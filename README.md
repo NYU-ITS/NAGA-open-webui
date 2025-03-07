@@ -145,7 +145,27 @@ If you have your own OpenShift/Kubernetes manifests or Helm charts, you can impo
 
 ---
 
-This guide covers the **end-to-end** process of deploying an application on **OpenShift** using a Git repository. 🚀  
+This above guide covers the **end-to-end** process of deploying an application on **OpenShift** using a Git repository. 🚀  
 For advanced configurations, refer to the OpenShift documentation.
 
+----------------------
+
+# Changing the Git URL/Branch for Testing
+
+1. Click on **Administrator perspective**
+2. Navigate to **Builds** section and select **BuildConfigs** subsection
+3. Select the **open-webui BuildConfig**
+4. Click on **YAML** tab
+   
+   a. Locate the following line and update the Git repository URL under `git.uri` with the repository you are working on and update the `ref` value to your desired branch:  
+      ```yaml
+      git:
+          uri: 'git@github.com:NYU-ITS/NAGA-open-webui.git'
+          ref: Dev
+      ```
+   b. Save the changes  
+5. Select **Start Build** to trigger the build process in the **Actions** dropdown (top-right corner)
+6. Go to the **Builds** section to track the build progress and ensure it is successful
+
+<img width="1126" alt="Screenshot 2025-03-06 at 10 37 59 PM" src="https://github.com/user-attachments/assets/fb93e462-9d1c-48ff-884b-112b8ec99e3d" />
 
