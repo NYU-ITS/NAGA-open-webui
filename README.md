@@ -1,4 +1,4 @@
-# Guide to NYU Advanced GenAI Application (NAGA)
+# User Guide to NYU Advanced GenAI Application (NAGA)
 
   ## 1. Connect to NYU VPN
 
