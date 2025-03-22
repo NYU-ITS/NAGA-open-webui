@@ -1,7 +1,8 @@
 <script lang="ts">
 	import { toast } from 'svelte-sonner';
 	import { v4 as uuidv4 } from 'uuid';
-
+	// please note that this Sidebar.svelte is src/lib/components/layout/Sidebar.svelte
+	// and not src/lib/components/common/Sidebar.svelte
 	import { goto } from '$app/navigation';
 	import {
 		user,
@@ -78,11 +79,33 @@
 
 	let folders = {};
 
+	/*
+	Structure of the Sidebar:
+	1. Chats[Folder] -> initFolders -> src/lib/apis/folders/index.ts -> getFolders() -> folderList
+		- Untitled
+			- Chat 1 (a chat can only exist in here or there)
+			- Chat 2 (a chat can only exist in here or there)
+		- (to be added by clicking +)
+
+		--- ---
+	2. Chats
+
+		- Previous 7 days
+			- Chat 3 (a chat can only exist in here or there)
+			- Chat 4 (a chat can only exist in here or there)
+		- Previous 30 days
+			- Chat 5 (a chat can only exist in here or there)
+			- Chat 6 (a chat can only exist in here or there)
+		
+	*/
+
 	const initFolders = async () => {
 		const folderList = await getFolders(localStorage.token).catch((error) => {
 			toast.error(`${error}`);
 			return [];
 		});
+
+		console.log(folderList);
 
 		folders = {};
 
@@ -170,6 +193,8 @@
 		if (search) {
 			await chats.set(await getChatListBySearchText(localStorage.token, search, $currentChatPage));
 		} else {
+			const chatList = await getChatList(localStorage.token, $currentChatPage);
+			console.log('[initChatList] Returned chats:', chatList);
 			await chats.set(await getChatList(localStorage.token, $currentChatPage));
 		}
 
@@ -651,7 +676,7 @@
 				className="px-2 mt-0.5"
 				name={$i18n.t('Chats')}
 				onAdd={() => {
-					createFolder();
+					createFolder();//when click the + button, create a new Folder by createFolder()
 				}}
 				onAddLabel={$i18n.t('New Folder')}
 				on:import={(e) => {
@@ -703,11 +728,15 @@
 					}
 				}}
 			>
+			<div class = "pl-2 space-y-4">
+				<!-- 1. Temporary -->
 				{#if $temporaryChatEnabled}
 					<div class="absolute z-40 w-full h-full flex justify-center"></div>
 				{/if}
 
+				<!-- 2. Pinned -->
 				{#if !search && $pinnedChats.length > 0}
+					<!-- If some Folder is pinned, it will be put here -->
 					<div class="flex flex-col space-y-1 rounded-xl">
 						<Folder
 							className=""
@@ -783,6 +812,7 @@
 					</div>
 				{/if}
 
+				<!-- 3. Folders -->
 				{#if !search && folders}
 					<Folders
 						{folders}
@@ -799,6 +829,7 @@
 					/>
 				{/if}
 
+				<!-- 4. Time arranged -->
 				<div class=" flex-1 flex flex-col overflow-y-auto scrollbar-hidden">
 					<div class="pt-1.5">
 						{#if $chats}
@@ -878,6 +909,7 @@
 						{/if}
 					</div>
 				</div>
+			</div>
 			</Folder>
 		</div>
 
