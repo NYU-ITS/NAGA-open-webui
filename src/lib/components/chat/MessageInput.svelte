@@ -674,6 +674,7 @@
 											<RichTextInput
 												bind:this={chatInputElement}
 												bind:value={prompt}
+												aria-label="Chat Input"	
 												id="chat-input"
 												messageInput={true}
 												shiftEnter={!$mobile ||
@@ -875,6 +876,7 @@
 										</div>
 									{:else}
 										<textarea
+											aria-label="Chat Input"	
 											id="chat-input"
 											bind:this={chatInputElement}
 											class="scrollbar-hidden bg-transparent dark:text-gray-100 outline-hidden w-full pt-3 px-1 resize-none"
