@@ -250,7 +250,7 @@
 								>
 									<div class="  font-semibold line-clamp-1">{model.name}</div>
 								</Tooltip>
-								<div class=" text-xs overflow-hidden text-ellipsis line-clamp-1 text-gray-500">
+								<div class=" text-xs overflow-hidden text-ellipsis line-clamp-1 text-gray-600">
 									<span class=" line-clamp-1">
 										{!!model?.meta?.description
 											? model?.meta?.description
