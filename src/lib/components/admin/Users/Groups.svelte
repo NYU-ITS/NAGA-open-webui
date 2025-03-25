@@ -119,7 +119,7 @@
 			{$i18n.t('Groups')}
 			<div class="flex self-center w-[1px] h-6 mx-2.5 bg-gray-50 dark:bg-gray-850" />
 
-			<span class="text-lg font-medium text-gray-500 dark:text-gray-300">{groups.length}</span>
+			<span class="text-lg font-medium text-gray-600 dark:text-gray-300">{groups.length}</span>
 		</div>
 
 		<div class="flex gap-1">
@@ -149,7 +149,7 @@
 				<div>
 					<Tooltip content={$i18n.t('Create Group')}>
 						<button
-							aria-label = "Create Group"
+							aria-label="Create Group"
 							class=" p-2 rounded-xl hover:bg-gray-100 dark:bg-gray-900 dark:hover:bg-gray-850 transition font-medium text-sm flex items-center space-x-1"
 							on:click={() => {
 								showCreateGroupModal = !showCreateGroupModal;

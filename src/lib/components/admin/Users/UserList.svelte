@@ -129,7 +129,7 @@
 		{$i18n.t('Users')}
 		<div class="flex self-center w-[1px] h-6 mx-2.5 bg-gray-50 dark:bg-gray-850" />
 
-		<span class="text-lg font-medium text-gray-500 dark:text-gray-300">{users.length}</span>
+		<span class="text-lg font-medium text-gray-600 dark:text-gray-300">{users.length}</span>
 	</div>
 
 	<div class="flex gap-1">
@@ -449,7 +449,7 @@
 	</table>
 </div>
 
-<div class=" text-gray-500 text-xs mt-1.5 text-right">
+<div class=" text-gray-600 text-xs mt-1.5 text-right">
 	ⓘ {$i18n.t("Click on the user role button to change a user's role.")}
 </div>
 

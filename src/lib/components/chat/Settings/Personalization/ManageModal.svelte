@@ -95,7 +95,7 @@
 								<tbody>
 									{#each memories as memory}
 										<tr class="border-b dark:border-gray-850 items-center">
-											<td class="px-3 py-1">
+											<td class="px-3 py-1 text-gray-600 dark:text-white">
 												<div class="line-clamp-1">
 													{memory.content}
 												</div>
@@ -105,7 +105,7 @@
 													{dayjs(memory.updated_at * 1000).format('LLL')}
 												</div>
 											</td>
-											<td class="px-3 py-1">
+											<td class="px-3 py-1 text-gray-600 dark:text-white">
 												<div class="flex justify-end w-full">
 													<Tooltip content="Edit">
 														<button
