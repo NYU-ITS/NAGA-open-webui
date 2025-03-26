@@ -120,17 +120,31 @@ class FunctionsTable:
         except Exception:
             return None
 
-    def get_functions(self, active_only=False) -> list[FunctionModel]:
+    # def get_functions(self, active_only=False) -> list[FunctionModel]:
+    #     with get_db() as db:
+    #         if active_only:
+    #             return [
+    #                 FunctionModel.model_validate(function)
+    #                 for function in db.query(Function).filter_by(is_active=True).all()
+    #             ]
+    #         else:
+    #             return [
+    #                 FunctionModel.model_validate(function)
+    #                 for function in db.query(Function).all()
+    #             ]
+        
+
+    def get_functions(self, user_email, active_only=False) -> list[FunctionModel]:
         with get_db() as db:
             if active_only:
                 return [
                     FunctionModel.model_validate(function)
-                    for function in db.query(Function).filter_by(is_active=True).all()
+                    for function in db.query(Function).filter(Function.created_by == user_email).filter_by(is_active=True).all()
                 ]
             else:
                 return [
                     FunctionModel.model_validate(function)
-                    for function in db.query(Function).all()
+                    for function in db.query(Function).filter(Function.created_by == user_email).all()
                 ]
 
     def get_functions_by_type(

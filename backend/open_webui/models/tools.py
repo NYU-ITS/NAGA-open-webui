@@ -65,7 +65,8 @@ class ToolModel(BaseModel):
     content: str
     specs: list[dict]
     meta: ToolMeta
-    access_control: Optional[dict] = None
+    #access_control: Optional[dict] = None
+    access_control: Optional[dict] = {}
 
     updated_at: int  # timestamp in epoch
     created_at: int  # timestamp in epoch
@@ -88,7 +89,8 @@ class ToolResponse(BaseModel):
     created_by: Optional[str] = None
     name: str
     meta: ToolMeta
-    access_control: Optional[dict] = None
+    #access_control: Optional[dict] = None
+    access_control: Optional[dict] = {}
     updated_at: int  # timestamp in epoch
     created_at: int  # timestamp in epoch
 
@@ -102,7 +104,8 @@ class ToolForm(BaseModel):
     name: str
     content: str
     meta: ToolMeta
-    access_control: Optional[dict] = None
+    #access_control: Optional[dict] = None
+    access_control: Optional[dict] = {}
 
 
 class ToolValves(BaseModel):

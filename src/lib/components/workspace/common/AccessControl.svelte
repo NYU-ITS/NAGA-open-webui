@@ -13,7 +13,7 @@
 	export let onChange: Function = () => {};
 
 	export let accessRoles = ['read'];
-	export let accessControl = null;
+	export let accessControl = {};
 
 	let selectedGroupId = '';
 	let groups = [];
@@ -22,7 +22,7 @@
 		groups = await getGroups(localStorage.token);
 
 		if (accessControl === null) {
-			accessControl = null;
+			accessControl = {};
 		} else {
 			accessControl = {
 				read: {
@@ -113,8 +113,8 @@
 						}
 					}}
 				>
-					<option class=" text-gray-700" value="private" selected>Private</option>
-					<option class=" text-gray-700" value="public" selected>Public</option>
+					<option class=" text-gray-700" value="private" >Private</option>
+					<option class=" text-gray-700" value="public" >Public</option>
 				</select>
 
 				<div class=" text-xs text-gray-400 font-medium">

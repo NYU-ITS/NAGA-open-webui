@@ -119,12 +119,12 @@ class GroupTable:
             except Exception:
                 return None
 
-    def get_groups(self) -> list[GroupModel]:
+    def get_groups(self, user_email: str) -> list[GroupModel]:
         with get_db() as db:
-            return [
-                GroupModel.model_validate(group)
-                for group in db.query(Group).order_by(Group.updated_at.desc()).all()
-            ]
+                return [
+                    GroupModel.model_validate(group)
+                    for group in db.query(Group).filter(Group.created_by == user_email).order_by(Group.updated_at.desc()).all()
+                ]
 
     def get_groups_by_member_id(self, user_id: str) -> list[GroupModel]:
         with get_db() as db:
