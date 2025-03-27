@@ -121,6 +121,7 @@ def upgrade() -> None:
             "model",
             sa.Column("id", sa.Text(), nullable=False),
             sa.Column("user_id", sa.Text(), nullable=True),
+            sa.Column("created_by", sa.Text(), nullable=True),
             sa.Column("base_model_id", sa.Text(), nullable=True),
             sa.Column("name", sa.Text(), nullable=True),
             sa.Column("params", JSONField(), nullable=True),

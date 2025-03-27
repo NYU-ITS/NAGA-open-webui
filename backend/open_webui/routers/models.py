@@ -37,7 +37,7 @@ async def get_models(id: Optional[str] = None, user=Depends(get_verified_user)):
 
 
 @router.get("/base", response_model=list[ModelResponse])
-async def get_base_models(user=Depends(get_admin_user)):
+async def get_base_models(user=Depends(get_verified_user)):
     return Models.get_base_models()
 
 
@@ -68,7 +68,7 @@ async def create_new_model(
         )
 
     else:
-        model = Models.insert_new_model(form_data, user.id)
+        model = Models.insert_new_model(form_data, user.id, user.email)
         if model:
             return model
         else:
