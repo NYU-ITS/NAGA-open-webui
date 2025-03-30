@@ -1866,6 +1866,7 @@
 		}
 	};
 </script>
+<!-- 1. The script tag is for importing the needed components and defining the functions like uploading prompt -->
 
 <svelte:head>
 	<title>
@@ -1874,7 +1875,7 @@
 			: `${$WEBUI_NAME}`}
 	</title>
 </svelte:head>
-
+<!-- 2. the svelte:head is the head element rendered ultimately in the app.html -->
 <audio id="audioElement" src="" style="display: none;" />
 
 <EventConfirmDialog
@@ -1903,6 +1904,7 @@
 	id="chat-container"
 >
 	{#if chatIdProp === '' || (!loading && chatIdProp)}
+
 		{#if $settings?.backgroundImageUrl ?? null}
 			<div
 				class="absolute {$showSidebar

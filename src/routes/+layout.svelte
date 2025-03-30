@@ -8,6 +8,7 @@
 	});
 
 	import { onMount, tick, setContext } from 'svelte';
+	import { Tour, TourTip } from 'svelte-tour';
 	import {
 		config,
 		user,

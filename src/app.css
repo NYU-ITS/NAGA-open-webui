@@ -246,6 +246,10 @@ input[type='number'] {
 	width: 100%;
 }
 
+.vite-plugin-inspect-inspector {
+	margin-left: 24px !important; /* Adjust as needed */
+  }
+
 .cm-scroller:active::-webkit-scrollbar-thumb,
 .cm-scroller:focus::-webkit-scrollbar-thumb,
 .cm-scroller:hover::-webkit-scrollbar-thumb {
