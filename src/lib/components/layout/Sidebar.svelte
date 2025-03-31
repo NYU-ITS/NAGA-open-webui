@@ -677,7 +677,7 @@
 				className="px-2 mt-0.5"
 				name={$i18n.t('Chats')}
 				onAdd={() => {
-					createFolder();//when click the + button, create a new Folder by createFolder()
+					createFolder(); //when click the + button, create a new Folder by createFolder()
 				}}
 				onAddLabel={$i18n.t('New Folder')}
 				on:import={(e) => {
@@ -729,64 +729,141 @@
 					}
 				}}
 			>
-			<div class = "pl-2 space-y-4">
-				<!-- 1. Temporary -->
-				{#if $temporaryChatEnabled}
-					<div class="absolute z-40 w-full h-full flex justify-center"></div>
-				{/if}
+				<div class="pl-2 space-y-4">
+					<!-- 1. Temporary -->
+					{#if $temporaryChatEnabled}
+						<div class="absolute z-40 w-full h-full flex justify-center"></div>
+					{/if}
 
-				<!-- 2. Pinned -->
-				{#if !search && $pinnedChats.length > 0}
-					<!-- If some Folder is pinned, it will be put here -->
-					<div class="flex flex-col space-y-1 rounded-xl">
-						<Folder
-							className=""
-							bind:open={showPinnedChat}
-							on:change={(e) => {
-								localStorage.setItem('showPinnedChat', e.detail);
-								console.log(e.detail);
-							}}
-							on:import={(e) => {
-								importChatHandler(e.detail, true);
-							}}
-							on:drop={async (e) => {
-								const { type, id, item } = e.detail;
+					<!-- 2. Pinned -->
+					{#if !search && $pinnedChats.length > 0}
+						<!-- If some Folder is pinned, it will be put here -->
+						<div class="flex flex-col space-y-1 rounded-xl">
+							<Folder
+								className=""
+								bind:open={showPinnedChat}
+								on:change={(e) => {
+									localStorage.setItem('showPinnedChat', e.detail);
+									console.log(e.detail);
+								}}
+								on:import={(e) => {
+									importChatHandler(e.detail, true);
+								}}
+								on:drop={async (e) => {
+									const { type, id, item } = e.detail;
 
-								if (type === 'chat') {
-									let chat = await getChatById(localStorage.token, id).catch((error) => {
-										return null;
-									});
-									if (!chat && item) {
-										chat = await importChat(localStorage.token, item.chat, item?.meta ?? {});
-									}
-
-									if (chat) {
-										console.log(chat);
-										if (chat.folder_id) {
-											const res = await updateChatFolderIdById(
-												localStorage.token,
-												chat.id,
-												null
-											).catch((error) => {
-												toast.error(`${error}`);
-												return null;
-											});
+									if (type === 'chat') {
+										let chat = await getChatById(localStorage.token, id).catch((error) => {
+											return null;
+										});
+										if (!chat && item) {
+											chat = await importChat(localStorage.token, item.chat, item?.meta ?? {});
 										}
 
-										if (!chat.pinned) {
-											const res = await toggleChatPinnedStatusById(localStorage.token, chat.id);
-										}
+										if (chat) {
+											console.log(chat);
+											if (chat.folder_id) {
+												const res = await updateChatFolderIdById(
+													localStorage.token,
+													chat.id,
+													null
+												).catch((error) => {
+													toast.error(`${error}`);
+													return null;
+												});
+											}
 
-										initChatList();
+											if (!chat.pinned) {
+												const res = await toggleChatPinnedStatusById(localStorage.token, chat.id);
+											}
+
+											initChatList();
+										}
 									}
-								}
-							}}
-							name={$i18n.t('Pinned')}
-						>
-							<div
-								class="ml-3 pl-1 mt-[1px] flex flex-col overflow-y-auto scrollbar-hidden border-s border-gray-100 dark:border-gray-900"
+								}}
+								name={$i18n.t('Pinned')}
 							>
-								{#each $pinnedChats as chat, idx}
+								<div
+									class="ml-3 pl-1 mt-[1px] flex flex-col overflow-y-auto scrollbar-hidden border-s border-gray-100 dark:border-gray-900"
+								>
+									{#each $pinnedChats as chat, idx}
+										<ChatItem
+											className=""
+											id={chat.id}
+											title={chat.title}
+											{shiftKey}
+											selected={selectedChatId === chat.id}
+											on:select={() => {
+												selectedChatId = chat.id;
+											}}
+											on:unselect={() => {
+												selectedChatId = null;
+											}}
+											on:change={async () => {
+												initChatList();
+											}}
+											on:tag={(e) => {
+												const { type, name } = e.detail;
+												tagEventHandler(type, name, chat.id);
+											}}
+										/>
+									{/each}
+								</div>
+							</Folder>
+						</div>
+					{/if}
+
+					<!-- 3. Folders -->
+					{#if !search && folders}
+						<Folders
+							{folders}
+							on:import={(e) => {
+								const { folderId, items } = e.detail;
+								importChatHandler(items, false, folderId);
+							}}
+							on:update={async (e) => {
+								initChatList();
+							}}
+							on:change={async () => {
+								initChatList();
+							}}
+						/>
+					{/if}
+
+					<!-- 4. Time arranged -->
+					<div class=" flex-1 flex flex-col overflow-y-auto scrollbar-hidden">
+						<div class="pt-1.5">
+							{#if $chats}
+								{#each $chats as chat, idx}
+									{#if idx === 0 || (idx > 0 && chat.time_range !== $chats[idx - 1].time_range)}
+										<div
+											class="w-full pl-2.5 text-xs text-gray-100 dark:text-gray-500 font-medium {idx ===
+											0
+												? ''
+												: 'pt-5'} pb-1.5"
+										>
+											{$i18n.t(chat.time_range)}
+											<!-- localisation keys for time_range to be recognized from the i18next parser (so they don't get automatically removed):
+							{$i18n.t('Today')}
+							{$i18n.t('Yesterday')}
+							{$i18n.t('Previous 7 days')}
+							{$i18n.t('Previous 30 days')}
+							{$i18n.t('January')}
+							{$i18n.t('February')}
+							{$i18n.t('March')}
+							{$i18n.t('April')}
+							{$i18n.t('May')}
+							{$i18n.t('June')}
+							{$i18n.t('July')}
+							{$i18n.t('August')}
+							{$i18n.t('September')}
+							{$i18n.t('October')}
+							{$i18n.t('November')}
+							{$i18n.t('December')}
+							-->
+										</div>
+									{/if}
+
 									<ChatItem
 										className=""
 										id={chat.id}
@@ -808,109 +885,34 @@
 										}}
 									/>
 								{/each}
-							</div>
-						</Folder>
-					</div>
-				{/if}
 
-				<!-- 3. Folders -->
-				{#if !search && folders}
-					<Folders
-						{folders}
-						on:import={(e) => {
-							const { folderId, items } = e.detail;
-							importChatHandler(items, false, folderId);
-						}}
-						on:update={async (e) => {
-							initChatList();
-						}}
-						on:change={async () => {
-							initChatList();
-						}}
-					/>
-				{/if}
-
-				<!-- 4. Time arranged -->
-				<div class=" flex-1 flex flex-col overflow-y-auto scrollbar-hidden">
-					<div class="pt-1.5">
-						{#if $chats}
-							{#each $chats as chat, idx}
-								{#if idx === 0 || (idx > 0 && chat.time_range !== $chats[idx - 1].time_range)}
-									<div
-										class="w-full pl-2.5 text-xs text-gray-500 dark:text-gray-500 font-medium {idx ===
-										0
-											? ''
-											: 'pt-5'} pb-1.5"
+								{#if $scrollPaginationEnabled && !allChatsLoaded}
+									<Loader
+										on:visible={(e) => {
+											if (!chatListLoading) {
+												loadMoreChats();
+											}
+										}}
 									>
-										{$i18n.t(chat.time_range)}
-										<!-- localisation keys for time_range to be recognized from the i18next parser (so they don't get automatically removed):
-							{$i18n.t('Today')}
-							{$i18n.t('Yesterday')}
-							{$i18n.t('Previous 7 days')}
-							{$i18n.t('Previous 30 days')}
-							{$i18n.t('January')}
-							{$i18n.t('February')}
-							{$i18n.t('March')}
-							{$i18n.t('April')}
-							{$i18n.t('May')}
-							{$i18n.t('June')}
-							{$i18n.t('July')}
-							{$i18n.t('August')}
-							{$i18n.t('September')}
-							{$i18n.t('October')}
-							{$i18n.t('November')}
-							{$i18n.t('December')}
-							-->
-									</div>
+										<div
+											class="w-full flex justify-center py-1 text-xs animate-pulse items-center gap-2"
+										>
+											<Spinner className=" size-4" />
+											<div class=" ">Loading...</div>
+										</div>
+									</Loader>
 								{/if}
-
-								<ChatItem
-									className=""
-									id={chat.id}
-									title={chat.title}
-									{shiftKey}
-									selected={selectedChatId === chat.id}
-									on:select={() => {
-										selectedChatId = chat.id;
-									}}
-									on:unselect={() => {
-										selectedChatId = null;
-									}}
-									on:change={async () => {
-										initChatList();
-									}}
-									on:tag={(e) => {
-										const { type, name } = e.detail;
-										tagEventHandler(type, name, chat.id);
-									}}
-								/>
-							{/each}
-
-							{#if $scrollPaginationEnabled && !allChatsLoaded}
-								<Loader
-									on:visible={(e) => {
-										if (!chatListLoading) {
-											loadMoreChats();
-										}
-									}}
+							{:else}
+								<div
+									class="w-full flex justify-center py-1 text-xs animate-pulse items-center gap-2"
 								>
-									<div
-										class="w-full flex justify-center py-1 text-xs animate-pulse items-center gap-2"
-									>
-										<Spinner className=" size-4" />
-										<div class=" ">Loading...</div>
-									</div>
-								</Loader>
+									<Spinner className=" size-4" />
+									<div class=" ">Loading...</div>
+								</div>
 							{/if}
-						{:else}
-							<div class="w-full flex justify-center py-1 text-xs animate-pulse items-center gap-2">
-								<Spinner className=" size-4" />
-								<div class=" ">Loading...</div>
-							</div>
-						{/if}
+						</div>
 					</div>
 				</div>
-			</div>
 			</Folder>
 		</div>
 
@@ -948,7 +950,7 @@
 								/>
 							</div>
 							<div class=" self-center font-medium">{$user.name}</div>
-								<!-- User Image color f29c14 will be changed here -->
+							<!-- User Image color f29c14 will be changed here -->
 						</button>
 					</UserMenu>
 				{/if}

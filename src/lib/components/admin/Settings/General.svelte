@@ -308,7 +308,7 @@
 									<a
 										href="https://docs.openwebui.com/getting-started/api-endpoints"
 										target="_blank"
-										class=" text-gray-300 font-medium underline"
+										class=" text-gray-600 font-medium underline"
 									>
 										{$i18n.t('To learn more about available endpoints, visit our documentation.')}
 									</a>

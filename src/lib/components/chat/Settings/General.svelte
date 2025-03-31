@@ -213,7 +213,7 @@
 				<div class="mb-2 text-xs text-gray-600 dark:text-gray-500">
 					Couldn't find your language?
 					<a
-						class=" text-blue-600 font-medium underline"
+						class=" text-gray-600 font-medium underline"
 						href="https://github.com/open-webui/open-webui/blob/main/docs/CONTRIBUTING.md#-translations-and-internationalization"
 						target="_blank"
 					>

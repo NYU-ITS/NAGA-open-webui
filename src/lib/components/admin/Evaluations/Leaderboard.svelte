@@ -276,7 +276,7 @@
 
 		<div class="flex self-center w-[1px] h-6 mx-2.5 bg-gray-50 dark:bg-gray-850" />
 
-		<span class="text-lg font-medium text-gray-500 dark:text-gray-300 mr-1.5"
+		<span class="text-lg font-medium text-gray-600 dark:text-gray-300 mr-1.5"
 			>{rankedModels.length}</span
 		>
 	</div>
@@ -400,7 +400,7 @@
 	{/if}
 </div>
 
-<div class=" text-gray-500 text-xs mt-1.5 w-full flex justify-end">
+<div class=" text-gray-600 text-xs mt-1.5 w-full flex justify-end">
 	<div class=" text-right">
 		<div class="line-clamp-1">
 			ⓘ {$i18n.t(

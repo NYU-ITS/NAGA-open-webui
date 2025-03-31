@@ -161,7 +161,7 @@
 				<div class="flex items-center md:self-center text-xl font-medium px-0.5">
 					{$i18n.t('Models')}
 					<div class="flex self-center w-[1px] h-6 mx-2.5 bg-gray-50 dark:bg-gray-850" />
-					<span class="text-lg font-medium text-gray-500 dark:text-gray-300"
+					<span class="text-lg font-medium text-gray-600 dark:text-gray-300"
 						>{filteredModels.length}</span
 					>
 				</div>
@@ -169,7 +169,7 @@
 				<div class="flex items-center gap-1.5">
 					<Tooltip content={$i18n.t('Manage Models')}>
 						<button
-							aria-label = "Manage Models"
+							aria-label="Manage Models"
 							class=" p-1 rounded-full flex gap-1 items-center"
 							type="button"
 							on:click={() => {
@@ -250,7 +250,7 @@
 								>
 									<div class="  font-semibold line-clamp-1">{model.name}</div>
 								</Tooltip>
-								<div class=" text-xs overflow-hidden text-ellipsis line-clamp-1 text-gray-500">
+								<div class=" text-xs overflow-hidden text-ellipsis line-clamp-1 text-gray-600">
 									<span class=" line-clamp-1">
 										{!!model?.meta?.description
 											? model?.meta?.description

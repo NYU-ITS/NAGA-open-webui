@@ -122,7 +122,7 @@
 											class="bg-transparent {idx !== chats.length - 1 &&
 												'border-b'} dark:bg-gray-900 dark:border-gray-850 text-xs"
 										>
-											<td class="px-3 py-1">
+											<td class="px-3 py-1 text-gray-600 dark:text-white">
 												<a href="/s/{chat.id}" target="_blank">
 													<div class=" underline line-clamp-1 max-w-96">
 														{chat.title}
