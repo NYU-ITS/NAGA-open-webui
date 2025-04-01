@@ -172,24 +172,21 @@ class ModelsTable:
             log.exception(f"Failed to insert a new model: {e}")
             return None
 
-    def get_all_models(self) -> list[ModelModel]:
-        with get_db() as db:
-            return [ModelModel.model_validate(model) for model in db.query(Model).all()]
-
-
-    # def get_all_models(self, user_email: str) -> list[ModelModel]:
+    # def get_all_models(self) -> list[ModelModel]:
     #     with get_db() as db:
-    #         return [
-    #             ModelModel.model_validate(model)
-    #             for model in db.query(Model)
-    #                 .filter(
-    #                     or_(
-    #                         Model.created_by == user_email,
-    #                         Model.created_by == "chetangiridhar96@gmail.com"
-    #                     )
-    #                 )
-    #                 .all()
-    #         ]
+    #         return [ModelModel.model_validate(model) for model in db.query(Model).all()]
+        
+    
+    def get_all_models(self, user_id, user_email: str = None, permission: str = "read") -> list[ModelModel]:
+        with get_db() as db:
+            raw_models = db.query(Model).all()
+        
+        filtered = []
+        for model in raw_models:
+            if model.created_by == user_email or has_access(user_id, permission, model.access_control):
+                filtered.append(model)
+        
+        return [ModelModel.model_validate(m) for m in filtered]
 
 
     def get_models(self) -> list[ModelUserResponse]:
