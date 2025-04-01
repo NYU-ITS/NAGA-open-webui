@@ -13,7 +13,7 @@
 	import { get, type Unsubscriber, type Writable } from 'svelte/store';
 	import type { i18n as i18nType } from 'i18next';
 	import { WEBUI_BASE_URL } from '$lib/constants';
-
+	import { Tour,TourTip } from 'svelte-tour';
 	import {
 		chatId,
 		chats,
@@ -1897,6 +1897,7 @@
 	}}
 />
 
+
 <div
 	class="h-screen max-h-[100dvh] transition-width duration-200 ease-in-out {$showSidebar
 		? '  md:max-w-[calc(100%-260px)]'
@@ -2119,3 +2120,13 @@
 		</div>
 	{/if}
 </div>
+
+
+
+<!-- Chat tutorial:
+ 1. "Select Models": Navbar
+ 2. "New Chat icon": Sidebar
+ 3. "Input message": Placeholder
+ 4. "Tool Buttons": MessageInput
+ 5. "Settings": Navbar
+-->

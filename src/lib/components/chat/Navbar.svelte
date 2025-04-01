@@ -16,7 +16,7 @@
 
 	import { slide } from 'svelte/transition';
 	import { page } from '$app/stores';
-
+	import { TourItem,Tour, TourTip } from 'svelte-tour';
 	import ShareChatModal from '../chat/ShareChatModal.svelte';
 	import ModelSelector from '../chat/ModelSelector.svelte';
 	import Tooltip from '../common/Tooltip.svelte';
@@ -39,6 +39,7 @@
 
 	let showShareChatModal = false;
 	let showDownloadChatModal = false;
+
 </script>
 
 <ShareChatModal bind:show={showShareChatModal} chatId={$chatId} />
@@ -75,7 +76,11 @@
 			"
 			>
 				{#if showModelSelector}
-					<ModelSelector bind:selectedModels showSetDefault={!shareEnabled} />
+	
+				<!-- <Tour TourTip={TourTip}></Tour>				 -->
+<!-- <TourItem message="Test Message"> -->
+				<ModelSelector bind:selectedModels showSetDefault={!shareEnabled} />
+<!-- </TourItem> -->
 				{/if}
 			</div>
 

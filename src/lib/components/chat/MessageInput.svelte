@@ -46,6 +46,7 @@
 	import Photo from '../icons/Photo.svelte';
 	import CommandLine from '../icons/CommandLine.svelte';
 	import { KokoroWorker } from '$lib/workers/KokoroWorker';
+	import { TourItem,Tour, TourTip } from 'svelte-tour';//step1, reference Tour components
 
 	const i18n = getContext('i18n');
 
@@ -1075,6 +1076,8 @@
 								</div>
 
 								<div class=" flex justify-between mt-1.5 mb-2.5 mx-0.5 max-w-full">
+									<TourItem message="[User Guide - 1/5] Select your AI model here">
+										<!-- step3, surround with TourItem, while the ID should be corresponding to the /src/lib/components/chat/ModelSelector.svelte  -->
 									<div class="ml-1 self-end gap-0.5 flex items-center flex-1 max-w-[80%]">
 										<InputMenu
 											bind:selectedToolIds
@@ -1205,7 +1208,8 @@
 											{/if}
 										</div>
 									</div>
-
+								</TourItem>
+								<!-- step3, surround with TourItem -->
 									<div class="self-end flex space-x-1 mr-1 shrink-0">
 										{#if !history?.currentId || history.messages[history.currentId]?.done == true}
 											<Tooltip content={$i18n.t('Record voice')}>

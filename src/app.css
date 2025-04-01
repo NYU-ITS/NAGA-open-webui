@@ -247,8 +247,9 @@ input[type='number'] {
 }
 
 .vite-plugin-inspect-inspector {
-	margin-left: 24px !important; /* Adjust as needed */
-  }
+	margin-left: 24px !important;
+	/* Adjust as needed */
+}
 
 .cm-scroller:active::-webkit-scrollbar-thumb,
 .cm-scroller:focus::-webkit-scrollbar-thumb,
@@ -403,3 +404,23 @@ input[type='number'] {
 .hljs-strong {
 	font-weight: 700;
 }
+
+
+/* Below are the new style codes applied for the svelte-tour elements */
+
+
+/* :global(.tour-overlay) {
+	background-color: rgba(0, 0, 50, 0.7) !important;
+}
+
+
+:global(.tour-tip) {
+	background: linear-gradient(135deg, #6e8efb, #a777e3) !important;
+	border-radius: 12px !important;
+	box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15) !important;
+}
+
+:global(.tour-tip button) {
+	background: white !important;
+	color: #6e8efb !important;
+} */

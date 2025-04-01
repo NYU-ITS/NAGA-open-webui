@@ -24,12 +24,12 @@
 	import { toast } from 'svelte-sonner';
 	import { capitalizeFirstLetter, sanitizeResponseContent, splitStream } from '$lib/utils';
 	import { getModels } from '$lib/apis';
-
+	import { TourItem,Tour, TourTip } from 'svelte-tour';//step1, reference Tour components
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import Switch from '$lib/components/common/Switch.svelte';
 	import ChatBubbleOval from '$lib/components/icons/ChatBubbleOval.svelte';
 	import { goto } from '$app/navigation';
-
+	
 	const i18n = getContext('i18n');
 	const dispatch = createEventDispatcher();
 
@@ -233,6 +233,12 @@
 	};
 </script>
 
+
+
+
+			 
+<TourItem message="[User Guide - 1/5] Select your AI model here">
+<!-- step3, surround with TourItem, while the ID should be corresponding to the /src/lib/components/chat/ModelSelector.svelte  -->
 <DropdownMenu.Root
 	bind:open={show}
 	onOpenChange={async () => {
@@ -242,11 +248,14 @@
 	}}
 	closeFocus={false}
 >
+
 	<DropdownMenu.Trigger
 		class="relative w-full font-primary"
 		aria-label={placeholder}
 		id="model-selector-{id}-button"
 	>
+
+
 		<div
 			class="flex w-full text-left px-0.5 outline-hidden bg-transparent truncate {triggerClassName} justify-between font-medium placeholder-gray-400 focus:outline-hidden"
 		>
@@ -257,6 +266,8 @@
 			{/if}
 			<ChevronDown className=" self-center ml-2 size-3" strokeWidth="2.5" />
 		</div>
+
+
 	</DropdownMenu.Trigger>
 
 	<DropdownMenu.Content
@@ -615,4 +626,8 @@
 			<div class="hidden w-[32rem]" />
 		</slot>
 	</DropdownMenu.Content>
+
 </DropdownMenu.Root>
+
+</TourItem>
+<!-- step3, surround with TourItem -->
