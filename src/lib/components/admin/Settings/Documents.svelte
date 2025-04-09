@@ -818,7 +818,7 @@
 								<input
 									class="flex-1 w-full rounded-lg text-sm bg-transparent outline-hidden"
 									type="number"
-									placeholder={$i18n.t('Leave empty for unlimited')}
+									placeholder={$i18n.t('Leave empty for default')}
 									bind:value={fileMaxSize}
 									autocomplete="off"
 									min="0"
@@ -839,7 +839,7 @@
 								<input
 									class="flex-1 w-full rounded-lg text-sm bg-transparent outline-hidden"
 									type="number"
-									placeholder={$i18n.t('Leave empty for unlimited')}
+									placeholder={$i18n.t('Leave empty for default')}
 									bind:value={fileMaxCount}
 									autocomplete="off"
 									min="0"
