@@ -151,7 +151,10 @@ RUN pip3 install uv && \
     chown -R $UID:$GID /app/backend/data/
 
 
-
+# Copy the plugin requirements file
+COPY --chown=$UID:$GID ./custom-plugins/plugin-requirements.txt ./plugin-requirements.txt
+# Install those extra dependencies
+RUN uv pip install --system -r plugin-requirements.txt --no-cache-dir
 # copy embedding weight from build
 # RUN mkdir -p /root/.cache/chroma/onnx_models/all-MiniLM-L6-v2
 # COPY --from=build /app/onnx /root/.cache/chroma/onnx_models/all-MiniLM-L6-v2/onnx
