@@ -1,4 +1,4 @@
 # plugin-requirements.txt
-langchain-yt-dlp
+langchain-yt-dlp==0.0.8
 langchain-openai==0.2.14
 langgraph==0.2.60
