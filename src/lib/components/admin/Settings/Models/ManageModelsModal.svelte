@@ -43,8 +43,8 @@
 				{$i18n.t('Manage Models')}
 			</div>
 			<button
-			aria-label = "Manage Models"	
-			class="self-center"
+				aria-label="Manage Models"
+				class="self-center"
 				on:click={() => {
 					show = false;
 				}}
@@ -78,7 +78,7 @@
 							<button
 								class="min-w-fit rounded-full p-1.5 {selected === 'ollama'
 									? 'text-[#57068c] dark:text-white'
-									: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
+									: 'text-gray-600 dark:text-gray-500 hover:text-[#57068c] dark:hover:text-white'} transition"
 								on:click={() => {
 									selected = 'ollama';
 								}}>{$i18n.t('Ollama')}</button

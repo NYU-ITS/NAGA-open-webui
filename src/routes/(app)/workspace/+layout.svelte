@@ -82,7 +82,7 @@
 									'/workspace/models'
 								)
 									? 'text-[#57068c] dark:text-white'
-									: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
+									: 'text-gray-600 dark:text-gray-500 hover:text-[#57068c] dark:hover:text-white'} transition"
 								href="/workspace/models">{$i18n.t('Models')}</a
 							>
 						{/if}
@@ -93,7 +93,7 @@
 									'/workspace/knowledge'
 								)
 									? 'text-[#57068c] dark:text-white'
-									: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
+									: 'text-gray-600 dark:text-gray-500 hover:text-[#57068c] dark:hover:text-white'} transition"
 								href="/workspace/knowledge"
 							>
 								{$i18n.t('Knowledge')}
@@ -106,7 +106,7 @@
 									'/workspace/prompts'
 								)
 									? 'text-[#57068c] dark:text-white'
-									: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
+									: 'text-gray-600 dark:text-gray-500 hover:text-[#57068c] dark:hover:text-white'} transition"
 								href="/workspace/prompts">{$i18n.t('Prompts')}</a
 							>
 						{/if}
@@ -115,7 +115,7 @@
 							<a
 								class="min-w-fit rounded-full p-1.5 {$page.url.pathname.includes('/workspace/tools')
 									? 'text-[#57068c] dark:text-white'
-									: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
+									: 'text-gray-600 dark:text-gray-500 hover:text-[#57068c] dark:hover:text-white'} transition"
 								href="/workspace/tools"
 							>
 								{$i18n.t('Tools')}

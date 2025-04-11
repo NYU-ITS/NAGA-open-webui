@@ -46,7 +46,7 @@
 							$page.url.pathname
 						)
 							? 'text-[#57068c] dark:text-white'
-							: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
+							: 'text-gray-600 dark:text-gray-500 hover:text-[#57068c] dark:hover:text-white'} transition"
 						href="/playground">{$i18n.t('Chat')}</a
 					>
 
@@ -62,7 +62,7 @@
 							'/playground/completions'
 						)
 							? 'text-[#57068c] dark:text-white'
-							: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
+							: 'text-gray-600 dark:text-gray-500 hover:text-[#57068c] dark:hover:text-white'} transition"
 						href="/playground/completions">{$i18n.t('Completions')}</a
 					>
 				</div>

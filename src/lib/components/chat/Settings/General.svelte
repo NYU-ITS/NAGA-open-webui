@@ -213,7 +213,7 @@
 				<div class="mb-2 text-xs text-gray-600 dark:text-gray-500">
 					Couldn't find your language?
 					<a
-						class=" text-gray-600 font-medium underline"
+						class=" text-gray-600 dark:text-gray-500 font-medium underline"
 						href="https://github.com/open-webui/open-webui/blob/main/docs/CONTRIBUTING.md#-translations-and-internationalization"
 						target="_blank"
 					>
@@ -247,7 +247,9 @@
 			<hr class="border-gray-100 dark:border-gray-850 my-3" />
 
 			<div>
-				<div aria-label="System Prompt" class=" my-2.5 text-sm font-medium">{$i18n.t('System Prompt')}</div>
+				<div aria-label="System Prompt" class=" my-2.5 text-sm font-medium">
+					{$i18n.t('System Prompt')}
+				</div>
 				<textarea
 					aria-label="System Prompt"
 					id="systemPrompt"
@@ -262,7 +264,7 @@
 					<div class="  font-medium">{$i18n.t('Advanced Parameters')}</div>
 					<button
 						aria-label="Toggle Advanced Parameters"
-						class=" text-xs font-medium text-gray-600"
+						class=" text-xs font-medium text-gray-600 dark:text-gray-500"
 						type="button"
 						on:click={() => {
 							showAdvanced = !showAdvanced;

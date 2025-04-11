@@ -140,7 +140,7 @@
 									class="px-0.5 py-1 max-w-fit w-fit rounded-lg flex-1 lg:flex-none flex text-right transition {selectedTab ===
 									'general'
 										? 'text-[#57068c] dark:text-white'
-										: ' text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'}"
+										: ' text-gray-600 dark:text-gray-500 hover:text-[#57068c] dark:hover:text-white'}"
 									on:click={() => {
 										selectedTab = 'general';
 									}}
@@ -169,7 +169,7 @@
 									class="px-0.5 py-1 max-w-fit w-fit rounded-lg flex-1 lg:flex-none flex text-right transition {selectedTab ===
 									'permissions'
 										? 'text-[#57068c] dark:text-white'
-										: ' text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'}"
+										: ' text-gray-600 dark:text-gray-500 hover:text-[#57068c] dark:hover:text-white'}"
 									on:click={() => {
 										selectedTab = 'permissions';
 									}}
@@ -187,7 +187,7 @@
 									class="px-0.5 py-1 max-w-fit w-fit rounded-lg flex-1 lg:flex-none flex text-right transition {selectedTab ===
 									'users'
 										? 'text-[#57068c] dark:text-white'
-										: ' text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'}"
+										: ' text-gray-600 dark:text-gray-500 hover:text-[#57068c] dark:hover:text-white'}"
 									on:click={() => {
 										selectedTab = 'users';
 									}}

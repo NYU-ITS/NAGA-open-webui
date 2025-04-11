@@ -156,11 +156,11 @@
 	};
 
 	function isDarkMode() {
-        if (typeof window !== 'undefined') {
-            return document.documentElement.classList.contains('dark');
-        }
-        return false;
-    }
+		if (typeof window !== 'undefined') {
+			return document.documentElement.classList.contains('dark');
+		}
+		return false;
+	}
 
 	const playAudio = (idx: number) => {
 		return new Promise<void>((res) => {
@@ -575,7 +575,7 @@
 
 				{#if message.timestamp}
 					<div
-						class=" self-center text-xs invisible group-hover:visible text-gray-600 font-medium first-letter:capitalize ml-0.5 translate-y-[1px]"
+						class=" self-center text-xs invisible group-hover:visible text-gray-600 dark:text-gray-500 font-medium first-letter:capitalize ml-0.5 translate-y-[1px]"
 					>
 						<Tooltip content={dayjs(message.timestamp * 1000).format('LLLL')}>
 							<span class="line-clamp-1">{formatDate(message.timestamp * 1000)}</span>

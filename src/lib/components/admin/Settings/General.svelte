@@ -251,7 +251,7 @@
 							<select
 								class="dark:bg-gray-900 w-fit pr-8 rounded-sm px-2 text-xs bg-transparent outline-hidden text-right"
 								bind:value={adminConfig.DEFAULT_USER_ROLE}
-								aria-label = "Select a role"
+								aria-label="Select a role"
 								placeholder="Select a role"
 							>
 								<option value="pending">{$i18n.t('pending')}</option>
@@ -308,7 +308,7 @@
 									<a
 										href="https://docs.openwebui.com/getting-started/api-endpoints"
 										target="_blank"
-										class=" text-gray-600 font-medium underline"
+										class=" text-gray-600 dark:text-gray-500 font-medium underline"
 									>
 										{$i18n.t('To learn more about available endpoints, visit our documentation.')}
 									</a>
@@ -333,7 +333,7 @@
 
 						<div class="mt-2 text-xs text-gray-600 dark:text-gray-500">
 							{$i18n.t('Valid time units:')}
-							<span class=" text-gray-600 font-medium"
+							<span class=" text-gray-600 dark:text-gray-500 font-medium"
 								>{$i18n.t("'s', 'm', 'h', 'd', 'w' or '-1' for no expiration.")}</span
 							>
 						</div>

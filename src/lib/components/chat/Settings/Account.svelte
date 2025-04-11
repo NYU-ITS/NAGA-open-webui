@@ -271,7 +271,7 @@
 		<div class="flex justify-between items-center text-sm">
 			<div class="  font-medium">{$i18n.t('API keys')}</div>
 			<button
-				class=" text-xs font-medium text-gray-600"
+				class=" text-xs font-medium text-gray-600 dark:text-gray-500"
 				type="button"
 				on:click={() => {
 					showAPIKeys = !showAPIKeys;
