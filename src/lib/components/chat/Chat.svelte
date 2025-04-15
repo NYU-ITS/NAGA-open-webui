@@ -13,7 +13,7 @@
 	import { get, type Unsubscriber, type Writable } from 'svelte/store';
 	import type { i18n as i18nType } from 'i18next';
 	import { WEBUI_BASE_URL } from '$lib/constants';
-	import { Tour,TourTip } from 'svelte-tour';
+	import { TourTip } from '$lib/components/tour';
 	import {
 		chatId,
 		chats,
@@ -392,7 +392,7 @@
 	};
 
 	onMount(async () => {
-		console.log('mounted');
+		console.log('Chat.svelte is mounted');
 		window.addEventListener('message', onMessageHandler);
 		$socket?.on('chat-events', chatEventHandler);
 

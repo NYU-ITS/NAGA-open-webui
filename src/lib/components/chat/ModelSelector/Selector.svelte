@@ -24,7 +24,7 @@
 	import { toast } from 'svelte-sonner';
 	import { capitalizeFirstLetter, sanitizeResponseContent, splitStream } from '$lib/utils';
 	import { getModels } from '$lib/apis';
-	import { TourItem,Tour, TourTip } from 'svelte-tour';//step1, reference Tour components
+	import { TourItem } from '$lib/components/tour';//step1, reference Tour components
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import Switch from '$lib/components/common/Switch.svelte';
 	import ChatBubbleOval from '$lib/components/icons/ChatBubbleOval.svelte';
@@ -237,7 +237,8 @@
 
 
 			 
-<TourItem message="[User Guide - 1/5] Select your AI model here">
+<TourItem message="Select an AI model
+from the top menu.">
 <!-- step3, surround with TourItem, while the ID should be corresponding to the /src/lib/components/chat/ModelSelector.svelte  -->
 <DropdownMenu.Root
 	bind:open={show}

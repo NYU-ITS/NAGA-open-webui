@@ -46,7 +46,7 @@
 	import Photo from '../icons/Photo.svelte';
 	import CommandLine from '../icons/CommandLine.svelte';
 	import { KokoroWorker } from '$lib/workers/KokoroWorker';
-	import { TourItem,Tour, TourTip } from 'svelte-tour';//step1, reference Tour components
+	import { TourItem } from '$lib/components/tour'; //step1, reference Tour components
 
 	const i18n = getContext('i18n');
 
@@ -669,13 +669,16 @@
 
 								<div class="px-2.5">
 									{#if $settings?.richTextInput ?? true}
+									<!-- TourItem -->
+									<TourItem message="Type your message in the input box
+and press Enter to submit." className="flex-1">
 										<div
 											class="scrollbar-hidden text-left bg-transparent dark:text-gray-100 outline-hidden w-full pt-3 px-1 resize-none h-fit max-h-80 overflow-auto"
 										>
 											<RichTextInput
 												bind:this={chatInputElement}
 												bind:value={prompt}
-												aria-label="Chat Input"	
+												aria-label="Chat Input"
 												id="chat-input"
 												messageInput={true}
 												shiftEnter={!$mobile ||
@@ -875,9 +878,10 @@
 												}}
 											/>
 										</div>
+									</TourItem>
 									{:else}
 										<textarea
-											aria-label="Chat Input"	
+											aria-label="Chat Input"
 											id="chat-input"
 											bind:this={chatInputElement}
 											class="scrollbar-hidden bg-transparent dark:text-gray-100 outline-hidden w-full pt-3 px-1 resize-none"
@@ -1076,80 +1080,84 @@
 								</div>
 
 								<div class=" flex justify-between mt-1.5 mb-2.5 mx-0.5 max-w-full">
-									<TourItem message="[User Guide - 1/5] Select your AI model here">
+									<TourItem message="Select an AI model
+from the top menu.">
 										<!-- step3, surround with TourItem, while the ID should be corresponding to the /src/lib/components/chat/ModelSelector.svelte  -->
-									<div class="ml-1 self-end gap-0.5 flex items-center flex-1 max-w-[80%]">
-										<InputMenu
-											bind:selectedToolIds
-											{screenCaptureHandler}
-											{inputFilesHandler}
-											uploadFilesHandler={() => {
-												filesInputElement.click();
-											}}
-											uploadGoogleDriveHandler={async () => {
-												try {
-													const fileData = await createPicker();
-													if (fileData) {
-														const file = new File([fileData.blob], fileData.name, {
-															type: fileData.blob.type
-														});
-														await uploadFileHandler(file);
-													} else {
-														console.log('No file was selected from Google Drive');
+										<div class="ml-1 self-end gap-0.5 flex items-center flex-1 max-w-[80%]">
+											<InputMenu
+												bind:selectedToolIds
+												{screenCaptureHandler}
+												{inputFilesHandler}
+												uploadFilesHandler={() => {
+													filesInputElement.click();
+												}}
+												uploadGoogleDriveHandler={async () => {
+													try {
+														const fileData = await createPicker();
+														if (fileData) {
+															const file = new File([fileData.blob], fileData.name, {
+																type: fileData.blob.type
+															});
+															await uploadFileHandler(file);
+														} else {
+															console.log('No file was selected from Google Drive');
+														}
+													} catch (error) {
+														console.error('Google Drive Error:', error);
+														toast.error(
+															$i18n.t('Error accessing Google Drive: {{error}}', {
+																error: error.message
+															})
+														);
 													}
-												} catch (error) {
-													console.error('Google Drive Error:', error);
-													toast.error(
-														$i18n.t('Error accessing Google Drive: {{error}}', {
-															error: error.message
-														})
-													);
-												}
-											}}
-											uploadOneDriveHandler={async () => {
-												try {
-													const fileData = await pickAndDownloadFile();
-													if (fileData) {
-														const file = new File([fileData.blob], fileData.name, {
-															type: fileData.blob.type || 'application/octet-stream'
-														});
-														await uploadFileHandler(file);
-													} else {
-														console.log('No file was selected from OneDrive');
+												}}
+												uploadOneDriveHandler={async () => {
+													try {
+														const fileData = await pickAndDownloadFile();
+														if (fileData) {
+															const file = new File([fileData.blob], fileData.name, {
+																type: fileData.blob.type || 'application/octet-stream'
+															});
+															await uploadFileHandler(file);
+														} else {
+															console.log('No file was selected from OneDrive');
+														}
+													} catch (error) {
+														console.error('OneDrive Error:', error);
 													}
-												} catch (error) {
-													console.error('OneDrive Error:', error);
-												}
-											}}
-											onClose={async () => {
-												await tick();
+												}}
+												onClose={async () => {
+													await tick();
 
-												const chatInput = document.getElementById('chat-input');
-												chatInput?.focus();
-											}}
-										>
-											<button
-												class="bg-transparent hover:bg-gray-100 text-gray-800 dark:text-white dark:hover:bg-gray-800 transition rounded-full p-1.5 outline-hidden focus:outline-hidden"
-												type="button"
-												aria-label="More"
+													const chatInput = document.getElementById('chat-input');
+													chatInput?.focus();
+												}}
 											>
-												<svg
-													xmlns="http://www.w3.org/2000/svg"
-													viewBox="0 0 20 20"
-													fill="currentColor"
-													class="size-5"
+											<TourItem message="Use the tools button below
+to upload files or capture." className="flex-1">
+												<button
+													class="bg-transparent hover:bg-gray-100 text-gray-800 dark:text-white dark:hover:bg-gray-800 transition rounded-full p-1.5 outline-hidden focus:outline-hidden"
+													type="button"
+													aria-label="More"
 												>
-													<path
-														d="M10.75 4.75a.75.75 0 0 0-1.5 0v4.5h-4.5a.75.75 0 0 0 0 1.5h4.5v4.5a.75.75 0 0 0 1.5 0v-4.5h4.5a.75.75 0 0 0 0-1.5h-4.5v-4.5Z"
-													/>
-												</svg>
-											</button>
-										</InputMenu>
+													<svg
+														xmlns="http://www.w3.org/2000/svg"
+														viewBox="0 0 20 20"
+														fill="currentColor"
+														class="size-5"
+													>
+														<path
+															d="M10.75 4.75a.75.75 0 0 0-1.5 0v4.5h-4.5a.75.75 0 0 0 0 1.5h4.5v4.5a.75.75 0 0 0 1.5 0v-4.5h4.5a.75.75 0 0 0 0-1.5h-4.5v-4.5Z"
+														/>
+													</svg>
+												</button>
+											</TourItem>
+											</InputMenu>
 
-										<div class="flex gap-0.5 items-center overflow-x-auto scrollbar-none flex-1">
-											<!-- WebSearch -->
-											{#if $_user}
-												<!-- {#if $config?.features?.enable_web_search && ($_user.role === 'admin' || $_user?.permissions?.features?.web_search)} -->
+											<div class="flex gap-0.5 items-center overflow-x-auto scrollbar-none flex-1">
+												<!-- WebSearch -->
+												{#if $_user}
+													<!-- {#if $config?.features?.enable_web_search && ($_user.role === 'admin' || $_user?.permissions?.features?.web_search)} -->
 													<Tooltip content={$i18n.t('Search the internet')} placement="top">
 														<button
 															on:click|preventDefault={() => (webSearchEnabled = !webSearchEnabled)}
@@ -1166,50 +1174,50 @@
 															>
 														</button>
 													</Tooltip>
-												<!-- {/if} -->
+													<!-- {/if} -->
 
-												{#if $config?.features?.enable_image_generation && ($_user.role === 'admin' || $_user?.permissions?.features?.image_generation)}
-													<Tooltip content={$i18n.t('Generate an image')} placement="top">
-														<button
-															on:click|preventDefault={() =>
-																(imageGenerationEnabled = !imageGenerationEnabled)}
-															type="button"
-															class="px-1.5 @sm:px-2.5 py-1.5 flex gap-1.5 items-center text-sm rounded-full font-medium transition-colors duration-300 focus:outline-hidden max-w-full overflow-hidden {imageGenerationEnabled
-																? 'bg-gray-100 dark:bg-gray-500/20 text-gray-600 dark:text-gray-400'
-																: 'bg-transparent text-gray-600 dark:text-gray-300 border-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 '}"
-														>
-															<Photo className="size-5" strokeWidth="1.75" />
-															<span
-																class="hidden @sm:block whitespace-nowrap overflow-hidden text-ellipsis translate-y-[0.5px] mr-0.5"
-																>{$i18n.t('Image')}</span
+													{#if $config?.features?.enable_image_generation && ($_user.role === 'admin' || $_user?.permissions?.features?.image_generation)}
+														<Tooltip content={$i18n.t('Generate an image')} placement="top">
+															<button
+																on:click|preventDefault={() =>
+																	(imageGenerationEnabled = !imageGenerationEnabled)}
+																type="button"
+																class="px-1.5 @sm:px-2.5 py-1.5 flex gap-1.5 items-center text-sm rounded-full font-medium transition-colors duration-300 focus:outline-hidden max-w-full overflow-hidden {imageGenerationEnabled
+																	? 'bg-gray-100 dark:bg-gray-500/20 text-gray-600 dark:text-gray-400'
+																	: 'bg-transparent text-gray-600 dark:text-gray-300 border-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 '}"
 															>
-														</button>
-													</Tooltip>
-												{/if}
+																<Photo className="size-5" strokeWidth="1.75" />
+																<span
+																	class="hidden @sm:block whitespace-nowrap overflow-hidden text-ellipsis translate-y-[0.5px] mr-0.5"
+																	>{$i18n.t('Image')}</span
+																>
+															</button>
+														</Tooltip>
+													{/if}
 
-												{#if $config?.features?.enable_code_interpreter && ($_user.role === 'admin' || $_user?.permissions?.features?.code_interpreter)}
-													<Tooltip content={$i18n.t('Execute code for analysis')} placement="top">
-														<button
-															on:click|preventDefault={() =>
-																(codeInterpreterEnabled = !codeInterpreterEnabled)}
-															type="button"
-															class="px-1.5 @sm:px-2.5 py-1.5 flex gap-1.5 items-center text-sm rounded-full font-medium transition-colors duration-300 focus:outline-hidden max-w-full overflow-hidden {codeInterpreterEnabled
-																? 'bg-gray-100 dark:bg-gray-500/20 text-gray-600 dark:text-gray-400'
-																: 'bg-transparent text-gray-600 dark:text-gray-300 border-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 '}"
-														>
-															<CommandLine className="size-5" strokeWidth="1.75" />
-															<span
-																class="hidden @sm:block whitespace-nowrap overflow-hidden text-ellipsis translate-y-[0.5px] mr-0.5"
-																>{$i18n.t('Code Interpreter')}</span
+													{#if $config?.features?.enable_code_interpreter && ($_user.role === 'admin' || $_user?.permissions?.features?.code_interpreter)}
+														<Tooltip content={$i18n.t('Execute code for analysis')} placement="top">
+															<button
+																on:click|preventDefault={() =>
+																	(codeInterpreterEnabled = !codeInterpreterEnabled)}
+																type="button"
+																class="px-1.5 @sm:px-2.5 py-1.5 flex gap-1.5 items-center text-sm rounded-full font-medium transition-colors duration-300 focus:outline-hidden max-w-full overflow-hidden {codeInterpreterEnabled
+																	? 'bg-gray-100 dark:bg-gray-500/20 text-gray-600 dark:text-gray-400'
+																	: 'bg-transparent text-gray-600 dark:text-gray-300 border-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 '}"
 															>
-														</button>
-													</Tooltip>
+																<CommandLine className="size-5" strokeWidth="1.75" />
+																<span
+																	class="hidden @sm:block whitespace-nowrap overflow-hidden text-ellipsis translate-y-[0.5px] mr-0.5"
+																	>{$i18n.t('Code Interpreter')}</span
+																>
+															</button>
+														</Tooltip>
+													{/if}
 												{/if}
-											{/if}
+											</div>
 										</div>
-									</div>
-								</TourItem>
-								<!-- step3, surround with TourItem -->
+										<!-- step3, surround with TourItem -->
+									</TourItem>
 									<div class="self-end flex space-x-1 mr-1 shrink-0">
 										{#if !history?.currentId || history.messages[history.currentId]?.done == true}
 											<Tooltip content={$i18n.t('Record voice')}>

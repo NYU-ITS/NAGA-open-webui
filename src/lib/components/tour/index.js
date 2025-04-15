@@ -17,6 +17,7 @@ export function register(el) {
 };
 
 export function run() {
+  console.log('running tour');
   tourStore.update(store => ({
     ...store,
     active: true

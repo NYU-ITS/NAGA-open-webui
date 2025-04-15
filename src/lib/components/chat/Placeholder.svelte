@@ -15,7 +15,7 @@
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import EyeSlash from '$lib/components/icons/EyeSlash.svelte';
 	import MessageInput from './MessageInput.svelte';
-	import { TourItem,Tour, TourTip } from 'svelte-tour';//step1, reference Tour components
+	import { TourItem,Tour, TourTip } from '$lib/components/tour';//step1, reference Tour components
 	const i18n = getContext('i18n');
 
 	export let transparentBackground = false;
@@ -191,7 +191,7 @@
 					{/if}
 				</div>
 			</div>
-			<TourItem message="[User Guide - 3/5] Input your message here">
+			<TourItem message="Input your message, upload files and select tools in this area.">
 				<!-- step3, surround with TourItem, while the ID should be corresponding to the /src/lib/components/chat/ModelSelector.svelte  -->
 			<div class="text-base font-normal @md:max-w-3xl w-full py-3 {atSelectedModel ? 'mt-2' : ''}">
 				<MessageInput

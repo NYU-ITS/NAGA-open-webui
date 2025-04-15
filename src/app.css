@@ -405,22 +405,3 @@ input[type='number'] {
 	font-weight: 700;
 }
 
-
-/* Below are the new style codes applied for the svelte-tour elements */
-
-
-/* :global(.tour-overlay) {
-	background-color: rgba(0, 0, 50, 0.7) !important;
-}
-
-
-:global(.tour-tip) {
-	background: linear-gradient(135deg, #6e8efb, #a777e3) !important;
-	border-radius: 12px !important;
-	box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15) !important;
-}
-
-:global(.tour-tip button) {
-	background: white !important;
-	color: #6e8efb !important;
-} */

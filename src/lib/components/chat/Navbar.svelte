@@ -16,7 +16,7 @@
 
 	import { slide } from 'svelte/transition';
 	import { page } from '$app/stores';
-	import { TourItem,Tour, TourTip } from 'svelte-tour';
+	import { TourItem } from '$lib/components/tour';
 	import ShareChatModal from '../chat/ShareChatModal.svelte';
 	import ModelSelector from '../chat/ModelSelector.svelte';
 	import Tooltip from '../common/Tooltip.svelte';
@@ -83,7 +83,8 @@
 <!-- </TourItem> -->
 				{/if}
 			</div>
-
+			<TourItem message="Access chat control and account 
+settings in the top-right." className="flex flex-none">
 			<div class="self-start flex flex-none items-center text-gray-600 dark:text-gray-400">
 				<!-- <div class="md:hidden flex self-center w-[1px] h-5 mx-2 bg-gray-300 dark:bg-stone-700" /> -->
 				{#if shareEnabled && chat && (chat.id || $temporaryChatEnabled)}
@@ -195,6 +196,7 @@
 					</UserMenu>
 				{/if}
 			</div>
+		</TourItem>
 		</div>
 	</div>
 </nav>

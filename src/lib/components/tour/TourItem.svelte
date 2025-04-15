@@ -1,9 +1,10 @@
-<script>
+<script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { register, unregister } from './index';
 
-  export let message;
-  let element;
+  export let message: string;
+  export let className = '';
+  let element: HTMLElement;
 
   onMount(() => {
     register(element);
@@ -14,6 +15,6 @@
   });
 </script>
 
-<div bind:this={element} data-tour={message}>
+<div bind:this={element} data-tour={message} class={className}>
   <slot></slot>
 </div>

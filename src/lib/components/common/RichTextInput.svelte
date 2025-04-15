@@ -26,6 +26,7 @@
 	import { all, createLowlight } from 'lowlight';
 
 	import { PASTED_TEXT_CHARACTER_LIMIT } from '$lib/constants';
+	import { TourItem } from '$lib/components/tour';//step1, reference Tour components
 
 	// create a lowlight instance with all languages loaded
 	const lowlight = createLowlight(all);

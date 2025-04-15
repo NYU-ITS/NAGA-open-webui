@@ -59,7 +59,7 @@
 	import ChannelItem from './Sidebar/ChannelItem.svelte';
 	import PencilSquare from '../icons/PencilSquare.svelte';
 	import Home from '../icons/Home.svelte';	
-	import { TourItem,Tour, TourTip } from 'svelte-tour';//step1, reference Tour components
+	import { TourItem } from '$lib/components/tour';//step1, reference Tour components
 
 	const BREAKPOINT = 768;
 
@@ -526,7 +526,8 @@
 					</svg>
 				</div>
 			</button>
-
+			<TourItem message="Start a new chat by
+clicking “+ New Chat.”" className="flex-1">
 			<a
 				id="sidebar-new-chat-button"
 				class="flex justify-between items-center flex-1 rounded-lg px-2 py-1 h-full text-right hover:bg-[#8900E1] dark:hover:bg-gray-700 transition no-drag-region"
@@ -553,12 +554,10 @@
 							alt="logo"
 						/>
 					</div>
-					<TourItem message="[User Guide - 2/5] Start a new chat here">
-						<!-- step3, surround with TourItem, while the ID should be corresponding to the /src/lib/components/chat/ModelSelector.svelte  -->
+				
 						<div class=" self-center font-medium text-sm text-gray-50 dark:text-white font-primary">
 							{$i18n.t('New Chat')}
 						</div>
-					</TourItem>
 					<!-- step3, surround with TourItem -->
 				</div>
 
@@ -566,6 +565,7 @@
 					<PencilSquare className=" size-5" strokeWidth="1.5" />
 				</div>
 			</a>
+			</TourItem>
 		</div>
 
 		<!-- {#if $user?.role === 'admin'}
