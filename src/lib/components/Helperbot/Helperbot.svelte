@@ -3,20 +3,13 @@
     import { onMount, tick } from 'svelte';
 	import Markdown from '$lib/components/chat/Messages/Markdown.svelte';
 
-    // import MessageInput from '$lib/components/chat/MessageInput.svelte';
-    // import Messages from '$lib/components/chat/Messages.svelte';
-    // import Spinner from '../common/Spinner.svelte';
 
     import { WEBUI_BASE_URL } from '$lib/constants';
 	import systemPrompt from './nagaexpert_prompt.txt?raw';
 
     import { chatCompletion, generateOpenAIChatCompletion } from '$lib/apis/openai';
 
-    //import { chatCompletionHandler } from './chatCompletionHandler';
-    // import { socket } from '$lib/stores';
-	// import { splitStream } from '$lib/utils';
-
-    import './helperbot.css';
+    //import './helperbot.css';
 
     let isOpen = false;
     let input = '';
@@ -133,13 +126,12 @@
 
 
 </script>
-<!-- 
-<style>
 
+<style>
     #helperbot-button {
         position: fixed;
         bottom: 110px;
-        right: 20px;
+        right: 40px;
         width: 42px;
         height: 42px;
         border-radius: 50%;
@@ -155,29 +147,29 @@
 		justify-content: center;
     }
 	#helperbot-close {
-    position: fixed;
-    bottom: 110px;
-    right: 20px;
-    width: 42px;
-    height: 42px;
-    border-radius: 50%;
-    background-color: #57068c; /* same purple color */
-    color: ＃fff;
-    font-size: 26px;
-    border: none;
-    cursor: pointer;
-    z-index: 9999;
-    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: transform 0.2s;
-}
+        position: fixed;
+        bottom: 110px;
+        right: 40px;
+        width: 42px;
+        height: 42px;
+        border-radius: 50%;
+        background-color: #57068c; /* same purple color */
+        color: ＃fff;
+        font-size: 26px;
+        border: none;
+        cursor: pointer;
+        z-index: 9999;
+        box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: transform 0.2s;
+    }
 
     #helperbot-chat {
         position: fixed;
         bottom: 170px;
-        right: 20px;
+        right: 40px;
         width: 400px;
         height: 500px;
         border-radius: 16px;
@@ -189,74 +181,61 @@
 		margin: 0; 
     }
 
-
 	#chat-messages {
-  flex: 1;
-  overflow-y: auto;
-  padding: 1rem;
-}
-.bubble {
-	display: inline-block;
-	max-width: 60%;
-	padding: 0.75rem 1rem;
-	border-radius: 20px;
-	word-wrap: break-word;
-	white-space: pre-wrap;
-  }
+    flex: 1;
+    overflow-y: auto;
+    padding: 1rem;
+    }
+
+    .bubble {
+        display: inline-block;
+        max-width: 60%;
+        padding: 0.75rem 1rem;
+        border-radius: 20px;
+        word-wrap: break-word;
+        white-space: pre-wrap;
+    }
+    
     .message {
         margin-bottom: 0.75rem;
     }
 
 
 	.message.user {
-  display: flex;
-  justify-content: flex-end;
-  margin-bottom: 0.75rem;
-}
-.message.user .bubble {
-  background-color: #f2f2f2; 
-  color: #000000;
-}
+        display: flex;
+        justify-content: flex-end;
+        margin-bottom: 0.75rem;
+    }
+    .message.user .bubble {
+        background-color: #f2f2f2; 
+        color: #000000;
+    }
 
     .message.assistant {
         text-align: left;
     }
 
-    /* #chat-input {
+	#chat-input {
         display: flex;
         padding: 0.75rem;
         border-top: 1px solid #ccc;
-		
+        background: #f5f5f5;
     }
 
-    input {
+    #chat-input input {
         flex: 1;
         padding: 0.5rem;
         font-size: 1rem;
         border: 1px solid #ccc;
         border-radius: 4px;
-    } */
-	#chat-input {
-  display: flex;
-  padding: 0.75rem;
-  border-top: 1px solid #ccc;
-  background: #f5f5f5;
-}
+        transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    }
 
-#chat-input input {
-  flex: 1;
-  padding: 0.5rem;
-  font-size: 1rem;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
-}
-
-/* Focus (selected) state */
-#chat-input input:focus {
-  border-color: #7b039d;
-  outline: none; /* Remove default browser outline if desired */
-}
+    /* Focus (selected) state */
+    #chat-input input:focus {
+        border-color: #7b039d;
+        outline: none; /* Remove default browser outline if desired */
+    }
 
 
     button.send {
@@ -268,7 +247,7 @@
         border-radius: 4px;
         cursor: pointer;
     }
-</style> -->
+</style>
 
 <!-- Floating Button -->
 {#if !isOpen}
