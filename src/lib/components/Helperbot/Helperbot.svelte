@@ -16,6 +16,8 @@
     // import { socket } from '$lib/stores';
 	// import { splitStream } from '$lib/utils';
 
+    import './helperbot.css';
+
     let isOpen = false;
     let input = '';
     let messages: { role: string; content: string }[] = [];
@@ -129,7 +131,7 @@ async function sendMessage() {
         
     });
 </script>
-
+<!-- 
 <style>
 
     #helperbot-button {
@@ -203,10 +205,6 @@ async function sendMessage() {
         margin-bottom: 0.75rem;
     }
 
-    /* .message.user {
-        text-align: right;
-		
-    } */
 
 	.message.user {
   display: flex;
@@ -268,21 +266,9 @@ async function sendMessage() {
         border-radius: 4px;
         cursor: pointer;
     }
-</style>
-
-
+</style> -->
 
 <!-- Floating Button -->
-<!-- <button id="helperbot-button" on:click={() => (isOpen = !isOpen)} aria-label="HelperBot">
-    {#if isOpen} ✖ {:else} 🤖 {/if}
-</button> -->
-
-<!-- {#if !isOpen}
-  <button id="helperbot-button" on:click={() => (isOpen = true)} aria-label="Open HelperBot">
-    <img src={`${WEBUI_BASE_URL}/static/flower-white.png`} alt="HelperBot" class="helperbot-icon" />
-  </button>
-  
-{/if} -->
 {#if !isOpen}
   <button id="helperbot-button" on:click={() => (isOpen = true)} aria-label="Open HelperBot">
     <img src={WEBUI_BASE_URL + '/static/flower-white.png'} alt="HelperBot" class="helperbot-icon" />
@@ -308,13 +294,6 @@ async function sendMessage() {
 			<p class="text-xs font-bold text-white animate-pulse">NAGA is thinking...</p>
 			</div>
 		{/if}
-		<!-- <div id="chat-messages">
-			{#each messages as msg}
-				<div class="message {msg.role}">
-					<p>{msg.content}</p>
-				</div>
-			{/each}
-		</div> -->
 		<div id="chat-messages">
 			{#each messages as message (message.id)}
 			  <div class="message {message.role}">
