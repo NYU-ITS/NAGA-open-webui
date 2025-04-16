@@ -31,86 +31,86 @@
 		if (chatMessagesEl && autoScrollEnabled) {
 			chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
 		}
-}
-
-
-async function sendMessage() {
-	if (!input.trim() || loading) return;
-
-  // Create a user message with a unique ID.
-  const userMessage = { id: uuidv4(), role: 'user', content: input };
-  const assistantMessage = { id: uuidv4(), role: 'assistant', content: '' };
-
-  // Build the payload for the API request:
-  // If there's a system prompt, add it as the first message (only once).
-  let payloadMessages = [];
-  if (systemPrompt) {
-    // If a system message isn't already in the messages array, add it.
-    if (!messages.some((msg) => msg.role === 'system')) {
-      payloadMessages.push({ id: uuidv4(), role: 'system', content: systemPrompt });
-    } else {
-      // If it's already in the messages, include it.
-      payloadMessages.push(...messages.filter((msg) => msg.role === 'system'));
     }
-  }
-  // Add the new user message.
-  payloadMessages.push(userMessage);
 
-  // For UI purposes, update the messages array to show the new user message.
-  messages = [...messages, userMessage];
-  input = '';
-  loading = true;
+    async function sendMessage() {
+        if (!input.trim() || loading) return;
 
-  try {
-    const res = await generateOpenAIChatCompletion(
-      localStorage.getItem('token'),
-      {
-        stream: false,
-        model: 'naga-expert-beta',
-        messages: payloadMessages,  // Use the payload that includes the system prompt if it exists.
-        params: { stream_response: false }
-      },
-      `${WEBUI_BASE_URL}/api`
-    );
+        // Create a user message with a unique ID.
+        const userMessage = { id: uuidv4(), role: 'user', content: input };
+        const assistantMessage = { id: uuidv4(), role: 'assistant', content: '' };
+
+        // Build the payload for the API request:
+        // If there's a system prompt, add it as the first message (only once).
+        let payloadMessages = [];
+        if (systemPrompt) {
+            // If a system message isn't already in the messages array, add it.
+            if (!messages.some((msg) => msg.role === 'system')) {
+            payloadMessages.push({ id: uuidv4(), role: 'system', content: systemPrompt });
+            } else {
+            // If it's already in the messages, include it.
+            payloadMessages.push(...messages.filter((msg) => msg.role === 'system'));
+            }
+        }
+        // Add the new user message.
+        payloadMessages.push(userMessage);
+
+        // For UI purposes, update the messages array to show the new user message.
+        messages = [...messages, userMessage];
+        input = '';
+        loading = true;
+
+        try {
+            const res = await generateOpenAIChatCompletion(
+            localStorage.getItem('token'),
+            {
+                stream: false,
+                model: 'naga-expert-beta',
+                messages: payloadMessages,  // Use the payload that includes the system prompt if it exists.
+                params: { stream_response: false }
+            },
+            `${WEBUI_BASE_URL}/api`
+            );
 
     
-    const fullReply = res?.choices?.[0]?.message?.content;
-    if (fullReply) {
-      // Add the assistant message to the UI (as a placeholder).
-      messages = [...messages, assistantMessage];
+            const fullReply = res?.choices?.[0]?.message?.content;
+            if (fullReply) {
+                // Add the assistant message to the UI (as a placeholder).
+                messages = [...messages, assistantMessage];
 
-      // Simulate a streaming effect by splitting the full reply into tokens.
-      const tokens = fullReply.split(''); // Splitting by character; adjust if needed.
-      let currentContent = '';
+                // Simulate a streaming effect by splitting the full reply into tokens.
+                const tokens = fullReply.split(''); // Splitting by character; adjust if needed.
+                let currentContent = '';
 
-      // Recursive function to simulate token-by-token update.
-      async function simulateTyping() {
-        if (tokens.length === 0) {
-          // Typing finished. Final update.
-          assistantMessage.content = currentContent;
-          // Replace the last message with the final assistant message.
-          messages = [...messages.slice(0, -1), assistantMessage];
-          scrollToBottom();
-          loading = false;
-          return;
+                // Recursive function to simulate token-by-token update.
+                async function simulateTyping() {
+                    if (tokens.length === 0) {
+                    // Typing finished. Final update.
+                    assistantMessage.content = currentContent;
+                    // Replace the last message with the final assistant message.
+                    messages = [...messages.slice(0, -1), assistantMessage];
+                    scrollToBottom();
+                    loading = false;
+                    return;
+                    }
+                    currentContent += tokens.shift();
+                    assistantMessage.content = currentContent;
+                    // Update the messages array to trigger UI refresh.
+                    messages = [...messages.slice(0, -1), assistantMessage];
+                    await tick();
+                    scrollToBottom();
+                    setTimeout(simulateTyping, 5); // Adjust delay (50ms) as needed.
+                }
+                simulateTyping();
+            } 
+            else {
+                loading = false;
+            }
+        } catch (err) {
+            console.error('Error sending message:', err);
+            loading = false;
         }
-        currentContent += tokens.shift();
-        assistantMessage.content = currentContent;
-        // Update the messages array to trigger UI refresh.
-        messages = [...messages.slice(0, -1), assistantMessage];
-        await tick();
-        scrollToBottom();
-        setTimeout(simulateTyping, 5); // Adjust delay (50ms) as needed.
-      }
-      simulateTyping();
-    } else {
-      loading = false;
     }
-  } catch (err) {
-    console.error('Error sending message:', err);
-    loading = false;
-  }
-}
 
     onMount(() => {
         console.log('[HelperBot] mounted');
@@ -130,6 +130,8 @@ async function sendMessage() {
 		}
         
     });
+
+
 </script>
 <!-- 
 <style>
