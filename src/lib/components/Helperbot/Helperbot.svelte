@@ -25,6 +25,12 @@
 			chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
 		}
     }
+    function isDarkMode() {
+        if (typeof window !== 'undefined') {
+            return document.documentElement.classList.contains('dark');
+        }
+        return false;
+    }
 
     async function sendMessage() {
         if (!input.trim() || loading) return;
@@ -135,8 +141,8 @@
         width: 42px;
         height: 42px;
         border-radius: 50%;
-        background-color: #57068c;
-        color: white;
+        /* background-color: #57068c; */
+        /* color: white; */
         font-size: 26px;
         border: none;
         cursor: pointer;
@@ -153,8 +159,8 @@
         width: 42px;
         height: 42px;
         border-radius: 50%;
-        background-color: #57068c; /* same purple color */
-        color: ＃fff;
+        /* background-color: #57068c;  */
+        /* color: ＃fff; */
         font-size: 26px;
         border: none;
         cursor: pointer;
@@ -175,7 +181,7 @@
         border-radius: 16px;
         box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
         z-index: 9998;
-        background: white;
+        /* background: white; */
         display: flex;
         flex-direction: column;
 		margin: 0; 
@@ -206,20 +212,19 @@
         justify-content: flex-end;
         margin-bottom: 0.75rem;
     }
-    .message.user .bubble {
-        background-color: #f2f2f2; 
+    .message.user .bubble { 
+        /* background-color: #f2f2f2;  */
         color: #000000;
     }
 
     .message.assistant {
         text-align: left;
     }
-
+ 
 	#chat-input {
         display: flex;
         padding: 0.75rem;
         border-top: 1px solid #ccc;
-        background: #f5f5f5;
     }
 
     #chat-input input {
@@ -228,22 +233,13 @@
         font-size: 1rem;
         border: 1px solid #ccc;
         border-radius: 4px;
-        transition: border-color 0.2s ease, box-shadow 0.2s ease;
-    }
-
-    /* Focus (selected) state */
-    #chat-input input:focus {
-        border-color: #7b039d;
-        outline: none; /* Remove default browser outline if desired */
-    }
+        /* transition: border-color 0.2s ease, box-shadow 0.2s ease; */
+    } 
 
 
     button.send {
         margin-left: 0.5rem;
         padding: 0.5rem 1rem;
-        background-color: #57068c;
-        color: white;
-        border: none;
         border-radius: 4px;
         cursor: pointer;
     }
@@ -251,24 +247,32 @@
 
 <!-- Floating Button -->
 {#if !isOpen}
-  <button id="helperbot-button" on:click={() => (isOpen = true)} aria-label="Open HelperBot">
-    <img src={WEBUI_BASE_URL + '/static/flower-white.png'} alt="HelperBot" class="helperbot-icon" />
+  <button id="helperbot-button" 
+          on:click={() => (isOpen = true)} 
+          aria-label="Open HelperBot"
+          class="bg-[#57068c] dark:bg-gray-600 text-white dark:text-black hover:scale-105 transition duration-200"
+    >
+    <img src={WEBUI_BASE_URL + '/static/flower-white.png'} alt="HelperBot" class="helperbot-icon" /> 
   </button>
 {:else}
-  <button id="helperbot-close"  on:click={() => (isOpen = false)} aria-label="Close HelperBot">
+  <button id="helperbot-close"  
+          on:click={() => (isOpen = false)} 
+          aria-label="Close HelperBot"
+          class="bg-[#57068c] dark:bg-gray-600 text-white dark:text-black hover:scale-105 transition duration-200"
+    >
     <span style="color: #fff;">✖</span>
   </button>
 {/if}
 
 <!-- Direct Minimal Chat UI -->
 {#if isOpen}
-    <div id="helperbot-chat" class="relative"> 
-		<!-- <button class="close-btn" on:click={() => (isOpen = false)} aria-label="Close HelperBot">
-			✖
-		  </button> -->
+    <div id="helperbot-chat"  class="relative bg-white dark:bg-[#1f1f1f] dark:text-white rounded-xl shadow-2xl border border-gray-300 dark:border-gray-600"> 
 		{#if loading}
-		<div 
-			class="absolute bottom-16 left-4 px-2 py-1 bg-gradient-to-r from-purple-600 to-purple-800 rounded-md shadow-lg"
+		<div     
+            class="absolute bottom-16 left-4 px-2 py-1 
+	                bg-gradient-to-r from-purple-600 to-purple-800 
+	                dark:from-gray-700 dark:to-gray-900  
+	                rounded-md shadow-lg"
 			role="status"
 			aria-live="polite"
 			>
@@ -281,7 +285,7 @@
 				{#if message.role === 'assistant'}
 				  <Markdown id={message.id} content={message.content} />
 				{:else}
-				  <div class="bubble">
+				  <div class="bubble bg-gray-200 text-black dark:bg-gray-700 dark:text-white">
 					<p>{message.content}</p>
 				  </div>
 				{/if}
@@ -294,9 +298,23 @@
 				bind:value={input}
 				placeholder="Ask me something..."
 				on:keydown={(e) => e.key === 'Enter' && sendMessage()}
+                
+                class="w-full 
+                        border border-gray-300 dark:border-gray-600 
+                        bg-white dark:bg-gray-800 
+                        text-black dark:text-white 
+                        focus:outline-none 
+                        focus:border-[#7b039d] dark:focus:border-purple-400 
+                        transition"
 			/>
 			
-			<button class="send" on:click={sendMessage} disabled={loading}>Send</button>
+			<button class="send border border-gray-300 dark:border-gray-600 
+	                        bg-[#57068c] text-white 
+	                        dark:bg-white dark:text-black" 
+                    on:click={sendMessage} 
+                    disabled={loading}>
+                    Send
+            </button>
 		</div>
     </div>
 {/if}
