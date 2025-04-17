@@ -141,9 +141,6 @@
         width: 42px;
         height: 42px;
         border-radius: 50%;
-        /* background-color: #57068c; */
-        /* color: white; */
-        font-size: 26px;
         border: none;
         cursor: pointer;
         z-index: 9999;
@@ -159,9 +156,6 @@
         width: 42px;
         height: 42px;
         border-radius: 50%;
-        /* background-color: #57068c;  */
-        /* color: ＃fff; */
-        font-size: 26px;
         border: none;
         cursor: pointer;
         z-index: 9999;
@@ -181,7 +175,6 @@
         border-radius: 16px;
         box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
         z-index: 9998;
-        /* background: white; */
         display: flex;
         flex-direction: column;
 		margin: 0; 
@@ -212,10 +205,6 @@
         justify-content: flex-end;
         margin-bottom: 0.75rem;
     }
-    .message.user .bubble { 
-        /* background-color: #f2f2f2;  */
-        color: #000000;
-    }
 
     .message.assistant {
         text-align: left;
@@ -233,7 +222,6 @@
         font-size: 1rem;
         border: 1px solid #ccc;
         border-radius: 4px;
-        /* transition: border-color 0.2s ease, box-shadow 0.2s ease; */
     } 
 
 
@@ -275,7 +263,7 @@
 
 <!-- Direct Minimal Chat UI -->
 {#if isOpen}
-    <div id="helperbot-chat"  class="relative bg-white dark:bg-[#1f1f1f] dark:text-white rounded-xl shadow-2xl border border-gray-300 dark:border-gray-600"> 
+    <div id="helperbot-chat"  class="relative text-sm md:text-base bg-white dark:bg-[#1f1f1f] dark:text-white rounded-xl shadow-2xl border border-gray-300 dark:border-gray-600"> 
 		{#if loading}
 		<div     
             class="absolute bottom-16 left-4 px-2 py-1 
