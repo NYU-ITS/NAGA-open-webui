@@ -117,12 +117,13 @@
         if (saved) {
             try {
                 messages = JSON.parse(saved);
-                loadedFromSession = true;
+                
                 tick().then(scrollToBottom);
             } catch (err) {
                 console.error('Failed to load session messages', err);
             }
         }
+        loadedFromSession = true;
 
 		const chatMessagesEl = document.getElementById('chat-messages');
 		if (chatMessagesEl) {
