@@ -14,6 +14,10 @@
     let isOpen = false;
     let input = '';
     let messages: { role: string; content: string }[] = [];
+    let loadedFromSession = false;
+    $: if (loadedFromSession) {
+	sessionStorage.setItem('helperbot_messages', JSON.stringify(messages));
+    }
 	let system = '';
     let loading = false;
 	let autoScrollEnabled = true;
@@ -24,12 +28,6 @@
 		if (chatMessagesEl && autoScrollEnabled) {
 			chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
 		}
-    }
-    function isDarkMode() {
-        if (typeof window !== 'undefined') {
-            return document.documentElement.classList.contains('dark');
-        }
-        return false;
     }
 
     async function sendMessage() {
@@ -113,7 +111,19 @@
 
     onMount(() => {
         console.log('[HelperBot] mounted');
-        //socket.on('chat-events', helperBotEventHandler);
+
+        
+        const saved = sessionStorage.getItem('helperbot_messages');
+        if (saved) {
+            try {
+                messages = JSON.parse(saved);
+                loadedFromSession = true;
+                tick().then(scrollToBottom);
+            } catch (err) {
+                console.error('Failed to load session messages', err);
+            }
+        }
+
 		const chatMessagesEl = document.getElementById('chat-messages');
 		if (chatMessagesEl) {
 			// Listen for user scroll events.
