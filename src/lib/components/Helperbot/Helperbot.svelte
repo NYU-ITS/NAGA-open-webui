@@ -260,7 +260,16 @@
           aria-label="Close HelperBot"
           class="bg-[#57068c] dark:bg-gray-600 text-white dark:text-black hover:scale-105 transition duration-200"
     >
-    <span style="color: #fff;">✖</span>
+    <svg
+	xmlns="http://www.w3.org/2000/svg"
+	fill="none"
+	viewBox="0 0 24 24"
+	stroke-width="6"
+	stroke="currentColor"
+	class="w-5 h-5 text-white "
+    >
+        <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+    </svg>
   </button>
 {/if}
 
