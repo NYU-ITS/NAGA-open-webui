@@ -43,6 +43,7 @@
 	import ChangelogModal from '$lib/components/ChangelogModal.svelte';
 	import AccountPending from '$lib/components/layout/Overlay/AccountPending.svelte';
 	import UpdateInfoToast from '$lib/components/layout/UpdateInfoToast.svelte';
+	import Helperbot from '$lib/components/Helperbot/Helperbot.svelte';
 
 	const i18n = getContext('i18n');
 
@@ -296,7 +297,7 @@
 					</div>
 				</div>
 			{/if}
-
+			<Helperbot/>
 			<Sidebar />
 			<slot />
 		{/if}
