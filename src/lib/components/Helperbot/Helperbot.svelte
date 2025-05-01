@@ -138,6 +138,18 @@
 			}
 			});
 		}
+
+        window.addEventListener('keydown', (e) => {
+            // ESC to close
+            if (e.key === 'Escape' && isOpen) {
+                isOpen = false;
+            }
+
+            // Shift+/ to toggle chat
+            if (e.shiftKey && e.key === '/') {
+                isOpen = !isOpen;
+            }
+        });
         
     });
 
@@ -274,7 +286,8 @@
 
 <!-- Direct Minimal Chat UI -->
 {#if isOpen}
-    <div id="helperbot-chat"  class="relative text-sm md:text-base bg-white dark:bg-[#1f1f1f] dark:text-white rounded-xl shadow-2xl border border-gray-300 dark:border-gray-600"> 
+    <h2 id="helperbot-title" class="sr-only">HelperBot Chat</h2>
+    <div id="helperbot-chat" aria-modal="true" role="dialog" aria-describedby="chat-messages" class="relative text-sm md:text-base bg-white dark:bg-[#121212] dark:text-white rounded-xl shadow-2xl border border-gray-300 dark:border-gray-600"> 
 		{#if loading}
 		<div     
             class="absolute bottom-16 left-4 px-2 py-1 
@@ -287,13 +300,13 @@
 			<p class="text-xs font-bold text-white animate-pulse">NAGA is thinking...</p>
 			</div>
 		{/if}
-		<div id="chat-messages">
+		<div id="chat-messages" tabindex="0">
 			{#each messages as message (message.id)}
 			  <div class="message {message.role}">
 				{#if message.role === 'assistant'}
 				  <Markdown id={message.id} content={message.content} />
 				{:else}
-				  <div class="bubble bg-gray-200 text-black dark:bg-gray-700 dark:text-white">
+				  <div class="bubble bg-gray-200 text-black dark:bg-[#2f2f2f] dark:text-white">
 					<p>{message.content}</p>
 				  </div>
 				{/if}
@@ -308,7 +321,7 @@
 				on:keydown={(e) => e.key === 'Enter' && sendMessage()}
                 
                 class="w-full 
-                        border border-gray-300 dark:border-gray-600 
+                        border border-gray-300 dark:border-[#333333]
                         bg-white dark:bg-gray-800 
                         text-black dark:text-white 
                         focus:outline-none 
@@ -316,7 +329,7 @@
                         transition"
 			/>
 			
-			<button class="send border border-gray-300 dark:border-gray-600 
+			<button class="send border border-gray-300 dark:bg-[#2c2c2c]
 	                        bg-[#57068c] text-white 
 	                        dark:bg-white dark:text-black" 
                     on:click={sendMessage} 
