@@ -302,7 +302,7 @@ class UserScopedConfig:
     #         # Step 3: If still nothing, return default
     #     return self.default
         
-    def get(self, email: str) -> Any:
+    def get(self, email: str, selected_group_id: str = None) -> Any:
         with get_db() as db:
             # Step 1: Check user-specific config
             entry = db.query(Config).filter_by(email=email).first()
@@ -326,14 +326,36 @@ class UserScopedConfig:
             user_groups = Groups.get_groups_by_member_id(user.id)
             print(f"User {email} is part of groups: {user_groups}")
             
-            for group in user_groups:
-                group_creator_email = group.created_by
-                print(f"Group created by {group_creator_email}")
-                if group_creator_email:
-                    creator_entry = db.query(Config).filter_by(email=group_creator_email).first()
+            # prioritise selected group
+            if selected_group_id is None:
+                try:
+                    user = Users.get_user_by_email(email)
+                    if user:
+                        import sys
+                        if 'open_webui.main' in sys.modules:
+                            app = sys.modules['open_webui.main'].app
+                            selected_group_id = app.state.USER_GROUP_SELECTIONS.get(user.id)
+                            if selected_group_id:
+                                print(f"Using selected group {selected_group_id} for user {email}")
+                except Exception as e:
+                    print(f"Could not get selected group: {e}")
+                    pass
+
+            if selected_group_id: # if group is provided and exists
+                try:
+                    group = Groups.get_group_by_id(selected_group_id)
+                    group_creator_email = group.created_by
+                    print(f"Selected group: {group.name}, created by {group.created_by}")
+                    
+                    creator_entry = db.query(Config).filter_by(email=group.created_by).first()
+                    print(f"Group creator entry: {creator_entry}")
+                    
                     if creator_entry and isinstance(creator_entry.data, dict):
                         data = creator_entry.data
                         final_value = self.default
+                        print(f"Group admin {group.created_by} has config for {self.config_path}: {data}")
+                        
+                        # Navigate through config path
                         for part in self.config_path.split("."):
                             if isinstance(data, dict) and part in data:
                                 data = data[part]
@@ -343,7 +365,30 @@ class UserScopedConfig:
                                 break
                         if final_value != self.default:
                             print(f"Group admin {group_creator_email} has config for {self.config_path}: {final_value}")
+                        print(f"Found config value: {final_value}")
                         return final_value
+                        
+                except (AttributeError, KeyError, TypeError) as e:
+                    print(f"Selected group config not found: {e}")
+            # else: 
+            #     for group in user_groups:
+            #         group_creator_email = group.created_by
+            #         print(f"Group created by {group_creator_email}")
+            #         if group_creator_email:
+            #             creator_entry = db.query(Config).filter_by(email=group_creator_email).first()
+            #             if creator_entry and isinstance(creator_entry.data, dict):
+            #                 data = creator_entry.data
+            #                 final_value = self.default
+            #                 for part in self.config_path.split("."):
+            #                     if isinstance(data, dict) and part in data:
+            #                         data = data[part]
+            #                         final_value = data
+            #                     else:
+            #                         final_value = self.default
+            #                         break
+            #                 if final_value != self.default:
+            #                     print(f"Group admin {group_creator_email} has config for {self.config_path}: {final_value}")
+            #                 return final_value
 
             # Step 3: Fallback
             print(f"Using default for {email} for {self.config_path}")
