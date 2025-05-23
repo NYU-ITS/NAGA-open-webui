@@ -77,12 +77,6 @@
 				throw new Error(error.detail || 'Failed to save group selection');
 			}
 			
-			// Store in localStorage for frontend reference
-			localStorage.setItem('selectedUserGroup', selectedGroup);
-			
-			// Update user store
-			user.update(u => u ? { ...u, selectedUserGroupId: selectedGroup } : u);
-			
 			toast.success('Group selected successfully!');
 			
 			// Redirect to main chat
@@ -96,70 +90,87 @@
 	}
 
 	function handleLogout() {
-		localStorage.removeItem('selectedUserGroup');
 		localStorage.removeItem('token');
 		window.location.replace('/auth');
 	}
 </script>
 
-<div class="fixed inset-0 bg-black/85 backdrop-blur-md flex items-center justify-center z-50">
-	<div class="bg-white dark:bg-gray-800 rounded-xl p-8 w-full max-w-md shadow-2xl">
-		<div class="flex items-center gap-3 mb-5">
+<svelte:head>
+	<title>Select Group - Welcome</title>
+</svelte:head>
+
+<!-- Full page layout with centered content, keeping your original modal design -->
+<div class="min-h-screen bg-black/85 backdrop-blur-md flex items-center justify-center p-4">
+	<main class="bg-white dark:bg-gray-800 rounded-xl p-8 w-full max-w-md shadow-2xl">
+		<header class="flex items-center gap-3 mb-5">
 			<div class="shrink-0">
 				<div class="w-10 h-10 flex items-center justify-center">
 					<img 
 						src={WEBUI_BASE_URL + '/static/flower-violet.png'}
-						alt="Logo" 
+						alt="Company logo" 
 						class="w-10 h-10"
 					/>
 				</div>
 			</div>
-			<h2 class="text-2xl font-semibold text-gray-900 dark:text-white">
+			<h1 class="text-2xl font-semibold text-gray-900 dark:text-white">
 				Welcome, {$user?.name || 'User Name'}!
-			</h2>
-		</div>
+			</h1>
+		</header>
 		
-		<div class="mb-5">
-			<label for="groupSelect" class="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
-				Select your group
-			</label>
-			{#if loadingGroups}
-				<div class="w-full px-4 py-3 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-500 dark:text-gray-400">
-					Loading groups...
+		<section>
+			<form on:submit|preventDefault={handleContinue}>
+				<div class="mb-5">
+					<label for="groupSelect" class="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
+						Select your group
+					</label>
+					{#if loadingGroups}
+						<div 
+							class="w-full px-4 py-3 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-500 dark:text-gray-400"
+							role="status"
+							aria-live="polite"
+						>
+							Loading groups...
+						</div>
+					{:else}
+						<select
+							id="groupSelect"
+							bind:value={selectedGroup}
+							required
+							aria-describedby="group-help-text"
+							class="w-full px-4 py-3 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-purple-600 focus:border-transparent transition-colors"
+						>
+							<option value="">Choose a group...</option>
+							{#each groups as group}
+								<option value={group.value}>{group.label}</option>
+							{/each}
+						</select>
+					{/if}
 				</div>
-			{:else}
-				<select
-					id="groupSelect"
-					bind:value={selectedGroup}
-					class="w-full px-4 py-3 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-purple-600 focus:border-transparent transition-colors"
+
+				<p id="group-help-text" class="text-sm text-gray-600 dark:text-gray-400 mb-6">
+					{helpText}
+				</p>
+
+				<button
+					type="submit"
+					disabled={loading || loadingGroups || !selectedGroup}
+					class="w-full py-3 px-4 bg-white dark:bg-purple-700 text-[#57068C] dark:text-white font-medium rounded-lg border border-[#57068C] dark:border-transparent hover:bg-[#57068C] hover:text-white dark:hover:bg-purple-800 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
 				>
-					<option value="">Choose a group...</option>
-					{#each groups as group}
-						<option value={group.value}>{group.label}</option>
-					{/each}
-				</select>
-			{/if}
-		</div>
+					{loading ? 'Saving...' : 'Continue'}
+				</button>
+			</form>
+		</section>
 
-		<p class="text-sm text-gray-600 dark:text-gray-400 mb-6">
-			{helpText}
-		</p>
-
-		<button
-			on:click={handleContinue}
-			disabled={loading || loadingGroups || !selectedGroup}
-			class="w-full py-3 px-4 bg-white dark:bg-purple-700 text-[#57068C] dark:text-white font-medium rounded-lg border border-[#57068C] dark:border-transparent hover:bg-[#57068C] hover:text-white dark:hover:bg-purple-800 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
-		>
-			{loading ? 'Saving...' : 'Continue'}
-		</button>
-
-		<button
-			on:click={handleLogout}
-			class="w-full mt-3 text-black dark:text-gray-400 hover:text-[#57068C] dark:hover:text-gray-300 text-sm font-medium transition-colors"
-		>
-			Log out
-		</button>
-	</div>
+		<footer class="mt-3">
+			<button
+				type="button"
+				on:click={handleLogout}
+				class="w-full text-black dark:text-gray-400 hover:text-[#57068C] dark:hover:text-gray-300 text-sm font-medium transition-colors"
+			>
+				Log out
+			</button>
+		</footer>
+	</main>
 </div>
 
 <style>
