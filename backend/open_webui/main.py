@@ -493,7 +493,7 @@ app.state.config = AppConfig()
 
 app.state.WEBUI_NAME = WEBUI_NAME
 app.state.config.LICENSE_KEY = LICENSE_KEY
-
+app.state.USER_GROUP_SELECTIONS = {}  # {user_id: selected_group_id}
 ########################################
 #
 # OLLAMA
