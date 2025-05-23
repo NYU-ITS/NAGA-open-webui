@@ -19,24 +19,6 @@
 			return;
 		}
 
-		// Check if user already has a selected group for this session
-		try {
-			const response = await fetch(`${WEBUI_API_BASE_URL}/users/selected-group`, {
-				headers: { 'Authorization': `Bearer ${localStorage.token}` }
-			});
-			
-			if (response.ok) {
-				const data = await response.json();
-				if (data.selected_group_id) {
-					// User already selected a group, redirect to main app
-					goto('/');
-					return;
-				}
-			}
-		} catch (error) {
-			console.error('Error checking existing group selection:', error);
-		}
-
 		// Load available groups from API
 		try {
 			loadingGroups = true;
