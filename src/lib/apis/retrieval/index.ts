@@ -1,6 +1,6 @@
 import { RETRIEVAL_API_BASE_URL } from '$lib/constants';
 
-export const getRAGConfig = async (token: string,email: string) => {
+export const getRAGConfig = async (token: string, email: string) => {
 	let error = null;
 
 	const res = await fetch(`${RETRIEVAL_API_BASE_URL}/config?email=${email}`, {

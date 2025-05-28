@@ -50,9 +50,9 @@
 			if (sessionUser.role === 'user') {
 				try {
 					const response = await fetch(`${WEBUI_API_BASE_URL}/users/selected-group`, {
-						headers: { 'Authorization': `Bearer ${sessionUser.token}` }
+						headers: { Authorization: `Bearer ${sessionUser.token}` }
 					});
-					
+
 					if (response.ok) {
 						const data = await response.json();
 						if (!data.selected_group_id) {

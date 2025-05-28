@@ -45,7 +45,6 @@
 		write: { group_ids: [], user_ids: [] }
 	};
 
-
 	let imageInputElement;
 	let loading = false;
 

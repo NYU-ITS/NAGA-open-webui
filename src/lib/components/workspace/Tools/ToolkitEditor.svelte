@@ -35,7 +35,6 @@
 		write: { group_ids: [], user_ids: [] }
 	};
 
-
 	let _content = '';
 
 	$: if (content) {
@@ -155,8 +154,9 @@ class Tools:
 
 	const saveHandler = async () => {
 		loading = true;
-		let emailPrefix = $user?.email?.split('@')[0]
-		const finalName = (!edit && !clone && !name.endsWith(`_${emailPrefix}`))? `${name}_${emailPrefix}`: name;
+		let emailPrefix = $user?.email?.split('@')[0];
+		const finalName =
+			!edit && !clone && !name.endsWith(`_${emailPrefix}`) ? `${name}_${emailPrefix}` : name;
 		onSave({
 			id: finalName,
 			name: finalName,

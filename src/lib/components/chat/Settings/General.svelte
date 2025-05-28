@@ -3,7 +3,7 @@
 	import { createEventDispatcher, onMount, getContext } from 'svelte';
 	import { getLanguages } from '$lib/i18n';
 	import { getGroups } from '$lib/apis/groups';
-	import { WEBUI_BASE_URL, WEBUI_API_BASE_URL  } from '$lib/constants';
+	import { WEBUI_BASE_URL, WEBUI_API_BASE_URL } from '$lib/constants';
 
 	const dispatch = createEventDispatcher();
 
@@ -26,7 +26,7 @@
 	let system = '';
 
 	let showAdvanced = false;
-	
+
 	// Group Selection
 	let availableGroups = [];
 	let selectedGroup = '';
@@ -91,7 +91,7 @@
 		try {
 			loadingGroups = true;
 			const groupsData = await getGroups(localStorage.token);
-			availableGroups = groupsData.map(group => ({
+			availableGroups = groupsData.map((group) => ({
 				id: group.id,
 				name: group.name
 			}));
@@ -105,8 +105,8 @@
 
 	const loadCurrentGroup = async () => {
 		try {
-			const response =await fetch(`${WEBUI_API_BASE_URL}/users/selected-group`, {
-				headers: { 'Authorization': `Bearer ${localStorage.token}` }
+			const response = await fetch(`${WEBUI_API_BASE_URL}/users/selected-group`, {
+				headers: { Authorization: `Bearer ${localStorage.token}` }
 			});
 			if (response.ok) {
 				const data = await response.json();
@@ -122,17 +122,17 @@
 			toast.error('Please select a group');
 			return;
 		}
-		
+
 		try {
 			const response = await fetch(`${WEBUI_API_BASE_URL}/users/select-group`, {
 				method: 'POST',
 				headers: {
 					'Content-Type': 'application/json',
-					'Authorization': `Bearer ${localStorage.token}`
+					Authorization: `Bearer ${localStorage.token}`
 				},
 				body: JSON.stringify({ group_id: newGroupId })
 			});
-			
+
 			if (response.ok) {
 				toast.success('Group changed successfully!');
 				// Reload page to apply new group settings
@@ -162,7 +162,7 @@
 
 		params = { ...params, ...$settings.params };
 		params.stop = $settings?.params?.stop ? ($settings?.params?.stop ?? []).join(',') : null;
-		
+
 		// Load group
 		await loadGroups();
 		await loadCurrentGroup();
@@ -264,14 +264,12 @@
 					</select>
 				</div>
 			</div>
-			
+
 			<div class=" flex w-full justify-between">
 				<div class=" self-center text-xs font-medium">{$i18n.t('Current Group')}</div>
 				<div class="flex items-center relative">
 					{#if loadingGroups}
-						<div class="text-xs text-gray-500 dark:text-gray-400 py-2 px-2">
-							Loading...
-						</div>
+						<div class="text-xs text-gray-500 dark:text-gray-400 py-2 px-2">Loading...</div>
 					{:else}
 						<select
 							aria-label="Select a group"
@@ -287,7 +285,7 @@
 					{/if}
 				</div>
 			</div>
-			
+
 			{#if selectedGroup}
 				<div class="mb-2 text-xs text-gray-600 dark:text-gray-500">
 					Changing your group will reload the page to apply the new admin settings.

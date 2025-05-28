@@ -5,7 +5,14 @@
 
 	import { user } from '$lib/stores';
 
-	const SPECIAL_ADMIN_EMAILS = ['cg4532@nyu.edu','ms15138@nyu.edu','mb484@nyu.edu','jy4421@nyu.edu','sm11538@nyu.edu', 'ht2490@nyu.edu'];
+	const SPECIAL_ADMIN_EMAILS = [
+		'cg4532@nyu.edu',
+		'ms15138@nyu.edu',
+		'mb484@nyu.edu',
+		'jy4421@nyu.edu',
+		'sm11538@nyu.edu',
+		'ht2490@nyu.edu'
+	];
 
 	const canViewFileSettings = () => SPECIAL_ADMIN_EMAILS.includes($user?.email);
 
@@ -232,7 +239,7 @@
 			}
 		});
 
-		await updateQuerySettings(localStorage.token, {email: $user.email, ...querySettings});
+		await updateQuerySettings(localStorage.token, { email: $user.email, ...querySettings });
 
 		if (fileMaxSize === '' || fileMaxSize === null) {
 			fileMaxSize = 5;
@@ -251,7 +258,7 @@
 			embeddingEngine = embeddingConfig.embedding_engine || 'portkey';
 			if (!embeddingConfig.embedding_model) {
 				if (embeddingConfig.embedding_engine === 'portkey') {
-					embeddingModel = 'text-embedding-d47871'; 
+					embeddingModel = 'text-embedding-d47871';
 				} else if (embeddingConfig.embedding_engine === '') {
 					embeddingModel = 'sentence-transformers/all-MiniLM-L6-v2';
 				} else {
@@ -260,8 +267,6 @@
 			} else {
 				embeddingModel = embeddingConfig.embedding_model;
 			}
-
-
 
 			// embeddingModel = embeddingConfig.embedding_model;
 			embeddingBatchSize = embeddingConfig.embedding_batch_size ?? 1;
@@ -274,12 +279,11 @@
 				OpenAIUrl = embeddingConfig.openai_config?.url || OpenAIUrl;
 			}
 
-
 			OllamaKey = embeddingConfig.ollama_config.key;
 			OllamaUrl = embeddingConfig.ollama_config.url;
 		} else {
-		embeddingEngine = 'portkey';
-		embeddingModel = 'text-embedding-d47871';
+			embeddingEngine = 'portkey';
+			embeddingModel = 'text-embedding-d47871';
 		}
 	};
 
@@ -519,7 +523,7 @@
 										} else if (e.target.value === 'openai') {
 											embeddingModel = 'text-embedding-3-small';
 										} else if (e.target.value === 'portkey') {
-											embeddingModel = 'text-embedding-d47871'
+											embeddingModel = 'text-embedding-d47871';
 										} else if (e.target.value === '') {
 											embeddingModel = 'sentence-transformers/all-MiniLM-L6-v2';
 										}

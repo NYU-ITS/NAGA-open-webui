@@ -24,7 +24,6 @@
 		write: { group_ids: [], user_ids: [] }
 	};
 
-
 	let loading = false;
 
 	$: if (name) {
