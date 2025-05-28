@@ -214,8 +214,8 @@ async def update_file_data_content_by_id(
                 try:
                     file_path = Storage.get_file(file.path)
                     file_path = Path(file_path)
-                    
-                    with open(file_path, 'w', encoding='utf-8') as f:
+
+                    with open(file_path, "w", encoding="utf-8") as f:
                         f.write(form_data.content)
                     log.info(f"Updated physical file content at {file_path}")
                 except Exception as e:

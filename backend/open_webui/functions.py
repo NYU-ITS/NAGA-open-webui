@@ -72,7 +72,9 @@ async def get_function_models(request, user: UserModel = None):
     pipe_models = []
 
     for pipe in pipes:
-        if (user.role == "admin" and pipe.created_by == user.email) or (user.role == "user"):
+        if (user.role == "admin" and pipe.created_by == user.email) or (
+            user.role == "user"
+        ):
             function_module = get_function_module_by_id(request, pipe.id)
 
             # Check if function is a manifold

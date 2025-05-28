@@ -203,9 +203,8 @@ async def get_knowledge_by_id(id: str, user=Depends(get_verified_user)):
     if not knowledge:
         raise HTTPException(status_code=404, detail="Knowledge not found")
 
-    if (
-        knowledge.user_id == user.id
-        or has_access(user.id, "read", knowledge.access_control)
+    if knowledge.user_id == user.id or has_access(
+        user.id, "read", knowledge.access_control
     ):
 
         file_ids = knowledge.data.get("file_ids", []) if knowledge.data else []
@@ -216,9 +215,9 @@ async def get_knowledge_by_id(id: str, user=Depends(get_verified_user)):
             files=files,
         )
     raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=ERROR_MESSAGES.NOT_FOUND,
-        )
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=ERROR_MESSAGES.NOT_FOUND,
+    )
 
 
 ############################

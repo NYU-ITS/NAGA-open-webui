@@ -393,6 +393,8 @@ https://github.com/open-webui/open-webui
 """
 )
 from sqlalchemy import create_engine, inspect
+
+
 def ensure_group_created_by_column():
     from open_webui.config import DATABASE_URL
 
@@ -407,6 +409,7 @@ def ensure_group_created_by_column():
             print("Column 'created_by' added successfully")
         else:
             print("Column 'created_by' already exists")
+
 
 def ensure_function_created_by_column():
     from open_webui.config import DATABASE_URL
@@ -423,20 +426,21 @@ def ensure_function_created_by_column():
         else:
             print("Column 'created_by' already exists")
 
+
 def ensure_tool_created_by_column():
     from open_webui.config import DATABASE_URL
 
     engine = create_engine(DATABASE_URL)
     with engine.begin() as conn:  # Automatically commits on success
-    #     conn.execute(text('DELETE FROM "tool";'))
-    #     conn.execute(text('DELETE FROM "prompt";'))
-    #     conn.execute(text('DELETE FROM "function";'))
-    #     conn.execute(text('DELETE FROM "group";'))
-    #     conn.execute(text('DELETE FROM "model";'))
-    #     conn.execute(text('DELETE FROM "file";'))
+        #     conn.execute(text('DELETE FROM "tool";'))
+        #     conn.execute(text('DELETE FROM "prompt";'))
+        #     conn.execute(text('DELETE FROM "function";'))
+        #     conn.execute(text('DELETE FROM "group";'))
+        #     conn.execute(text('DELETE FROM "model";'))
+        #     conn.execute(text('DELETE FROM "file";'))
         conn.execute(text('DELETE FROM "config";'))
-    #     conn.execute(text('DELETE FROM "knowledge";'))
-    # with engine.connect() as conn:
+        #     conn.execute(text('DELETE FROM "knowledge";'))
+        # with engine.connect() as conn:
         inspector = inspect(conn)
         columns = [col["name"] for col in inspector.get_columns("tool")]
 
@@ -446,6 +450,7 @@ def ensure_tool_created_by_column():
             print("Column 'created_by' added successfully")
         else:
             print("Column 'created_by' already exists")
+
 
 def ensure_model_created_by_column():
     from open_webui.config import DATABASE_URL
@@ -1244,7 +1249,9 @@ async def get_app_config(request: Request):
                 {
                     "enable_direct_connections": app.state.config.ENABLE_DIRECT_CONNECTIONS,
                     "enable_channels": app.state.config.ENABLE_CHANNELS,
-                    "enable_web_search": app.state.config.ENABLE_RAG_WEB_SEARCH.get(user.email),
+                    "enable_web_search": app.state.config.ENABLE_RAG_WEB_SEARCH.get(
+                        user.email
+                    ),
                     "enable_code_interpreter": app.state.config.ENABLE_CODE_INTERPRETER,
                     "enable_image_generation": app.state.config.ENABLE_IMAGE_GENERATION,
                     "enable_autocomplete_generation": app.state.config.ENABLE_AUTOCOMPLETE_GENERATION,

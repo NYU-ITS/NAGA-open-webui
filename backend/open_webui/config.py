@@ -13,10 +13,8 @@ import requests
 from pydantic import BaseModel
 from sqlalchemy import JSON, Column, DateTime, Integer, func, Any, String
 from sqlalchemy.orm.attributes import flag_modified
-from open_webui.models.groups import (
-    Groups)
-from open_webui.models.users import (
-    Users)
+from open_webui.models.groups import Groups
+from open_webui.models.users import Users
 
 from open_webui.env import (
     DATA_DIR,
@@ -31,6 +29,7 @@ from open_webui.env import (
     log,
 )
 from open_webui.internal.db import Base, get_db
+
 
 class EndpointFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
@@ -165,7 +164,9 @@ def get_config():
         config_entry = db.query(Config).order_by(Config.id.desc()).first()
         return config_entry.data if config_entry else DEFAULT_CONFIG
 
+
 from sqlalchemy import create_engine, inspect, text
+
 
 def ensure_config_email_column():
     engine = create_engine(DATABASE_URL)
@@ -174,10 +175,15 @@ def ensure_config_email_column():
         columns = [col["name"] for col in inspector.get_columns("config")]
         if "email" not in columns:
             print("🔧 Adding missing column: config.email")
-            conn.execute(text('ALTER TABLE "config" ADD COLUMN email TEXT DEFAULT \'system@default\';'))
+            conn.execute(
+                text(
+                    "ALTER TABLE \"config\" ADD COLUMN email TEXT DEFAULT 'system@default';"
+                )
+            )
             print(" Column 'email' added successfully")
         else:
             print("Column 'email' already exists")
+
 
 ensure_config_email_column()
 
@@ -265,6 +271,7 @@ class PersistentConfig(Generic[T]):
         save_to_db(CONFIG_DATA)
         self.config_value = self.value
 
+
 class UserScopedConfig:
     def __init__(self, config_path: str, default: Any):
         self.config_path = config_path
@@ -281,13 +288,13 @@ class UserScopedConfig:
     #                 else:
     #                     return self.default
     #             return data
-        
+
     # # Step 2: If not found, try group creator lookup
     #         user_id = Users.get_user_by_email(email)
     #         user_groups = []
     #         user_groups = Groups.get_groups_by_member_id(user_id)
     #         for group in user_groups:
-    #             group_creator_email = group.created_by  
+    #             group_creator_email = group.created_by
     #             if group_creator_email:
     #                 creator_entry = db.query(Config).filter_by(email=group_creator_email).first()
     #                 if creator_entry and isinstance(creator_entry.data, dict):
@@ -301,7 +308,7 @@ class UserScopedConfig:
 
     #         # Step 3: If still nothing, return default
     #     return self.default
-        
+
     def get(self, email: str, selected_group_id: str = None) -> Any:
         with get_db() as db:
             # Step 1: Check user-specific config
@@ -317,7 +324,9 @@ class UserScopedConfig:
                         final_value = self.default
                         break
                 if final_value != self.default:
-                    print(f"User {email} has personal config for {self.config_path}: {final_value}")
+                    print(
+                        f"User {email} has personal config for {self.config_path}: {final_value}"
+                    )
                 return final_value
 
             # Step 2: Check group creator's config
@@ -325,36 +334,47 @@ class UserScopedConfig:
             print(f"User {email} maps to user_id={user.id}")
             user_groups = Groups.get_groups_by_member_id(user.id)
             print(f"User {email} is part of groups: {user_groups}")
-            
+
             # prioritise selected group
             if selected_group_id is None:
                 try:
                     user = Users.get_user_by_email(email)
                     if user:
                         import sys
-                        if 'open_webui.main' in sys.modules:
-                            app = sys.modules['open_webui.main'].app
-                            selected_group_id = app.state.USER_GROUP_SELECTIONS.get(user.id)
+
+                        if "open_webui.main" in sys.modules:
+                            app = sys.modules["open_webui.main"].app
+                            selected_group_id = app.state.USER_GROUP_SELECTIONS.get(
+                                user.id
+                            )
                             if selected_group_id:
-                                print(f"Using selected group {selected_group_id} for user {email}")
+                                print(
+                                    f"Using selected group {selected_group_id} for user {email}"
+                                )
                 except Exception as e:
                     print(f"Could not get selected group: {e}")
                     pass
 
-            if selected_group_id: # if group is provided and exists
+            if selected_group_id:  # if group is provided and exists
                 try:
                     group = Groups.get_group_by_id(selected_group_id)
                     group_creator_email = group.created_by
-                    print(f"Selected group: {group.name}, created by {group.created_by}")
-                    
-                    creator_entry = db.query(Config).filter_by(email=group.created_by).first()
+                    print(
+                        f"Selected group: {group.name}, created by {group.created_by}"
+                    )
+
+                    creator_entry = (
+                        db.query(Config).filter_by(email=group.created_by).first()
+                    )
                     print(f"Group creator entry: {creator_entry}")
-                    
+
                     if creator_entry and isinstance(creator_entry.data, dict):
                         data = creator_entry.data
                         final_value = self.default
-                        print(f"Group admin {group.created_by} has config for {self.config_path}: {data}")
-                        
+                        print(
+                            f"Group admin {group.created_by} has config for {self.config_path}: {data}"
+                        )
+
                         # Navigate through config path
                         for part in self.config_path.split("."):
                             if isinstance(data, dict) and part in data:
@@ -364,13 +384,15 @@ class UserScopedConfig:
                                 final_value = self.default
                                 break
                         if final_value != self.default:
-                            print(f"Group admin {group_creator_email} has config for {self.config_path}: {final_value}")
+                            print(
+                                f"Group admin {group_creator_email} has config for {self.config_path}: {final_value}"
+                            )
                         print(f"Found config value: {final_value}")
                         return final_value
-                        
+
                 except (AttributeError, KeyError, TypeError) as e:
                     print(f"Selected group config not found: {e}")
-            # else: 
+            # else:
             #     for group in user_groups:
             #         group_creator_email = group.created_by
             #         print(f"Group created by {group_creator_email}")
@@ -412,13 +434,12 @@ class UserScopedConfig:
 
             entry.data = data
             entry.updated_at = datetime.now()
-            flag_modified(entry, "data")  
+            flag_modified(entry, "data")
             db.commit()
 
 
-
 class AppConfig:
-    _state: dict[str, PersistentConfig | UserScopedConfig ]
+    _state: dict[str, PersistentConfig | UserScopedConfig]
 
     def __init__(self):
         super().__setattr__("_state", {})
@@ -434,7 +455,7 @@ class AppConfig:
                 self._state[key].save()
             elif isinstance(self._state[key], UserScopedConfig):
                 raise TypeError("Use .set(email, value) to update UserScopedConfig.")
-            
+
     def __getattr__(self, key):
         config_obj = self._state[key]
         if isinstance(config_obj, PersistentConfig):
@@ -443,9 +464,6 @@ class AppConfig:
 
     # def __getattr__(self, key):
     #     return self._state[key]  # return the whole config object (not just .value)
-
-
-
 
 
 # class AppConfig:
@@ -1860,18 +1878,21 @@ BYPASS_EMBEDDING_AND_RETRIEVAL = PersistentConfig(
     "rag.bypass_embedding_and_retrieval",
     os.environ.get("BYPASS_EMBEDDING_AND_RETRIEVAL", "False").lower() == "true",
 )
-RAG_TOP_K = UserScopedConfig( "rag.top_k", int(os.environ.get("RAG_TOP_K", "4")))
+RAG_TOP_K = UserScopedConfig("rag.top_k", int(os.environ.get("RAG_TOP_K", "4")))
 
 # RAG_TOP_K = PersistentConfig(
 #     "RAG_TOP_K", "rag.top_k", int(os.environ.get("RAG_TOP_K", "3"))
-#)
+# )
 RAG_RELEVANCE_THRESHOLD = PersistentConfig(
     "RAG_RELEVANCE_THRESHOLD",
     "rag.relevance_threshold",
     float(os.environ.get("RAG_RELEVANCE_THRESHOLD", "1")),
 )
 
-ENABLE_RAG_HYBRID_SEARCH = UserScopedConfig("rag.enable_hybrid_search",os.environ.get("ENABLE_RAG_HYBRID_SEARCH", "").lower() == "true" )
+ENABLE_RAG_HYBRID_SEARCH = UserScopedConfig(
+    "rag.enable_hybrid_search",
+    os.environ.get("ENABLE_RAG_HYBRID_SEARCH", "").lower() == "true",
+)
 #     "ENABLE_RAG_HYBRID_SEARCH",
 #     "rag.enable_hybrid_search",
 #     os.environ.get("ENABLE_RAG_HYBRID_SEARCH", "").lower() == "true",
@@ -1884,8 +1905,8 @@ ENABLE_RAG_HYBRID_SEARCH = UserScopedConfig("rag.enable_hybrid_search",os.enviro
 # )
 
 RAG_FULL_CONTEXT = UserScopedConfig(
-    "rag.full_context",
-    os.getenv("RAG_FULL_CONTEXT", "False").lower() == "true")
+    "rag.full_context", os.getenv("RAG_FULL_CONTEXT", "False").lower() == "true"
+)
 
 RAG_FILE_MAX_COUNT = PersistentConfig(
     "RAG_FILE_MAX_COUNT",
@@ -1983,7 +2004,9 @@ TIKTOKEN_ENCODING_NAME = PersistentConfig(
     os.environ.get("TIKTOKEN_ENCODING_NAME", "cl100k_base"),
 )
 
-CHUNK_SIZE = UserScopedConfig("rag.chunk_size", int(os.environ.get("CHUNK_SIZE", "1000")))
+CHUNK_SIZE = UserScopedConfig(
+    "rag.chunk_size", int(os.environ.get("CHUNK_SIZE", "1000"))
+)
 # CHUNK_SIZE = PersistentConfig(
 #     "CHUNK_SIZE", "rag.chunk_size", int(os.environ.get("CHUNK_SIZE", "1000"))
 # )
