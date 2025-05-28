@@ -266,7 +266,7 @@
 			</div>
 
 			<div class=" flex w-full justify-between">
-				<div class=" self-center text-xs font-medium">{$i18n.t('Current Group')}</div>
+				<div class=" self-center text-xs font-medium">Current Group</div>
 				<div class="flex items-center relative">
 					{#if loadingGroups}
 						<div class="text-xs text-gray-500 dark:text-gray-400 py-2 px-2">Loading...</div>
