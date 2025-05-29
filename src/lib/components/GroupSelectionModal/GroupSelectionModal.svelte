@@ -13,16 +13,8 @@
 	let helpText =
 		"Your experience has been customized by your group's admin, and you can switch groups anytime later under Settings > General.";
 
-	// Dark mode detection function
-	const isDarkMode = () => {
-		if (typeof window === 'undefined') return false;
-		return document.documentElement.classList.contains('dark');
-	};
-
 	// Reactive logo source
-	$: logoSrc = isDarkMode()
-		? `${WEBUI_BASE_URL}/static/flower-white.png`
-		: `${WEBUI_BASE_URL}/static/flower-violet.png`;
+	$: logoSrc = `${WEBUI_BASE_URL}/static/flower-violet.png`;
 
 	onMount(async () => {
 		// Apply theme on mount
@@ -98,18 +90,19 @@
 	<title>Select Group - Welcome</title>
 </svelte:head>
 
-<!-- Keep your original modal overlay design with proper dark theme -->
-<div
+<!-- <div
 	class="min-h-screen bg-black/85 dark:bg-black/90 backdrop-blur-md flex items-center justify-center p-4"
->
-	<main class="bg-white dark:bg-gray-800 rounded-xl p-8 w-full max-w-md shadow-2xl">
+> -->
+<!-- <main class="bg-white dark:bg-gray-800 rounded-xl p-8 w-full max-w-md shadow-2xl"> -->
+<div class="min-h-screen bg-[#330662] flex items-center justify-center p-4">
+	<main class="bg-white p-8 w-full max-w-md">
 		<header class="flex items-center gap-3 mb-5">
 			<div class="shrink-0">
 				<div class="w-10 h-10 flex items-center justify-center">
 					<img src={logoSrc} alt="Company logo" class="w-10 h-10" />
 				</div>
 			</div>
-			<h1 class="text-2xl font-semibold text-gray-900 dark:text-white">
+			<h1 class="text-2xl font-semibold text-gray-900">
 				Welcome, {$user?.name || 'User Name'}!
 			</h1>
 		</header>
@@ -117,15 +110,12 @@
 		<section>
 			<form on:submit|preventDefault={handleContinue}>
 				<div class="mb-5">
-					<label
-						for="groupSelect"
-						class="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-2"
-					>
+					<label for="groupSelect" class="block text-sm font-medium text-gray-700">
 						Select your group
 					</label>
 					{#if loadingGroups}
 						<div
-							class="w-full px-4 py-3 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-500 dark:text-gray-400"
+							class="w-full px-4 py-3 border border-gray-300 rounded-lg bg-white text-gray-500"
 							role="status"
 							aria-live="polite"
 						>
@@ -137,7 +127,7 @@
 							bind:value={selectedGroup}
 							required
 							aria-describedby="group-help-text"
-							class="w-full px-4 py-3 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+							class="w-full px-4 py-3 border border-gray-300 rounded-lg bg-white text-gray-900"
 						>
 							<option value="">Choose a group...</option>
 							{#each groups as group}
@@ -147,14 +137,14 @@
 					{/if}
 				</div>
 
-				<p id="group-help-text" class="text-sm text-gray-600 dark:text-gray-400 mb-6">
+				<p id="group-help-text" class="text-sm text-gray-600 mb-6">
 					{helpText}
 				</p>
 
 				<button
 					type="submit"
 					disabled={loading || loadingGroups || !selectedGroup}
-					class="w-full py-3 px-4 bg-white dark:bg-gray-800 text-[#57068C] dark:text-white font-medium rounded-lg border border-[#57068C] dark:border-white hover:bg-[#57068C] hover:text-white dark:hover:text-black dark:hover:bg-white focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2 dark:focus:ring-offset-gray-800 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+					class="w-full py-3 px-4 bg-white text-[#57068C] font-medium rounded-lg border border-[#57068C] hover:bg-[#57068C] hover:text-white focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
 				>
 					{loading ? 'Saving...' : 'Continue'}
 				</button>
@@ -165,7 +155,7 @@
 			<button
 				type="button"
 				on:click={handleLogout}
-				class="w-full text-black dark:text-gray-400 hover:text-[#57068C] dark:hover:text-gray-300 text-sm font-medium transition-colors"
+				class="w-full text-black hover:text-[#57068C] text-sm font-medium transition-colors"
 			>
 				Log out
 			</button>
@@ -183,10 +173,5 @@
 		-webkit-appearance: none;
 		-moz-appearance: none;
 		appearance: none;
-	}
-
-	/* Dark mode select arrow */
-	:global(.dark) select {
-		background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%239ca3af' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
 	}
 </style>
