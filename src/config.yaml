@@ -1,0 +1,12 @@
+portkey:
+  base_url: https://ai-gateway.apps.cloud.rt.nyu.edu/v1
+  chat:
+    api_key: gyuFhxn6WQbev77i5ecKQ+iFh+DX
+    gemini_virtual_key: gemini-a67b98
+    openai_virtual_key: openai-nyu-it-d-5b382a
+    default_model: "gpt-4o"
+  embeddings:
+    api_key: dogDlg+W3/1qn7LsU3oTuJHDEopS 
+    virtual_key: text-embedding-d47871
+tavily:
+  TAVILY_API_KEY: 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
