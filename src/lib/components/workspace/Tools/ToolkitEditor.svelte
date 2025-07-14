@@ -30,15 +30,20 @@
 		description: ''
 	};
 	export let content = '';
-	let accessControl = {
-		read: { group_ids: [], user_ids: [] },
-		write: { group_ids: [], user_ids: [] }
-	};
+	export let accessControl;
 
 	let _content = '';
 
 	$: if (content) {
 		updateContent();
+	}
+
+	$: if (!edit && !clone && accessControl === undefined) {
+	// New tool: default to private access
+		accessControl = {
+			read: { group_ids: [], user_ids: [] },
+			write: { group_ids: [], user_ids: [] }
+		};
 	}
 
 	const updateContent = () => {
