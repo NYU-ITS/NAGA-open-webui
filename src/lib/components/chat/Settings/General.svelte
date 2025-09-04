@@ -2,6 +2,9 @@
 	import { toast } from 'svelte-sonner';
 	import { createEventDispatcher, onMount, getContext } from 'svelte';
 	import { getLanguages } from '$lib/i18n';
+	import { getGroups } from '$lib/apis/groups';
+	import { WEBUI_BASE_URL, WEBUI_API_BASE_URL } from '$lib/constants';
+
 	const dispatch = createEventDispatcher();
 
 	import { models, settings, theme, user } from '$lib/stores';
@@ -23,6 +26,11 @@
 	let system = '';
 
 	let showAdvanced = false;
+
+	// Group Selection
+	let availableGroups = [];
+	let selectedGroup = '';
+	let loadingGroups = false;
 
 	const toggleNotification = async () => {
 		const permission = await Notification.requestPermission();
@@ -79,6 +87,68 @@
 		saveSettings({ requestFormat: requestFormat !== '' ? requestFormat : undefined });
 	};
 
+	const loadGroups = async () => {
+		try {
+			loadingGroups = true;
+			const groupsData = await getGroups(localStorage.token);
+			availableGroups = groupsData.map((group) => ({
+				id: group.id,
+				name: group.name
+			}));
+		} catch (error) {
+			console.error('Failed to load groups:', error);
+			toast.error('Failed to load groups');
+		} finally {
+			loadingGroups = false;
+		}
+	};
+
+	const loadCurrentGroup = async () => {
+		try {
+			const response = await fetch(`${WEBUI_API_BASE_URL}/users/selected-group`, {
+				headers: { Authorization: `Bearer ${localStorage.token}` }
+			});
+			if (response.ok) {
+				const data = await response.json();
+				selectedGroup = data.selected_group_id || '';
+			}
+		} catch (error) {
+			console.error('Failed to load current group:', error);
+		}
+	};
+
+	const changeGroup = async (newGroupId) => {
+		if (!newGroupId) {
+			toast.error('Please select a group');
+			return;
+		}
+
+		try {
+			const response = await fetch(`${WEBUI_API_BASE_URL}/users/select-group`, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+					Authorization: `Bearer ${localStorage.token}`
+				},
+				body: JSON.stringify({ group_id: newGroupId })
+			});
+
+			if (response.ok) {
+				toast.success('Group changed successfully!');
+				// Reload page to apply new group settings
+				setTimeout(() => {
+					window.location.reload();
+				}, 1000);
+			} else {
+				const error = await response.json();
+				throw new Error(error.detail || 'Failed to change group');
+			}
+		} catch (error) {
+			console.error('Failed to change group:', error);
+			toast.error('Failed to change group: ' + error.message);
+		}
+	};
+
 	onMount(async () => {
 		selectedTheme = localStorage.theme ?? 'system';
 
@@ -92,6 +162,10 @@
 
 		params = { ...params, ...$settings.params };
 		params.stop = $settings?.params?.stop ? ($settings?.params?.stop ?? []).join(',') : null;
+
+		// Load group
+		await loadGroups();
+		await loadCurrentGroup();
 	});
 
 	const applyTheme = (_theme: string) => {
@@ -190,6 +264,33 @@
 					</select>
 				</div>
 			</div>
+
+			<div class=" flex w-full justify-between">
+				<div class=" self-center text-xs font-medium">Current Group</div>
+				<div class="flex items-center relative">
+					{#if loadingGroups}
+						<div class="text-xs text-gray-500 dark:text-gray-400 py-2 px-2">Loading...</div>
+					{:else}
+						<select
+							aria-label="Select a group"
+							class="dark:bg-gray-900 w-fit pr-8 rounded-sm py-2 px-2 text-xs bg-transparent outline-hidden text-right"
+							bind:value={selectedGroup}
+							on:change={(e) => changeGroup(e.target.value)}
+						>
+							<option value="">Choose a group...</option>
+							{#each availableGroups as group}
+								<option value={group.id}>{group.name}</option>
+							{/each}
+						</select>
+					{/if}
+				</div>
+			</div>
+
+			{#if selectedGroup}
+				<div class="mb-2 text-xs text-gray-600 dark:text-gray-500">
+					Changing your group will reload the page to apply the new admin settings.
+				</div>
+			{/if}
 
 			<div class=" flex w-full justify-between">
 				<div class=" self-center text-xs font-medium">{$i18n.t('Language')}</div>

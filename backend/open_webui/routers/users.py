@@ -10,7 +10,7 @@ from open_webui.models.users import (
     UserSettings,
     UserUpdateForm,
 )
-
+from open_webui.models.groups import Groups
 
 from open_webui.socket.main import get_active_status_by_user_id
 from open_webui.constants import ERROR_MESSAGES
@@ -46,6 +46,55 @@ async def get_users(
 @router.get("/groups")
 async def get_user_groups(user=Depends(get_verified_user)):
     return Users.get_user_groups(user.id)
+
+
+class GroupSelectionForm(BaseModel):
+    group_id: str
+
+
+############################
+# Group Selection
+############################
+
+
+@router.post("/select-group")
+async def select_user_group(
+    request: Request, form_data: GroupSelectionForm, user=Depends(get_verified_user)
+):
+    # Verify user has access to this group
+    user_groups = Groups.get_groups_by_member_id(user.id)
+    if not any(g.id == form_data.group_id for g in user_groups):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Access denied to group"
+        )
+
+    # Store in app state
+    request.app.state.USER_GROUP_SELECTIONS[user.id] = form_data.group_id
+
+    return {"status": "success", "selected_group_id": form_data.group_id}
+
+
+@router.get("/selected-group")
+async def get_selected_group(request: Request, user=Depends(get_verified_user)):
+    print(f"=== get_selected_group called ===")
+    print(f"User ID: {user.id}")
+
+    # Check if USER_GROUP_SELECTIONS exists
+    if not hasattr(request.app.state, "USER_GROUP_SELECTIONS"):
+        print("ERROR: USER_GROUP_SELECTIONS not in app.state!")
+        return {"error": "app state not initialized", "selected_group_id": None}
+
+    print(
+        f"USER_GROUP_SELECTIONS exists: {hasattr(request.app.state, 'USER_GROUP_SELECTIONS')}"
+    )
+    print(
+        f"Full app state USER_GROUP_SELECTIONS: {dict(request.app.state.USER_GROUP_SELECTIONS)}"
+    )
+
+    selected_group_id = request.app.state.USER_GROUP_SELECTIONS.get(user.id)
+    print(f"Selected group for user {user.id}: {selected_group_id}")
+
+    return {"selected_group_id": selected_group_id}
 
 
 ############################

@@ -23,7 +23,6 @@
 
 	export let accessControl;
 
-
 	let showAccessControlModal = false;
 
 	$: if (!edit) {
@@ -77,7 +76,6 @@
 				read: { group_ids: [], user_ids: [] },
 				write: { group_ids: [], user_ids: [] }
 			};
-
 		}
 	});
 </script>

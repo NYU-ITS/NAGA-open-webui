@@ -96,7 +96,6 @@
 		};
 	}
 
-
 	const addUsage = (base_model_id) => {
 		const baseModel = $models.find((m) => m.id === base_model_id);
 

@@ -46,6 +46,26 @@
 			await user.set(sessionUser);
 			await config.set(await getBackendConfig());
 
+			// ADD GROUP SELECTION CHECK HERE
+			if (sessionUser.role === 'user') {
+				try {
+					const response = await fetch(`${WEBUI_API_BASE_URL}/users/selected-group`, {
+						headers: { Authorization: `Bearer ${sessionUser.token}` }
+					});
+
+					if (response.ok) {
+						const data = await response.json();
+						if (!data.selected_group_id) {
+							console.log('User has not selected a group, redirecting to group selection');
+							await goto('/group-selection');
+							return; // Exit early, don't redirect to main app
+						}
+					}
+				} catch (error) {
+					console.error('Error checking group selection:', error);
+				}
+			}
+
 			const redirectPath = querystringValue('redirect') || '/';
 			goto(redirectPath);
 		}

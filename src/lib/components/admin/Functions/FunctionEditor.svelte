@@ -258,9 +258,10 @@ class Pipe:
 
 	const saveHandler = async () => {
 		loading = true;
-		let emailPrefix = $user?.email?.split('@')[0]
+		let emailPrefix = $user?.email?.split('@')[0];
 		// let finalName = (edit || name.endsWith(`_${emailPrefix}`)) ? name : `${name}_${emailPrefix}`;
-		const finalName = (!edit && !clone && !name.endsWith(`_${emailPrefix}`))? `${name}_${emailPrefix}`: name;
+		const finalName =
+			!edit && !clone && !name.endsWith(`_${emailPrefix}`) ? `${name}_${emailPrefix}` : name;
 		onSave({
 			id: finalName,
 			name: finalName,
