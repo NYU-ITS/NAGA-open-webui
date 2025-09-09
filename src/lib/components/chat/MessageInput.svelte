@@ -18,7 +18,8 @@
 		tools,
 		user as _user,
 		showControls,
-		TTSWorker
+		TTSWorker,
+		showFacilitiesForm,
 	} from '$lib/stores';
 
 	import { blobToFile, compressImage, createMessagesList, findWordIndices } from '$lib/utils';
@@ -1200,6 +1201,24 @@
 														</button>
 													</Tooltip>
 												{/if}
+												
+												<Tooltip content={'Facilities Form Generator'} placement="top">
+													<button
+														on:click|preventDefault={() => {
+															$showFacilitiesForm = true;
+															$showControls = true;
+														}}
+														type="button"
+														class="px-1.5 @sm:px-2.5 py-1.5 flex gap-1.5 items-center text-sm rounded-full font-medium transition-colors duration-300 focus:outline-hidden max-w-full overflow-hidden bg-transparent text-gray-600 dark:text-gray-300 border-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800"
+													>
+														<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.75" stroke="currentColor" class="size-5">
+															<path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0-1.125.504-1.125 1.125V11.25a9 9 0 0 0-9-9Z" />
+														</svg>
+														<span class="hidden @sm:block whitespace-nowrap overflow-hidden text-ellipsis translate-y-[0.5px] mr-0.5">
+															{'Facilities Form'}
+														</span>
+													</button>
+												</Tooltip>
 											{/if}
 										</div>
 									</div>
