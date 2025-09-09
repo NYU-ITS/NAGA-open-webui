@@ -61,9 +61,9 @@
 
 	const reindexPDFs = async () => {
 		try {
-			toast.success($i18n.t('PDF reindexing complete!'));
+			toast.success(('PDF reindexing complete!'));
 		} catch (error) {
-			toast.error($i18n.t('Error reindexing PDFs: {{error}}', { error: error.message }));
+			toast.error(('Error reindexing PDFs: {{error}}', { error: error.message }));
 		}
 	};
 
@@ -80,10 +80,10 @@
 	<div class="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
 		<div class="flex-1">
 			<h2 class="text-lg font-semibold text-gray-900 dark:text-white">
-				{$i18n.t('Grant Facilities Generator')}
+				{('Grant Facilities Generator')}
 			</h2>
 			<p class="text-sm text-gray-600 dark:text-gray-400 mt-1">
-				{$i18n.t('Generate and customize grant facility sections')}
+				{('Generate and customize grant facility sections')}
 			</p>
 		</div>
 		
@@ -107,21 +107,21 @@
 				class="w-full px-4 py-3 bg-gray-900 text-white dark:bg-white dark:text-gray-900 rounded-lg hover:bg-gray-800 dark:hover:bg-gray-100 transition-colors font-medium text-sm"
 				on:click={reindexPDFs}
 			>
-				{$i18n.t('Reindex PDFs in /data folder')}
+				{('Reindex PDFs in /data folder')}
 			</button>
 		</div>
 
 		<!-- Agency Selection -->
 		<div>
 			<label class="block text-sm font-medium text-gray-900 dark:text-white mb-3">
-				{$i18n.t('Agency Selection')}
+				{('Agency Selection')}
 			</label>
 			<select
 				class="w-full rounded-lg py-2.5 px-3 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-800 border border-gray-300 dark:border-gray-600 outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
 				bind:value={selectedAgency}
 				aria-label="Select Agency"
 			>
-				<option value="">{$i18n.t('Choose an agency...')}</option>
+				<option value="">{('Choose an agency...')}</option>
 				{#each agencies as agency}
 					<option value={agency}>{agency}</option>
 				{/each}
@@ -132,7 +132,7 @@
 		{#if selectedAgency && sectionLabels.length > 0}
 			<div>
 				<label class="block text-sm font-medium text-gray-900 dark:text-white mb-4">
-					{$i18n.t('Section Details')}
+					{('Section Details')}
 				</label>
 				
 				<div class="space-y-4">
@@ -156,7 +156,7 @@
 					class="w-full mt-6 px-4 py-3 bg-gray-900 hover:bg-gray-800 text-white dark:bg-white dark:text-gray-900 dark:hover:bg-gray-100 rounded-lg font-medium text-sm transition-colors"
 					on:click={() => toast.success('Form submitted!')}
 				>
-					{$i18n.t('Generate Enhanced Sections')}
+					{('Generate Enhanced Sections')}
 				</button>
 			</div>
 		{/if}
