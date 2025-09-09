@@ -4,11 +4,12 @@
 	import { Pane, PaneResizer } from 'paneforge';
 
 	import { onDestroy, onMount, tick } from 'svelte';
-	import { mobile, showControls, showCallOverlay, showOverview, showArtifacts } from '$lib/stores';
+	import { mobile, showControls, showCallOverlay, showOverview, showArtifacts, showFacilitiesForm } from '$lib/stores';
 
 	import Modal from '../common/Modal.svelte';
 	import Controls from './Controls/Controls.svelte';
 	import CallOverlay from './MessageInput/CallOverlay.svelte';
+	import FacilitiesForm from './FacilitiesForm.svelte';
 	import Drawer from '../common/Drawer.svelte';
 	import Overview from './Overview.svelte';
 	import EllipsisVertical from '../icons/EllipsisVertical.svelte';
@@ -124,6 +125,7 @@
 		showControls.set(false);
 		showOverview.set(false);
 		showArtifacts.set(false);
+		showFacilitiesForm.set(false); 
 
 		if ($showCallOverlay) {
 			showCallOverlay.set(false);
@@ -145,7 +147,7 @@
 				}}
 			>
 				<div
-					class=" {$showCallOverlay || $showOverview || $showArtifacts
+					class=" {$showCallOverlay || $showOverview || $showArtifacts || $showFacilitiesForm
 						? ' h-screen  w-full'
 						: 'px-6 py-4'} h-full"
 				>
@@ -177,15 +179,26 @@
 								showControls.set(false);
 							}}
 						/>
+					
+					{:else if $showFacilitiesForm}
+						<div class="h-full max-h-[100dvh] bg-white text-gray-700 dark:bg-gray-900 dark:text-gray-300">
+							<FacilitiesForm
+								show={$showFacilitiesForm}
+								on:close={() => {
+									showControls.set(false);
+									showFacilitiesForm.set(false);
+								}}
+							/>
+						</div>
 					{:else}
-						<Controls
-							on:close={() => {
-								showControls.set(false);
-							}}
-							{models}
-							bind:chatFiles
-							bind:params
-						/>
+							<Controls
+								on:close={() => {
+									showControls.set(false);
+								}}
+								{models}
+								bind:chatFiles
+								bind:params
+							/>
 					{/if}
 				</div>
 			</Drawer>
@@ -228,7 +241,7 @@
 			{#if $showControls}
 				<div class="pr-4 pb-8 flex max-h-full min-h-full">
 					<div
-						class="w-full {($showOverview || $showArtifacts) && !$showCallOverlay
+						class="w-full {($showOverview || $showArtifacts || $showFacilitiesForm) && !$showCallOverlay
 							? ' '
 							: 'px-4 py-4 bg-white dark:shadow-lg dark:bg-gray-850  border border-gray-100 dark:border-gray-850'}  rounded-xl z-40 pointer-events-auto overflow-y-auto scrollbar-hidden"
 					>
@@ -246,6 +259,17 @@
 									}}
 								/>
 							</div>
+						{:else if $showFacilitiesForm}
+							<div class="w-full h-full bg-white dark:bg-gray-900 rounded-xl">
+								<FacilitiesForm
+									show={$showFacilitiesForm}
+									on:close={() => {
+										showControls.set(false);
+										showFacilitiesForm.set(false);
+									}}
+								/>
+							</div>
+							
 						{:else if $showArtifacts}
 							<Artifacts {history} overlay={dragged} />
 						{:else if $showOverview}
