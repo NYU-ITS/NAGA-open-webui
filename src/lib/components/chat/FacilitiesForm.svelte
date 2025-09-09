@@ -59,14 +59,6 @@
 		dispatch('close');
 	};
 
-	const reindexPDFs = async () => {
-		try {
-			toast.success(('PDF reindexing complete!'));
-		} catch (error) {
-			toast.error(('Error reindexing PDFs: {{error}}', { error: error.message }));
-		}
-	};
-
 	// Simple function to handle text input
 	const handleInput = (label, event) => {
 		userInputs[label] = event.target.value;
@@ -101,16 +93,6 @@
 
 	<!-- Main content area - scrollable -->
 	<div class="flex-1 min-h-0 overflow-y-auto p-4 space-y-6">
-		<!-- PDF Reindexing -->
-		<div>
-			<button
-				class="w-full px-4 py-3 bg-gray-900 text-white dark:bg-white dark:text-gray-900 rounded-lg hover:bg-gray-800 dark:hover:bg-gray-100 transition-colors font-medium text-sm"
-				on:click={reindexPDFs}
-			>
-				{('Reindex PDFs in /data folder')}
-			</button>
-		</div>
-
 		<!-- Agency Selection -->
 		<div>
 			<label class="block text-sm font-medium text-gray-900 dark:text-white mb-3">
@@ -142,7 +124,7 @@
 								{label}
 							</label>
 							<textarea
-								class="w-full rounded-lg py-2.5 px-3 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-800 border border-gray-300 dark:border-gray-600 outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none pointer-events-auto"
+								class="w-full rounded-lg py-2.5 px-3 text-sm bg-gray-50 dark:text-gray-500 dark:bg-gray-800 border border-gray-300 dark:border-gray-600 outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none pointer-events-auto"
 								rows="3"
 								placeholder="Enter details for {label}..."
 								value={userInputs[label] || ''}
