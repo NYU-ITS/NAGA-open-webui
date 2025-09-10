@@ -174,14 +174,7 @@
 		<div class="flex-1">
 			<h1 class="text-lg font-semibold text-gray-900 dark:text-white">
 				{('Research Facilities Draft Generator')}
-			</h1>
-			<p class="text-sm text-gray-600 dark:text-gray-400 mt-1">
-				<b>Description</b><br>
-This tool assists in developing professional Facilities & Other Resources sections for grant proposals. Users should complete only those sections that are applicable to their research; any sections left blank will be omitted from the final document. LLM will generate responses in accordance with the NSF Proposal & Award Policies & Procedures Guide (PAPPG).
-<br><br>
-<b>Disclaimer</b><br>
-The AI-generated text is intended as a drafting aid and may contain inaccuracies or incomplete information. All content must be carefully reviewed, verified, and revised by the researcher to ensure accuracy, compliance with the PAPPG, and adherence to institutional policies. Researchers are solely responsible for the final submitted materials.
-			</p>
+			</h1>		
 		</div>
 		
 		<button
@@ -198,6 +191,13 @@ The AI-generated text is intended as a drafting aid and may contain inaccuracies
 
 	<!-- Main content area - scrollable -->
 	<div class="flex-1 min-h-0 overflow-y-auto custom-scrollbar p-4 space-y-6">
+		<p class="text-sm text-gray-600 dark:text-gray-400 mt-1">
+			<b>Description</b><br>
+			This tool assists in developing professional Facilities & Other Resources sections for grant proposals. Users can complete only those sections that are applicable; un-filled sections will be omitted from the final document.
+			<br><br>
+			<b>Disclaimer</b><br>
+			The AI-generated text is intended as a drafting aid and may contain inaccuracies or incomplete information. All content must be carefully reviewed, verified, and revised by the researcher to ensure accuracy, compliance with the NSF Proposal & Award Policies & Procedures Guide (PAPPG), and adherence to institutional policies. Researchers are solely responsible for the final submitted materials.
+		</p>
 		<!-- Sponsor Selection -->
 		<div>
 			<label for="sponsor-select" class="block text-sm font-medium text-gray-900 dark:text-white mb-3">
