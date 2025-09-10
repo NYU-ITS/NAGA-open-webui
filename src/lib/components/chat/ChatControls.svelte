@@ -9,7 +9,7 @@
 	import Modal from '../common/Modal.svelte';
 	import Controls from './Controls/Controls.svelte';
 	import CallOverlay from './MessageInput/CallOverlay.svelte';
-	import GrantFacilitiesForm from './GrantFacilitiesForm.svelte';
+	import ResearchFacilitiesForm from './ResearchFacilitiesForm.svelte';
 	import Drawer from '../common/Drawer.svelte';
 	import Overview from './Overview.svelte';
 	import EllipsisVertical from '../icons/EllipsisVertical.svelte';
@@ -182,7 +182,7 @@
 					
 					{:else if $showFacilitiesForm}
 						<div class="h-full max-h-[100dvh] bg-white text-gray-700 dark:bg-gray-900 dark:text-gray-300">
-							<GrantFacilitiesForm
+							<ResearchFacilitiesForm
 								show={$showFacilitiesForm}
 								on:close={() => {
 									showControls.set(false);
@@ -261,7 +261,7 @@
 							</div>
 						{:else if $showFacilitiesForm}
 							<div class="w-full h-full bg-white dark:bg-gray-900 rounded-xl">
-								<GrantFacilitiesForm
+								<ResearchFacilitiesForm
 									show={$showFacilitiesForm}
 									on:close={() => {
 										showControls.set(false);

@@ -9,15 +9,15 @@
 	export let show = false;
 
 	// Form state
-	let selectedAgency = '';
+	let selectedSponsor = '';
 	let userInputs = {};
 	let sectionLabels = [];
 
-	// Available agencies
-	const agencies = ['NSF', 'NIH'];
+	// Available sponsors
+	const sponsors = ['NSF', 'NIH'];
 
-	// Section labels for each agency
-	const agencySections = {
+	// Section labels for each sponsor
+	const sponsorSections = {
 		NSF: [
 			'1. Project Title',
 			'2. Research Space and Facilities',
@@ -49,8 +49,8 @@
 	};
 
 	// Watch for agency selection changes
-	$: if (selectedAgency) {
-		sectionLabels = agencySections[selectedAgency] || [];
+	$: if (selectedSponsor) {
+		sectionLabels = sponsorSections[selectedSponsor] || [];
 		initializeInputs();
 	}
 
@@ -72,7 +72,7 @@
 	<div class="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
 		<div class="flex-1">
 			<h2 class="text-lg font-semibold text-gray-900 dark:text-white">
-				{('Grant Facilities Generator')}
+				{('Research Facilities Draft Generator')}
 			</h2>
 			<p class="text-sm text-gray-600 dark:text-gray-400 mt-1">
 				{('Generate and customize grant facility sections')}
@@ -93,25 +93,25 @@
 
 	<!-- Main content area - scrollable -->
 	<div class="flex-1 min-h-0 overflow-y-auto p-4 space-y-6">
-		<!-- Agency Selection -->
+		<!-- Sponsor Selection -->
 		<div>
 			<label class="block text-sm font-medium text-gray-900 dark:text-white mb-3">
-				{('Agency Selection')}
+				{('Sponsor Selection')}
 			</label>
 			<select
 				class="w-full rounded-lg py-2.5 px-3 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-800 border border-gray-300 dark:border-gray-600 outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-				bind:value={selectedAgency}
-				aria-label="Select Agency"
+				bind:value={selectedSponsor}
+				aria-label="Select Sponsor"
 			>
-				<option value="">{('Choose an agency...')}</option>
-				{#each agencies as agency}
-					<option value={agency}>{agency}</option>
+				<option value="">{('Choose an sponsor...')}</option>
+				{#each sponsors as sponsor}
+					<option value={sponsor}>{sponsor}</option>
 				{/each}
 			</select>
 		</div>
 
 		<!-- Form Inputs -->
-		{#if selectedAgency && sectionLabels.length > 0}
+		{#if selectedSponsor && sectionLabels.length > 0}
 			<div>
 				<label class="block text-sm font-medium text-gray-900 dark:text-white mb-4">
 					{('Section Details')}
@@ -135,10 +135,10 @@
 				</div>
 
 				<button
-					class="w-full mt-6 px-4 py-3 bg-gray-900 hover:bg-gray-800 text-white dark:bg-white dark:text-gray-900 dark:hover:bg-gray-100 rounded-lg font-medium text-sm transition-colors"
+					class="w-full mt-6 px-4 py-3 bg-[#57068C] hover:bg-[#8900E1] text-white dark:bg-white dark:text-gray-900 dark:hover:bg-gray-100 rounded-lg font-medium text-sm transition-colors"
 					on:click={() => toast.success('Form submitted!')}
 				>
-					{('Generate Enhanced Sections')}
+					{('Generate')}
 				</button>
 			</div>
 		{/if}
