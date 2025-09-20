@@ -142,11 +142,11 @@ def facilities_web_search(query: str, request: Request, user) -> tuple[str, List
         for domain in allowed_domains:
             logging.info(f"Searching domain: {domain}")
             try:
+                site_query = f"site:{domain} {query}"
                 results = search_tavily(
                     api_key=tavily_api_key,
-                    query=query,
-                    count=3,
-                    filter_list=[domain]
+                    query=site_query,
+                    count=3
                 )
                 logging.info(f"Search results for {domain}: {len(results) if results else 0} results")
                 
@@ -157,14 +157,21 @@ def facilities_web_search(query: str, request: Request, user) -> tuple[str, List
                         score = result.score if hasattr(result, 'score') else 0.1
                         logging.info(f"Found result: {url[:50]}... with score: {score}")
                         
+                        # Parse domain and validate it's from allowed domains
+                        from urllib.parse import urlparse
+                        parsed_domain = urlparse(url).netloc
                         
-                        if not any(url.startswith(bad) for bad in blocklist):
+                        # More strict domain validation - must end with allowed domains
+                        is_allowed_domain = any(parsed_domain.endswith(allowed) for allowed in allowed_domains)
+                        is_blocked = any(url.startswith(bad) for bad in blocklist)
+                        
+                        if is_allowed_domain and not is_blocked:
                             snippets.append(content)
                             urls.append(url)
                             scores.append(score)
-                            logging.info(f"Added to results: {url} with score: {score}")
+                            logging.info(f"Added to results: {url} with score: {score} (domain: {parsed_domain})")
                         else:
-                            logging.info(f"Blocked by filter: {url}")
+                            logging.info(f"Blocked by filter: {url} (domain: {parsed_domain}, allowed: {is_allowed_domain}, blocked: {is_blocked})")
                 else:
                     logging.info(f"No results for domain: {domain}")
             except Exception as e:
@@ -202,11 +209,11 @@ def facilities_web_search_specific_sites(query: str, allowed_sites: List[str], r
         for site in allowed_sites:
             
             domain = urlparse(site).netloc
+            site_query = f"site:{site} {query}"
             results = search_tavily(
                 api_key=tavily_api_key,
-                query=query,
+                query=site_query,
                 count=3,
-                filter_list=[domain]
             )
             
             for result in results:
