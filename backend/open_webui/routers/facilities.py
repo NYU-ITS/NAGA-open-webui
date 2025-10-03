@@ -44,6 +44,12 @@ Your job is to expand and professionally refine the user's section draft using:
 > *Draft:* "The wireless communications laboratory is equipped with 12 USRP B210 software-defined radios [Lab_Inventory_2023.pdf] and Keysight N9020A spectrum analyzers [Equipment_Manual_2024.pdf] for advanced signal processing and spectrum analysis."
 > *NOTE:* Use separate brackets [source1.pdf] [source2.pdf] NOT combined [source1.pdf; source2.pdf]
 
+**Example 3 - Multiple Sources**  
+> *User:* "Our wireless lab has software-defined radios and spectrum analyzers."  
+> *Context:* `<source><source_id>Lab_Inventory_2023.pdf</source_id><source_context>12 USRP B210 software-defined radios</source_context></source>` and `<source><source_id>Equipment_Manual_2024.pdf</source_id><source_context>Keysight N9020A spectrum analyzers</source_context></source>`
+> *Draft:* "The wireless communications laboratory is equipped with 12 USRP B210 software-defined radios [Lab_Inventory_2023.pdf] and Keysight N9020A spectrum analyzers [Equipment_Manual_2024.pdf] for advanced signal processing and spectrum analysis."
+> *NOTE:* Use separate brackets [source1.pdf] [source2.pdf] NOT combined [source1.pdf; source2.pdf]
+
 ---
 
 ### SECTION: {section}
@@ -79,6 +85,9 @@ Your job is to expand and professionally refine the user's section draft using:
 - **NEVER use numbered citations like [1], [2], [3] - ALWAYS use the actual source name/link.**
 - **Do NOT use source names/links that are NOT in the `<source_id>` tags.**
 - **If no `<source_id>` tags are provided, do not include any citations.**
+- **If web search is disabled, do NOT include any web URLs as citations.**
+- **IMPORTANT: Use SEPARATE citations for each source - [source1.pdf] [source2.pdf] NOT [source1.pdf; source2.pdf].**
+- **NEVER combine multiple sources in one bracket with semicolons or commas.**
 - **If web search is disabled, do NOT include any web URLs as citations.**
 - **IMPORTANT: Use SEPARATE citations for each source - [source1.pdf] [source2.pdf] NOT [source1.pdf; source2.pdf].**
 - **NEVER combine multiple sources in one bracket with semicolons or commas.**
@@ -313,8 +322,28 @@ def search_knowledge_base(query: str, user_id: str, request: Request, model, k: 
                 collection_names.extend(item.get("collection_names", []))
             elif item.get("id"):
                 collection_names.append(item.get("id"))
+def search_knowledge_base(query: str, user_id: str, request: Request, model, k: int = 5) -> List[tuple]:
+    """Model-dependent knowledge base search"""
+    try:
+        # Get model knowledge configuration (same as regular chat)
+        model_knowledge = model.get("info", {}).get("meta", {}).get("knowledge", False)
+        
+        if not model_knowledge:
+            logging.warning("No knowledge bases configured for this model")
+            return []
+        
+        # Extract collection names from model configuration
+        collection_names = []
+        for item in model_knowledge:
+            if item.get("collection_name"):
+                collection_names.append(item.get("collection_name"))
+            elif item.get("collection_names"):
+                collection_names.extend(item.get("collection_names", []))
+            elif item.get("id"):
+                collection_names.append(item.get("id"))
         
         if not collection_names:
+            logging.warning("No knowledge base collections found in model configuration")
             logging.warning("No knowledge base collections found in model configuration")
             return []
         
@@ -418,6 +447,11 @@ async def generate_facilities_response(request: Request, form_data: FacilitiesRe
         if not model:
             raise HTTPException(status_code=400, detail="Model not found")
         
+        # Get model information for knowledge base access
+        model = request.app.state.MODELS.get(form_data.model)
+        if not model:
+            raise HTTPException(status_code=400, detail="Model not found")
+        
         section_labels = get_section_labels(form_data.sponsor)
         
         field_mappings = {
@@ -462,6 +496,7 @@ async def generate_facilities_response(request: Request, form_data: FacilitiesRe
             query = f"{section}: {user_text}"
             
             
+            search_results = search_knowledge_base(query, user.id, request, model, k=5)
             search_results = search_knowledge_base(query, user.id, request, model, k=5)
             
              
@@ -561,6 +596,11 @@ async def generate_facilities_response(request: Request, form_data: FacilitiesRe
                 web_sources = "\n\n".join(web_source_tags) if web_source_tags else "No relevant web sources found."
             else:
                 web_sources = "Web search is disabled for this request."
+            # Only include web sources if web search is enabled
+            if form_data.web_search_enabled:
+                web_sources = "\n\n".join(web_source_tags) if web_source_tags else "No relevant web sources found."
+            else:
+                web_sources = "Web search is disabled for this request."
             
             prompt = FACILITIES_PROMPT.format(
                 section=section,
@@ -577,6 +617,7 @@ async def generate_facilities_response(request: Request, form_data: FacilitiesRe
                 
                 if cleaned_content.startswith('Error:') or 'Connection aborted' in cleaned_content:
                     logging.error(f"LLM returned error for {section}: {cleaned_content}")
+                    # ❌ DON'T use user input as fallback - fail like regular chat
                     raise Exception(f"LLM generation failed for {section}: {cleaned_content}")
                 else:
                     section_outputs[section] = cleaned_content
@@ -588,13 +629,21 @@ async def generate_facilities_response(request: Request, form_data: FacilitiesRe
                     for citation in citations:
                         # Only add if it looks like a source (contains .pdf, .doc, http, or is a filename)
                         # But exclude web URLs if web search is disabled
+                        # But exclude web URLs if web search is disabled
                         if ('.pdf' in citation or '.doc' in citation or 
+                            (citation.startswith('http') and form_data.web_search_enabled) or 
+                            (len(citation) > 10 and not citation.startswith('http'))):  # Likely a filename, not a URL
                             (citation.startswith('http') and form_data.web_search_enabled) or 
                             (len(citation) > 10 and not citation.startswith('http'))):  # Likely a filename, not a URL
                             cited_sources.add(citation)
                     
                     logging.info(f"Generated content for {section}: {len(cleaned_content)} chars")
                     logging.info(f"All citations found in {section}: {citations}")
+                    # Filter citations based on web search status
+                    if form_data.web_search_enabled:
+                        valid_citations = [c for c in citations if '.pdf' in c or '.doc' in c or c.startswith('http') or len(c) > 10]
+                    else:
+                        valid_citations = [c for c in citations if '.pdf' in c or '.doc' in c or (len(c) > 10 and not c.startswith('http'))]
                     # Filter citations based on web search status
                     if form_data.web_search_enabled:
                         valid_citations = [c for c in citations if '.pdf' in c or '.doc' in c or c.startswith('http') or len(c) > 10]
@@ -611,6 +660,7 @@ async def generate_facilities_response(request: Request, form_data: FacilitiesRe
                 
             except Exception as e:
                 logging.error(f"Failed to generate content for {section}: {e}")
+                # ❌ DON'T use user input as fallback - fail like regular chat
                 raise Exception(f"Failed to generate content for {section}: {str(e)}")
         
         if not section_outputs:
@@ -649,6 +699,8 @@ async def generate_facilities_response(request: Request, form_data: FacilitiesRe
             message=f"Successfully generated {len(section_outputs)} sections for {form_data.sponsor}",
             content=content,
             sections=section_outputs, 
+            sources=formatted_sources,
+            error=None  # No error for successful generation
             sources=formatted_sources,
             error=None  # No error for successful generation
         )
