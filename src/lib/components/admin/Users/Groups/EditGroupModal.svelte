@@ -13,7 +13,7 @@
 	import ConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
 	import GarbageBin from '$lib/components/icons/GarbageBin.svelte';
 	import { WEBUI_BASE_URL } from '$lib/constants';
-
+	import { getUsers } from '$lib/apis/users';
 	export let onSubmit: Function = () => {};
 	export let onDelete: Function = () => {};
 
@@ -248,7 +248,7 @@
 	}
 
 	onMount(() => {
-		console.log(tabs);
+		// console.log(tabs);
 		selectedTab = tabs[0];
 		init();
 	});

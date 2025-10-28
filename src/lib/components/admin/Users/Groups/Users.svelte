@@ -136,6 +136,7 @@
 							{#if userIds.includes(user.id)}
 								<Badge type="success" content="member" />
 							{/if}
+							<!-- Associated  -->
 						</div>
 					</div>
 				{/each}
