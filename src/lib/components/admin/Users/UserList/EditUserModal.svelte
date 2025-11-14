@@ -27,10 +27,12 @@
 	const submitHandler = async () => {
 		const res = await updateUserById(localStorage.token, selectedUser.id, _user).catch((error) => {
 			toast.error(`${error}`);
+			return null;
 		});
 
 		if (res) {
-			dispatch('save');
+			// Pass the updated user data to parent component for efficient state update
+			dispatch('save', res);
 			show = false;
 		}
 	};

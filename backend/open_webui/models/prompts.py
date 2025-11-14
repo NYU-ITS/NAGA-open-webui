@@ -172,13 +172,13 @@ class PromptsTable:
                         text("""
                             (prompt.access_control->'write'->'user_ids' @> :user_id_json::jsonb)
                             OR (prompt.access_control->'read'->'user_ids' @> :user_id_json::jsonb)
-                        """).bindparam(user_id_json=user_id_json)
+                        """).params(user_id_json=user_id_json)
                     )
                 else:
                     conditions.append(
                         text("""
                             prompt.access_control->'read'->'user_ids' @> :user_id_json::jsonb
-                        """).bindparam(user_id_json=user_id_json)
+                        """).params(user_id_json=user_id_json)
                     )
                 
                 # Add group access conditions using PostgreSQL JSON queries
@@ -197,7 +197,7 @@ class PromptsTable:
                                     FROM jsonb_array_elements_text(prompt.access_control->'read'->'group_ids') AS group_id
                                     WHERE group_id = ANY(:group_ids)
                                 )
-                            """).bindparam(group_ids=group_ids_list)
+                            """).params(group_ids=group_ids_list)
                         )
                     else:
                         conditions.append(
@@ -207,7 +207,7 @@ class PromptsTable:
                                     FROM jsonb_array_elements_text(prompt.access_control->'read'->'group_ids') AS group_id
                                     WHERE group_id = ANY(:group_ids)
                                 )
-                            """).bindparam(group_ids=group_ids_list)
+                            """).params(group_ids=group_ids_list)
                         )
             
             # Apply all conditions
@@ -247,13 +247,13 @@ class PromptsTable:
             for prompt in prompts_for_user:
                 user = users_dict.get(prompt.user_id)
                 result.append(
-                    PromptUserResponse.model_validate(
-                        {
-                            **PromptModel.model_validate(prompt).model_dump(),
-                            "user": user.model_dump() if user else None,
-                        }
+                        PromptUserResponse.model_validate(
+                            {
+                                **PromptModel.model_validate(prompt).model_dump(),
+                                "user": user.model_dump() if user else None,
+                            }
+                        )
                     )
-                )
             return result
 
     def update_prompt_by_command(

@@ -34,23 +34,27 @@
 		loading = true;
 		
 		try {
-			// Load the full model
-			model = await getModelById(localStorage.token, modelId);
+			// Load model and resources in parallel for better performance
+			const [modelData, knowledgeData, toolsData] = await Promise.all([
+				getModelById(localStorage.token, modelId),
+				getKnowledgeBases(localStorage.token),
+				getTools(localStorage.token)
+			]);
 			
-			// Load ALL knowledge and tools (not just user's)
-			// The API should return all resources accessible by the group
-			allKnowledge = await getKnowledgeBases(localStorage.token);
-			allTools = await getTools(localStorage.token);
+			model = modelData;
 			
 			// Filter to show only resources that belong to the group
-			// This assumes your API returns resources with group information
-			allKnowledge = allKnowledge.filter(kb => 
+			// Note: This filtering happens client-side because we need to filter by a specific group_id
+			// The API endpoints filter by user's groups, but here we need resources for a specific group
+			allKnowledge = knowledgeData.filter(kb => 
 				kb.access_control?.read?.group_ids?.includes(groupId) ||
+				kb.access_control?.write?.group_ids?.includes(groupId) ||
 				kb.user_id === model.user_id // Include resources from model owner
 			);
 			
-			allTools = allTools.filter(tool => 
+			allTools = toolsData.filter(tool => 
 				tool.access_control?.read?.group_ids?.includes(groupId) ||
+				tool.access_control?.write?.group_ids?.includes(groupId) ||
 				tool.user_id === model.user_id
 			);
 			

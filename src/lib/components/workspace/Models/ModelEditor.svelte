@@ -184,9 +184,16 @@
 	};
 
 	onMount(async () => {
-		await tools.set(await getTools(localStorage.token));
-		await functions.set(await getFunctions(localStorage.token));
-		await knowledgeCollections.set(await getKnowledgeBases(localStorage.token));
+		// Load data in parallel for better performance
+		const [toolsData, functionsData, knowledgeData] = await Promise.all([
+			getTools(localStorage.token),
+			getFunctions(localStorage.token),
+			getKnowledgeBases(localStorage.token)
+		]);
+		
+		await tools.set(toolsData);
+		await functions.set(functionsData);
+		await knowledgeCollections.set(knowledgeData);
 
 		// Check if user is super admin
 		if ($user?.email) {

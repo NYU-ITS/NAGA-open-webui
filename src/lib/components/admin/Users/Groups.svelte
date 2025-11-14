@@ -105,8 +105,13 @@
 		if ($user?.role !== 'admin') {
 			await goto('/');
 		} else {
-			await setGroups();
-			defaultPermissions = await getUserDefaultPermissions(localStorage.token);
+			// Load groups and default permissions in parallel for better performance
+			const [groupsData, permissionsData] = await Promise.all([
+				getGroups(localStorage.token),
+				getUserDefaultPermissions(localStorage.token)
+			]);
+			groups = groupsData;
+			defaultPermissions = permissionsData;
 		}
 		loaded = true;
 	});

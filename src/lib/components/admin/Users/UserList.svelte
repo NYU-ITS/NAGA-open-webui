@@ -126,7 +126,15 @@
 		});
 
 		if (res) {
-			users = await getUsers(localStorage.token);
+			// Update local state instead of refetching all users (more efficient)
+			const userIndex = users.findIndex(u => u.id === id);
+			if (userIndex !== -1) {
+				users[userIndex] = { ...users[userIndex], ...res };
+				users = [...users]; // Trigger reactivity
+			} else {
+				// Fallback: refetch if user not found in current list (e.g., pagination)
+				users = await getUsers(localStorage.token);
+			}
 		}
 	};
 
@@ -137,7 +145,15 @@
 		});
 
 		if (res) {
-			users = await getUsers(localStorage.token);
+			// Update local state instead of refetching all users (more efficient)
+			const userIndex = users.findIndex(u => u.id === id);
+			if (userIndex !== -1) {
+				users[userIndex] = { ...users[userIndex], ...res };
+				users = [...users]; // Trigger reactivity
+			} else {
+				// Fallback: refetch if user not found in current list
+				users = await getUsers(localStorage.token);
+			}
 		}
 	};
 
@@ -147,7 +163,8 @@
 			return null;
 		});
 		if (res) {
-			users = await getUsers(localStorage.token);
+			// Update local state by removing the deleted user (more efficient)
+			users = users.filter(u => u.id !== id);
 		}
 	};
 
@@ -196,16 +213,35 @@
 		bind:show={showEditUserModal}
 		{selectedUser}
 		sessionUser={$user}
-		on:save={async () => {
-			users = await getUsers(localStorage.token);
+		on:save={async (updatedUser) => {
+			// Update local state if user is in current list, otherwise refetch
+			if (updatedUser) {
+				const userIndex = users.findIndex(u => u.id === updatedUser.id);
+				if (userIndex !== -1) {
+					users[userIndex] = updatedUser;
+					users = [...users]; // Trigger reactivity
+				} else {
+					// User not in current list (e.g., pagination), refetch
+					users = await getUsers(localStorage.token);
+				}
+			} else {
+				// Fallback: refetch if no updated user returned
+				users = await getUsers(localStorage.token);
+			}
 		}}
 	/>
 {/key}
 
 <AddUserModal
 	bind:show={showAddUserModal}
-	on:save={async () => {
-		users = await getUsers(localStorage.token);
+	on:save={async (newUser) => {
+		// Add new user to local state instead of refetching
+		if (newUser) {
+			users = [newUser, ...users];
+		} else {
+			// Fallback: refetch if no new user returned
+			users = await getUsers(localStorage.token);
+		}
 	}}
 />
 <UserChatsModal bind:show={showUserChatsModal} user={selectedUser} />

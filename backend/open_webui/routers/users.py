@@ -239,18 +239,20 @@ async def update_user_role(form_data: UserRoleUpdateForm, user=Depends(get_admin
             detail="Users cannot change their own role",
         )
 
+    # Use optimized super admin check
+    from open_webui.utils.super_admin import is_super_admin
+    
     # If the target user is currently an admin,
     # only the super-admin or an allowed email can change that role.
-    if target_user.role == "admin" and not (
-        user.id == Users.get_first_user().id or is_email_super_admin(user.email)
-    ):
+    if target_user.role == "admin" and not is_super_admin(user):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Cannot change another admin's or super-admin's role",
         )
 
     # Prevent modifying the role of the first registered user.
-    if form_data.id == Users.get_first_user().id:
+    first_user = Users.get_first_user()
+    if form_data.id == first_user.id if first_user else False:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Cannot change the role of the first registered user",
@@ -259,8 +261,7 @@ async def update_user_role(form_data: UserRoleUpdateForm, user=Depends(get_admin
     # Now, check if the current user is just a normal admin (not super admin(first user) or not in allowed_emails).
     is_normal_admin = (
         user.role == "admin"
-        and user.id != Users.get_first_user().id
-        and not is_email_super_admin(user.email)
+        and not is_super_admin(user)
     )
 
     # If the user is a normal admin, limit role changes to only "pending" -> "user".
@@ -488,13 +489,11 @@ async def delete_user_by_id(user_id: str, user=Depends(get_admin_user)):
 
 @router.post("/{user_id}/co-admin/toggle", response_model=Optional[UserModel])
 async def toggle_co_admin_status(user_id: str, user=Depends(get_admin_user)):
-    # Check if current user is super admin
-    is_super_admin = (
-        user.id == Users.get_first_user().id or 
-        is_email_super_admin(user.email)
-    )
+    # Use optimized super admin check
+    from open_webui.utils.super_admin import is_super_admin as check_is_super_admin
     
-    if not is_super_admin:
+    # Check if current user is super admin
+    if not check_is_super_admin(user):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only super admins can manage co-admin status",
@@ -515,7 +514,8 @@ async def toggle_co_admin_status(user_id: str, user=Depends(get_admin_user)):
         )
     
     # Prevent changing super admin co-admin status
-    if target_user.id == Users.get_first_user().id or is_email_super_admin(target_user.email):
+    from open_webui.utils.super_admin import is_super_admin as check_is_super_admin
+    if check_is_super_admin(target_user):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Cannot change co-admin status of super admins",

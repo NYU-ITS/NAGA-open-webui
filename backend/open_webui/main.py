@@ -1060,20 +1060,47 @@ if audit_level != AuditLevel.NONE:
 @app.get("/api/models")
 async def get_models(request: Request, user=Depends(get_verified_user)):
     def get_filtered_models(models, user):
+        from open_webui.models.models import Models
+        from open_webui.internal.db import get_db
+        from sqlalchemy import or_
+        
         filtered_models = []
+        
+        # Separate arena models from regular models
+        arena_models = []
+        regular_model_ids = []
+        
         for model in models:
             if model.get("arena"):
-                if has_access(
-                    user.id,
-                    type="read",
-                    access_control=model.get("info", {})
-                    .get("meta", {})
-                    .get("access_control", {}),
-                ):
-                    filtered_models.append(model)
-                continue
-
-            model_info = Models.get_model_by_id(model["id"])
+                arena_models.append(model)
+            else:
+                regular_model_ids.append(model["id"])
+        
+        # Batch load all regular models in a single query to avoid N+1
+        model_info_dict = {}
+        if regular_model_ids:
+            with get_db() as db:
+                from open_webui.models.models import Model
+                model_objs = db.query(Model).filter(Model.id.in_(regular_model_ids)).all()
+                model_info_dict = {m.id: m for m in model_objs}
+        
+        # Process arena models
+        for model in arena_models:
+            if has_access(
+                user.id,
+                type="read",
+                access_control=model.get("info", {})
+                .get("meta", {})
+                .get("access_control", {}),
+            ):
+                filtered_models.append(model)
+        
+        # Process regular models using batched data
+        for model in models:
+            if model.get("arena"):
+                continue  # Already processed
+            
+            model_info = model_info_dict.get(model["id"])
             if model_info:
                 if user.id == model_info.user_id or has_access(
                     user.id, type="read", access_control=model_info.access_control

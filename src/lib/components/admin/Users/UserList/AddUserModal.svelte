@@ -34,11 +34,6 @@
 	}
 
 	const submitHandler = async () => {
-		const stopLoading = () => {
-			dispatch('save');
-			loading = false;
-		};
-
 		if (tab === '') {
 			loading = true;
 
@@ -50,11 +45,29 @@
 				_user.role
 			).catch((error) => {
 				toast.error(`${error}`);
+				return null;
 			});
 
 			if (res) {
-				stopLoading();
+				// Pass the new user data to parent component for efficient state update
+				// Convert the response to match UserModel format
+				const newUser = {
+					id: res.id,
+					name: res.name,
+					email: res.email,
+					role: res.role,
+					profile_image_url: res.profile_image_url,
+					created_at: Math.floor(Date.now() / 1000), // Approximate timestamp
+					updated_at: Math.floor(Date.now() / 1000),
+					last_active_at: Math.floor(Date.now() / 1000),
+					info: null,
+					settings: null
+				};
+				dispatch('save', newUser);
+				loading = false;
 				show = false;
+			} else {
+				loading = false;
 			}
 		} else {
 			if (inputFiles) {

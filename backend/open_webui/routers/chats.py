@@ -513,13 +513,9 @@ async def filter_chats_by_meta(form_data: ChatMetaFilterForm, user=Depends(get_v
             user_groups = Groups.get_groups_by_member_id(user.id)
             user_group_ids = [g.id for g in user_groups]
             
-            # Check if super admin
-            first_user = Users.get_first_user()
-            allowed_emails = [
-                "sm11538@nyu.edu", "ms15138@nyu.edu", "mb484@nyu.edu",
-                "cg4532@nyu.edu"
-            ]
-            is_super_admin = (first_user and user.id == first_user.id) or user.email in allowed_emails
+            # Use optimized super admin check
+            from open_webui.utils.super_admin import is_super_admin
+            is_super_admin = is_super_admin(user)
             
             if form_data.group_id not in user_group_ids and group.user_id != user.id and not is_super_admin:
                 raise HTTPException(
