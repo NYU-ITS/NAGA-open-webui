@@ -10,7 +10,7 @@ from open_webui.models.users import Users, UserResponse
 
 from pydantic import BaseModel, ConfigDict
 
-from sqlalchemy import or_, and_, func, text, literal
+from sqlalchemy import or_, and_, func, text
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy import BigInteger, Column, Text, JSON, Boolean
 
@@ -196,54 +196,48 @@ class ModelsTable:
             if user_email:
                 conditions.append(Model.created_by == user_email)
             
-            # For PostgreSQL, we can use JSON queries to filter at database level
+            # For PostgreSQL, filter at database level using raw SQL
+            # For SQLite, we'll filter in Python below
             if dialect_name == "postgresql":
-                # Add direct access conditions (access_control with user_ids)
-                # Use literal() to safely embed the JSON value (user_id is from authenticated user, safe to embed)
-                user_id_json = f'["{user_id}"]'
-                if permission == "write":
-                    conditions.append(
-                        text(f"""
-                            (model.access_control->'write'->'user_ids' @> '{user_id_json}'::jsonb)
-                            OR (model.access_control->'read'->'user_ids' @> '{user_id_json}'::jsonb)
-                        """)
-                    )
-                else:
-                    conditions.append(
-                        text(f"""
-                            model.access_control->'read'->'user_ids' @> '{user_id_json}'::jsonb
-                        """)
-                    )
+                # Escape user_id for JSON (replace quotes to prevent injection)
+                safe_user_id = user_id.replace("'", "''").replace('"', '\\"')
+                user_id_json = f'["{safe_user_id}"]'
                 
-                # Add group access conditions using PostgreSQL JSON queries
+                # Build direct access condition
+                if permission == "write":
+                    access_condition = f"""
+                        ((model.access_control->'write'->'user_ids')::jsonb @> '{user_id_json}'::jsonb
+                         OR (model.access_control->'read'->'user_ids')::jsonb @> '{user_id_json}'::jsonb)
+                    """
+                else:
+                    access_condition = f"(model.access_control->'read'->'user_ids')::jsonb @> '{user_id_json}'::jsonb"
+                
+                conditions.append(text(access_condition))
+                
+                # Add group access conditions
                 if user_group_ids:
-                    # Convert list to PostgreSQL array format
-                    group_ids_array = "{" + ",".join([f'"{gid}"' for gid in user_group_ids]) + "}"
+                    # Escape group IDs and format as PostgreSQL array
+                    safe_group_ids = [gid.replace("'", "''").replace('"', '\\"') for gid in user_group_ids]
+                    group_ids_str = ",".join([f"'{gid}'" for gid in safe_group_ids])
+                    
                     if permission == "write":
-                        conditions.append(
-                            text(f"""
-                                EXISTS (
-                                    SELECT 1
-                                    FROM jsonb_array_elements_text(model.access_control->'write'->'group_ids') AS group_id
-                                    WHERE group_id = ANY(ARRAY[{group_ids_array}]::text[])
-                                )
-                                OR EXISTS (
-                                    SELECT 1
-                                    FROM jsonb_array_elements_text(model.access_control->'read'->'group_ids') AS group_id
-                                    WHERE group_id = ANY(ARRAY[{group_ids_array}]::text[])
-                                )
-                            """)
-                        )
+                        group_condition = f"""
+                            EXISTS (
+                                SELECT 1 FROM jsonb_array_elements_text((model.access_control->'write'->'group_ids')::jsonb) AS gid
+                                WHERE gid = ANY(ARRAY[{group_ids_str}]::text[])
+                            ) OR EXISTS (
+                                SELECT 1 FROM jsonb_array_elements_text((model.access_control->'read'->'group_ids')::jsonb) AS gid
+                                WHERE gid = ANY(ARRAY[{group_ids_str}]::text[])
+                            )
+                        """
                     else:
-                        conditions.append(
-                            text(f"""
-                                EXISTS (
-                                    SELECT 1
-                                    FROM jsonb_array_elements_text(model.access_control->'read'->'group_ids') AS group_id
-                                    WHERE group_id = ANY(ARRAY[{group_ids_array}]::text[])
-                                )
-                            """)
-                        )
+                        group_condition = f"""
+                            EXISTS (
+                                SELECT 1 FROM jsonb_array_elements_text((model.access_control->'read'->'group_ids')::jsonb) AS gid
+                                WHERE gid = ANY(ARRAY[{group_ids_str}]::text[])
+                            )
+                        """
+                    conditions.append(text(group_condition))
             
             # Apply conditions if any, otherwise return all (for admin/super admin)
             if conditions:
@@ -344,59 +338,48 @@ class ModelsTable:
             # Filter by user_id first (uses index)
             conditions = [Model.user_id == user_id]
             
-            # For PostgreSQL, we can use JSON queries to filter at database level
-            # For SQLite, we'll fall back to Python filtering (slower but works)
+            # For PostgreSQL, filter at database level using raw SQL
+            # For SQLite, we'll filter in Python below
             if dialect_name == "postgresql":
-                # Add direct access conditions (access_control with user_ids)
-                # Use f-string to embed JSON value (user_id is from authenticated user, safe to embed)
-                user_id_json = f'["{user_id}"]'
-                if permission == "write":
-                    conditions.append(
-                        text(f"""
-                            (model.access_control->'write'->'user_ids' @> '{user_id_json}'::jsonb)
-                            OR (model.access_control->'read'->'user_ids' @> '{user_id_json}'::jsonb)
-                        """)
-                    )
-                else:
-                    conditions.append(
-                        text(f"""
-                            model.access_control->'read'->'user_ids' @> '{user_id_json}'::jsonb
-                        """)
-                    )
+                # Escape user_id for JSON (replace quotes to prevent injection)
+                safe_user_id = user_id.replace("'", "''").replace('"', '\\"')
+                user_id_json = f'["{safe_user_id}"]'
                 
-                # Add group access conditions using PostgreSQL JSON queries
+                # Build direct access condition
+                if permission == "write":
+                    access_condition = f"""
+                        ((model.access_control->'write'->'user_ids')::jsonb @> '{user_id_json}'::jsonb
+                         OR (model.access_control->'read'->'user_ids')::jsonb @> '{user_id_json}'::jsonb)
+                    """
+                else:
+                    access_condition = f"(model.access_control->'read'->'user_ids')::jsonb @> '{user_id_json}'::jsonb"
+                
+                conditions.append(text(access_condition))
+                
+                # Add group access conditions
                 if user_group_ids:
-                    # Check if any of the user's groups are in the access_control
-                    # Use jsonb_array_elements_text to expand arrays and check membership
-                    # Convert list to PostgreSQL array format
-                    group_ids_array = "{" + ",".join([f'"{gid}"' for gid in user_group_ids]) + "}"
+                    # Escape group IDs and format as PostgreSQL array
+                    safe_group_ids = [gid.replace("'", "''").replace('"', '\\"') for gid in user_group_ids]
+                    group_ids_str = ",".join([f"'{gid}'" for gid in safe_group_ids])
+                    
                     if permission == "write":
-                        # Check write or read groups
-                        conditions.append(
-                            text(f"""
-                                EXISTS (
-                                    SELECT 1
-                                    FROM jsonb_array_elements_text(model.access_control->'write'->'group_ids') AS group_id
-                                    WHERE group_id = ANY(ARRAY[{group_ids_array}]::text[])
-                                )
-                                OR EXISTS (
-                                    SELECT 1
-                                    FROM jsonb_array_elements_text(model.access_control->'read'->'group_ids') AS group_id
-                                    WHERE group_id = ANY(ARRAY[{group_ids_array}]::text[])
-                                )
-                            """)
-                        )
+                        group_condition = f"""
+                            EXISTS (
+                                SELECT 1 FROM jsonb_array_elements_text((model.access_control->'write'->'group_ids')::jsonb) AS gid
+                                WHERE gid = ANY(ARRAY[{group_ids_str}]::text[])
+                            ) OR EXISTS (
+                                SELECT 1 FROM jsonb_array_elements_text((model.access_control->'read'->'group_ids')::jsonb) AS gid
+                                WHERE gid = ANY(ARRAY[{group_ids_str}]::text[])
+                            )
+                        """
                     else:
-                        # Check read groups only
-                        conditions.append(
-                            text(f"""
-                                EXISTS (
-                                    SELECT 1
-                                    FROM jsonb_array_elements_text(model.access_control->'read'->'group_ids') AS group_id
-                                    WHERE group_id = ANY(ARRAY[{group_ids_array}]::text[])
-                                )
-                            """)
-                        )
+                        group_condition = f"""
+                            EXISTS (
+                                SELECT 1 FROM jsonb_array_elements_text((model.access_control->'read'->'group_ids')::jsonb) AS gid
+                                WHERE gid = ANY(ARRAY[{group_ids_str}]::text[])
+                            )
+                        """
+                    conditions.append(text(group_condition))
             else:
                 # For SQLite, filter by user_id first (uses index), then filter access_control in Python
                 # This is less efficient but necessary for SQLite compatibility
@@ -439,13 +422,13 @@ class ModelsTable:
             for model in models_for_user:
                 user = users_dict.get(model.user_id)
                 result.append(
-                    ModelUserResponse.model_validate(
-                        {
-                            **ModelModel.model_validate(model).model_dump(),
-                            "user": user.model_dump() if user else None,
-                        }
+                        ModelUserResponse.model_validate(
+                            {
+                                **ModelModel.model_validate(model).model_dump(),
+                                "user": user.model_dump() if user else None,
+                            }
+                        )
                     )
-                )
             return result
 
     def get_model_by_id(self, id: str) -> Optional[ModelModel]:

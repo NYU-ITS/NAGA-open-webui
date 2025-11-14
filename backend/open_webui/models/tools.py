@@ -6,7 +6,7 @@ from open_webui.internal.db import Base, JSONField, get_db
 from open_webui.models.users import Users, UserResponse
 from open_webui.env import SRC_LOG_LEVELS
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import BigInteger, Column, String, Text, JSON, or_, text, bindparam
+from sqlalchemy import BigInteger, Column, String, Text, JSON, or_, text
 
 from open_webui.utils.access_control import has_access
 
@@ -213,54 +213,44 @@ class ToolsTable:
             # Filter by user_id first (uses index)
             conditions = [Tool.user_id == user_id]
             
-            # For PostgreSQL, we can use JSON queries to filter at database level
+            # For PostgreSQL, filter at database level using raw SQL
             if dialect_name == "postgresql":
-                # Add direct access conditions (access_control with user_ids)
-                # Use f-string to embed JSON value (user_id is from authenticated user, safe to embed)
-                user_id_json = f'["{user_id}"]'
-                if permission == "write":
-                    conditions.append(
-                        text(f"""
-                            (tool.access_control->'write'->'user_ids' @> '{user_id_json}'::jsonb)
-                            OR (tool.access_control->'read'->'user_ids' @> '{user_id_json}'::jsonb)
-                        """)
-                    )
-                else:
-                    conditions.append(
-                        text(f"""
-                            tool.access_control->'read'->'user_ids' @> '{user_id_json}'::jsonb
-                        """)
-                    )
+                # Escape user_id for JSON
+                safe_user_id = user_id.replace("'", "''").replace('"', '\\"')
+                user_id_json = f'["{safe_user_id}"]'
                 
-                # Add group access conditions using PostgreSQL JSON queries
+                if permission == "write":
+                    access_condition = f"""
+                        ((tool.access_control->'write'->'user_ids')::jsonb @> '{user_id_json}'::jsonb
+                         OR (tool.access_control->'read'->'user_ids')::jsonb @> '{user_id_json}'::jsonb)
+                    """
+                else:
+                    access_condition = f"(tool.access_control->'read'->'user_ids')::jsonb @> '{user_id_json}'::jsonb"
+                
+                conditions.append(text(access_condition))
+                
                 if user_group_ids:
-                    # Convert list to PostgreSQL array format
-                    group_ids_array = "{" + ",".join([f'"{gid}"' for gid in user_group_ids]) + "}"
+                    safe_group_ids = [gid.replace("'", "''").replace('"', '\\"') for gid in user_group_ids]
+                    group_ids_str = ",".join([f"'{gid}'" for gid in safe_group_ids])
+                    
                     if permission == "write":
-                        conditions.append(
-                            text(f"""
-                                EXISTS (
-                                    SELECT 1
-                                    FROM jsonb_array_elements_text(tool.access_control->'write'->'group_ids') AS group_id
-                                    WHERE group_id = ANY(ARRAY[{group_ids_array}]::text[])
-                                )
-                                OR EXISTS (
-                                    SELECT 1
-                                    FROM jsonb_array_elements_text(tool.access_control->'read'->'group_ids') AS group_id
-                                    WHERE group_id = ANY(ARRAY[{group_ids_array}]::text[])
-                                )
-                            """)
-                        )
+                        group_condition = f"""
+                            EXISTS (
+                                SELECT 1 FROM jsonb_array_elements_text((tool.access_control->'write'->'group_ids')::jsonb) AS gid
+                                WHERE gid = ANY(ARRAY[{group_ids_str}]::text[])
+                            ) OR EXISTS (
+                                SELECT 1 FROM jsonb_array_elements_text((tool.access_control->'read'->'group_ids')::jsonb) AS gid
+                                WHERE gid = ANY(ARRAY[{group_ids_str}]::text[])
+                            )
+                        """
                     else:
-                        conditions.append(
-                            text(f"""
-                                EXISTS (
-                                    SELECT 1
-                                    FROM jsonb_array_elements_text(tool.access_control->'read'->'group_ids') AS group_id
-                                    WHERE group_id = ANY(ARRAY[{group_ids_array}]::text[])
-                                )
-                            """)
-                        )
+                        group_condition = f"""
+                            EXISTS (
+                                SELECT 1 FROM jsonb_array_elements_text((tool.access_control->'read'->'group_ids')::jsonb) AS gid
+                                WHERE gid = ANY(ARRAY[{group_ids_str}]::text[])
+                            )
+                        """
+                    conditions.append(text(group_condition))
             
             # Apply all conditions
             query = query.filter(or_(*conditions))
