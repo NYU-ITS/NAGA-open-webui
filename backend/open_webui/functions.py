@@ -108,60 +108,77 @@ async def get_function_models(request, user: UserModel = None):
             except Exception as e:
                 log.error(f"Error loading pipe {pipe.id}: {e}")
 
-    # Process loaded modules
-    for pipe, function_module in pipe_modules.values():
-        # Check if function is a manifold
+    # Process loaded modules - parallelize pipes() calls to reduce Portkey API latency
+    async def get_pipes_from_module(pipe, function_module):
+        """Helper to get pipes from a module, handling both sync and async"""
         if hasattr(function_module, "pipes"):
-            sub_pipes = []
-
-            # Handle pipes being a list, sync function, or async function
             try:
                 if callable(function_module.pipes):
                     if asyncio.iscoroutinefunction(function_module.pipes):
-                        sub_pipes = await function_module.pipes()
+                        return await function_module.pipes()
                     else:
-                        sub_pipes = function_module.pipes()
+                        # Run sync function in thread pool to avoid blocking
+                        import concurrent.futures
+                        loop = asyncio.get_event_loop()
+                        with concurrent.futures.ThreadPoolExecutor() as executor:
+                            return await loop.run_in_executor(executor, function_module.pipes)
                 else:
-                    sub_pipes = function_module.pipes
+                    return function_module.pipes
             except Exception as e:
                 log.exception(e)
-                sub_pipes = []
-
-            log.debug(
-                f"get_function_models: function '{pipe.id}' is a manifold of {sub_pipes}"
-            )
-
-            for p in sub_pipes:
-                sub_pipe_id = f'{pipe.id}.{p["id"]}'
-                sub_pipe_name = p["name"]
-
-                if hasattr(function_module, "name"):
-                    sub_pipe_name = f"{function_module.name}{sub_pipe_name}"
-
-                pipe_flag = {"type": pipe.type}
-
-                pipe_models.append(
-                    {
-                        "id": sub_pipe_id,
-                        "name": sub_pipe_name,
-                        "object": "model",
-                        "created": pipe.created_at,
-                        "owned_by": "openai",
-                        "pipe": pipe_flag,
-                        "created_by": pipe.created_by,
-                    }
-                )
-        else:
+                return []
+        return None
+    
+    # Collect all pipes() calls and execute them in parallel
+    pipes_tasks = [
+        get_pipes_from_module(pipe, function_module)
+        for pipe, function_module in pipe_modules.values()
+    ]
+    
+    pipes_results = await asyncio.gather(*pipes_tasks, return_exceptions=True)
+    
+    # Process results
+    for (pipe, function_module), sub_pipes in zip(pipe_modules.values(), pipes_results):
+        if isinstance(sub_pipes, Exception):
+            log.error(f"Error getting pipes from {pipe.id}: {sub_pipes}")
+            sub_pipes = []
+        elif sub_pipes is None:
+            # Not a manifold, treat as single pipe
             pipe_flag = {"type": "pipe"}
-
             log.debug(
                 f"get_function_models: function '{pipe.id}' is a single pipe {{ 'id': {pipe.id}, 'name': {pipe.name} }}"
             )
-
             pipe_models.append(
                 {
                     "id": pipe.id,
                     "name": pipe.name,
+                    "object": "model",
+                    "created": pipe.created_at,
+                    "owned_by": "openai",
+                    "pipe": pipe_flag,
+                    "created_by": pipe.created_by,
+                }
+            )
+            continue
+        
+        # Process manifold pipes
+        log.debug(
+            f"get_function_models: function '{pipe.id}' is a manifold of {sub_pipes}"
+        )
+
+        for p in sub_pipes:
+            sub_pipe_id = f'{pipe.id}.{p["id"]}'
+            sub_pipe_name = p["name"]
+
+            if hasattr(function_module, "name"):
+                sub_pipe_name = f"{function_module.name}{sub_pipe_name}"
+
+            pipe_flag = {"type": pipe.type}
+
+            pipe_models.append(
+                {
+                    "id": sub_pipe_id,
+                    "name": sub_pipe_name,
                     "object": "model",
                     "created": pipe.created_at,
                     "owned_by": "openai",

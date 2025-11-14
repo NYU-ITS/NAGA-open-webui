@@ -374,7 +374,13 @@ async def get_filtered_models(models, user):
     return filtered_models
 
 
-@cached(ttl=3)
+def _models_cache_key(f, *args, **kwargs):
+    """Cache key builder for get_all_models"""
+    user = kwargs.get('user') or (args[1] if len(args) > 1 else None)
+    user_id = user.id if user and hasattr(user, 'id') else 'anonymous'
+    return f"models:{user_id}"
+
+@cached(ttl=60, key_builder=_models_cache_key)
 async def get_all_models(request: Request, user: UserModel) -> dict[str, list]:
     log.info("get_all_models()")
 

@@ -265,6 +265,31 @@ class PersistentConfig(Generic[T]):
         save_to_db(CONFIG_DATA)
         self.config_value = self.value
 
+# Cache for user groups to avoid repeated database queries
+_user_groups_cache = {}
+_user_groups_cache_ttl = 30  # 30 seconds TTL
+
+def _get_user_groups_cached(user_id: str) -> list:
+    """Get user groups with caching to avoid repeated database queries"""
+    import time
+    cache_key = f"groups:{user_id}"
+    now = time.time()
+    
+    if cache_key in _user_groups_cache:
+        cached_data, cached_time = _user_groups_cache[cache_key]
+        if now - cached_time < _user_groups_cache_ttl:
+            return cached_data
+    
+    # Fetch from database
+    groups = Groups.get_groups_by_member_id(user_id)
+    _user_groups_cache[cache_key] = (groups, now)
+    
+    # Cleanup old cache entries (simple cleanup)
+    if len(_user_groups_cache) > 1000:
+        _user_groups_cache.clear()
+    
+    return groups
+
 class UserScopedConfig:
     def __init__(self, config_path: str, default: Any):
         self.config_path = config_path
@@ -323,7 +348,7 @@ class UserScopedConfig:
             # Step 2: Check group creator's config
             user = Users.get_user_by_email(email)
             print(f"User {email} maps to user_id={user.id}")
-            user_groups = Groups.get_groups_by_member_id(user.id)
+            user_groups = _get_user_groups_cached(user.id)
             print(f"User {email} is part of groups: {user_groups}")
             
             for group in user_groups:

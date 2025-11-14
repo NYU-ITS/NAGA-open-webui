@@ -400,6 +400,37 @@ async def get_chat_by_id(id: str, user=Depends(get_verified_user)):
 
 
 ############################
+# BatchGetChats - Get multiple chats in one request
+############################
+
+class BatchChatRequest(BaseModel):
+    chat_ids: list[str]
+
+
+class BatchChatResponse(BaseModel):
+    chats: list[ChatResponse]
+    not_found: list[str]
+
+
+@router.post("/batch", response_model=BatchChatResponse)
+async def batch_get_chats(
+    form_data: BatchChatRequest, user=Depends(get_verified_user)
+):
+    """Get multiple chats in a single request to reduce API calls"""
+    chats = []
+    not_found = []
+    
+    for chat_id in form_data.chat_ids:
+        chat = Chats.get_chat_by_id_and_user_id(chat_id, user.id)
+        if chat:
+            chats.append(ChatResponse(**chat.model_dump()))
+        else:
+            not_found.append(chat_id)
+    
+    return BatchChatResponse(chats=chats, not_found=not_found)
+
+
+############################
 # UpdateChatById
 ############################
 
