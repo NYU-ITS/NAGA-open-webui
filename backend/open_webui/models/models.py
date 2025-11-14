@@ -10,7 +10,7 @@ from open_webui.models.users import Users, UserResponse
 
 from pydantic import BaseModel, ConfigDict
 
-from sqlalchemy import or_, and_, func
+from sqlalchemy import or_, and_, func, text
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy import BigInteger, Column, Text, JSON, Boolean
 
@@ -180,16 +180,87 @@ class ModelsTable:
         self, user_id, user_email: str = None, permission: str = "read"
     ) -> list[ModelModel]:
         with get_db() as db:
-            raw_models = db.query(Model).all()
+            from sqlalchemy import or_, text
+            from open_webui.models.groups import Groups
+            
+            # Pre-fetch user groups once
+            user_groups = Groups.get_groups_by_member_id(user_id)
+            user_group_ids = [g.id for g in user_groups]
+            
+            # Build SQL query to filter at database level
+            dialect_name = db.bind.dialect.name
+            query = db.query(Model)
+            
+            # Filter by created_by first (uses index if available)
+            conditions = []
+            if user_email:
+                conditions.append(Model.created_by == user_email)
+            
+            # For PostgreSQL, we can use JSON queries to filter at database level
+            if dialect_name == "postgresql":
+                # Add direct access conditions (access_control with user_ids)
+                user_id_json = f'["{user_id}"]'
+                if permission == "write":
+                    conditions.append(
+                        text("""
+                            (model.access_control->'write'->'user_ids' @> :user_id_json::jsonb)
+                            OR (model.access_control->'read'->'user_ids' @> :user_id_json::jsonb)
+                        """).bindparam(user_id_json=user_id_json)
+                    )
+                else:
+                    conditions.append(
+                        text("""
+                            model.access_control->'read'->'user_ids' @> :user_id_json::jsonb
+                        """).bindparam(user_id_json=user_id_json)
+                    )
+                
+                # Add group access conditions using PostgreSQL JSON queries
+                if user_group_ids:
+                    group_ids_list = user_group_ids
+                    if permission == "write":
+                        conditions.append(
+                            text("""
+                                EXISTS (
+                                    SELECT 1
+                                    FROM jsonb_array_elements_text(model.access_control->'write'->'group_ids') AS group_id
+                                    WHERE group_id = ANY(:group_ids)
+                                )
+                                OR EXISTS (
+                                    SELECT 1
+                                    FROM jsonb_array_elements_text(model.access_control->'read'->'group_ids') AS group_id
+                                    WHERE group_id = ANY(:group_ids)
+                                )
+                            """).bindparam(group_ids=group_ids_list)
+                        )
+                    else:
+                        conditions.append(
+                            text("""
+                                EXISTS (
+                                    SELECT 1
+                                    FROM jsonb_array_elements_text(model.access_control->'read'->'group_ids') AS group_id
+                                    WHERE group_id = ANY(:group_ids)
+                                )
+                            """).bindparam(group_ids=group_ids_list)
+                        )
+            
+            # Apply conditions if any, otherwise return all (for admin/super admin)
+            if conditions:
+                query = query.filter(or_(*conditions))
+            
+            # Execute query - now filtered at database level for PostgreSQL
+            raw_models = query.all()
+            
+            # For SQLite, we need additional Python filtering for access_control
+            if dialect_name != "postgresql" and conditions:
+                filtered = []
+                for model in raw_models:
+                    if model.created_by == user_email or has_access(
+                        user_id, permission, model.access_control
+                    ):
+                        filtered.append(model)
+                raw_models = filtered
 
-        filtered = []
-        for model in raw_models:
-            if model.created_by == user_email or has_access(
-                user_id, permission, model.access_control
-            ):
-                filtered.append(model)
-
-        return [ModelModel.model_validate(m) for m in filtered]
+        return [ModelModel.model_validate(m) for m in raw_models]
 
     def get_models(self) -> list[ModelUserResponse]:
         with get_db() as db:
@@ -258,37 +329,102 @@ class ModelsTable:
         self, user_id: str, permission: str = "write"
     ) -> list[ModelUserResponse]:
         with get_db() as db:
-            # Get all models with base_model_id (non-base models)
-            all_models = db.query(Model).filter(Model.base_model_id != None).all()
-
-            # Pre-fetch user groups once to avoid repeated queries
             from open_webui.models.groups import Groups
+            
+            # Pre-fetch user groups once
             user_groups = Groups.get_groups_by_member_id(user_id)
             user_group_ids = [g.id for g in user_groups]
             
-            # Get all unique user_ids from models to batch load users
-            user_ids = set()
-            models_for_user = []
+            # Build SQL query to filter at database level
+            dialect_name = db.bind.dialect.name
+            query = db.query(Model).filter(Model.base_model_id != None)
             
-            for model in all_models:
-                # Check access more efficiently
-                has_user_access = model.user_id == user_id
-                has_direct_access = has_access(user_id, permission, model.access_control)
-                has_group_access = False
+            # Filter by user_id first (uses index)
+            conditions = [Model.user_id == user_id]
+            
+            # For PostgreSQL, we can use JSON queries to filter at database level
+            # For SQLite, we'll fall back to Python filtering (slower but works)
+            if dialect_name == "postgresql":
+                # Add direct access conditions (access_control with user_ids)
+                user_id_json = f'["{user_id}"]'
+                if permission == "write":
+                    conditions.append(
+                        text("""
+                            (model.access_control->'write'->'user_ids' @> :user_id_json::jsonb)
+                            OR (model.access_control->'read'->'user_ids' @> :user_id_json::jsonb)
+                        """).bindparam(user_id_json=user_id_json)
+                    )
+                else:
+                    conditions.append(
+                        text("""
+                            model.access_control->'read'->'user_ids' @> :user_id_json::jsonb
+                        """).bindparam(user_id_json=user_id_json)
+                    )
                 
-                if not has_user_access and not has_direct_access:
-                    # Check group access
-                    if model.access_control:
+                # Add group access conditions using PostgreSQL JSON queries
+                if user_group_ids:
+                    # Check if any of the user's groups are in the access_control
+                    # Use jsonb_array_elements_text to expand arrays and check membership
+                    group_ids_list = user_group_ids  # List of group IDs
+                    if permission == "write":
+                        # Check write or read groups
+                        conditions.append(
+                            text("""
+                                EXISTS (
+                                    SELECT 1
+                                    FROM jsonb_array_elements_text(model.access_control->'write'->'group_ids') AS group_id
+                                    WHERE group_id = ANY(:group_ids)
+                                )
+                                OR EXISTS (
+                                    SELECT 1
+                                    FROM jsonb_array_elements_text(model.access_control->'read'->'group_ids') AS group_id
+                                    WHERE group_id = ANY(:group_ids)
+                                )
+                            """).bindparam(group_ids=group_ids_list)
+                        )
+                    else:
+                        # Check read groups only
+                        conditions.append(
+                            text("""
+                                EXISTS (
+                                    SELECT 1
+                                    FROM jsonb_array_elements_text(model.access_control->'read'->'group_ids') AS group_id
+                                    WHERE group_id = ANY(:group_ids)
+                                )
+                            """).bindparam(group_ids=group_ids_list)
+                        )
+            else:
+                # For SQLite, filter by user_id first (uses index), then filter access_control in Python
+                # This is less efficient but necessary for SQLite compatibility
+                pass
+            
+            # Apply all conditions
+            query = query.filter(or_(*conditions))
+            
+            # Execute query - now filtered at database level for PostgreSQL
+            models_for_user = query.all()
+            
+            # For SQLite, we need additional Python filtering for access_control
+            if dialect_name != "postgresql":
+                filtered_models = []
+                for model in models_for_user:
+                    # Check access in Python
+                    has_user_access = model.user_id == user_id
+                    has_direct_access = has_access(user_id, permission, model.access_control)
+                    has_group_access = False
+                    
+                    if not has_user_access and not has_direct_access and model.access_control:
                         read_groups = model.access_control.get("read", {}).get("group_ids", [])
                         write_groups = model.access_control.get("write", {}).get("group_ids", [])
                         item_groups = list(set(read_groups + write_groups))
                         has_group_access = any(group_id in user_group_ids for group_id in item_groups)
-                
-                if has_user_access or has_direct_access or has_group_access:
-                    user_ids.add(model.user_id)
-                    models_for_user.append(model)
+                    
+                    if has_user_access or has_direct_access or has_group_access:
+                        filtered_models.append(model)
+                models_for_user = filtered_models
             
-            # Batch load all users at once
+            # Get all unique user_ids from filtered models to batch load users
+            user_ids = {model.user_id for model in models_for_user}
             users_dict = {}
             if user_ids:
                 users_list = Users.get_users_by_user_ids(list(user_ids))

@@ -6,7 +6,7 @@ from open_webui.internal.db import Base, JSONField, get_db
 from open_webui.models.users import Users, UserResponse
 from open_webui.env import SRC_LOG_LEVELS
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import BigInteger, Column, String, Text, JSON
+from sqlalchemy import BigInteger, Column, String, Text, JSON, or_, text
 
 from open_webui.utils.access_control import has_access
 
@@ -200,36 +200,93 @@ class ToolsTable:
         or has group-based permission to (via has_access).
         """
         with get_db() as db:
-            all_tools = db.query(Tool).order_by(Tool.updated_at.desc()).all()
-
-            # Pre-fetch user groups once to avoid repeated queries
             from open_webui.models.groups import Groups
+            
+            # Pre-fetch user groups once
             user_groups = Groups.get_groups_by_member_id(user_id)
             user_group_ids = [g.id for g in user_groups]
             
-            # Get all unique user_ids from tools to batch load users
-            user_ids = set()
-            tools_for_user = []
+            # Build SQL query to filter at database level
+            dialect_name = db.bind.dialect.name
+            query = db.query(Tool).order_by(Tool.updated_at.desc())
             
-            for tool in all_tools:
-                # Check access more efficiently
-                has_user_access = tool.user_id == user_id
-                has_direct_access = has_access(user_id, permission, tool.access_control)
-                has_group_access = False
+            # Filter by user_id first (uses index)
+            conditions = [Tool.user_id == user_id]
+            
+            # For PostgreSQL, we can use JSON queries to filter at database level
+            if dialect_name == "postgresql":
+                # Add direct access conditions (access_control with user_ids)
+                user_id_json = f'["{user_id}"]'
+                if permission == "write":
+                    conditions.append(
+                        text("""
+                            (tool.access_control->'write'->'user_ids' @> :user_id_json::jsonb)
+                            OR (tool.access_control->'read'->'user_ids' @> :user_id_json::jsonb)
+                        """).bindparam(user_id_json=user_id_json)
+                    )
+                else:
+                    conditions.append(
+                        text("""
+                            tool.access_control->'read'->'user_ids' @> :user_id_json::jsonb
+                        """).bindparam(user_id_json=user_id_json)
+                    )
                 
-                if not has_user_access and not has_direct_access:
-                    # Check group access
-                    if tool.access_control:
+                # Add group access conditions using PostgreSQL JSON queries
+                if user_group_ids:
+                    group_ids_list = user_group_ids
+                    if permission == "write":
+                        conditions.append(
+                            text("""
+                                EXISTS (
+                                    SELECT 1
+                                    FROM jsonb_array_elements_text(tool.access_control->'write'->'group_ids') AS group_id
+                                    WHERE group_id = ANY(:group_ids)
+                                )
+                                OR EXISTS (
+                                    SELECT 1
+                                    FROM jsonb_array_elements_text(tool.access_control->'read'->'group_ids') AS group_id
+                                    WHERE group_id = ANY(:group_ids)
+                                )
+                            """).bindparam(group_ids=group_ids_list)
+                        )
+                    else:
+                        conditions.append(
+                            text("""
+                                EXISTS (
+                                    SELECT 1
+                                    FROM jsonb_array_elements_text(tool.access_control->'read'->'group_ids') AS group_id
+                                    WHERE group_id = ANY(:group_ids)
+                                )
+                            """).bindparam(group_ids=group_ids_list)
+                        )
+            
+            # Apply all conditions
+            query = query.filter(or_(*conditions))
+            
+            # Execute query - now filtered at database level for PostgreSQL
+            tools_for_user = query.all()
+            
+            # For SQLite, we need additional Python filtering for access_control
+            if dialect_name != "postgresql":
+                filtered_tools = []
+                for tool in tools_for_user:
+                    # Check access in Python
+                    has_user_access = tool.user_id == user_id
+                    has_direct_access = has_access(user_id, permission, tool.access_control)
+                    has_group_access = False
+                    
+                    if not has_user_access and not has_direct_access and tool.access_control:
                         read_groups = tool.access_control.get("read", {}).get("group_ids", [])
                         write_groups = tool.access_control.get("write", {}).get("group_ids", [])
                         item_groups = list(set(read_groups + write_groups))
                         has_group_access = any(group_id in user_group_ids for group_id in item_groups)
-                
-                if has_user_access or has_direct_access or has_group_access:
-                    user_ids.add(tool.user_id)
-                    tools_for_user.append(tool)
+                    
+                    if has_user_access or has_direct_access or has_group_access:
+                        filtered_tools.append(tool)
+                tools_for_user = filtered_tools
             
-            # Batch load all users at once
+            # Get all unique user_ids from filtered tools to batch load users
+            user_ids = {tool.user_id for tool in tools_for_user}
             users_dict = {}
             if user_ids:
                 users_list = Users.get_users_by_user_ids(list(user_ids))

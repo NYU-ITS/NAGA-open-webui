@@ -93,14 +93,30 @@
 				settings.set(localStorageSettings);
 			}
 
-			models.set(
-				await getModels(
-					localStorage.token,
-					$config?.features?.enable_direct_connections && ($settings?.directConnections ?? null)
-				)
-			);
-			banners.set(await getBanners(localStorage.token));
-			tools.set(await getTools(localStorage.token));
+			// Load critical data in parallel
+			await Promise.all([
+				models.set(
+					await getModels(
+						localStorage.token,
+						$config?.features?.enable_direct_connections && ($settings?.directConnections ?? null)
+					)
+				),
+				banners.set(await getBanners(localStorage.token))
+			]);
+			
+			// Lazy load tools - only load if not already in store
+			// This reduces initial load time since tools are only needed when:
+			// 1. User opens workspace/tools tab
+			// 2. User selects a model with toolIds
+			// Tools will be loaded on-demand in those cases
+			if (!$tools) {
+				// Load in background, don't block initial page load
+				getTools(localStorage.token).then(loadedTools => {
+					tools.set(loadedTools);
+				}).catch(err => {
+					console.error('Error loading tools:', err);
+				});
+			}
 
 			document.addEventListener('keydown', async function (event) {
 				const isCtrlPressed = event.ctrlKey || event.metaKey; // metaKey is for Cmd key on Mac

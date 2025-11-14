@@ -42,8 +42,9 @@ def item_assigned_to_user_groups(user_id: str, item, permission: str = "write") 
         return True
     
     # Also check if user owns any of the groups that have access to this item
-    all_groups = Groups.get_groups()
-    owned_group_ids = [g.id for g in all_groups if g.user_id == user_id]
+    # Optimize: Only get groups owned by this user instead of all groups
+    user_owned_groups = Groups.get_groups(user_id=user_id)
+    owned_group_ids = [g.id for g in user_owned_groups]
     owner_match = any(group_id in owned_group_ids for group_id in item_groups)
     
     return owner_match

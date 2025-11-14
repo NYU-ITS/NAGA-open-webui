@@ -17,12 +17,11 @@
 	let selectedTab = 'overview';
 	let loaded = false;
 
-	$: if (selectedTab) {
-		getUsersHandler();
-	}
-
+	// Only load users once on mount, not on every tab switch
 	const getUsersHandler = async () => {
-		users = await getUsers(localStorage.token);
+		if (users.length === 0) {
+			users = await getUsers(localStorage.token);
+		}
 	};
 
 	onMount(async () => {

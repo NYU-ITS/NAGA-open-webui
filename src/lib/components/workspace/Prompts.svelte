@@ -76,8 +76,11 @@
 	};
 
 	const init = async () => {
+		// Use getPromptList (write permission) for the list view
+		// This is more efficient than calling both read and write endpoints
 		prompts = await getPromptList(localStorage.token);
-		await _prompts.set(await getPrompts(localStorage.token));
+		// Also update the store for use in other components (like chat commands)
+		_prompts.set(prompts);
 	};
 
 	onMount(async () => {
@@ -251,7 +254,7 @@
 							}
 
 							prompts = await getPromptList(localStorage.token);
-							await _prompts.set(await getPrompts(localStorage.token));
+							_prompts.set(prompts);
 
 							importFiles = [];
 							promptsImportInputElement.value = '';

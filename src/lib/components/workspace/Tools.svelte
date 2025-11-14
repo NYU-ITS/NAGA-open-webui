@@ -130,8 +130,11 @@
 	};
 
 	const init = async () => {
+		// Use getToolList (write permission) for the list view
+		// This is more efficient than calling both read and write endpoints
 		tools = await getToolList(localStorage.token);
-		_tools.set(await getTools(localStorage.token));
+		// Also update the store for use in other components
+		_tools.set(tools);
 	};
 
 	onMount(async () => {
@@ -493,7 +496,8 @@
 				}
 
 				toast.success($i18n.t('Tool imported successfully'));
-				tools.set(await getTools(localStorage.token));
+				tools = await getToolList(localStorage.token);
+				_tools.set(tools);
 			};
 
 			reader.readAsText(importFiles[0]);

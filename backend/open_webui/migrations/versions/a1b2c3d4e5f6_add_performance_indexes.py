@@ -13,7 +13,7 @@ from sqlalchemy.engine.reflection import Inspector
 
 # revision identifiers, used by Alembic.
 revision: str = "a1b2c3d4e5f6"
-down_revision: Union[str, None] = "ca81bd47c050"
+down_revision: Union[str, None] = "3781e22d8b01"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
@@ -77,6 +77,13 @@ def upgrade():
             op.create_index('idx_group_user_id', 'group', ['user_id'], unique=False)
         if 'idx_group_updated_at' not in existing_indexes.get('group', []):
             op.create_index('idx_group_updated_at', 'group', ['updated_at'], unique=False)
+    
+    # Indexes for file table (for faster lookups by id and user_id)
+    if 'file' in inspector.get_table_names():
+        if 'idx_file_user_id' not in existing_indexes.get('file', []):
+            op.create_index('idx_file_user_id', 'file', ['user_id'], unique=False)
+        if 'idx_file_updated_at' not in existing_indexes.get('file', []):
+            op.create_index('idx_file_updated_at', 'file', ['updated_at'], unique=False)
 
 
 def downgrade():
@@ -85,6 +92,8 @@ def downgrade():
     
     # Drop indexes in reverse order
     indexes_to_drop = [
+        ('file', 'idx_file_updated_at'),
+        ('file', 'idx_file_user_id'),
         ('group', 'idx_group_updated_at'),
         ('group', 'idx_group_user_id'),
         ('tool', 'idx_tool_created_by'),

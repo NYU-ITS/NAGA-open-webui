@@ -59,13 +59,17 @@
 
 		if (res) {
 			knowledgeBases = await getKnowledgeBaseList(localStorage.token);
-			knowledge.set(await getKnowledgeBases(localStorage.token));
+			knowledge.set(knowledgeBases);
 			toast.success($i18n.t('Knowledge deleted successfully.'));
 		}
 	};
 
 	onMount(async () => {
+		// Use getKnowledgeBaseList (write permission) for the list view
+		// This is more efficient than calling both read and write endpoints
 		knowledgeBases = await getKnowledgeBaseList(localStorage.token);
+		// Also update the store for use in other components (like chat commands)
+		knowledge.set(knowledgeBases);
 		loaded = true;
 	});
 </script>

@@ -119,9 +119,9 @@ class GroupTable:
             except Exception:
                 return None
 
-    def get_groups(self, user_email: str = None) -> list[GroupModel]:
+    def get_groups(self, user_email: str = None, user_id: str = None) -> list[GroupModel]:
         with get_db() as db:
-            if user_email is None:
+            if user_email is None and user_id is None:
                 # Return ALL groups (for super admin)
                 return [
                     GroupModel.model_validate(group)
@@ -130,29 +130,55 @@ class GroupTable:
                     .all()
                 ]
             else:
-                # Return only groups created by this email (existing logic)
+                # Return only groups created by this email or owned by this user_id
+                query = db.query(Group)
+                if user_email:
+                    query = query.filter(Group.created_by == user_email)
+                if user_id:
+                    query = query.filter(Group.user_id == user_id)
                 return [
                     GroupModel.model_validate(group)
-                    for group in db.query(Group)
-                    .filter(Group.created_by == user_email)
-                    .order_by(Group.updated_at.desc())
-                    .all()
+                    for group in query.order_by(Group.updated_at.desc()).all()
                 ]
 
     def get_groups_by_member_id(self, user_id: str) -> list[GroupModel]:
         with get_db() as db:
-            return [
-                GroupModel.model_validate(group)
-                for group in db.query(Group)
-                .filter(
-                    func.json_array_length(Group.user_ids) > 0
-                )  # Ensure array exists
-                .filter(
-                    Group.user_ids.cast(String).like(f'%"{user_id}"%')
-                )  # String-based check
-                .order_by(Group.updated_at.desc())
-                .all()
-            ]
+            # Use proper JSON array queries for PostgreSQL, fallback to string search for SQLite
+            dialect_name = db.bind.dialect.name
+            if dialect_name == "postgresql":
+                from sqlalchemy import text
+                # PostgreSQL: Use json_array_elements_text for efficient JSON array queries
+                return [
+                    GroupModel.model_validate(group)
+                    for group in db.query(Group)
+                    .filter(
+                        text(
+                            """
+                            EXISTS (
+                                SELECT 1
+                                FROM json_array_elements_text("group".user_ids) AS user_id_elem
+                                WHERE user_id_elem = :user_id
+                            )
+                            """
+                        ).params(user_id=user_id)
+                    )
+                    .order_by(Group.updated_at.desc())
+                    .all()
+                ]
+            else:
+                # SQLite: Use string-based check as fallback
+                return [
+                    GroupModel.model_validate(group)
+                    for group in db.query(Group)
+                    .filter(
+                        func.json_array_length(Group.user_ids) > 0
+                    )  # Ensure array exists
+                    .filter(
+                        Group.user_ids.cast(String).like(f'%"{user_id}"%')
+                    )  # String-based check
+                    .order_by(Group.updated_at.desc())
+                    .all()
+                ]
 
     def get_group_by_id(self, id: str) -> Optional[GroupModel]:
         try:
