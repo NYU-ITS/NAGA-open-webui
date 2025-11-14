@@ -47,15 +47,17 @@ router = APIRouter()
 @router.get("/", response_model=list[ChatTitleIdResponse])
 @router.get("/list", response_model=list[ChatTitleIdResponse])
 async def get_session_user_chat_list(
-    user=Depends(get_verified_user), page: Optional[int] = None
+    user=Depends(get_verified_user), 
+    page: Optional[int] = None,
+    skip: int = 0,
+    limit: int = 60  # Default pagination: 60 chats per page
 ):
+    # Use page parameter if provided (for backward compatibility)
     if page is not None:
         limit = 60
         skip = (page - 1) * limit
 
-        return Chats.get_chat_title_id_list_by_user_id(user.id, skip=skip, limit=limit)
-    else:
-        return Chats.get_chat_title_id_list_by_user_id(user.id)
+    return Chats.get_chat_title_id_list_by_user_id(user.id, skip=skip, limit=limit)
 
 
 ############################

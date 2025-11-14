@@ -35,7 +35,7 @@ def _groups_cache_key(f, user):
     return f"groups:{user.id}"
 
 @router.get("/", response_model=list[GroupResponse])
-@cached(ttl=10, key_builder=_groups_cache_key)  # User-specific cache key
+@cached(ttl=30, key_builder=_groups_cache_key)  # User-specific cache key, 30s TTL to reduce duplicate calls
 async def get_groups(user=Depends(get_verified_user)):
     if user.role == "admin":
         # Use optimized super admin check (avoids calling get_first_user() every time)

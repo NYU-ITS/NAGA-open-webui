@@ -28,6 +28,38 @@ def upgrade():
         print(f"Skipping GIN indexes - not PostgreSQL (dialect: {dialect_name})")
         return
     
+    # Helper to convert JSON column to JSONB if needed
+    def convert_json_to_jsonb_if_needed(table_name, column_name):
+        """Convert JSON column to JSONB for GIN index support"""
+        if table_name not in inspector.get_table_names():
+            print(f"Table {table_name} does not exist, skipping.")
+            return False
+        
+        columns = inspector.get_columns(table_name)
+        column_info = next((col for col in columns if col['name'] == column_name), None)
+        
+        if not column_info:
+            print(f"Column {column_name} does not exist in {table_name}, skipping.")
+            return False
+        
+        # Check if column is already JSONB
+        col_type = str(column_info['type'])
+        if 'jsonb' in col_type.lower():
+            print(f"Column {table_name}.{column_name} is already JSONB, skipping conversion.")
+            return True
+        
+        # Convert JSON to JSONB
+        print(f"Converting {table_name}.{column_name} from JSON to JSONB...")
+        try:
+            op.execute(
+                sa.text(f'ALTER TABLE "{table_name}" ALTER COLUMN {column_name} TYPE jsonb USING {column_name}::jsonb')
+            )
+            print(f"Successfully converted {table_name}.{column_name} to JSONB")
+            return True
+        except Exception as e:
+            print(f"Error converting {table_name}.{column_name} to JSONB: {e}")
+            return False
+    
     # Helper to create GIN index only if it doesn't exist
     def create_gin_idx_if_not_exists(table_name, index_name, column_name):
         if table_name in inspector.get_table_names():
@@ -43,8 +75,20 @@ def upgrade():
         else:
             print(f"Table {table_name} does not exist, skipping GIN index creation for {index_name}.")
 
-    # Create GIN indexes on access_control JSONB columns for faster JSON queries
+    # Step 1: Convert JSON columns to JSONB (required for GIN indexes)
+    print("Converting JSON columns to JSONB...")
+    convert_json_to_jsonb_if_needed('model', 'access_control')
+    convert_json_to_jsonb_if_needed('knowledge', 'access_control')
+    convert_json_to_jsonb_if_needed('prompt', 'access_control')
+    convert_json_to_jsonb_if_needed('tool', 'access_control')
+    convert_json_to_jsonb_if_needed('group', 'user_ids')
+    
+    # Refresh inspector after column type changes
+    inspector = Inspector.from_engine(conn)
+    
+    # Step 2: Create GIN indexes on access_control JSONB columns for faster JSON queries
     # These indexes significantly speed up access control checks using @> operator
+    print("Creating GIN indexes...")
     create_gin_idx_if_not_exists('model', 'idx_model_access_control_gin', 'access_control')
     create_gin_idx_if_not_exists('knowledge', 'idx_knowledge_access_control_gin', 'access_control')
     create_gin_idx_if_not_exists('prompt', 'idx_prompt_access_control_gin', 'access_control')

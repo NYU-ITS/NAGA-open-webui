@@ -36,7 +36,7 @@ def _tools_cache_key(f, user):
     return f"tools:{user.id}"
 
 @router.get("/", response_model=list[ToolUserResponse])
-@cached(ttl=5, key_builder=_tools_cache_key)  # User-specific cache key
+@cached(ttl=30, key_builder=_tools_cache_key)  # User-specific cache key, 30s TTL to reduce duplicate calls
 async def get_tools(user=Depends(get_verified_user)):
     # if user.role == "admin":
     #     tools = Tools.get_tools()
@@ -55,7 +55,7 @@ def _tools_list_cache_key(f, user):
     return f"tools_list:{user.id}"
 
 @router.get("/list", response_model=list[ToolUserResponse])
-@cached(ttl=5, key_builder=_tools_list_cache_key)  # User-specific cache key
+@cached(ttl=30, key_builder=_tools_list_cache_key)  # User-specific cache key, 30s TTL to reduce duplicate calls
 async def get_tool_list(user=Depends(get_verified_user)):
     # if user.role == "admin":
     #     tools = Tools.get_tools()

@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Request
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.access_control import has_access, has_permission
 from open_webui.utils.super_admin import is_super_admin
+from aiocache import cached
 
 router = APIRouter()
 
@@ -18,8 +19,12 @@ router = APIRouter()
 # GetPrompts
 ############################
 
+def _prompts_cache_key(f, user):
+    """Generate user-specific cache key for prompts"""
+    return f"prompts:{user.id}"
 
 @router.get("/", response_model=list[PromptModel])
+@cached(ttl=30, key_builder=_prompts_cache_key)  # User-specific cache, 30s TTL
 async def get_prompts(user=Depends(get_verified_user)):
     # if user.role == "admin":
     #     prompts = Prompts.get_prompts()
@@ -29,7 +34,12 @@ async def get_prompts(user=Depends(get_verified_user)):
     return prompts
 
 
+def _prompt_list_cache_key(f, user):
+    """Generate user-specific cache key for prompts list"""
+    return f"prompt_list:{user.id}"
+
 @router.get("/list", response_model=list[PromptUserResponse])
+@cached(ttl=30, key_builder=_prompt_list_cache_key)  # User-specific cache, 30s TTL
 async def get_prompt_list(user=Depends(get_verified_user)):
     # if user.role == "admin":
     #     prompts = Prompts.get_prompts()

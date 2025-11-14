@@ -23,6 +23,7 @@ from open_webui.constants import ERROR_MESSAGES
 from open_webui.utils.auth import get_verified_user
 from open_webui.utils.access_control import has_access, has_permission
 from open_webui.utils.super_admin import is_super_admin
+from aiocache import cached
 
 
 from open_webui.env import SRC_LOG_LEVELS
@@ -38,8 +39,12 @@ router = APIRouter()
 # getKnowledgeBases
 ############################
 
+def _knowledge_cache_key(f, user):
+    """Generate user-specific cache key for knowledge bases"""
+    return f"knowledge:{user.id}"
 
 @router.get("/", response_model=list[KnowledgeUserResponse])
+@cached(ttl=30, key_builder=_knowledge_cache_key)  # User-specific cache, 30s TTL
 async def get_knowledge(user=Depends(get_verified_user)):
     knowledge_bases = []
 
@@ -98,7 +103,12 @@ async def get_knowledge(user=Depends(get_verified_user)):
     return knowledge_with_files
 
 
+def _knowledge_list_cache_key(f, user):
+    """Generate user-specific cache key for knowledge bases list"""
+    return f"knowledge_list:{user.id}"
+
 @router.get("/list", response_model=list[KnowledgeUserResponse])
+@cached(ttl=30, key_builder=_knowledge_list_cache_key)  # User-specific cache, 30s TTL
 async def get_knowledge_list(user=Depends(get_verified_user)):
     knowledge_bases = []
 

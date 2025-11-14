@@ -36,6 +36,7 @@ from fastapi import (
 from fastapi.openapi.docs import get_swagger_ui_html
 
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -987,6 +988,9 @@ async def inspect_websocket(request: Request, call_next):
             )
     return await call_next(request)
 
+
+# Add Gzip compression for responses > 1KB (reduces network transfer time by 60-80%)
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 app.add_middleware(
     CORSMiddleware,
