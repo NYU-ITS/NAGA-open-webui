@@ -10,7 +10,7 @@ from open_webui.models.users import Users, UserResponse
 
 from pydantic import BaseModel, ConfigDict
 
-from sqlalchemy import or_, and_, func, text, bindparam
+from sqlalchemy import or_, and_, func, text, literal
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy import BigInteger, Column, Text, JSON, Boolean
 
@@ -199,48 +199,50 @@ class ModelsTable:
             # For PostgreSQL, we can use JSON queries to filter at database level
             if dialect_name == "postgresql":
                 # Add direct access conditions (access_control with user_ids)
+                # Use literal() to safely embed the JSON value (user_id is from authenticated user, safe to embed)
                 user_id_json = f'["{user_id}"]'
                 if permission == "write":
                     conditions.append(
-                        text("""
-                            (model.access_control->'write'->'user_ids' @> :user_id_json::jsonb)
-                            OR (model.access_control->'read'->'user_ids' @> :user_id_json::jsonb)
-                        """).params(user_id_json=user_id_json)
+                        text(f"""
+                            (model.access_control->'write'->'user_ids' @> '{user_id_json}'::jsonb)
+                            OR (model.access_control->'read'->'user_ids' @> '{user_id_json}'::jsonb)
+                        """)
                     )
                 else:
                     conditions.append(
-                        text("""
-                            model.access_control->'read'->'user_ids' @> :user_id_json::jsonb
-                        """).params(user_id_json=user_id_json)
+                        text(f"""
+                            model.access_control->'read'->'user_ids' @> '{user_id_json}'::jsonb
+                        """)
                     )
                 
                 # Add group access conditions using PostgreSQL JSON queries
                 if user_group_ids:
-                    group_ids_list = user_group_ids
+                    # Convert list to PostgreSQL array format
+                    group_ids_array = "{" + ",".join([f'"{gid}"' for gid in user_group_ids]) + "}"
                     if permission == "write":
                         conditions.append(
-                            text("""
+                            text(f"""
                                 EXISTS (
                                     SELECT 1
                                     FROM jsonb_array_elements_text(model.access_control->'write'->'group_ids') AS group_id
-                                    WHERE group_id = ANY(:group_ids)
+                                    WHERE group_id = ANY(ARRAY[{group_ids_array}]::text[])
                                 )
                                 OR EXISTS (
                                     SELECT 1
                                     FROM jsonb_array_elements_text(model.access_control->'read'->'group_ids') AS group_id
-                                    WHERE group_id = ANY(:group_ids)
+                                    WHERE group_id = ANY(ARRAY[{group_ids_array}]::text[])
                                 )
-                            """).params(group_ids=group_ids_list)
+                            """)
                         )
                     else:
                         conditions.append(
-                            text("""
+                            text(f"""
                                 EXISTS (
                                     SELECT 1
                                     FROM jsonb_array_elements_text(model.access_control->'read'->'group_ids') AS group_id
-                                    WHERE group_id = ANY(:group_ids)
+                                    WHERE group_id = ANY(ARRAY[{group_ids_array}]::text[])
                                 )
-                            """).params(group_ids=group_ids_list)
+                            """)
                         )
             
             # Apply conditions if any, otherwise return all (for admin/super admin)
@@ -346,52 +348,54 @@ class ModelsTable:
             # For SQLite, we'll fall back to Python filtering (slower but works)
             if dialect_name == "postgresql":
                 # Add direct access conditions (access_control with user_ids)
+                # Use f-string to embed JSON value (user_id is from authenticated user, safe to embed)
                 user_id_json = f'["{user_id}"]'
                 if permission == "write":
                     conditions.append(
-                        text("""
-                            (model.access_control->'write'->'user_ids' @> :user_id_json::jsonb)
-                            OR (model.access_control->'read'->'user_ids' @> :user_id_json::jsonb)
-                        """).params(user_id_json=user_id_json)
+                        text(f"""
+                            (model.access_control->'write'->'user_ids' @> '{user_id_json}'::jsonb)
+                            OR (model.access_control->'read'->'user_ids' @> '{user_id_json}'::jsonb)
+                        """)
                     )
                 else:
                     conditions.append(
-                        text("""
-                            model.access_control->'read'->'user_ids' @> :user_id_json::jsonb
-                        """).params(user_id_json=user_id_json)
+                        text(f"""
+                            model.access_control->'read'->'user_ids' @> '{user_id_json}'::jsonb
+                        """)
                     )
                 
                 # Add group access conditions using PostgreSQL JSON queries
                 if user_group_ids:
                     # Check if any of the user's groups are in the access_control
                     # Use jsonb_array_elements_text to expand arrays and check membership
-                    group_ids_list = user_group_ids  # List of group IDs
+                    # Convert list to PostgreSQL array format
+                    group_ids_array = "{" + ",".join([f'"{gid}"' for gid in user_group_ids]) + "}"
                     if permission == "write":
                         # Check write or read groups
                         conditions.append(
-                            text("""
+                            text(f"""
                                 EXISTS (
                                     SELECT 1
                                     FROM jsonb_array_elements_text(model.access_control->'write'->'group_ids') AS group_id
-                                    WHERE group_id = ANY(:group_ids)
+                                    WHERE group_id = ANY(ARRAY[{group_ids_array}]::text[])
                                 )
                                 OR EXISTS (
                                     SELECT 1
                                     FROM jsonb_array_elements_text(model.access_control->'read'->'group_ids') AS group_id
-                                    WHERE group_id = ANY(:group_ids)
+                                    WHERE group_id = ANY(ARRAY[{group_ids_array}]::text[])
                                 )
-                            """).params(group_ids=group_ids_list)
+                            """)
                         )
                     else:
                         # Check read groups only
                         conditions.append(
-                            text("""
+                            text(f"""
                                 EXISTS (
                                     SELECT 1
                                     FROM jsonb_array_elements_text(model.access_control->'read'->'group_ids') AS group_id
-                                    WHERE group_id = ANY(:group_ids)
+                                    WHERE group_id = ANY(ARRAY[{group_ids_array}]::text[])
                                 )
-                            """).params(group_ids=group_ids_list)
+                            """)
                         )
             else:
                 # For SQLite, filter by user_id first (uses index), then filter access_control in Python

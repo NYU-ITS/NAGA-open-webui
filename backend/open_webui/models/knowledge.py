@@ -190,48 +190,50 @@ class KnowledgeTable:
             # For PostgreSQL, we can use JSON queries to filter at database level
             if dialect_name == "postgresql":
                 # Add direct access conditions (access_control with user_ids)
+                # Use f-string to embed JSON value (user_id is from authenticated user, safe to embed)
                 user_id_json = f'["{user_id}"]'
                 if permission == "write":
                     conditions.append(
-                        text("""
-                            (knowledge.access_control->'write'->'user_ids' @> :user_id_json::jsonb)
-                            OR (knowledge.access_control->'read'->'user_ids' @> :user_id_json::jsonb)
-                        """).params(user_id_json=user_id_json)
+                        text(f"""
+                            (knowledge.access_control->'write'->'user_ids' @> '{user_id_json}'::jsonb)
+                            OR (knowledge.access_control->'read'->'user_ids' @> '{user_id_json}'::jsonb)
+                        """)
                     )
                 else:
                     conditions.append(
-                        text("""
-                            knowledge.access_control->'read'->'user_ids' @> :user_id_json::jsonb
-                        """).params(user_id_json=user_id_json)
+                        text(f"""
+                            knowledge.access_control->'read'->'user_ids' @> '{user_id_json}'::jsonb
+                        """)
                     )
                 
                 # Add group access conditions using PostgreSQL JSON queries
                 if user_group_ids:
-                    group_ids_list = user_group_ids
+                    # Convert list to PostgreSQL array format
+                    group_ids_array = "{" + ",".join([f'"{gid}"' for gid in user_group_ids]) + "}"
                     if permission == "write":
                         conditions.append(
-                            text("""
+                            text(f"""
                                 EXISTS (
                                     SELECT 1
                                     FROM jsonb_array_elements_text(knowledge.access_control->'write'->'group_ids') AS group_id
-                                    WHERE group_id = ANY(:group_ids)
+                                    WHERE group_id = ANY(ARRAY[{group_ids_array}]::text[])
                                 )
                                 OR EXISTS (
                                     SELECT 1
                                     FROM jsonb_array_elements_text(knowledge.access_control->'read'->'group_ids') AS group_id
-                                    WHERE group_id = ANY(:group_ids)
+                                    WHERE group_id = ANY(ARRAY[{group_ids_array}]::text[])
                                 )
-                            """).params(group_ids=group_ids_list)
+                            """)
                         )
                     else:
                         conditions.append(
-                            text("""
+                            text(f"""
                                 EXISTS (
                                     SELECT 1
                                     FROM jsonb_array_elements_text(knowledge.access_control->'read'->'group_ids') AS group_id
-                                    WHERE group_id = ANY(:group_ids)
+                                    WHERE group_id = ANY(ARRAY[{group_ids_array}]::text[])
                                 )
-                            """).params(group_ids=group_ids_list)
+                            """)
                         )
             
             # Apply all conditions
