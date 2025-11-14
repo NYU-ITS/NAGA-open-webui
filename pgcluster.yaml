@@ -1,0 +1,184 @@
+apiVersion: postgres-operator.crunchydata.com/v1beta1
+kind: PostgresCluster
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"postgres-operator.crunchydata.com/v1beta1","kind":"PostgresCluster","metadata":{"annotations":{},"creationTimestamp":"2025-02-28T20:13:44Z","finalizers":["postgres-operator.crunchydata.com/finalizer"],"generation":10,"name":"rit-genai-poc-dev","namespace":"rit-genai-poc-dev","resourceVersion":"3898815362","uid":"80c31f49-70eb-4ed3-a89a-3bbdd234ce14"},"spec":{"backups":{"pgbackrest":{"configuration":[{"secret":{"name":"pgo-gcs-creds"}}],"global":{"repo1-path":"/pgbackrest/rit-genai-poc-dev/cloud-postgres/repo1","repo1-retention-full":"14","repo1-retention-full-type":"time"},"manual":{"options":["--type=full"],"repoName":"repo1"},"repos":[{"gcs":{"bucket":"rit-genai-db-backup"},"name":"repo1","schedules":{"full":"20 16 * * *","incremental":"5 12 * * *"}}]}},"instances":[{"affinity":{"podAntiAffinity":{"preferredDuringSchedulingIgnoredDuringExecution":[{"podAffinityTerm":{"labelSelector":{"matchLabels":{"postgres-operator.crunchydata.com/cluster":"rit-genai-poc-dev","postgres-operator.crunchydata.com/instance-set":"db1"}},"topologyKey":"kubernetes.io/hostname"},"weight":1}]}},"dataVolumeClaimSpec":{"accessModes":["ReadWriteOnce"],"resources":{"requests":{"storage":"50Gi"}}},"name":"db1","replicas":2,"resources":{"limits":{"cpu":"200m","memory":"512Mi"},"requests":{"cpu":"100m","memory":"128Mi"}}}],"patroni":{"dynamicConfiguration":{"pg_hba":["hostnossl all all 10.248.0.0/16 md5","host all all 127.0.0.1/32 trust","host all all ::1/128 trust"],"synchronous_mode":true},"leaderLeaseDurationSeconds":30,"port":8008,"syncPeriodSeconds":10},"port":5432,"postgresVersion":16,"shutdown":false,"users":[{"databases":["rit-genai-poc-dev","pilotgenai_qa_alpha_pg"],"name":"rit-genai-poc-dev-admin","options":"SUPERUSER"},{"databases":["rit-genai-poc-dev"],"name":"rit-genai-poc-dev-sa","options":"LOGIN"},{"databases":["pilotgenai_qa_alpha_pg"],"name":"pilotgenai-qa-alpha-pg-sa","options":"LOGIN"}]},"status":{"conditions":[{"lastTransitionTime":"2025-02-28T20:13:46Z","message":"Crunchy Postgres for Kubernetes requires registration for upgrades. Register now to be ready for your next upgrade. See https://access.crunchydata.com/register-cpk for details.","observedGeneration":10,"reason":"TokenRequired","status":"False","type":"Registered"},{"lastTransitionTime":"2025-02-28T20:38:46Z","message":"pgBackRest replica create repo is ready for backups","observedGeneration":10,"reason":"StanzaCreated","status":"True","type":"PGBackRestReplicaRepoReady"},{"lastTransitionTime":"2025-03-03T22:55:06Z","message":"pgBackRest replica creation is now possible","observedGeneration":10,"reason":"RepoBackupComplete","status":"True","type":"PGBackRestReplicaCreate"}],"databaseRevision":"7478b748d4","instances":[{"name":"db1","readyReplicas":2,"replicas":2,"updatedReplicas":2}],"monitoring":{"exporterConfiguration":"559c4c97d6"},"observedGeneration":10,"patroni":{"systemIdentifier":"7476565906117460083"},"pgbackrest":{"repoHost":{"apiVersion":"apps/v1","kind":"StatefulSet","ready":true},"repos":[{"name":"repo1","replicaCreateBackupComplete":true,"repoOptionsHash":"7477b674bc","stanzaCreated":true}],"scheduledBackups":[{"completionTime":"2025-11-10T16:27:15Z","cronJobName":"rit-genai-poc-dev-repo1-full","repo":"repo1","startTime":"2025-11-10T16:20:00Z","succeeded":1,"type":"full"},{"completionTime":"2025-11-11T16:27:32Z","cronJobName":"rit-genai-poc-dev-repo1-full","repo":"repo1","startTime":"2025-11-11T16:20:00Z","succeeded":1,"type":"full"},{"completionTime":"2025-11-12T16:27:05Z","cronJobName":"rit-genai-poc-dev-repo1-full","repo":"repo1","startTime":"2025-11-12T16:20:00Z","succeeded":1,"type":"full"},{"cronJobName":"rit-genai-poc-dev-repo1-incr","failed":7,"repo":"repo1","startTime":"2025-09-03T12:05:00Z","type":"incr"},{"completionTime":"2025-11-10T12:06:34Z","cronJobName":"rit-genai-poc-dev-repo1-incr","repo":"repo1","startTime":"2025-11-10T12:05:00Z","succeeded":1,"type":"incr"},{"completionTime":"2025-11-11T12:05:36Z","cronJobName":"rit-genai-poc-dev-repo1-incr","repo":"repo1","startTime":"2025-11-11T12:05:00Z","succeeded":1,"type":"incr"},{"completionTime":"2025-11-12T12:05:35Z","cronJobName":"rit-genai-poc-dev-repo1-incr","repo":"repo1","startTime":"2025-11-12T12:05:00Z","succeeded":1,"type":"incr"}]},"proxy":{"pgBouncer":{"postgresRevision":"69689f784f"}},"usersRevision":"5d84b6f5dc"}}
+  creationTimestamp: "2025-02-28T20:13:44Z"
+  finalizers:
+  - postgres-operator.crunchydata.com/finalizer
+  generation: 11
+  name: rit-genai-poc-dev
+  namespace: rit-genai-poc-dev
+  resourceVersion: "3907808429"
+  uid: 80c31f49-70eb-4ed3-a89a-3bbdd234ce14
+spec:
+  backups:
+    pgbackrest:
+      configuration:
+      - secret:
+          name: pgo-gcs-creds
+      global:
+        repo1-path: /pgbackrest/rit-genai-poc-dev/cloud-postgres/repo1
+        repo1-retention-full: "14"
+        repo1-retention-full-type: time
+      manual:
+        options:
+        - --type=full
+        repoName: repo1
+      repos:
+      - gcs:
+          bucket: rit-genai-db-backup
+        name: repo1
+        schedules:
+          full: 20 16 * * *
+          incremental: 5 12 * * *
+  instances:
+  - affinity:
+      podAntiAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+        - podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                postgres-operator.crunchydata.com/cluster: rit-genai-poc-dev
+                postgres-operator.crunchydata.com/instance-set: db1
+            topologyKey: kubernetes.io/hostname
+          weight: 1
+    dataVolumeClaimSpec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 50Gi
+    name: db1
+    replicas: 2
+    resources:
+      limits:
+        cpu: 200m
+        memory: 512Mi
+      requests:
+        cpu: 100m
+        memory: 128Mi
+    containers:
+    - name: database
+      env:
+      - name: PGOPTIONS
+        value: "-c log_min_messages=error"
+  patroni:
+    dynamicConfiguration:
+      parameters:
+        log_min_messages: error
+      pg_hba:
+      - hostnossl all all 10.248.0.0/16 md5
+      - host all all 127.0.0.1/32 trust
+      - host all all ::1/128 trust
+      synchronous_mode: true
+    leaderLeaseDurationSeconds: 30
+    port: 8008
+    syncPeriodSeconds: 10
+  port: 5432
+  postgresVersion: 16
+  shutdown: false
+  users:
+  - databases:
+    - rit-genai-poc-dev
+    - pilotgenai_qa_alpha_pg
+    name: rit-genai-poc-dev-admin
+    options: SUPERUSER
+  - databases:
+    - rit-genai-poc-dev
+    name: rit-genai-poc-dev-sa
+    options: LOGIN
+  - databases:
+    - pilotgenai_qa_alpha_pg
+    name: pilotgenai-qa-alpha-pg-sa
+    options: LOGIN
+status:
+  conditions:
+  - lastTransitionTime: "2025-02-28T20:13:46Z"
+    message: Crunchy Postgres for Kubernetes requires registration for upgrades. Register
+      now to be ready for your next upgrade. See https://access.crunchydata.com/register-cpk
+      for details.
+    observedGeneration: 11
+    reason: TokenRequired
+    status: "False"
+    type: Registered
+  - lastTransitionTime: "2025-02-28T20:38:46Z"
+    message: pgBackRest replica create repo is ready for backups
+    observedGeneration: 11
+    reason: StanzaCreated
+    status: "True"
+    type: PGBackRestReplicaRepoReady
+  - lastTransitionTime: "2025-03-03T22:55:06Z"
+    message: pgBackRest replica creation is now possible
+    observedGeneration: 11
+    reason: RepoBackupComplete
+    status: "True"
+    type: PGBackRestReplicaCreate
+  databaseRevision: 7478b748d4
+  instances:
+  - name: db1
+    readyReplicas: 2
+    replicas: 2
+    updatedReplicas: 2
+  monitoring:
+    exporterConfiguration: 559c4c97d6
+  observedGeneration: 11
+  patroni:
+    systemIdentifier: "7476565906117460083"
+  pgbackrest:
+    repoHost:
+      apiVersion: apps/v1
+      kind: StatefulSet
+      ready: true
+    repos:
+    - name: repo1
+      replicaCreateBackupComplete: true
+      repoOptionsHash: 7477b674bc
+      stanzaCreated: true
+    scheduledBackups:
+    - completionTime: "2025-11-12T16:27:05Z"
+      cronJobName: rit-genai-poc-dev-repo1-full
+      repo: repo1
+      startTime: "2025-11-12T16:20:00Z"
+      succeeded: 1
+      type: full
+    - completionTime: "2025-11-13T16:28:30Z"
+      cronJobName: rit-genai-poc-dev-repo1-full
+      repo: repo1
+      startTime: "2025-11-13T16:20:00Z"
+      succeeded: 1
+      type: full
+    - completionTime: "2025-11-14T16:28:48Z"
+      cronJobName: rit-genai-poc-dev-repo1-full
+      repo: repo1
+      startTime: "2025-11-14T16:20:00Z"
+      succeeded: 1
+      type: full
+    - cronJobName: rit-genai-poc-dev-repo1-incr
+      failed: 7
+      repo: repo1
+      startTime: "2025-09-03T12:05:00Z"
+      type: incr
+    - completionTime: "2025-11-12T12:05:35Z"
+      cronJobName: rit-genai-poc-dev-repo1-incr
+      repo: repo1
+      startTime: "2025-11-12T12:05:00Z"
+      succeeded: 1
+      type: incr
+    - completionTime: "2025-11-13T12:08:16Z"
+      cronJobName: rit-genai-poc-dev-repo1-incr
+      repo: repo1
+      startTime: "2025-11-13T12:05:00Z"
+      succeeded: 1
+      type: incr
+    - completionTime: "2025-11-14T12:06:06Z"
+      cronJobName: rit-genai-poc-dev-repo1-incr
+      repo: repo1
+      startTime: "2025-11-14T12:05:00Z"
+      succeeded: 1
+      type: incr
+  proxy:
+    pgBouncer:
+      postgresRevision: 69689f784f
+  usersRevision: 5d84b6f5dc

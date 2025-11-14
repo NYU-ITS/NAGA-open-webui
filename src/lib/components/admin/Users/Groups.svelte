@@ -30,8 +30,7 @@
 	let loaded = false;
 
 	export let users = [];
-
-	let groups = [];
+	export let groups = []; // Accept groups as prop to avoid duplicate API call
 	let filteredGroups;
 
 	$: filteredGroups = groups.filter((user) => {
@@ -105,13 +104,13 @@
 		if ($user?.role !== 'admin') {
 			await goto('/');
 		} else {
-			// Load groups and default permissions in parallel for better performance
-			const [groupsData, permissionsData] = await Promise.all([
-				getGroups(localStorage.token),
-				getUserDefaultPermissions(localStorage.token)
-			]);
-			groups = groupsData;
-			defaultPermissions = permissionsData;
+			// Only load groups if not provided as prop (to avoid duplicate API call)
+			// Groups are now loaded in parallel with users in parent component
+			if (groups.length === 0) {
+				groups = await getGroups(localStorage.token);
+			}
+			// Load default permissions
+			defaultPermissions = await getUserDefaultPermissions(localStorage.token);
 		}
 		loaded = true;
 	});
