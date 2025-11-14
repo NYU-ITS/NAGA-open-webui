@@ -205,13 +205,13 @@ class ModelsTable:
                         text("""
                             (model.access_control->'write'->'user_ids' @> :user_id_json::jsonb)
                             OR (model.access_control->'read'->'user_ids' @> :user_id_json::jsonb)
-                        """).bindparams(bindparam('user_id_json', user_id_json))
+                        """).params(user_id_json=user_id_json)
                     )
                 else:
                     conditions.append(
                         text("""
                             model.access_control->'read'->'user_ids' @> :user_id_json::jsonb
-                        """).bindparams(bindparam('user_id_json', user_id_json))
+                        """).params(user_id_json=user_id_json)
                     )
                 
                 # Add group access conditions using PostgreSQL JSON queries
@@ -230,7 +230,7 @@ class ModelsTable:
                                     FROM jsonb_array_elements_text(model.access_control->'read'->'group_ids') AS group_id
                                     WHERE group_id = ANY(:group_ids)
                                 )
-                            """).bindparams(bindparam('group_ids', group_ids_list))
+                            """).params(group_ids=group_ids_list)
                         )
                     else:
                         conditions.append(
@@ -240,7 +240,7 @@ class ModelsTable:
                                     FROM jsonb_array_elements_text(model.access_control->'read'->'group_ids') AS group_id
                                     WHERE group_id = ANY(:group_ids)
                                 )
-                            """).bindparams(bindparam('group_ids', group_ids_list))
+                            """).params(group_ids=group_ids_list)
                         )
             
             # Apply conditions if any, otherwise return all (for admin/super admin)
@@ -352,13 +352,13 @@ class ModelsTable:
                         text("""
                             (model.access_control->'write'->'user_ids' @> :user_id_json::jsonb)
                             OR (model.access_control->'read'->'user_ids' @> :user_id_json::jsonb)
-                        """).bindparams(bindparam('user_id_json', user_id_json))
+                        """).params(user_id_json=user_id_json)
                     )
                 else:
                     conditions.append(
                         text("""
                             model.access_control->'read'->'user_ids' @> :user_id_json::jsonb
-                        """).bindparams(bindparam('user_id_json', user_id_json))
+                        """).params(user_id_json=user_id_json)
                     )
                 
                 # Add group access conditions using PostgreSQL JSON queries
@@ -380,7 +380,7 @@ class ModelsTable:
                                     FROM jsonb_array_elements_text(model.access_control->'read'->'group_ids') AS group_id
                                     WHERE group_id = ANY(:group_ids)
                                 )
-                            """).bindparams(bindparam('group_ids', group_ids_list))
+                            """).params(group_ids=group_ids_list)
                         )
                     else:
                         # Check read groups only
@@ -391,7 +391,7 @@ class ModelsTable:
                                     FROM jsonb_array_elements_text(model.access_control->'read'->'group_ids') AS group_id
                                     WHERE group_id = ANY(:group_ids)
                                 )
-                            """).bindparams(bindparam('group_ids', group_ids_list))
+                            """).params(group_ids=group_ids_list)
                         )
             else:
                 # For SQLite, filter by user_id first (uses index), then filter access_control in Python

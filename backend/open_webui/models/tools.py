@@ -222,13 +222,13 @@ class ToolsTable:
                         text("""
                             (tool.access_control->'write'->'user_ids' @> :user_id_json::jsonb)
                             OR (tool.access_control->'read'->'user_ids' @> :user_id_json::jsonb)
-                        """).bindparams(bindparam('user_id_json', user_id_json))
+                        """).params(user_id_json=user_id_json)
                     )
                 else:
                     conditions.append(
                         text("""
                             tool.access_control->'read'->'user_ids' @> :user_id_json::jsonb
-                        """).bindparams(bindparam('user_id_json', user_id_json))
+                        """).params(user_id_json=user_id_json)
                     )
                 
                 # Add group access conditions using PostgreSQL JSON queries
@@ -247,7 +247,7 @@ class ToolsTable:
                                     FROM jsonb_array_elements_text(tool.access_control->'read'->'group_ids') AS group_id
                                     WHERE group_id = ANY(:group_ids)
                                 )
-                            """).bindparams(bindparam('group_ids', group_ids_list))
+                            """).params(group_ids=group_ids_list)
                         )
                     else:
                         conditions.append(
@@ -257,7 +257,7 @@ class ToolsTable:
                                     FROM jsonb_array_elements_text(tool.access_control->'read'->'group_ids') AS group_id
                                     WHERE group_id = ANY(:group_ids)
                                 )
-                            """).bindparams(bindparam('group_ids', group_ids_list))
+                            """).params(group_ids=group_ids_list)
                         )
             
             # Apply all conditions
