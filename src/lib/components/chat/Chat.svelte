@@ -193,8 +193,14 @@
 	}
 
 	const setToolIds = async () => {
+		// Only load tools if not already in store (avoid duplicate API calls)
 		if (!$tools) {
-			tools.set(await getTools(localStorage.token));
+			// Check if tools are being loaded by another component
+			// Wait a bit to see if tools get populated from another request
+			await new Promise(resolve => setTimeout(resolve, 50));
+			if (!$tools) {
+				tools.set(await getTools(localStorage.token));
+			}
 		}
 
 		if (selectedModels.length !== 1 && !atSelectedModel) {

@@ -1291,6 +1291,7 @@ async def list_tasks_endpoint(user=Depends(get_verified_user)):
 
 
 @app.get("/api/config")
+@cached(ttl=30)  # Cache config for 30 seconds - config rarely changes, reduces DB queries
 async def get_app_config(request: Request):
     user = None
     if "token" in request.cookies:

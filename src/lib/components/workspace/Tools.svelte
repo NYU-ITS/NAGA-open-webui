@@ -130,6 +130,12 @@
 	};
 
 	const init = async () => {
+		// Check if tools are already loaded in store to avoid duplicate API calls
+		if ($_tools && $_tools.length > 0) {
+			tools = $_tools;
+			return;
+		}
+		
 		// Use getToolList (write permission) for the list view
 		// This is more efficient than calling both read and write endpoints
 		tools = await getToolList(localStorage.token);

@@ -18,6 +18,7 @@ from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.access_control import has_access, has_permission
 from open_webui.env import SRC_LOG_LEVELS
 from open_webui.utils.super_admin import is_super_admin
+from aiocache import cached
 
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["MAIN"])
@@ -30,7 +31,12 @@ router = APIRouter()
 ############################
 
 
+def _tools_cache_key(f, user):
+    """Generate user-specific cache key for tools"""
+    return f"tools:{user.id}"
+
 @router.get("/", response_model=list[ToolUserResponse])
+@cached(ttl=5, key_builder=_tools_cache_key)  # User-specific cache key
 async def get_tools(user=Depends(get_verified_user)):
     # if user.role == "admin":
     #     tools = Tools.get_tools()
@@ -44,7 +50,12 @@ async def get_tools(user=Depends(get_verified_user)):
 ############################
 
 
+def _tools_list_cache_key(f, user):
+    """Generate user-specific cache key for tools list"""
+    return f"tools_list:{user.id}"
+
 @router.get("/list", response_model=list[ToolUserResponse])
+@cached(ttl=5, key_builder=_tools_list_cache_key)  # User-specific cache key
 async def get_tool_list(user=Depends(get_verified_user)):
     # if user.role == "admin":
     #     tools = Tools.get_tools()

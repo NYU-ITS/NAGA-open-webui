@@ -22,7 +22,7 @@
 	// Only load users once on mount, not on every tab switch
 	const getUsersHandler = async () => {
 		if (users.length === 0) {
-			users = await getUsers(localStorage.token);
+			users = await getUsers(localStorage.token, 0, 100); // Use pagination
 		}
 	};
 
@@ -30,10 +30,11 @@
 		if ($user?.role !== 'admin') {
 			await goto('/');
 		} else {
-			// Load users and groups in parallel for faster admin panel loading
-			// This reduces admin panel load time from 43s to ~2-3s
+			// Load users (first page only - 100 users) and groups in parallel
+			// Server-side pagination: only load what's needed, not all users
+			// This reduces admin panel load time significantly for large user lists
 			[users, groups] = await Promise.all([
-				getUsers(localStorage.token),
+				getUsers(localStorage.token, 0, 100), // Load first 100 users
 				getGroups(localStorage.token)
 			]);
 		}

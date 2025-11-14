@@ -33,11 +33,11 @@
 	export let groups = []; // Accept groups as prop to avoid duplicate API call
 	let filteredGroups;
 
-	$: filteredGroups = groups.filter((user) => {
+	$: filteredGroups = groups.filter((group) => {
 		if (search === '') {
 			return true;
 		} else {
-			let name = user.name.toLowerCase();
+			let name = group.name.toLowerCase();
 			const query = search.toLowerCase();
 			return name.includes(query);
 		}

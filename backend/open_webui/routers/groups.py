@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.super_admin import is_super_admin
 from open_webui.env import SRC_LOG_LEVELS
-
+from aiocache import cached
 
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["MAIN"])
@@ -30,7 +30,12 @@ router = APIRouter()
 ############################
 
 
+def _groups_cache_key(f, user):
+    """Generate user-specific cache key for groups"""
+    return f"groups:{user.id}"
+
 @router.get("/", response_model=list[GroupResponse])
+@cached(ttl=10, key_builder=_groups_cache_key)  # User-specific cache key
 async def get_groups(user=Depends(get_verified_user)):
     if user.role == "admin":
         # Use optimized super admin check (avoids calling get_first_user() every time)
