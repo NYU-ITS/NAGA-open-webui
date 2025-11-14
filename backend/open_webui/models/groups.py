@@ -147,7 +147,8 @@ class GroupTable:
             dialect_name = db.bind.dialect.name
             if dialect_name == "postgresql":
                 from sqlalchemy import text
-                # PostgreSQL: Use json_array_elements_text for efficient JSON array queries
+                # PostgreSQL: Use jsonb_array_elements_text for efficient JSONB array queries
+                # Note: user_ids column is now JSONB (converted in migration b2c3d4e5f6a7)
                 return [
                     GroupModel.model_validate(group)
                     for group in db.query(Group)
@@ -156,7 +157,7 @@ class GroupTable:
                             """
                             EXISTS (
                                 SELECT 1
-                                FROM json_array_elements_text("group".user_ids) AS user_id_elem
+                                FROM jsonb_array_elements_text("group".user_ids) AS user_id_elem
                                 WHERE user_id_elem = :user_id
                             )
                             """
