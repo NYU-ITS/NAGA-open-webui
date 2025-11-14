@@ -6,7 +6,7 @@ from open_webui.internal.db import Base, JSONField, get_db
 from open_webui.models.users import Users, UserResponse
 from open_webui.env import SRC_LOG_LEVELS
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import BigInteger, Column, String, Text, JSON, or_, text
+from sqlalchemy import BigInteger, Column, String, Text, JSON, or_, text, bindparam
 
 from open_webui.utils.access_control import has_access
 
@@ -222,13 +222,13 @@ class ToolsTable:
                         text("""
                             (tool.access_control->'write'->'user_ids' @> :user_id_json::jsonb)
                             OR (tool.access_control->'read'->'user_ids' @> :user_id_json::jsonb)
-                        """).params(user_id_json=user_id_json)
+                        """).bindparams(bindparam('user_id_json', user_id_json))
                     )
                 else:
                     conditions.append(
                         text("""
                             tool.access_control->'read'->'user_ids' @> :user_id_json::jsonb
-                        """).params(user_id_json=user_id_json)
+                        """).bindparams(bindparam('user_id_json', user_id_json))
                     )
                 
                 # Add group access conditions using PostgreSQL JSON queries
@@ -247,7 +247,7 @@ class ToolsTable:
                                     FROM jsonb_array_elements_text(tool.access_control->'read'->'group_ids') AS group_id
                                     WHERE group_id = ANY(:group_ids)
                                 )
-                            """).params(group_ids=group_ids_list)
+                            """).bindparams(bindparam('group_ids', group_ids_list))
                         )
                     else:
                         conditions.append(
@@ -257,7 +257,7 @@ class ToolsTable:
                                     FROM jsonb_array_elements_text(tool.access_control->'read'->'group_ids') AS group_id
                                     WHERE group_id = ANY(:group_ids)
                                 )
-                            """).params(group_ids=group_ids_list)
+                            """).bindparams(bindparam('group_ids', group_ids_list))
                         )
             
             # Apply all conditions

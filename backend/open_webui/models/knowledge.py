@@ -12,7 +12,7 @@ from open_webui.models.users import Users, UserResponse
 
 
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import BigInteger, Column, String, Text, JSON, or_, text
+from sqlalchemy import BigInteger, Column, String, Text, JSON, or_, text, bindparam
 
 from open_webui.utils.access_control import has_access
 
@@ -196,13 +196,13 @@ class KnowledgeTable:
                         text("""
                             (knowledge.access_control->'write'->'user_ids' @> :user_id_json::jsonb)
                             OR (knowledge.access_control->'read'->'user_ids' @> :user_id_json::jsonb)
-                        """).params(user_id_json=user_id_json)
+                        """).bindparams(bindparam('user_id_json', user_id_json))
                     )
                 else:
                     conditions.append(
                         text("""
                             knowledge.access_control->'read'->'user_ids' @> :user_id_json::jsonb
-                        """).params(user_id_json=user_id_json)
+                        """).bindparams(bindparam('user_id_json', user_id_json))
                     )
                 
                 # Add group access conditions using PostgreSQL JSON queries
@@ -221,7 +221,7 @@ class KnowledgeTable:
                                     FROM jsonb_array_elements_text(knowledge.access_control->'read'->'group_ids') AS group_id
                                     WHERE group_id = ANY(:group_ids)
                                 )
-                            """).params(group_ids=group_ids_list)
+                            """).bindparams(bindparam('group_ids', group_ids_list))
                         )
                     else:
                         conditions.append(
@@ -231,7 +231,7 @@ class KnowledgeTable:
                                     FROM jsonb_array_elements_text(knowledge.access_control->'read'->'group_ids') AS group_id
                                     WHERE group_id = ANY(:group_ids)
                                 )
-                            """).params(group_ids=group_ids_list)
+                            """).bindparams(bindparam('group_ids', group_ids_list))
                         )
             
             # Apply all conditions
