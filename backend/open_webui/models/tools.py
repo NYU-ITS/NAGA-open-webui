@@ -152,9 +152,19 @@ class ToolsTable:
 
     def get_tools(self) -> list[ToolUserModel]:
         with get_db() as db:
+            all_tools = db.query(Tool).order_by(Tool.updated_at.desc()).all()
+            
+            # Batch load all users at once
+            user_ids = {tool.user_id for tool in all_tools}
+            users_dict = {}
+            if user_ids:
+                users_list = Users.get_users_by_user_ids(list(user_ids))
+                users_dict = {user.id: user for user in users_list}
+            
+            # Build response with batched user data
             tools = []
-            for tool in db.query(Tool).order_by(Tool.updated_at.desc()).all():
-                user = Users.get_user_by_id(tool.user_id)
+            for tool in all_tools:
+                user = users_dict.get(tool.user_id)
                 tools.append(
                     ToolUserModel.model_validate(
                         {
@@ -192,22 +202,52 @@ class ToolsTable:
         with get_db() as db:
             all_tools = db.query(Tool).order_by(Tool.updated_at.desc()).all()
 
+            # Pre-fetch user groups once to avoid repeated queries
+            from open_webui.models.groups import Groups
+            user_groups = Groups.get_groups_by_member_id(user_id)
+            user_group_ids = [g.id for g in user_groups]
+            
+            # Get all unique user_ids from tools to batch load users
+            user_ids = set()
             tools_for_user = []
+            
             for tool in all_tools:
-                # Must be the creator OR pass group-based check OR be assigned to user's groups
-                if (tool.user_id == user_id or 
-                    has_access(user_id, permission, tool.access_control) or
-                    self._item_assigned_to_user_groups(user_id, tool, permission)):
-                    user = Users.get_user_by_id(tool.user_id)
-                    tools_for_user.append(
-                        ToolUserModel.model_validate(
-                            {
-                                **ToolModel.model_validate(tool).model_dump(),
-                                "user": user.model_dump() if user else None,
-                            }
-                        )
+                # Check access more efficiently
+                has_user_access = tool.user_id == user_id
+                has_direct_access = has_access(user_id, permission, tool.access_control)
+                has_group_access = False
+                
+                if not has_user_access and not has_direct_access:
+                    # Check group access
+                    if tool.access_control:
+                        read_groups = tool.access_control.get("read", {}).get("group_ids", [])
+                        write_groups = tool.access_control.get("write", {}).get("group_ids", [])
+                        item_groups = list(set(read_groups + write_groups))
+                        has_group_access = any(group_id in user_group_ids for group_id in item_groups)
+                
+                if has_user_access or has_direct_access or has_group_access:
+                    user_ids.add(tool.user_id)
+                    tools_for_user.append(tool)
+            
+            # Batch load all users at once
+            users_dict = {}
+            if user_ids:
+                users_list = Users.get_users_by_user_ids(list(user_ids))
+                users_dict = {user.id: user for user in users_list}
+            
+            # Build response with batched user data
+            result = []
+            for tool in tools_for_user:
+                user = users_dict.get(tool.user_id)
+                result.append(
+                    ToolUserModel.model_validate(
+                        {
+                            **ToolModel.model_validate(tool).model_dump(),
+                            "user": user.model_dump() if user else None,
+                        }
                     )
-            return tools_for_user
+                )
+            return result
 
     def get_tool_valves_by_id(self, id: str) -> Optional[dict]:
         try:

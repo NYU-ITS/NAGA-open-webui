@@ -106,10 +106,19 @@ class PromptsTable:
 
     def get_prompts(self) -> list[PromptUserResponse]:
         with get_db() as db:
+            all_prompts = db.query(Prompt).order_by(Prompt.timestamp.desc()).all()
+            
+            # Batch load all users at once
+            user_ids = {prompt.user_id for prompt in all_prompts}
+            users_dict = {}
+            if user_ids:
+                users_list = Users.get_users_by_user_ids(list(user_ids))
+                users_dict = {user.id: user for user in users_list}
+            
+            # Build response with batched user data
             prompts = []
-
-            for prompt in db.query(Prompt).order_by(Prompt.timestamp.desc()).all():
-                user = Users.get_user_by_id(prompt.user_id)
+            for prompt in all_prompts:
+                user = users_dict.get(prompt.user_id)
                 prompts.append(
                     PromptUserResponse.model_validate(
                         {
@@ -118,7 +127,6 @@ class PromptsTable:
                         }
                     )
                 )
-
             return prompts
 
     # def get_prompts_by_user_id(
@@ -144,21 +152,52 @@ class PromptsTable:
         with get_db() as db:
             all_prompts = db.query(Prompt).order_by(Prompt.timestamp.desc()).all()
 
+            # Pre-fetch user groups once to avoid repeated queries
+            from open_webui.models.groups import Groups
+            user_groups = Groups.get_groups_by_member_id(user_id)
+            user_group_ids = [g.id for g in user_groups]
+            
+            # Get all unique user_ids from prompts to batch load users
+            user_ids = set()
             prompts_for_user = []
+            
             for prompt in all_prompts:
-                if (prompt.user_id == user_id or 
-                    has_access(user_id, permission, prompt.access_control) or
-                    self._item_assigned_to_user_groups(user_id, prompt, permission)):
-                    user = Users.get_user_by_id(prompt.user_id)
-                    prompts_for_user.append(
-                        PromptUserResponse.model_validate(
-                            {
-                                **PromptModel.model_validate(prompt).model_dump(),
-                                "user": user.model_dump() if user else None,
-                            }
-                        )
+                # Check access more efficiently
+                has_user_access = prompt.user_id == user_id
+                has_direct_access = has_access(user_id, permission, prompt.access_control)
+                has_group_access = False
+                
+                if not has_user_access and not has_direct_access:
+                    # Check group access
+                    if prompt.access_control:
+                        read_groups = prompt.access_control.get("read", {}).get("group_ids", [])
+                        write_groups = prompt.access_control.get("write", {}).get("group_ids", [])
+                        item_groups = list(set(read_groups + write_groups))
+                        has_group_access = any(group_id in user_group_ids for group_id in item_groups)
+                
+                if has_user_access or has_direct_access or has_group_access:
+                    user_ids.add(prompt.user_id)
+                    prompts_for_user.append(prompt)
+            
+            # Batch load all users at once
+            users_dict = {}
+            if user_ids:
+                users_list = Users.get_users_by_user_ids(list(user_ids))
+                users_dict = {user.id: user for user in users_list}
+            
+            # Build response with batched user data
+            result = []
+            for prompt in prompts_for_user:
+                user = users_dict.get(prompt.user_id)
+                result.append(
+                    PromptUserResponse.model_validate(
+                        {
+                            **PromptModel.model_validate(prompt).model_dump(),
+                            "user": user.model_dump() if user else None,
+                        }
                     )
-            return prompts_for_user
+                )
+            return result
 
     def update_prompt_by_command(
         self, command: str, form_data: PromptForm

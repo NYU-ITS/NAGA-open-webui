@@ -131,11 +131,19 @@ class KnowledgeTable:
 
     def get_knowledge_bases(self) -> list[KnowledgeUserModel]:
         with get_db() as db:
+            all_knowledge = db.query(Knowledge).order_by(Knowledge.updated_at.desc()).all()
+            
+            # Batch load all users at once
+            user_ids = {kb.user_id for kb in all_knowledge}
+            users_dict = {}
+            if user_ids:
+                users_list = Users.get_users_by_user_ids(list(user_ids))
+                users_dict = {user.id: user for user in users_list}
+            
+            # Build response with batched user data
             knowledge_bases = []
-            for knowledge in (
-                db.query(Knowledge).order_by(Knowledge.updated_at.desc()).all()
-            ):
-                user = Users.get_user_by_id(knowledge.user_id)
+            for knowledge in all_knowledge:
+                user = users_dict.get(knowledge.user_id)
                 knowledge_bases.append(
                     KnowledgeUserModel.model_validate(
                         {
@@ -169,22 +177,53 @@ class KnowledgeTable:
             all_knowledge_bases = (
                 db.query(Knowledge).order_by(Knowledge.updated_at.desc()).all()
             )
+            
+            # Pre-fetch user groups once to avoid repeated queries
+            from open_webui.models.groups import Groups
+            user_groups = Groups.get_groups_by_member_id(user_id)
+            user_group_ids = [g.id for g in user_groups]
+            
+            # Get all unique user_ids from knowledge bases to batch load users
+            user_ids = set()
             knowledge_for_user = []
 
             for knowledge in all_knowledge_bases:
-                if (knowledge.user_id == user_id or 
-                    has_access(user_id, permission, knowledge.access_control) or
-                    self._item_assigned_to_user_groups(user_id, knowledge, permission)):
-                    user = Users.get_user_by_id(knowledge.user_id)
-                    knowledge_for_user.append(
-                        KnowledgeUserModel.model_validate(
-                            {
-                                **KnowledgeModel.model_validate(knowledge).model_dump(),
-                                "user": user.model_dump() if user else None,
-                            }
-                        )
+                # Check access more efficiently
+                has_user_access = knowledge.user_id == user_id
+                has_direct_access = has_access(user_id, permission, knowledge.access_control)
+                has_group_access = False
+                
+                if not has_user_access and not has_direct_access:
+                    # Check group access
+                    if knowledge.access_control:
+                        read_groups = knowledge.access_control.get("read", {}).get("group_ids", [])
+                        write_groups = knowledge.access_control.get("write", {}).get("group_ids", [])
+                        item_groups = list(set(read_groups + write_groups))
+                        has_group_access = any(group_id in user_group_ids for group_id in item_groups)
+                
+                if has_user_access or has_direct_access or has_group_access:
+                    user_ids.add(knowledge.user_id)
+                    knowledge_for_user.append(knowledge)
+            
+            # Batch load all users at once
+            users_dict = {}
+            if user_ids:
+                users_list = Users.get_users_by_user_ids(list(user_ids))
+                users_dict = {user.id: user for user in users_list}
+            
+            # Build response with batched user data
+            result = []
+            for knowledge in knowledge_for_user:
+                user = users_dict.get(knowledge.user_id)
+                result.append(
+                    KnowledgeUserModel.model_validate(
+                        {
+                            **KnowledgeModel.model_validate(knowledge).model_dump(),
+                            "user": user.model_dump() if user else None,
+                        }
                     )
-            return knowledge_for_user
+                )
+            return result
 
     def get_knowledge_by_id(self, id: str) -> Optional[KnowledgeModel]:
         try:

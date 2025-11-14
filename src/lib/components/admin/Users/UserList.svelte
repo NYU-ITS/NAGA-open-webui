@@ -12,7 +12,7 @@
 
 	import { toast } from 'svelte-sonner';
 
-	import { updateUserRole, getUsers, deleteUserById, toggleCoAdminStatus, checkIfSuperAdmin } from '$lib/apis/users';
+	import { updateUserRole, getUsers, deleteUserById, toggleCoAdminStatus, checkIfSuperAdmin, batchCheckIfSuperAdmin } from '$lib/apis/users';
 
 	import Pagination from '$lib/components/common/Pagination.svelte';
 	import ChatBubbles from '$lib/components/icons/ChatBubbles.svelte';
@@ -37,20 +37,34 @@
 	// Cache for current user's super admin status
 	let isCurrentUserSuperAdminCache = null;
 
-	// function to override the label if the user is truly "admin" + super admin
-	async function getRoleLabel(user) {
-		if (user.role === 'admin') {
-			// Check cache first
-			if (superAdminCache[user.email] === undefined) {
-				try {
-					const isSuperAdmin = await checkIfSuperAdmin(localStorage.token, user.email);
-					superAdminCache[user.email] = isSuperAdmin;
-				} catch (error) {
-					console.error('Error checking super admin status:', error);
-					superAdminCache[user.email] = false;
-				}
+	// Batch load super admin status for all admin users
+	async function batchLoadSuperAdminStatus(usersList) {
+		const adminEmails = usersList
+			.filter(user => user.role === 'admin' && superAdminCache[user.email] === undefined)
+			.map(user => user.email);
+		
+		if (adminEmails.length > 0) {
+			try {
+				const results = await batchCheckIfSuperAdmin(localStorage.token, adminEmails);
+				// Update cache with batch results
+				Object.keys(results).forEach(email => {
+					superAdminCache[email] = results[email];
+				});
+			} catch (error) {
+				console.error('Error batch checking super admin status:', error);
+				// Fallback: mark all as false if batch fails
+				adminEmails.forEach(email => {
+					if (superAdminCache[email] === undefined) {
+						superAdminCache[email] = false;
+					}
+				});
 			}
+		}
+	}
 
+	// function to override the label if the user is truly "admin" + super admin
+	function getRoleLabel(user) {
+		if (user.role === 'admin') {
 			if (superAdminCache[user.email]) {
 				return 'super admin';
 			} else if (user.info?.is_co_admin) {
@@ -93,6 +107,11 @@
 	let selectedUser = null;
 
 	let page = 1;
+
+	// Batch load super admin status when users change
+	$: if (users && users.length > 0) {
+		batchLoadSuperAdminStatus(users);
+	}
 
 	let showDeleteConfirmDialog = false;
 	let showAddUserModal = false;

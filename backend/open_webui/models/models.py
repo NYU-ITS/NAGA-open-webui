@@ -193,9 +193,19 @@ class ModelsTable:
 
     def get_models(self) -> list[ModelUserResponse]:
         with get_db() as db:
+            all_models = db.query(Model).filter(Model.base_model_id != None).all()
+            
+            # Batch load all users at once
+            user_ids = {model.user_id for model in all_models}
+            users_dict = {}
+            if user_ids:
+                users_list = Users.get_users_by_user_ids(list(user_ids))
+                users_dict = {user.id: user for user in users_list}
+            
+            # Build response with batched user data
             models = []
-            for model in db.query(Model).filter(Model.base_model_id != None).all():
-                user = Users.get_user_by_id(model.user_id)
+            for model in all_models:
+                user = users_dict.get(model.user_id)
                 models.append(
                     ModelUserResponse.model_validate(
                         {
@@ -248,23 +258,55 @@ class ModelsTable:
         self, user_id: str, permission: str = "write"
     ) -> list[ModelUserResponse]:
         with get_db() as db:
+            # Get all models with base_model_id (non-base models)
             all_models = db.query(Model).filter(Model.base_model_id != None).all()
 
+            # Pre-fetch user groups once to avoid repeated queries
+            from open_webui.models.groups import Groups
+            user_groups = Groups.get_groups_by_member_id(user_id)
+            user_group_ids = [g.id for g in user_groups]
+            
+            # Get all unique user_ids from models to batch load users
+            user_ids = set()
             models_for_user = []
+            
             for model in all_models:
-                if (model.user_id == user_id or 
-                    has_access(user_id, permission, model.access_control) or
-                    self._item_assigned_to_user_groups(user_id, model, permission)):
-                    user = Users.get_user_by_id(model.user_id)
-                    models_for_user.append(
-                        ModelUserResponse.model_validate(
-                            {
-                                **ModelModel.model_validate(model).model_dump(),
-                                "user": user.model_dump() if user else None,
-                            }
-                        )
+                # Check access more efficiently
+                has_user_access = model.user_id == user_id
+                has_direct_access = has_access(user_id, permission, model.access_control)
+                has_group_access = False
+                
+                if not has_user_access and not has_direct_access:
+                    # Check group access
+                    if model.access_control:
+                        read_groups = model.access_control.get("read", {}).get("group_ids", [])
+                        write_groups = model.access_control.get("write", {}).get("group_ids", [])
+                        item_groups = list(set(read_groups + write_groups))
+                        has_group_access = any(group_id in user_group_ids for group_id in item_groups)
+                
+                if has_user_access or has_direct_access or has_group_access:
+                    user_ids.add(model.user_id)
+                    models_for_user.append(model)
+            
+            # Batch load all users at once
+            users_dict = {}
+            if user_ids:
+                users_list = Users.get_users_by_user_ids(list(user_ids))
+                users_dict = {user.id: user for user in users_list}
+            
+            # Build response with batched user data
+            result = []
+            for model in models_for_user:
+                user = users_dict.get(model.user_id)
+                result.append(
+                    ModelUserResponse.model_validate(
+                        {
+                            **ModelModel.model_validate(model).model_dump(),
+                            "user": user.model_dump() if user else None,
+                        }
                     )
-            return models_for_user
+                )
+            return result
 
     def get_model_by_id(self, id: str) -> Optional[ModelModel]:
         try:

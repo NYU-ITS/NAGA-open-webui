@@ -36,6 +36,11 @@ async def get_users(
     limit: Optional[int] = None,
     user=Depends(get_admin_user),
 ):
+    # Default pagination: limit to 100 users per page if not specified
+    if limit is None:
+        limit = 100
+    if skip is None:
+        skip = 0
     return Users.get_users(skip, limit)
 
 
@@ -62,6 +67,38 @@ async def check_if_super_admin(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=ERROR_MESSAGES.USER_NOT_FOUND,
         )
+
+
+############################
+# BatchCheckSuperAdmin
+############################
+
+class BatchSuperAdminRequest(BaseModel):
+    emails: list[str]
+
+
+class BatchSuperAdminResponse(BaseModel):
+    results: dict[str, bool]  # email -> is_super_admin
+
+
+@router.post("/batch/is-super-admin", response_model=BatchSuperAdminResponse)
+async def batch_check_if_super_admin(
+    request: BatchSuperAdminRequest,
+    user=Depends(get_verified_user)
+):
+    """Batch check super admin status for multiple emails"""
+    user = Users.get_user_by_id(user.id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.USER_NOT_FOUND,
+        )
+    
+    results = {}
+    for email in request.emails:
+        results[email] = is_email_super_admin(email)
+    
+    return BatchSuperAdminResponse(results=results)
 
 ############################
 # User Groups
