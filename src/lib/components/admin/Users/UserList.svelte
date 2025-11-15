@@ -12,7 +12,7 @@
 
 	import { toast } from 'svelte-sonner';
 
-	import { updateUserRole, getUsers, deleteUserById, toggleCoAdminStatus, checkIfSuperAdmin } from '$lib/apis/users';
+	import { updateUserRole, getUsers, deleteUserById, toggleCoAdminStatus, checkIfSuperAdmin, batchCheckIfSuperAdmin } from '$lib/apis/users';
 
 	import Pagination from '$lib/components/common/Pagination.svelte';
 	import ChatBubbles from '$lib/components/icons/ChatBubbles.svelte';
@@ -36,6 +36,45 @@
 	
 	// Cache for current user's super admin status
 	let isCurrentUserSuperAdminCache = null;
+
+	// Batch check super admin status for all admin users when users list changes
+	$: if (users && users.length > 0 && localStorage.token) {
+		batchCheckSuperAdminStatus();
+	}
+
+	/**
+	 * Batch check super admin status for all admin users.
+	 * This is much more efficient than checking individually.
+	 */
+	async function batchCheckSuperAdminStatus() {
+		// Only check admin users (they're the ones that could be super admins)
+		const adminUsers = users.filter(user => user.role === 'admin');
+		
+		if (adminUsers.length === 0) {
+			return;
+		}
+
+		// Get emails that haven't been cached yet
+		const emailsToCheck = adminUsers
+			.map(user => user.email)
+			.filter(email => email && superAdminCache[email] === undefined);
+
+		if (emailsToCheck.length === 0) {
+			return; // All already cached
+		}
+
+		try {
+			const results = await batchCheckIfSuperAdmin(localStorage.token, emailsToCheck);
+			
+			// Update cache with batch results
+			Object.entries(results).forEach(([email, isSuperAdmin]) => {
+				superAdminCache[email] = isSuperAdmin;
+			});
+		} catch (error) {
+			console.error('Error in batch super admin check:', error);
+			// On error, individual checks will still work as fallback
+		}
+	}
 
 	// function to override the label if the user is truly "admin" + super admin
 	async function getRoleLabel(user) {

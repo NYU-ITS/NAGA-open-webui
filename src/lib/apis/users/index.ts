@@ -29,6 +29,63 @@ export const checkIfSuperAdmin = async (token: string, email: string) => {
 	return res;
 };
 
+/**
+ * Batch check super admin status for multiple emails.
+ * This is more efficient than calling checkIfSuperAdmin multiple times.
+ * 
+ * @param token - Authentication token
+ * @param emails - Array of email addresses to check
+ * @returns Promise resolving to a dictionary mapping email -> boolean (true if super admin)
+ */
+export const batchCheckIfSuperAdmin = async (token: string, emails: string[]): Promise<Record<string, boolean>> => {
+	let error = null;
+
+	// Validate input
+	if (!emails || emails.length === 0) {
+		return {};
+	}
+
+	// Remove duplicates and empty values
+	const uniqueEmails = [...new Set(emails.filter(email => email && email.trim()))];
+
+	if (uniqueEmails.length === 0) {
+		return {};
+	}
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/users/is-super-admin/batch`, {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify({
+			emails: uniqueEmails
+		})
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			console.error('Error in batch super admin check:', err);
+			error = err?.detail || err?.message || err;
+			// Return empty dict on error - individual checks will fall back to single endpoint
+			return {};
+		});
+
+	if (error) {
+		console.warn('Batch super admin check failed, falling back to individual checks:', error);
+		return {};
+	}
+
+	// Ensure we have a valid dictionary
+	if (typeof res !== 'object' || res === null) {
+		return {};
+	}
+
+	return res as Record<string, boolean>;
+};
+
 export const getUserGroups = async (token: string) => {
 	let error = null;
 

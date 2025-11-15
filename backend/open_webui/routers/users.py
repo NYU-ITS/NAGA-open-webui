@@ -18,7 +18,7 @@ from open_webui.env import SRC_LOG_LEVELS
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 from open_webui.utils.auth import get_admin_user, get_password_hash, get_verified_user
-from open_webui.utils.super_admin import is_email_super_admin
+from open_webui.utils.super_admin import is_email_super_admin, batch_check_super_admin
 
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["MODELS"])
@@ -61,6 +61,62 @@ async def check_if_super_admin(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=ERROR_MESSAGES.USER_NOT_FOUND,
+        )
+
+
+############################
+# BatchCheckIfSuperAdmin
+############################
+
+class BatchSuperAdminCheckRequest(BaseModel):
+    emails: list[str]
+
+
+@router.post("/is-super-admin/batch", response_model=dict[str, bool])
+async def batch_check_if_super_admin(
+    request: BatchSuperAdminCheckRequest,
+    user=Depends(get_verified_user)
+):
+    """
+    Batch check super admin status for multiple emails.
+    
+    Args:
+        request: Request body containing list of emails to check
+        
+    Returns:
+        Dictionary mapping email -> bool (True if super admin, False otherwise)
+    """
+    # Verify the requesting user exists
+    current_user = Users.get_user_by_id(user.id)
+    if not current_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.USER_NOT_FOUND,
+        )
+    
+    # Validate input
+    if not request.emails:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Emails list cannot be empty",
+        )
+    
+    # Limit batch size to prevent abuse (max 100 emails per request)
+    if len(request.emails) > 100:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Maximum 100 emails allowed per batch request",
+        )
+    
+    # Perform batch check
+    try:
+        result = batch_check_super_admin(request.emails)
+        return result
+    except Exception as e:
+        log.error(f"Error in batch super admin check: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error checking super admin status",
         )
 
 ############################
