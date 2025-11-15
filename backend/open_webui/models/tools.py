@@ -152,14 +152,36 @@ class ToolsTable:
 
     def get_tools(self) -> list[ToolUserModel]:
         with get_db() as db:
+            all_tools = db.query(Tool).order_by(Tool.updated_at.desc()).all()
+            
+            # Collect all unique user_ids
+            user_ids_to_fetch = set()
+            for tool in all_tools:
+                if tool.user_id:
+                    user_ids_to_fetch.add(tool.user_id)
+            
+            # Batch load all users in one query
+            users_dict = {}
+            if user_ids_to_fetch:
+                users = Users.get_users_by_user_ids(list(user_ids_to_fetch))
+                for user in users:
+                    users_dict[user.id] = UserResponse(
+                        id=user.id,
+                        name=user.name,
+                        email=user.email,
+                        role=user.role,
+                        profile_image_url=user.profile_image_url,
+                    )
+            
+            # Build response with cached user data
             tools = []
-            for tool in db.query(Tool).order_by(Tool.updated_at.desc()).all():
-                user = Users.get_user_by_id(tool.user_id)
+            for tool in all_tools:
+                user_response = users_dict.get(tool.user_id) if tool.user_id else None
                 tools.append(
                     ToolUserModel.model_validate(
                         {
                             **ToolModel.model_validate(tool).model_dump(),
-                            "user": user.model_dump() if user else None,
+                            "user": user_response.model_dump() if user_response else None,
                         }
                     )
                 )
@@ -192,21 +214,45 @@ class ToolsTable:
         with get_db() as db:
             all_tools = db.query(Tool).order_by(Tool.updated_at.desc()).all()
 
-            tools_for_user = []
+            # Collect all unique user_ids from tools that pass permission checks
+            filtered_tools = []
+            user_ids_to_fetch = set()
+            
+            # First pass: filter tools and collect user_ids
             for tool in all_tools:
                 # Must be the creator OR pass group-based check OR be assigned to user's groups
                 if (tool.user_id == user_id or 
                     has_access(user_id, permission, tool.access_control) or
                     self._item_assigned_to_user_groups(user_id, tool, permission)):
-                    user = Users.get_user_by_id(tool.user_id)
-                    tools_for_user.append(
-                        ToolUserModel.model_validate(
-                            {
-                                **ToolModel.model_validate(tool).model_dump(),
-                                "user": user.model_dump() if user else None,
-                            }
-                        )
+                    filtered_tools.append(tool)
+                    if tool.user_id:
+                        user_ids_to_fetch.add(tool.user_id)
+            
+            # Batch load all users in one query
+            users_dict = {}
+            if user_ids_to_fetch:
+                users = Users.get_users_by_user_ids(list(user_ids_to_fetch))
+                for user in users:
+                    users_dict[user.id] = UserResponse(
+                        id=user.id,
+                        name=user.name,
+                        email=user.email,
+                        role=user.role,
+                        profile_image_url=user.profile_image_url,
                     )
+            
+            # Second pass: build response with cached user data
+            tools_for_user = []
+            for tool in filtered_tools:
+                user_response = users_dict.get(tool.user_id) if tool.user_id else None
+                tools_for_user.append(
+                    ToolUserModel.model_validate(
+                        {
+                            **ToolModel.model_validate(tool).model_dump(),
+                            "user": user_response.model_dump() if user_response else None,
+                        }
+                    )
+                )
             return tools_for_user
 
     def get_tool_valves_by_id(self, id: str) -> Optional[dict]:

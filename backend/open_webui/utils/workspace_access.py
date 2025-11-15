@@ -1,6 +1,7 @@
 """
 Workspace access control utilities for group-based collaboration
 """
+from open_webui.utils.cache import get_cached
 
 def item_assigned_to_user_groups(user_id: str, item, permission: str = "write") -> bool:
     """Check if item is assigned to any group the user is member of OR owns OR user is super admin"""
@@ -24,8 +25,16 @@ def item_assigned_to_user_groups(user_id: str, item, permission: str = "write") 
     if is_super_admin:
         return True  # Super admin sees ALL items
     
-    # Get groups where user is member
-    user_groups = Groups.get_groups_by_member_id(user_id)
+    # Get groups where user is member (cached)
+    cache_key = f"user_groups:{user_id}"
+    user_groups = get_cached(
+        cache_key,
+        ttl=300,  # 5 minutes cache
+        factory=lambda: Groups.get_groups_by_member_id(user_id)
+    )
+    # Ensure we have a list (factory should always return a list, but be safe)
+    if user_groups is None:
+        user_groups = []
     user_group_ids = [g.id for g in user_groups]
     
     # Handle None access_control (legacy records without group assignments)
@@ -42,8 +51,16 @@ def item_assigned_to_user_groups(user_id: str, item, permission: str = "write") 
     if member_match:
         return True
     
-    # Also check if user owns any of the groups that have access to this item
-    all_groups = Groups.get_groups()
+    # Also check if user owns any of the groups that have access to this item (cached)
+    all_groups_cache_key = "all_groups"
+    all_groups = get_cached(
+        all_groups_cache_key,
+        ttl=300,  # 5 minutes cache
+        factory=lambda: Groups.get_groups()
+    )
+    # Ensure we have a list (factory should always return a list, but be safe)
+    if all_groups is None:
+        all_groups = []
     owned_group_ids = [g.id for g in all_groups if g.user_id == user_id]
     owner_match = any(group_id in owned_group_ids for group_id in item_groups)
     

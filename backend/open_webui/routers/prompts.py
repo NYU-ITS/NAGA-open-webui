@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Request
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.access_control import has_access, has_permission
 from open_webui.utils.super_admin import is_super_admin
+from open_webui.utils.cache import get_cached, clear_cached, clear_user_cache
 
 router = APIRouter()
 
@@ -20,13 +21,41 @@ router = APIRouter()
 
 
 @router.get("/", response_model=list[PromptModel])
-async def get_prompts(user=Depends(get_verified_user)):
-    # if user.role == "admin":
-    #     prompts = Prompts.get_prompts()
-    # else:
-    prompts = Prompts.get_prompts_by_user_id(user.id, "read")
-
-    return prompts
+async def get_prompts(
+    skip: Optional[int] = None,
+    limit: Optional[int] = None,
+    user=Depends(get_verified_user)
+):
+    # Default pagination: 100 items per page, max 500
+    if limit is None:
+        limit = 100
+    elif limit > 500:
+        limit = 500
+    elif limit < 0:
+        limit = 0
+    
+    if skip is None:
+        skip = 0
+    elif skip < 0:
+        skip = 0
+    
+    # Get full list (cached) and apply pagination
+    cache_key = f"prompts_list:{user.id}"
+    full_list = get_cached(
+        cache_key,
+        ttl=60,  # 1 minute cache
+        factory=lambda: Prompts.get_prompts_by_user_id(user.id, "read")
+    )
+    
+    # Ensure we have a list (factory should always return a list, but be safe)
+    if full_list is None:
+        full_list = []
+    
+    # Apply pagination
+    if skip is not None or limit is not None:
+        end = (skip + limit) if limit else None
+        return full_list[skip:end]
+    return full_list
 
 
 @router.get("/list", response_model=list[PromptUserResponse])
@@ -70,6 +99,8 @@ async def create_new_prompt(
         prompt = Prompts.insert_new_prompt(creator_user_id, form_data)
 
         if prompt:
+            # Clear prompts list cache for all users
+            clear_cached(pattern="prompts_list:")
             return prompt
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -170,6 +201,8 @@ async def update_prompt_by_command(
 
     prompt = Prompts.update_prompt_by_command(f"/{command}", form_data)
     if prompt:
+        # Clear prompts list cache for all users
+        clear_cached(pattern="prompts_list:")
         return prompt
     else:
         raise HTTPException(
@@ -203,4 +236,7 @@ async def delete_prompt_by_command(command: str, user=Depends(get_verified_user)
         )
 
     result = Prompts.delete_prompt_by_command(f"/{command}")
+    if result:
+        # Clear prompts list cache for all users
+        clear_cached(pattern="prompts_list:")
     return result

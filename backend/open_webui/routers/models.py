@@ -16,6 +16,7 @@ from open_webui.utils.access_control import has_access, has_permission
 from open_webui.utils.super_admin import is_super_admin
 from open_webui.models.functions import Functions
 from open_webui.models.users import Users
+from open_webui.utils.cache import get_cached, clear_cached, clear_user_cache
 
 
 router = APIRouter()
@@ -27,11 +28,42 @@ router = APIRouter()
 
 
 @router.get("/", response_model=list[ModelUserResponse])
-async def get_models(id: Optional[str] = None, user=Depends(get_verified_user)):
-    # if user.role == "admin":
-    #     return Models.get_models()
-    # else:
-    return Models.get_models_by_user_id(user.id)
+async def get_models(
+    id: Optional[str] = None,
+    skip: Optional[int] = None,
+    limit: Optional[int] = None,
+    user=Depends(get_verified_user)
+):
+    # Default pagination: 100 items per page, max 500
+    if limit is None:
+        limit = 100
+    elif limit > 500:
+        limit = 500
+    elif limit < 0:
+        limit = 0
+    
+    if skip is None:
+        skip = 0
+    elif skip < 0:
+        skip = 0
+    
+    # Get full list (cached) and apply pagination
+    cache_key = f"models_list:{user.id}"
+    full_list = get_cached(
+        cache_key,
+        ttl=60,  # 1 minute cache
+        factory=lambda: Models.get_models_by_user_id(user.id)
+    )
+    
+    # Ensure we have a list (factory should always return a list, but be safe)
+    if full_list is None:
+        full_list = []
+    
+    # Apply pagination
+    if skip is not None or limit is not None:
+        end = (skip + limit) if limit else None
+        return full_list[skip:end]
+    return full_list
 
 
 ###########################
@@ -88,6 +120,9 @@ async def create_new_model(
         
         model = Models.insert_new_model(form_data, creator_user_id, creator_email)
         if model:
+            # Clear cache for the creator and all users (since access control might allow others to see it)
+            # Clear models list cache for all users (pattern-based)
+            clear_cached(pattern="models_list:")
             return model
         else:
             raise HTTPException(
@@ -156,6 +191,8 @@ async def toggle_model_by_id(id: str, user=Depends(get_verified_user)):
             model = Models.toggle_model_by_id(id)
 
             if model:
+                # Clear models list cache for all users
+                clear_cached(pattern="models_list:")
                 return model
             else:
                 raise HTTPException(
@@ -204,6 +241,8 @@ async def update_model_by_id(
         )
 
     model = Models.update_model_by_id(id, form_data)
+    # Clear models list cache for all users
+    clear_cached(pattern="models_list:")
     return model
 
 
@@ -232,6 +271,9 @@ async def delete_model_by_id(id: str, user=Depends(get_verified_user)):
         )
 
     result = Models.delete_model_by_id(id)
+    # Clear models list cache for all users
+    if result:
+        clear_cached(pattern="models_list:")
     return result
 
 

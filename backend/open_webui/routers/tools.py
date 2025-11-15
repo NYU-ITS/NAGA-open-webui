@@ -18,6 +18,7 @@ from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.access_control import has_access, has_permission
 from open_webui.env import SRC_LOG_LEVELS
 from open_webui.utils.super_admin import is_super_admin
+from open_webui.utils.cache import get_cached, clear_cached, clear_user_cache
 
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["MAIN"])
@@ -31,12 +32,41 @@ router = APIRouter()
 
 
 @router.get("/", response_model=list[ToolUserResponse])
-async def get_tools(user=Depends(get_verified_user)):
-    # if user.role == "admin":
-    #     tools = Tools.get_tools()
-    # else:
-    tools = Tools.get_tools_by_user_id(user.id, "read")
-    return tools
+async def get_tools(
+    skip: Optional[int] = None,
+    limit: Optional[int] = None,
+    user=Depends(get_verified_user)
+):
+    # Default pagination: 100 items per page, max 500
+    if limit is None:
+        limit = 100
+    elif limit > 500:
+        limit = 500
+    elif limit < 0:
+        limit = 0
+    
+    if skip is None:
+        skip = 0
+    elif skip < 0:
+        skip = 0
+    
+    # Get full list (cached) and apply pagination
+    cache_key = f"tools_list:{user.id}"
+    full_list = get_cached(
+        cache_key,
+        ttl=60,  # 1 minute cache
+        factory=lambda: Tools.get_tools_by_user_id(user.id, "read")
+    )
+    
+    # Ensure we have a list (factory should always return a list, but be safe)
+    if full_list is None:
+        full_list = []
+    
+    # Apply pagination
+    if skip is not None or limit is not None:
+        end = (skip + limit) if limit else None
+        return full_list[skip:end]
+    return full_list
 
 
 ############################
@@ -123,6 +153,8 @@ async def create_new_tools(
             tool_cache_dir.mkdir(parents=True, exist_ok=True)
 
             if tools:
+                # Clear tools list cache for all users
+                clear_cached(pattern="tools_list:")
                 return tools
             else:
                 raise HTTPException(
@@ -242,6 +274,8 @@ async def update_tools_by_id(
         tools = Tools.update_tool_by_id(id, updated)
 
         if tools:
+            # Clear tools list cache for all users
+            clear_cached(pattern="tools_list:")
             return tools
         else:
             raise HTTPException(
@@ -287,6 +321,8 @@ async def delete_tools_by_id(
         TOOLS = request.app.state.TOOLS
         if id in TOOLS:
             del TOOLS[id]
+        # Clear tools list cache for all users
+        clear_cached(pattern="tools_list:")
 
     return result
 

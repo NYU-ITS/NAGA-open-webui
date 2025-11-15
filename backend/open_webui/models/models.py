@@ -193,14 +193,36 @@ class ModelsTable:
 
     def get_models(self) -> list[ModelUserResponse]:
         with get_db() as db:
+            all_models = db.query(Model).filter(Model.base_model_id != None).all()
+            
+            # Collect all unique user_ids
+            user_ids_to_fetch = set()
+            for model in all_models:
+                if model.user_id:
+                    user_ids_to_fetch.add(model.user_id)
+            
+            # Batch load all users in one query
+            users_dict = {}
+            if user_ids_to_fetch:
+                users = Users.get_users_by_user_ids(list(user_ids_to_fetch))
+                for user in users:
+                    users_dict[user.id] = UserResponse(
+                        id=user.id,
+                        name=user.name,
+                        email=user.email,
+                        role=user.role,
+                        profile_image_url=user.profile_image_url,
+                    )
+            
+            # Build response with cached user data
             models = []
-            for model in db.query(Model).filter(Model.base_model_id != None).all():
-                user = Users.get_user_by_id(model.user_id)
+            for model in all_models:
+                user_response = users_dict.get(model.user_id) if model.user_id else None
                 models.append(
                     ModelUserResponse.model_validate(
                         {
                             **ModelModel.model_validate(model).model_dump(),
-                            "user": user.model_dump() if user else None,
+                            "user": user_response.model_dump() if user_response else None,
                         }
                     )
                 )
@@ -250,20 +272,44 @@ class ModelsTable:
         with get_db() as db:
             all_models = db.query(Model).filter(Model.base_model_id != None).all()
 
+            # Collect all unique user_ids from models that pass permission checks
             models_for_user = []
+            user_ids_to_fetch = set()
+            
+            # First pass: filter models and collect user_ids
+            filtered_models = []
             for model in all_models:
                 if (model.user_id == user_id or 
                     has_access(user_id, permission, model.access_control) or
                     self._item_assigned_to_user_groups(user_id, model, permission)):
-                    user = Users.get_user_by_id(model.user_id)
-                    models_for_user.append(
-                        ModelUserResponse.model_validate(
-                            {
-                                **ModelModel.model_validate(model).model_dump(),
-                                "user": user.model_dump() if user else None,
-                            }
-                        )
+                    filtered_models.append(model)
+                    if model.user_id:
+                        user_ids_to_fetch.add(model.user_id)
+            
+            # Batch load all users in one query
+            users_dict = {}
+            if user_ids_to_fetch:
+                users = Users.get_users_by_user_ids(list(user_ids_to_fetch))
+                for user in users:
+                    users_dict[user.id] = UserResponse(
+                        id=user.id,
+                        name=user.name,
+                        email=user.email,
+                        role=user.role,
+                        profile_image_url=user.profile_image_url,
                     )
+            
+            # Second pass: build response with cached user data
+            for model in filtered_models:
+                user_response = users_dict.get(model.user_id) if model.user_id else None
+                models_for_user.append(
+                    ModelUserResponse.model_validate(
+                        {
+                            **ModelModel.model_validate(model).model_dump(),
+                            "user": user_response.model_dump() if user_response else None,
+                        }
+                    )
+                )
             return models_for_user
 
     def get_model_by_id(self, id: str) -> Optional[ModelModel]:

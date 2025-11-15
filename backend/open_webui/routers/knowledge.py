@@ -23,6 +23,7 @@ from open_webui.constants import ERROR_MESSAGES
 from open_webui.utils.auth import get_verified_user
 from open_webui.utils.access_control import has_access, has_permission
 from open_webui.utils.super_admin import is_super_admin
+from open_webui.utils.cache import get_cached, clear_cached
 
 
 from open_webui.env import SRC_LOG_LEVELS
@@ -40,13 +41,42 @@ router = APIRouter()
 
 
 @router.get("/", response_model=list[KnowledgeUserResponse])
-async def get_knowledge(user=Depends(get_verified_user)):
-    knowledge_bases = []
-
-    # if user.role == "admin":
-    #     knowledge_bases = Knowledges.get_knowledge_bases()
-    # else:
-    knowledge_bases = Knowledges.get_knowledge_bases_by_user_id(user.id, "read")
+async def get_knowledge(
+    skip: Optional[int] = None,
+    limit: Optional[int] = None,
+    user=Depends(get_verified_user)
+):
+    # Default pagination: 100 items per page, max 500
+    if limit is None:
+        limit = 100
+    elif limit > 500:
+        limit = 500
+    elif limit < 0:
+        limit = 0
+    
+    if skip is None:
+        skip = 0
+    elif skip < 0:
+        skip = 0
+    
+    # Get full list (cached)
+    cache_key = f"knowledge_list:{user.id}"
+    all_knowledge_bases = get_cached(
+        cache_key,
+        ttl=60,  # 1 minute cache
+        factory=lambda: Knowledges.get_knowledge_bases_by_user_id(user.id, "read")
+    )
+    
+    # Ensure we have a list (factory should always return a list, but be safe)
+    if all_knowledge_bases is None:
+        all_knowledge_bases = []
+    
+    # Apply pagination before processing files (to reduce work)
+    if skip is not None or limit is not None:
+        end = (skip + limit) if limit else None
+        knowledge_bases = all_knowledge_bases[skip:end]
+    else:
+        knowledge_bases = all_knowledge_bases
 
     # Get files for each knowledge base
     knowledge_with_files = []
@@ -163,6 +193,8 @@ async def create_new_knowledge(
     knowledge = Knowledges.insert_new_knowledge(creator_user_id, form_data)
 
     if knowledge:
+        # Clear knowledge list cache for all users
+        clear_cached(pattern="knowledge_list:")
         return knowledge
     else:
         raise HTTPException(
@@ -270,6 +302,8 @@ async def update_knowledge_by_id(
             if target_user:
                 knowledge = Knowledges.update_knowledge_by_id(id=id, form_data=form_data)
                 if knowledge:
+                    # Clear knowledge list cache for all users
+                    clear_cached(pattern="knowledge_list:")
                     from open_webui.internal.db import get_db
                     from open_webui.models.knowledge import Knowledge
                     with get_db() as db:
@@ -282,6 +316,8 @@ async def update_knowledge_by_id(
 
     knowledge = Knowledges.update_knowledge_by_id(id=id, form_data=form_data)
     if knowledge:
+        # Clear knowledge list cache for all users
+        clear_cached(pattern="knowledge_list:")
         file_ids = knowledge.data.get("file_ids", []) if knowledge.data else []
         files = Files.get_files_by_ids(file_ids)
 
@@ -644,6 +680,9 @@ async def delete_knowledge_by_id(id: str, user=Depends(get_verified_user)):
         log.debug(e)
         pass
     result = Knowledges.delete_knowledge_by_id(id=id)
+    if result:
+        # Clear knowledge list cache for all users
+        clear_cached(pattern="knowledge_list:")
     return result
 
 

@@ -131,16 +131,38 @@ class KnowledgeTable:
 
     def get_knowledge_bases(self) -> list[KnowledgeUserModel]:
         with get_db() as db:
-            knowledge_bases = []
-            for knowledge in (
+            all_knowledge_bases = (
                 db.query(Knowledge).order_by(Knowledge.updated_at.desc()).all()
-            ):
-                user = Users.get_user_by_id(knowledge.user_id)
+            )
+            
+            # Collect all unique user_ids
+            user_ids_to_fetch = set()
+            for knowledge in all_knowledge_bases:
+                if knowledge.user_id:
+                    user_ids_to_fetch.add(knowledge.user_id)
+            
+            # Batch load all users in one query
+            users_dict = {}
+            if user_ids_to_fetch:
+                users = Users.get_users_by_user_ids(list(user_ids_to_fetch))
+                for user in users:
+                    users_dict[user.id] = UserResponse(
+                        id=user.id,
+                        name=user.name,
+                        email=user.email,
+                        role=user.role,
+                        profile_image_url=user.profile_image_url,
+                    )
+            
+            # Build response with cached user data
+            knowledge_bases = []
+            for knowledge in all_knowledge_bases:
+                user_response = users_dict.get(knowledge.user_id) if knowledge.user_id else None
                 knowledge_bases.append(
                     KnowledgeUserModel.model_validate(
                         {
                             **KnowledgeModel.model_validate(knowledge).model_dump(),
-                            "user": user.model_dump() if user else None,
+                            "user": user_response.model_dump() if user_response else None,
                         }
                     )
                 )
@@ -169,21 +191,45 @@ class KnowledgeTable:
             all_knowledge_bases = (
                 db.query(Knowledge).order_by(Knowledge.updated_at.desc()).all()
             )
-            knowledge_for_user = []
-
+            
+            # Collect all unique user_ids from knowledge bases that pass permission checks
+            filtered_knowledge_bases = []
+            user_ids_to_fetch = set()
+            
+            # First pass: filter knowledge bases and collect user_ids
             for knowledge in all_knowledge_bases:
                 if (knowledge.user_id == user_id or 
                     has_access(user_id, permission, knowledge.access_control) or
                     self._item_assigned_to_user_groups(user_id, knowledge, permission)):
-                    user = Users.get_user_by_id(knowledge.user_id)
-                    knowledge_for_user.append(
-                        KnowledgeUserModel.model_validate(
-                            {
-                                **KnowledgeModel.model_validate(knowledge).model_dump(),
-                                "user": user.model_dump() if user else None,
-                            }
-                        )
+                    filtered_knowledge_bases.append(knowledge)
+                    if knowledge.user_id:
+                        user_ids_to_fetch.add(knowledge.user_id)
+            
+            # Batch load all users in one query
+            users_dict = {}
+            if user_ids_to_fetch:
+                users = Users.get_users_by_user_ids(list(user_ids_to_fetch))
+                for user in users:
+                    users_dict[user.id] = UserResponse(
+                        id=user.id,
+                        name=user.name,
+                        email=user.email,
+                        role=user.role,
+                        profile_image_url=user.profile_image_url,
                     )
+            
+            # Second pass: build response with cached user data
+            knowledge_for_user = []
+            for knowledge in filtered_knowledge_bases:
+                user_response = users_dict.get(knowledge.user_id) if knowledge.user_id else None
+                knowledge_for_user.append(
+                    KnowledgeUserModel.model_validate(
+                        {
+                            **KnowledgeModel.model_validate(knowledge).model_dump(),
+                            "user": user_response.model_dump() if user_response else None,
+                        }
+                    )
+                )
             return knowledge_for_user
 
     def get_knowledge_by_id(self, id: str) -> Optional[KnowledgeModel]:

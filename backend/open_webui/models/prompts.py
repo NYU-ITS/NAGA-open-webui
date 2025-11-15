@@ -106,15 +106,36 @@ class PromptsTable:
 
     def get_prompts(self) -> list[PromptUserResponse]:
         with get_db() as db:
+            all_prompts = db.query(Prompt).order_by(Prompt.timestamp.desc()).all()
+            
+            # Collect all unique user_ids
+            user_ids_to_fetch = set()
+            for prompt in all_prompts:
+                if prompt.user_id:
+                    user_ids_to_fetch.add(prompt.user_id)
+            
+            # Batch load all users in one query
+            users_dict = {}
+            if user_ids_to_fetch:
+                users = Users.get_users_by_user_ids(list(user_ids_to_fetch))
+                for user in users:
+                    users_dict[user.id] = UserResponse(
+                        id=user.id,
+                        name=user.name,
+                        email=user.email,
+                        role=user.role,
+                        profile_image_url=user.profile_image_url,
+                    )
+            
+            # Build response with cached user data
             prompts = []
-
-            for prompt in db.query(Prompt).order_by(Prompt.timestamp.desc()).all():
-                user = Users.get_user_by_id(prompt.user_id)
+            for prompt in all_prompts:
+                user_response = users_dict.get(prompt.user_id) if prompt.user_id else None
                 prompts.append(
                     PromptUserResponse.model_validate(
                         {
                             **PromptModel.model_validate(prompt).model_dump(),
-                            "user": user.model_dump() if user else None,
+                            "user": user_response.model_dump() if user_response else None,
                         }
                     )
                 )
@@ -144,20 +165,44 @@ class PromptsTable:
         with get_db() as db:
             all_prompts = db.query(Prompt).order_by(Prompt.timestamp.desc()).all()
 
-            prompts_for_user = []
+            # Collect all unique user_ids from prompts that pass permission checks
+            filtered_prompts = []
+            user_ids_to_fetch = set()
+            
+            # First pass: filter prompts and collect user_ids
             for prompt in all_prompts:
                 if (prompt.user_id == user_id or 
                     has_access(user_id, permission, prompt.access_control) or
                     self._item_assigned_to_user_groups(user_id, prompt, permission)):
-                    user = Users.get_user_by_id(prompt.user_id)
-                    prompts_for_user.append(
-                        PromptUserResponse.model_validate(
-                            {
-                                **PromptModel.model_validate(prompt).model_dump(),
-                                "user": user.model_dump() if user else None,
-                            }
-                        )
+                    filtered_prompts.append(prompt)
+                    if prompt.user_id:
+                        user_ids_to_fetch.add(prompt.user_id)
+            
+            # Batch load all users in one query
+            users_dict = {}
+            if user_ids_to_fetch:
+                users = Users.get_users_by_user_ids(list(user_ids_to_fetch))
+                for user in users:
+                    users_dict[user.id] = UserResponse(
+                        id=user.id,
+                        name=user.name,
+                        email=user.email,
+                        role=user.role,
+                        profile_image_url=user.profile_image_url,
                     )
+            
+            # Second pass: build response with cached user data
+            prompts_for_user = []
+            for prompt in filtered_prompts:
+                user_response = users_dict.get(prompt.user_id) if prompt.user_id else None
+                prompts_for_user.append(
+                    PromptUserResponse.model_validate(
+                        {
+                            **PromptModel.model_validate(prompt).model_dump(),
+                            "user": user_response.model_dump() if user_response else None,
+                        }
+                    )
+                )
             return prompts_for_user
 
     def update_prompt_by_command(
