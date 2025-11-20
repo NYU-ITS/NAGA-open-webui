@@ -1,5 +1,7 @@
 import chromadb
 import logging
+import os
+import shutil
 from chromadb import Settings
 from chromadb.utils.batch_utils import create_batches
 
@@ -175,4 +177,41 @@ class ChromaClient:
 
     def reset(self):
         # Resets the database. This will delete all collections and item entries.
-        return self.client.reset()
+        try:
+            # First, reset ChromaDB's internal state
+            result = self.client.reset()
+            
+            # If using PersistentClient (local storage), also delete physical files
+            if CHROMA_HTTP_HOST == "" and os.path.exists(CHROMA_DATA_PATH):
+                log.info(f"Cleaning up ChromaDB physical files from {CHROMA_DATA_PATH}")
+                try:
+                    deleted_count = 0
+                    # Delete all items in the vector_db directory (collections, database files, etc.)
+                    for item in os.listdir(CHROMA_DATA_PATH):
+                        item_path = os.path.join(CHROMA_DATA_PATH, item)
+                        try:
+                            if os.path.isdir(item_path):
+                                # Delete all collection directories
+                                shutil.rmtree(item_path)
+                                log.info(f"Deleted ChromaDB collection directory: {item}")
+                                deleted_count += 1
+                            elif os.path.isfile(item_path):
+                                # Delete database files and other ChromaDB files
+                                # Keep only if it's a system file we shouldn't touch
+                                if not item.startswith('.'):
+                                    os.remove(item_path)
+                                    log.info(f"Deleted ChromaDB file: {item}")
+                                    deleted_count += 1
+                        except Exception as e:
+                            log.warning(f"Failed to delete {item_path}: {e}")
+                            # Continue with other items
+                    
+                    log.info(f"ChromaDB physical files cleanup completed. Deleted {deleted_count} items.")
+                except Exception as e:
+                    log.warning(f"Error cleaning up ChromaDB physical files: {e}")
+                    # Don't fail the reset if physical cleanup fails - ChromaDB reset already succeeded
+            
+            return result
+        except Exception as e:
+            log.exception(f"Error during ChromaDB reset: {e}")
+            raise
