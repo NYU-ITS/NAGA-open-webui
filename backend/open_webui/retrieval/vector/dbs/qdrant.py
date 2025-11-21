@@ -183,7 +183,16 @@ class QdrantClient:
 
     def reset(self):
         # Resets the database. This will delete all collections and item entries.
-        collection_names = self.client.get_collections().collections
-        for collection_name in collection_names:
-            if collection_name.name.startswith(self.collection_prefix):
-                self.client.delete_collection(collection_name=collection_name.name)
+        try:
+            collection_names = self.client.get_collections().collections
+            for collection_name in collection_names:
+                actual_name = collection_name.name if hasattr(collection_name, 'name') else collection_name
+                try:
+                    self.client.delete_collection(collection_name=actual_name)
+                    log.info(f"Deleted Qdrant collection: {actual_name}")
+                except Exception as e:
+                    log.warning(f"Failed to delete Qdrant collection {actual_name}: {e}")
+                    # Continue with other collections
+        except Exception as e:
+            log.exception(f"Error during Qdrant reset: {e}")
+            raise

@@ -1,5 +1,6 @@
 from opensearchpy import OpenSearch
 from typing import Optional
+import logging
 
 from open_webui.retrieval.vector.main import VectorItem, SearchResult, GetResult
 from open_webui.config import (
@@ -9,6 +10,10 @@ from open_webui.config import (
     OPENSEARCH_USERNAME,
     OPENSEARCH_PASSWORD,
 )
+from open_webui.env import SRC_LOG_LEVELS
+
+log = logging.getLogger(__name__)
+log.setLevel(SRC_LOG_LEVELS["RAG"])
 
 
 class OpenSearchClient:
@@ -201,6 +206,40 @@ class OpenSearchClient:
         self.client.bulk(body=actions)
 
     def reset(self):
-        indices = self.client.indices.get(index=f"{self.index_prefix}_*")
-        for index in indices:
-            self.client.indices.delete(index=index)
+        # Resets the database. This will delete all indices (collections).
+        try:
+            indices_to_delete = []
+            
+            # Get prefixed indices
+            try:
+                prefixed_indices = self.client.indices.get(index=f"{self.index_prefix}_*")
+                indices_to_delete.extend(prefixed_indices.keys())
+            except Exception as e:
+                log.warning(f"Could not get prefixed indices: {e}")
+            
+            # Get all indices and filter for open-webui related ones
+            try:
+                all_indices = self.client.cat.indices(format="json")
+                for index_info in all_indices:
+                    index_name = index_info.get("index", "")
+                    # Include user-memory-*, file-*, and other non-system indices
+                    # Exclude system indices (start with .) and already identified indices
+                    if (index_name.startswith("user-memory-") or 
+                        index_name.startswith("file-") or
+                        (not index_name.startswith(".") and index_name not in indices_to_delete)):
+                        if index_name not in indices_to_delete:
+                            indices_to_delete.append(index_name)
+            except Exception as e:
+                log.warning(f"Could not enumerate all indices: {e}")
+            
+            # Delete all identified indices
+            for index in indices_to_delete:
+                try:
+                    self.client.indices.delete(index=index)
+                    log.info(f"Deleted OpenSearch index: {index}")
+                except Exception as e:
+                    log.warning(f"Failed to delete OpenSearch index {index}: {e}")
+                    # Continue with other indices
+        except Exception as e:
+            log.exception(f"Error during OpenSearch reset: {e}")
+            raise
