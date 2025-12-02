@@ -7,7 +7,7 @@
 	import { toast } from 'svelte-sonner';
 	import { knowledge, user } from '$lib/stores';
 	import AccessControl from '../common/AccessControl.svelte';
-	import { WEBUI_API_BASE_URL } from '$lib/constants';
+	import { WEBUI_API_BASE_URL, SUPER_ADMIN_EMAILS } from '$lib/constants';
 	import { onMount } from 'svelte';
 
 	let loading = false;
@@ -22,10 +22,7 @@
 	let allUsers = [];
 	let adminUsers = [];
 
-	$: isSuperAdmin = $user?.email && [
-		'sm11538@nyu.edu', 'ms15138@nyu.edu', 'mb484@nyu.edu',
-		'cg4532@nyu.edu', 'ht2490@nyu.edu', 'ps5226@nyu.edu'
-	].includes($user.email);
+	$: isSuperAdmin = $user?.email && SUPER_ADMIN_EMAILS.includes($user.email);
 
 	// Set assignToEmail for creating
 	$: if (isSuperAdmin && !edit && $user?.email && !assignToEmail) {

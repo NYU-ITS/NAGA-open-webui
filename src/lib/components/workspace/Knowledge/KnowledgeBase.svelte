@@ -10,7 +10,7 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { mobile, showSidebar, knowledge as _knowledge, user } from '$lib/stores';
-	import { WEBUI_API_BASE_URL } from '$lib/constants';
+	import { WEBUI_API_BASE_URL, SUPER_ADMIN_EMAILS } from '$lib/constants';
 
 	import { updateFileDataContentById, uploadFile, deleteFileById } from '$lib/apis/files';
 	import {
@@ -71,10 +71,7 @@
 	let allUsers = [];
 	let adminUsers = [];
 
-	$: isSuperAdmin = $user?.email && [
-		'sm11538@nyu.edu', 'ms15138@nyu.edu', 'mb484@nyu.edu',
-		'cg4532@nyu.edu', 'ht2490@nyu.edu', 'ps5226@nyu.edu'
-	].includes($user.email);
+	$: isSuperAdmin = $user?.email && SUPER_ADMIN_EMAILS.includes($user.email);
 
 	// Set assignToEmail when knowledge loads
 	$: if (isSuperAdmin && knowledge?.user_id && allUsers.length > 0 && !assignToEmail) {

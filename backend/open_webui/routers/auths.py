@@ -548,8 +548,8 @@ async def signup(request: Request, response: Response, form_data: SignupForm):
 
     # If there are no users in the DB, enforce special rules for the "first" user
     if user_count == 0:
-        REQUIRED_FIRST_EMAIL = ["sm11538@nyu.edu", "ms15138@nyu.edu", "mb484@nyu.edu", "cg4532@nyu.edu", "ht2490@nyu.edu", "ps5226@nyu.edu"]
-        if form_data.email.lower() not in [em.lower() for em in REQUIRED_FIRST_EMAIL]:
+        from open_webui.utils.super_admin import SUPER_ADMIN_EMAILS
+        if form_data.email.lower() not in [em.lower() for em in SUPER_ADMIN_EMAILS]:
             raise HTTPException(
                 status_code=400,
                 detail=f"Kindly wait until an authorized administrator has completed the initial login",

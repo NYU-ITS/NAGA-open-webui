@@ -1,6 +1,7 @@
 """
 Workspace access control utilities for group-based collaboration
 """
+from open_webui.utils.super_admin import is_super_admin
 
 def item_assigned_to_user_groups(user_id: str, item, permission: str = "write") -> bool:
     """Check if item is assigned to any group the user is member of OR owns OR user is super admin"""
@@ -9,20 +10,9 @@ def item_assigned_to_user_groups(user_id: str, item, permission: str = "write") 
     
     # Check if user is super admin - they see everything
     user = Users.get_user_by_id(user_id)
-    super_admin_emails = [
-        "sm11538@nyu.edu",
-        "ms15138@nyu.edu", 
-        "mb484@nyu.edu",
-        "cg4532@nyu.edu",
-        "ht2490@nyu.edu",
-        "ps5226@nyu.edu"
-    ]
-    is_super_admin = (
-        user and user.id == Users.get_first_user().id or 
-        user and user.email in super_admin_emails
-    )
+    is_super_admin_user = is_super_admin(user)
     
-    if is_super_admin:
+    if is_super_admin_user:
         return True  # Super admin sees ALL items
     
     # Get groups where user is member

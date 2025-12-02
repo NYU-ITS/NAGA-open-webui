@@ -8,7 +8,7 @@
 	import LockClosed from '$lib/components/icons/LockClosed.svelte';
 	import AccessControlModal from '../common/AccessControlModal.svelte';
 	import { user } from '$lib/stores';
-	import { WEBUI_API_BASE_URL } from '$lib/constants';
+	import { WEBUI_API_BASE_URL, SUPER_ADMIN_EMAILS } from '$lib/constants';
 
 	export let onSubmit: Function;
 	export let edit = false;
@@ -29,10 +29,7 @@
 	let allUsers = [];
 	let adminUsers = [];
 
-	$: isSuperAdmin = $user?.email && [
-		'sm11538@nyu.edu', 'ms15138@nyu.edu', 'mb484@nyu.edu',
-		'cg4532@nyu.edu', 'ht2490@nyu.edu', 'ps5226@nyu.edu'
-	].includes($user.email);
+	$: isSuperAdmin = $user?.email && SUPER_ADMIN_EMAILS.includes($user.email);
 
 	// Set assignToEmail based on context
 	$: if (isSuperAdmin) {

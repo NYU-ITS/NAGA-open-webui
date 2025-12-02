@@ -20,18 +20,10 @@
 	import DocumentChartBar from '../icons/DocumentChartBar.svelte';
 	import Evaluations from './Settings/Evaluations.svelte';
 	import CodeExecution from './Settings/CodeExecution.svelte';
-	import { user } from '$lib/stores'; 
+	import { user } from '$lib/stores';
+	import { SUPER_ADMIN_EMAILS } from '$lib/constants';
 
-	const SPECIAL_ADMIN_EMAILS = [
-	'cg4532@nyu.edu',
-	'ms15138@nyu.edu',
-	'mb484@nyu.edu',
-	'sm11538@nyu.edu',
-	'ht2490@nyu.edu',
-	'ps5226@nyu.edu'
-	];
-
-	const canViewRestrictedTabs = () => SPECIAL_ADMIN_EMAILS.includes($user?.email);
+	const canViewRestrictedTabs = () => SUPER_ADMIN_EMAILS.includes($user?.email);
 
 	const i18n = getContext('i18n');
 

@@ -97,6 +97,18 @@ export const SUPPORTED_FILE_EXTENSIONS = [
 
 export const PASTED_TEXT_CHARACTER_LIMIT = 1000;
 
+// Super Admin Email Configuration
+// Single source of truth for all super admin email addresses
+// Edit this list to add/remove super admins across the entire frontend
+export const SUPER_ADMIN_EMAILS = [
+	'sm11538@nyu.edu',
+	'ms15138@nyu.edu',
+	'mb484@nyu.edu',
+	'cg4532@nyu.edu',
+	'ht2490@nyu.edu',
+	'ps5226@nyu.edu'
+];
+
 // Source: https://kit.svelte.dev/docs/modules#$env-static-public
 // This feature, akin to $env/static/private, exclusively incorporates environment variables
 // that are prefixed with config.kit.env.publicPrefix (usually set to PUBLIC_).
