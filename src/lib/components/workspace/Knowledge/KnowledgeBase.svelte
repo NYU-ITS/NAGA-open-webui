@@ -73,7 +73,7 @@
 
 	$: isSuperAdmin = $user?.email && [
 		'sm11538@nyu.edu', 'ms15138@nyu.edu', 'mb484@nyu.edu',
-		'cg4532@nyu.edu', 'ps5226@nyu.edu'
+		'cg4532@nyu.edu', 'ht2490@nyu.edu', 'ps5226@nyu.edu'
 	].includes($user.email);
 
 	// Set assignToEmail when knowledge loads
@@ -157,7 +157,11 @@
 				id, // knowledge base ID
 				file
 			).catch((e) => {
-				toast.error(`${e}`);
+				if (e && typeof e === 'string' && e.includes('Duplicate content')) {
+					toast.warning($i18n.t(e));
+				} else {
+					toast.error(`${e}`);
+				}
 				return null;
 			});
 
