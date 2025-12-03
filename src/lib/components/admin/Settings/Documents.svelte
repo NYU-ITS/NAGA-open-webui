@@ -345,34 +345,14 @@
 
 <ResetVectorDBConfirmDialog
 	bind:show={showResetConfirm}
-	on:confirm={async () => {
-		try {
-			const res = await resetVectorDB(localStorage.token);
-			
-			if (res) {
-				if (res.status === 'success') {
-					toast.success(res.message || $i18n.t('Vector database reset completed successfully'));
-				} else if (res.status === 'completed_with_warnings') {
-					toast.warning(res.message || $i18n.t('Reset completed with warnings'));
-					if (res.warnings && res.warnings.length > 0) {
-						console.warn('Warnings:', res.warnings);
-					}
-				} else if (res.status === 'completed_with_errors') {
-					toast.error(res.message || $i18n.t('Reset completed with errors'));
-					if (res.errors && res.errors.length > 0) {
-						console.error('Errors:', res.errors);
-					}
-				} else if (res.status === 'failed') {
-					toast.error(res.message || $i18n.t('Reset failed'));
-					if (res.errors && res.errors.length > 0) {
-						console.error('Errors:', res.errors);
-					}
-				} else {
-					toast.success($i18n.t('Success'));
-				}
-			}
-		} catch (error) {
+	on:confirm={() => {
+		const res = resetVectorDB(localStorage.token).catch((error) => {
 			toast.error(`${error}`);
+			return null;
+		});
+
+		if (res) {
+			toast.success($i18n.t('Success'));
 		}
 	}}
 />
@@ -936,7 +916,7 @@
 				</div>
 			</div>
 
-			<div class="mb-3">
+			<!-- <div class="mb-3">
 				<div class=" mb-2.5 text-base font-medium">{$i18n.t('Danger Zone')}</div>
 
 				<hr class=" border-gray-100 dark:border-gray-850 my-2" />
@@ -970,7 +950,7 @@
 						</button>
 					</div>
 				</div>
-			</div>
+			</div> -->
 		</div>
 	</div>
 	<div class="flex justify-end pt-3 text-sm font-medium">
