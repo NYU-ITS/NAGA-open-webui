@@ -1,15 +1,10 @@
 import time
 import uuid
-import logging
 from typing import Optional
 
 from open_webui.internal.db import Base, get_db
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import BigInteger, Column, String, Text
-from open_webui.env import SRC_LOG_LEVELS
-
-log = logging.getLogger(__name__)
-log.setLevel(SRC_LOG_LEVELS.get("MODELS", logging.INFO))
 
 ####################
 # Memory DB Schema
@@ -136,17 +131,6 @@ class MemoriesTable:
 
                 return True
             except Exception:
-                return False
-
-    def delete_all_memories(self) -> bool:
-        with get_db() as db:
-            try:
-                db.query(Memory).delete()
-                db.commit()
-                return True
-            except Exception as e:
-                log.exception(f"Error deleting all memories: {e}")
-                db.rollback()
                 return False
 
 

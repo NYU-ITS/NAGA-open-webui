@@ -291,15 +291,7 @@ class MilvusClient:
 
     def reset(self):
         # Resets the database. This will delete all collections and item entries.
-        try:
-            collection_names = self.client.list_collections()
-            for collection_name in collection_names:
-                try:
-                    self.client.drop_collection(collection_name=collection_name)
-                    log.info(f"Deleted Milvus collection: {collection_name}")
-                except Exception as e:
-                    log.warning(f"Failed to delete Milvus collection {collection_name}: {e}")
-                    # Continue with other collections
-        except Exception as e:
-            log.exception(f"Error during Milvus reset: {e}")
-            raise
+        collection_names = self.client.list_collections()
+        for collection_name in collection_names:
+            if collection_name.startswith(self.collection_prefix):
+                self.client.drop_collection(collection_name=collection_name)
