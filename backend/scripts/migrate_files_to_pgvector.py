@@ -10,7 +10,7 @@ import sys
 import argparse
 import logging
 from pathlib import Path
-from typing import List, Dict, Set
+from typing import List, Dict, Set, Any, Tuple
 import hashlib
 from datetime import datetime
 
@@ -56,8 +56,13 @@ import json
 import uuid
 import time
 import requests
+from requests.exceptions import HTTPError
 
-log = logging.getLogger(__name__)
+
+# Set up logging with explicit name (after open_webui imports may have configured logging)
+log = logging.getLogger("migrate_files_to_pgvector")
+log.setLevel(logging.INFO)
+# Ensure basic config is set (force=True to override any previous config)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
@@ -83,7 +88,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--overwrite",
         action="store_true",
-        help="Overwrite existing embeddings (delete collection before inserting)",
+        help="Overwrite existing embeddings - re-process all files even if already complete (default: skip complete files)",
     )
     parser.add_argument(
         "--knowledge-only",
@@ -127,7 +132,44 @@ def load_and_split_file(
         )
         
         content_type = file.meta.get("content_type", "") if file.meta else ""
-        docs = loader.load(file.filename, content_type, file_path)
+        
+        # Check if file is an image that might not be processable
+        file_ext = os.path.splitext(file.filename)[1].lower().lstrip('.')
+        image_extensions = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg', 'ico', 'tiff', 'tif']
+        is_image = file_ext in image_extensions or (content_type and content_type.startswith('image/'))
+        
+        try:
+            docs = loader.load(file.filename, content_type, file_path)
+        except TimeoutError as e:
+            if is_image:
+                log.warning(f"File {file.id} ({file.filename}) is an image file that cannot be processed as text. "
+                           f"Image files require OCR/image processing (Tika or Document Intelligence). Skipping.")
+            else:
+                log.warning(f"Timeout while loading file {file.id} ({file.filename}): {e}. Skipping.")
+            return []
+        except UnicodeDecodeError as e:
+            if is_image:
+                log.warning(f"File {file.id} ({file.filename}) is an image file that cannot be decoded as text. "
+                           f"Image files require OCR/image processing. Skipping.")
+            else:
+                log.warning(f"Unicode decode error for file {file.id} ({file.filename}): {e}. "
+                           f"File may be binary or have unsupported encoding. Skipping.")
+            return []
+        except Exception as e:
+            error_msg = str(e).lower()
+            if 'timeout' in error_msg or 'encoding' in error_msg:
+                if is_image:
+                    log.warning(f"File {file.id} ({file.filename}) is an image file that cannot be processed. "
+                               f"Image files require OCR/image processing (Tika or Document Intelligence). Skipping.")
+                else:
+                    log.warning(f"Error loading file {file.id} ({file.filename}): {e}. Skipping.")
+            else:
+                log.warning(f"Error loading file {file.id} ({file.filename}): {e}. Skipping.")
+            return []
+        
+        if not docs:
+            log.warning(f"No documents extracted from file {file.id} ({file.filename}). Skipping.")
+            return []
         
         # Add metadata (same as normal uploads)
         docs = [
@@ -172,7 +214,7 @@ def load_and_split_file(
         return docs
         
     except Exception as e:
-        log.exception(f"Error loading file {file.id} ({file.filename}): {e}")
+        log.warning(f"Unexpected error loading file {file.id} ({file.filename}): {e}. Skipping.")
         return []
 
 
@@ -180,7 +222,9 @@ def generate_embeddings_with_retry_and_split(
     texts: List[str],
     embedding_function,
     min_batch_size: int = 1,
+    max_batch_size: int = 500,
     user=None,
+    progress_bar=None,
 ) -> List:
     """
     Generate embeddings with retry logic and automatic batch splitting on failures.
@@ -192,12 +236,37 @@ def generate_embeddings_with_retry_and_split(
         texts: List of text chunks to embed
         embedding_function: Function to generate embeddings
         min_batch_size: Minimum batch size before giving up (default: 1)
+        max_batch_size: Maximum batch size before proactively splitting (default: 500)
+        user: User object for embedding generation (optional)
+        progress_bar: tqdm progress bar to update (optional)
     
     Returns:
         List of embedding vectors
     """
     if not texts:
         return []
+    
+    # Proactively split very large batches to avoid rate limits
+    if len(texts) > max_batch_size:
+        log.info(f"Batch size ({len(texts)}) exceeds max_batch_size ({max_batch_size}). Splitting proactively...")
+        mid = len(texts) // 2
+        embeddings_first = generate_embeddings_with_retry_and_split(
+            texts[:mid],
+            embedding_function,
+            min_batch_size,
+            max_batch_size,
+            user=user,
+            progress_bar=progress_bar
+        )
+        embeddings_second = generate_embeddings_with_retry_and_split(
+            texts[mid:],
+            embedding_function,
+            min_batch_size,
+            max_batch_size,
+            user=user,
+            progress_bar=progress_bar
+        )
+        return embeddings_first + embeddings_second
     
     processed_texts = [text.replace("\n", " ") for text in texts]
     
@@ -210,8 +279,16 @@ def generate_embeddings_with_retry_and_split(
             # Pass user parameter to match normal upload behavior
             # The embedding function signature is: lambda query, user=None
             embeddings = embedding_function(processed_texts, user=user)
+            # Update progress bar if provided
+            if progress_bar is not None:
+                progress_bar.update(len(texts))
             return embeddings
         except Exception as e:
+            # Check if it's a rate limit error (429)
+            is_rate_limit = False
+            if isinstance(e, HTTPError):
+                is_rate_limit = e.response is not None and e.response.status_code == 429
+            
             # Check if it's a network/connection/timeout error that we should retry
             error_str = str(e).lower()
             is_network_error = (
@@ -222,19 +299,30 @@ def generate_embeddings_with_retry_and_split(
                 "incompleteread" in error_str or
                 "protocol" in error_str or
                 "broken" in error_str or
-                "timeout" in error_str
+                "timeout" in error_str or
+                "429" in error_str or
+                "too many requests" in error_str
             )
             
-            if is_network_error and retry_count < max_retries:
+            # Rate limit errors should be retried with longer backoff
+            is_retryable = is_network_error or is_rate_limit
+            
+            if is_retryable and retry_count < max_retries:
                 retry_count += 1
-                wait_time = 2 ** retry_count  # Exponential backoff: 2, 4, 8 seconds
-                log.warning(f"Network error generating embeddings for {len(texts)} chunks (attempt {retry_count}/{max_retries}): {type(e).__name__}")
+                # Use longer backoff for rate limits (5, 10, 20 seconds)
+                # Regular network errors use shorter backoff (2, 4, 8 seconds)
+                if is_rate_limit:
+                    wait_time = 5 * retry_count  # 5, 10, 15 seconds for rate limits
+                    log.warning(f"Rate limit (429) error generating embeddings for {len(texts)} chunks (attempt {retry_count}/{max_retries})")
+                else:
+                    wait_time = 2 ** retry_count  # Exponential backoff: 2, 4, 8 seconds
+                    log.warning(f"Network error generating embeddings for {len(texts)} chunks (attempt {retry_count}/{max_retries}): {type(e).__name__}")
                 log.info(f"Retrying in {wait_time} seconds...")
                 time.sleep(wait_time)
             else:
-                # Not a network error or max retries reached
+                # Not a retryable error or max retries reached
                 # If batch is large enough, try splitting it in half
-                if len(texts) > min_batch_size and (is_network_error or "timeout" in error_str):
+                if len(texts) > min_batch_size and (is_retryable or "timeout" in error_str or "429" in error_str):
                     log.warning(f"Failed to generate embeddings for {len(texts)} chunks after {retry_count} retries. Splitting batch in half...")
                     mid = len(texts) // 2
                     
@@ -244,23 +332,84 @@ def generate_embeddings_with_retry_and_split(
                         texts[:mid],
                         embedding_function,
                         min_batch_size,
-                        user=user
+                        max_batch_size,
+                        user=user,
+                        progress_bar=progress_bar
                     )
                     embeddings_second = generate_embeddings_with_retry_and_split(
                         texts[mid:],
                         embedding_function,
                         min_batch_size,
-                        user=user
+                        max_batch_size,
+                        user=user,
+                        progress_bar=progress_bar
                     )
                     
                     # Combine results
                     return embeddings_first + embeddings_second
                 else:
-                    # Batch too small to split or non-network error
+                    # Batch too small to split or non-retryable error
                     log.error(f"Failed to generate embeddings for {len(texts)} chunks: {e}")
                     raise
     
     raise ValueError("Failed to generate embeddings after all retries")
+
+
+def check_file_completeness(
+    file: FileModel,
+    collections: List[str],
+    expected_chunk_count: int,
+    pg_client: PgvectorClient,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Check if a file is already fully inserted in all its collections.
+    
+    Returns a dict mapping collection_name to status info:
+    {
+        "collection_name": {
+            "exists": bool,
+            "chunk_count": int,
+            "is_complete": bool,
+            "needs_processing": bool
+        }
+    }
+    """
+    status = {}
+    
+    for collection_name in collections:
+        try:
+            existing_chunks = pg_client.query(
+                collection_name=collection_name,
+                filter={"file_id": file.id}
+            )
+            
+            if existing_chunks and existing_chunks.ids and existing_chunks.ids[0]:
+                existing_count = len(existing_chunks.ids[0])
+                is_complete = existing_count == expected_chunk_count
+                status[collection_name] = {
+                    "exists": True,
+                    "chunk_count": existing_count,
+                    "is_complete": is_complete,
+                    "needs_processing": not is_complete,  # Process if incomplete
+                }
+            else:
+                status[collection_name] = {
+                    "exists": False,
+                    "chunk_count": 0,
+                    "is_complete": False,
+                    "needs_processing": True,  # Process if missing
+                }
+        except Exception as e:
+            # If query fails, assume collection doesn't exist or has issues
+            log.debug(f"Error checking collection {collection_name} for file {file.id}: {e}")
+            status[collection_name] = {
+                "exists": False,
+                "chunk_count": 0,
+                "is_complete": False,
+                "needs_processing": True,
+            }
+    
+    return status
 
 
 def process_file_to_collections(
@@ -272,7 +421,15 @@ def process_file_to_collections(
     user=None,
     overwrite: bool = False,
     dry_run: bool = False,
-) -> bool:
+    skip_complete: bool = True,
+) -> Tuple[bool, bool]:
+    """
+    Process a file and save to multiple collections.
+    
+    Returns:
+        (success: bool, was_complete: bool) - success indicates if processing succeeded,
+        was_complete indicates if the file was already complete and skipped
+    """
     """
     Process a file and save to multiple collections.
     """
@@ -281,11 +438,42 @@ def process_file_to_collections(
         docs = load_and_split_file(file, user_email, {})
         
         if not docs:
-            log.warning(f"No documents extracted from file {file.id} ({file.filename})")
-            return False
+            # Error already logged in load_and_split_file with specific details
+            return (False, False)
         
         # Prepare texts and metadatas
         texts = [doc.page_content for doc in docs]
+        expected_chunk_count = len(texts)
+        
+        # Check completeness if skip_complete is enabled
+        if skip_complete and not overwrite:
+            completeness_status = check_file_completeness(
+                file=file,
+                collections=collections,
+                expected_chunk_count=expected_chunk_count,
+                pg_client=pg_client,
+            )
+            
+            # Filter to only collections that need processing
+            collections_to_process = [
+                coll for coll in collections
+                if completeness_status.get(coll, {}).get("needs_processing", True)
+            ]
+            
+            # Check if all collections are complete
+            if not collections_to_process:
+                log.info(f"   ✅ File {file.id} ({file.filename}) is already complete in all {len(collections)} collections. Skipping.")
+                return (True, True)  # Successfully skipped because complete
+            
+            # Log status for incomplete collections
+            for coll in collections:
+                status = completeness_status.get(coll, {})
+                if status.get("exists") and not status.get("is_complete"):
+                    log.info(f"   ⚠️  Collection {coll}: partial insert detected ({status['chunk_count']}/{expected_chunk_count} chunks). Will re-process.")
+                elif status.get("is_complete"):
+                    log.info(f"   ✅ Collection {coll}: already complete ({status['chunk_count']} chunks). Skipping.")
+            
+            collections = collections_to_process
         
         # Calculate hash from full document content (same as normal upload)
         # This matches the behavior in retrieval.py where hash is calculated from text_content
@@ -320,12 +508,22 @@ def process_file_to_collections(
                         metadata[key] = json.dumps(value)
         
         # Generate embeddings with retry and automatic batch splitting
-        log.info(f"Generating embeddings for {len(texts)} chunks from file {file.id}")
-        embeddings = generate_embeddings_with_retry_and_split(texts, embedding_function, user=user)
+        # Use a conservative max batch size to avoid rate limits (500 chunks per batch)
+        # This is larger than typical RAG_EMBEDDING_BATCH_SIZE to allow batching, but small enough to avoid rate limits
+        max_batch_size = 500
+        log.info(f"Generating embeddings for {len(texts)} chunks from file {file.id} (max batch size: {max_batch_size})")
+        
+        embeddings = generate_embeddings_with_retry_and_split(
+            texts, 
+            embedding_function, 
+            max_batch_size=max_batch_size, 
+            user=user,
+            progress_bar=None
+        )
         
         if dry_run:
             log.info(f"[DRY RUN] Would insert {len(texts)} chunks into collections: {collections}")
-            return True
+            return (True, False)
         
         # Delete existing chunks for this file if overwrite
         if overwrite:
@@ -347,33 +545,30 @@ def process_file_to_collections(
         # IMPORTANT: Since id is the primary key (not composite with collection_name),
         # we must generate unique IDs for each collection to avoid duplicate key errors
         for collection_name in collections:
-            # Check for existing duplicates/partials if not overwriting
-            if not overwrite:
-                try:
-                    # Check using hash if available in metadata, otherwise assume file_id check in delete() above was enough
-                    # But delete() only ran if overwrite=True.
-                    
-                    # We can check by file_id since we have it
-                    existing_chunks = pg_client.query(
-                        collection_name=collection_name,
-                        filter={"file_id": file.id}
-                    )
-                    
-                    if existing_chunks and existing_chunks.ids and existing_chunks.ids[0]:
-                        existing_count = len(existing_chunks.ids[0])
-                        new_count = len(texts)
-                        
-                        if existing_count == new_count:
-                            log.info(f"   ⚠️  File {file.id} already exists in {collection_name} with same chunk count. Skipping.")
-                            continue
-                        else:
-                            log.warning(f"   ⚠️  File {file.id} exists in {collection_name} but with different chunk count ({existing_count} vs {new_count}). Overwriting.")
-                            pg_client.delete(
-                                collection_name=collection_name,
-                                filter={"file_id": file.id}
-                            )
-                except Exception as e:
-                    log.debug(f"Error checking for existing chunks: {e}")
+            # Delete any existing chunks for this file in this collection BEFORE inserting
+            # This prevents duplicates when:
+            # - Handling partial inserts (some chunks inserted, some not)
+            # - Using --overwrite flag (processing complete files)
+            # - Re-processing files after errors
+            # Note: If skip_complete is enabled, complete collections were already filtered out above,
+            # but we still delete here as a safety measure for partial inserts
+            try:
+                existing_chunks = pg_client.query(
+                    collection_name=collection_name,
+                    filter={"file_id": file.id}
+                )
+                
+                if existing_chunks and existing_chunks.ids and existing_chunks.ids[0]:
+                    existing_count = len(existing_chunks.ids[0])
+                    if existing_count > 0:
+                        log.info(f"   Deleting {existing_count} existing chunks from {collection_name} before inserting (prevents duplicates)")
+                        pg_client.delete(
+                            collection_name=collection_name,
+                            filter={"file_id": file.id}
+                        )
+            except Exception as e:
+                log.debug(f"Error checking/deleting existing chunks in {collection_name}: {e}")
+                # Continue anyway - if chunks exist, we'll get duplicate key errors and handle them below
 
             log.info(f"Inserting {len(texts)} chunks into collection {collection_name}")
             
@@ -423,15 +618,23 @@ def process_file_to_collections(
                     log.exception(f"Error inserting into {collection_name}: {e}")
                     raise
         
-        return True
+        return (True, False)  # Successfully processed, was not complete
         
     except Exception as e:
         log.exception(f"Error processing file {file.id}: {e}")
-        return False
+        return (False, False)  # Failed, was not complete
 
 
 def main() -> None:
     args = parse_args()
+    
+    # Force logging level (in case open_webui imports changed it)
+    log.setLevel(logging.INFO)
+    
+    # Use print with flush to ensure output appears immediately
+    print("=" * 80, flush=True)
+    print("RE-PROCESSING FILES FROM UPLOADS TO PGVECTOR", flush=True)
+    print("=" * 80, flush=True)
     
     log.info("=" * 80)
     log.info("RE-PROCESSING FILES FROM UPLOADS TO PGVECTOR")
@@ -466,7 +669,7 @@ def main() -> None:
     file_to_collections: Dict[str, Set[str]] = {}
     
     # 1. Get all knowledge bases first (to build complete mapping)
-    log.info("\n📚 Building collection mapping from knowledge bases...")
+    print("\n📚 Building collection mapping from knowledge bases...", flush=True)
     knowledge_bases = Knowledges.get_knowledge_bases()
     
     # Build mapping of file_id -> knowledge base IDs
@@ -475,7 +678,7 @@ def main() -> None:
             continue
         
         file_ids = kb.data.get("file_ids", []) if kb.data else []
-        log.info(f"Knowledge base '{kb.name}' (id: {kb.id}): {len(file_ids)} files")
+        print(f"   Knowledge base '{kb.name}' (id: {kb.id}): {len(file_ids)} files", flush=True)
         
         for file_id in file_ids:
             if file_id not in file_to_collections:
@@ -483,7 +686,7 @@ def main() -> None:
             file_to_collections[file_id].add(kb.id)  # Add to knowledge base collection
     
     # 2. Get all files and ensure they're in the mapping
-    log.info("\n📄 Processing files...")
+    print("\n📄 Processing files...", flush=True)
     all_files = Files.get_files()
     
     # Build complete list of files to process
@@ -524,13 +727,19 @@ def main() -> None:
                 else:
                     log.warning(f"File {file_id} listed in knowledge base but not found in database")
             
-            log.info(f"   Processing {len(files_to_process)} files from knowledge bases only")
+            print(f"   Processing {len(files_to_process)} files from knowledge bases only", flush=True)
         else:
             # Process all files that are either:
             # 1. In any knowledge base, OR
             # 2. All files (to ensure file-{file.id} collections exist)
             files_to_process = all_files
-            log.info(f"   Processing all {len(files_to_process)} files in database")
+            print(f"   Processing all {len(files_to_process)} files in database", flush=True)
+    
+    # Check if there are any files to process
+    if not files_to_process:
+        log.warning("No files to process! Exiting.")
+        print("WARNING: No files found to process!", flush=True)
+        return
     
     # Ensure all files have their file collection
     for file in files_to_process:
@@ -539,9 +748,9 @@ def main() -> None:
         file_to_collections[file.id].add(f"file-{file.id}")  # Always add to file collection
     
     # Verify mapping completeness
-    log.info(f"\n📊 Collection mapping summary:")
-    log.info(f"   Files to process: {len(files_to_process)}")
-    log.info(f"   Files with collections mapped: {len(file_to_collections)}")
+    print(f"\n📊 Collection mapping summary:", flush=True)
+    print(f"   Files to process: {len(files_to_process)}", flush=True)
+    print(f"   Files with collections mapped: {len(file_to_collections)}", flush=True)
     
     # Check for files in knowledge bases that aren't in files_to_process
     all_kb_file_ids = set()
@@ -553,27 +762,33 @@ def main() -> None:
     
     missing_files = all_kb_file_ids - {f.id for f in files_to_process}
     if missing_files:
-        log.warning(f"   ⚠️  {len(missing_files)} file(s) in knowledge bases but not in files_to_process:")
+        print(f"   ⚠️  {len(missing_files)} file(s) in knowledge bases but not in files_to_process:", flush=True)
         for file_id in missing_files:
             file = Files.get_file_by_id(file_id)
             if file:
-                log.warning(f"      - {file.filename} (id: {file_id}) - will be added to processing list")
+                print(f"      - {file.filename} (id: {file_id}) - will be added to processing list", flush=True)
                 files_to_process.append(file)
                 if file.id not in file_to_collections:
                     file_to_collections[file.id] = set()
                 file_to_collections[file.id].add(f"file-{file.id}")
             else:
-                log.warning(f"      - File not found (id: {file_id})")
+                print(f"      - File not found (id: {file_id})", flush=True)
     
     # 3. Process each file
-    log.info(f"\n🔄 Processing {len(files_to_process)} files...")
-    log.info("=" * 80)
+    print(f"\n🔄 Starting processing of {len(files_to_process)} files...", flush=True)
+    print("=" * 80, flush=True)
     
     processed_count = 0
     failed_count = 0
     skipped_count = 0
+    complete_count = 0  # Files that were already complete
     
-    for file in files_to_process:
+    total_files = len(files_to_process)
+    
+    for i, file in enumerate(files_to_process):
+        current_num = i + 1
+        print(f"\n[{current_num}/{total_files}] 📄 Processing: {file.filename}", flush=True)
+        
         collections = list(file_to_collections.get(file.id, set()))
         if not collections:
             log.warning(f"File {file.id} ({file.filename}) has no collections, skipping")
@@ -584,8 +799,8 @@ def main() -> None:
         user = Users.get_user_by_id(file.user_id)
         user_email = user.email if user else "default"
         
-        log.info(f"\n📄 Processing file: {file.filename} (id: {file.id})")
-        log.info(f"   Collections: {collections}")
+        # log.info(f"\n📄 Processing file: {file.filename} (id: {file.id})")
+        # log.info(f"   Collections: {collections}")
         
         # Verify file exists
         if not file.path:
@@ -599,7 +814,7 @@ def main() -> None:
             skipped_count += 1
             continue
         
-        success = process_file_to_collections(
+        success, was_complete = process_file_to_collections(
             file=file,
             collections=collections,
             user_email=user_email,
@@ -608,21 +823,28 @@ def main() -> None:
             user=user,
             overwrite=args.overwrite,
             dry_run=args.dry_run,
+            skip_complete=not args.overwrite,  # Skip complete files unless --overwrite is used
         )
         
-        if success:
+        if was_complete:
+            complete_count += 1
+            # Already logged in process_file_to_collections
+        elif success:
             processed_count += 1
-            log.info(f"   ✅ Successfully processed file {file.id}")
+            print(f"   ✅ Successfully processed file {file.id}", flush=True)
         else:
             failed_count += 1
-            log.warning(f"   ❌ Failed to process file {file.id}")
+            print(f"   ❌ Failed to process file {file.id}", flush=True)
+        
     
-    log.info("\n" + "=" * 80)
-    log.info(f"✅ Processing complete!")
-    log.info(f"   Processed: {processed_count}")
-    log.info(f"   Failed: {failed_count}")
-    log.info(f"   Skipped: {skipped_count}")
-    log.info("=" * 80)
+    print("\n" + "=" * 80, flush=True)
+    print("✅ PROCESSING COMPLETE", flush=True)
+    print("-" * 80, flush=True)
+    print(f"   Processed:              {processed_count}", flush=True)
+    print(f"   Already complete:       {complete_count}", flush=True)
+    print(f"   Failed:                 {failed_count}", flush=True)
+    print(f"   Skipped:                {skipped_count}", flush=True)
+    print("=" * 80, flush=True)
     
     # Rebuild pgvector index for optimal retrieval performance
     # IVFFlat indexes work best when built on the actual data distribution
@@ -666,5 +888,11 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
-
+    print("Starting migration script...", flush=True)
+    try:
+        main()
+        print("Migration script completed successfully.", flush=True)
+    except Exception as e:
+        log.exception(f"Fatal error in migration script: {e}")
+        print(f"Script failed with error: {e}", flush=True)
+        raise
