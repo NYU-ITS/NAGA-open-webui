@@ -43,6 +43,8 @@ from open_webui.utils.misc import (
     openai_chat_chunk_message_template,
     openai_chat_completion_message_template,
 )
+from open_webui.models.groups import Groups
+from open_webui.models.users import Users
 from open_webui.utils.payload import (
     apply_model_params_to_body_openai,
     apply_model_system_prompt_to_body,
@@ -68,12 +70,50 @@ def get_function_module_by_id(request: Request, pipe_id: str):
     return function_module
 
 
+def is_in_same_group_as_pipe_creator(user_id: str, creator_email: str) -> bool:
+    """
+    Check if user is in the same group as the pipe/function creator.
+    This allows Admin and Co-admin in the same group to see each other's base models.
+    """
+    # Get user's groups (as member)
+    user_groups = Groups.get_groups_by_member_id(user_id)
+    
+    # Get creator's user object
+    creator = Users.get_user_by_email(creator_email)
+    if not creator:
+        return False
+    
+    # Get current user
+    user = Users.get_user_by_id(user_id)
+    if not user:
+        return False
+    
+    # Check if creator owns any of user's groups (user is in creator's group)
+    for group in user_groups:
+        if group.created_by == creator_email:
+            return True
+    
+    # Check if user owns any group that creator is member of (creator is in user's group)
+    creator_groups = Groups.get_groups_by_member_id(creator.id)
+    for group in creator_groups:
+        if group.created_by == user.email:
+            return True
+    
+    return False
+
+
 async def get_function_models(request, user: UserModel = None):
     pipes = Functions.get_functions_by_type("pipe", active_only=True)
     pipe_models = []
 
     for pipe in pipes:
-        if (user.role == "admin" and pipe.created_by == user.email) or (user.role == "user") or is_super_admin(user):
+        # Admin sees: own functions + functions from Admin/Co-admin in same group
+        # SuperAdmin sees: all functions
+        # User sees: all functions (but can't create custom models)
+        if (user.role == "admin" and (
+            pipe.created_by == user.email or 
+            is_in_same_group_as_pipe_creator(user.id, pipe.created_by)
+        )) or (user.role == "user") or is_super_admin(user):
             function_module = get_function_module_by_id(request, pipe.id)
 
             # Check if function is a manifold

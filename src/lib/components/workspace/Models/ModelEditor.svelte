@@ -572,7 +572,7 @@
 									}) as baseModel}
 										<option value={baseModel.id} class=" text-gray-900">
 											{baseModel.name}
-											{#if isSuperAdmin && baseModel.created_by && baseModel.created_by !== $user.email}
+											{#if $user.role === 'admin' && baseModel.created_by}
 												({baseModel.created_by})
 											{/if}
 										</option>
