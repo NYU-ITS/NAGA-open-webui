@@ -1531,15 +1531,15 @@ Strictly return in JSON format:
 {{MESSAGES:END:6}}
 </chat_history>"""
 
-# Task feature flags are now per-admin, default to False (disabled)
+# Task feature flags are now per-admin, default to True (enabled) for better UX
 ENABLE_TAGS_GENERATION = UserScopedConfig(
     "task.tags.enable",
-    os.environ.get("ENABLE_TAGS_GENERATION", "False").lower() == "true",
+    os.environ.get("ENABLE_TAGS_GENERATION", "True").lower() == "true",
 )
 
 ENABLE_TITLE_GENERATION = UserScopedConfig(
     "task.title.enable",
-    os.environ.get("ENABLE_TITLE_GENERATION", "False").lower() == "true",
+    os.environ.get("ENABLE_TITLE_GENERATION", "True").lower() == "true",
 )
 
 ENABLE_SEARCH_QUERY_GENERATION = UserScopedConfig(

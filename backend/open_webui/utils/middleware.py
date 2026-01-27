@@ -46,6 +46,7 @@ from open_webui.routers.tasks import (
     generate_image_prompt,
     generate_chat_tags,
     find_gemini_flash_lite_model,
+    user_has_access_to_task_model_with_inheritance,
 )
 from open_webui.routers.retrieval import process_web_search, SearchForm
 from open_webui.routers.images import image_generations, GenerateImageForm
@@ -910,16 +911,24 @@ async def process_chat_response(
             messages = get_message_list(message_map, message.get("id"))
 
             if tasks and messages:
-                # Get available models and find Gemini Flash Lite before running tasks
+                # Get available models and check task model access (with inheritance from group admin)
                 from open_webui.utils.models import get_all_models
                 models_list = await get_all_models(request, user)
                 models = {model["id"]: model for model in models_list}
-                task_model_id = find_gemini_flash_lite_model(models)
                 
-                # If Gemini Flash Lite is not available, skip all background tasks
-                if not task_model_id:
-                    log.debug(f"Gemini Flash Lite not available for user {user.email}, skipping background tasks")
+                # Check if user has access to task model (directly or via group admin inheritance)
+                has_task_access, task_model_id, effective_user, effective_models = await user_has_access_to_task_model_with_inheritance(
+                    request, user, models
+                )
+                
+                # If no task model access (even with inheritance), skip all background tasks
+                if not has_task_access:
+                    log.debug(f"Gemini Flash Lite not available for user {user.email} (even with inheritance), skipping background tasks")
                     return  # Exit early, don't run any tasks
+                
+                # Log if using inherited access
+                if effective_user.email != user.email:
+                    log.info(f"User {user.email} using inherited task model access from group admin {effective_user.email}")
                 
                 if TASKS.TITLE_GENERATION in tasks:
                     if tasks[TASKS.TITLE_GENERATION]:

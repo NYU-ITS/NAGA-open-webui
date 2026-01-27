@@ -33,6 +33,8 @@ from open_webui.config import (
 )
 from open_webui.env import SRC_LOG_LEVELS
 from open_webui.models.models import Models
+from open_webui.models.groups import Groups
+from open_webui.models.users import Users
 from open_webui.utils.access_control import has_access
 from open_webui.utils.workspace_access import item_assigned_to_user_groups
 
@@ -98,6 +100,56 @@ def find_gemini_flash_lite_model(models: dict) -> Optional[str]:
     return None
 
 
+async def get_group_admin_with_task_model_access(request, user) -> tuple[Optional[any], Optional[dict], Optional[str]]:
+    """
+    Find a group admin who has access to the task model.
+    This allows regular users to inherit task model access from their group admin.
+    
+    Args:
+        request: The FastAPI request object
+        user: The current user requesting task model access
+        
+    Returns:
+        Tuple of (admin_user, admin_models_dict, task_model_id) or (None, None, None) if not found
+    """
+    from open_webui.utils.models import get_all_models
+    
+    # Get user's groups
+    user_groups = Groups.get_groups_by_member_id(user.id)
+    
+    if not user_groups:
+        log.debug(f"User {user.email} is not a member of any group")
+        return None, None, None
+    
+    for group in user_groups:
+        group_creator_email = group.created_by
+        if not group_creator_email:
+            continue
+            
+        # Get the group admin user
+        admin_user = Users.get_user_by_email(group_creator_email)
+        if not admin_user:
+            log.debug(f"Group admin {group_creator_email} not found")
+            continue
+        
+        # Get admin's models
+        try:
+            admin_models_list = await get_all_models(request, admin_user)
+            admin_models = {model["id"]: model for model in admin_models_list}
+            
+            # Check if admin has access to task model
+            task_model_id = find_gemini_flash_lite_model(admin_models)
+            if task_model_id:
+                log.info(f"User {user.email} inheriting task model access from group admin {group_creator_email} (model: {task_model_id})")
+                return admin_user, admin_models, task_model_id
+        except Exception as e:
+            log.warning(f"Error getting models for group admin {group_creator_email}: {e}")
+            continue
+    
+    log.debug(f"No group admin with task model access found for user {user.email}")
+    return None, None, None
+
+
 def user_has_access_to_task_model(user, models: dict) -> tuple[bool, Optional[str]]:
     """
     Check if the user has access to the required Gemini 2.5 Flash Lite model.
@@ -148,6 +200,28 @@ def user_has_access_to_task_model(user, models: dict) -> tuple[bool, Optional[st
     return True, model_id
 
 
+async def user_has_access_to_task_model_with_inheritance(request, user, models: dict) -> tuple[bool, Optional[str], Optional[any], Optional[dict]]:
+    """
+    Check if the user has access to the task model, either directly or via group admin inheritance.
+    
+    Returns:
+        Tuple of (has_access, model_id, effective_user, effective_models)
+        - effective_user: The user whose credentials should be used (user or admin)
+        - effective_models: The models dict to use (user's or admin's)
+    """
+    # First check direct access
+    has_access_result, model_id = user_has_access_to_task_model(user, models)
+    if has_access_result:
+        return True, model_id, user, models
+    
+    # If no direct access, try inheriting from group admin
+    admin_user, admin_models, admin_model_id = await get_group_admin_with_task_model_access(request, user)
+    if admin_user and admin_models and admin_model_id:
+        return True, admin_model_id, admin_user, admin_models
+    
+    return False, None, None, None
+
+
 ##################################
 #
 # Task Endpoints
@@ -174,13 +248,23 @@ async def get_task_config(request: Request, user=Depends(get_verified_user)):
     log.info(f"=== END AVAILABLE MODELS (Total: {len(models)}) ===")
     
     # Check if user has access to the required Gemini 2.5 Flash Lite model
-    has_task_model_access, found_model_id = user_has_access_to_task_model(user, models)
+    # Now includes inheritance from group admin
+    has_task_model_access, found_model_id, effective_user, _ = await user_has_access_to_task_model_with_inheritance(
+        request, user, models
+    )
+    
+    # Determine if access is inherited
+    inherited_from = None
+    if has_task_model_access and effective_user and effective_user.email != user.email:
+        inherited_from = effective_user.email
+        log.info(f"User {user.email} has inherited task model access from group admin {inherited_from}")
     
     # DEBUG: Log the result of model search
     log.info(f"=== GEMINI MODEL SEARCH RESULT ===")
     log.info(f"  User: {user.email}")
     log.info(f"  Has Task Model Access: {has_task_model_access}")
     log.info(f"  Found Model ID: '{found_model_id}'")
+    log.info(f"  Inherited From: {inherited_from or 'N/A (direct access)'}")
     log.info(f"=== END MODEL SEARCH RESULT ===")
     
     # Get per-admin task config settings (inherits from group admin if user is in a group)
@@ -225,6 +309,7 @@ async def get_task_config(request: Request, user=Depends(get_verified_user)):
         "TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE": request.app.state.config.TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE,
         "HAS_TASK_MODEL_ACCESS": has_task_model_access,  # Additional flag for frontend
         "TASK_MODEL_ID": found_model_id,  # Actual model ID found (for debugging)
+        "TASK_MODEL_INHERITED_FROM": inherited_from,  # Email of group admin if access is inherited
     }
 
 
@@ -335,18 +420,23 @@ async def update_task_config(
 async def generate_title(
     request: Request, form_data: dict, user=Depends(get_verified_user)
 ):
+    from open_webui.utils.models import get_all_models
+    
     if getattr(request.state, "direct", False) and hasattr(request.state, "model"):
         models = {
             request.state.model["id"]: request.state.model,
         }
     else:
-        from open_webui.utils.models import get_all_models
         models_list = await get_all_models(request, user)
         models = {model["id"]: model for model in models_list}
     
     # Check if user has access to the required Gemini 2.5 Flash Lite model
-    has_access, _ = user_has_access_to_task_model(user, models)
-    if not has_access:
+    # with inheritance from group admin if user doesn't have direct access
+    has_access_result, task_model_id, effective_user, effective_models = await user_has_access_to_task_model_with_inheritance(
+        request, user, models
+    )
+    
+    if not has_access_result:
         return JSONResponse(
             status_code=status.HTTP_403_FORBIDDEN,
             content={"detail": "Title generation requires access to Gemini 2.5 Flash Lite model"},
@@ -359,24 +449,9 @@ async def generate_title(
             content={"detail": "Title generation is disabled"},
         )
 
-    # Find Gemini Flash Lite model directly (ignore chat model from form_data)
-    task_model_id = find_gemini_flash_lite_model(models)
-    if task_model_id is None:
-        log.warning(f"Title generation requires Gemini 2.5 Flash Lite model which is not available for user {user.email}")
-        return JSONResponse(
-            status_code=status.HTTP_403_FORBIDDEN,
-            content={"detail": "Title generation requires Gemini 2.5 Flash Lite model which is not available"},
-        )
-    
-    if task_model_id not in models:
-        log.error(f"Gemini Flash Lite model {task_model_id} not found in available models for user {user.email}")
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Gemini Flash Lite model not found in available models",
-        )
-
     log.debug(
         f"generating chat title using model {task_model_id} for user {user.email} "
+        f"(effective_user: {effective_user.email})"
     )
 
     if request.app.state.config.TITLE_GENERATION_PROMPT_TEMPLATE != "":
@@ -410,7 +485,7 @@ async def generate_title(
         "stream": False,
         **(
             {"max_tokens": 1000}
-            if models[task_model_id].get("owned_by") == "ollama"
+            if effective_models[task_model_id].get("owned_by") == "ollama"
             else {
                 "max_completion_tokens": 1000,
             }
@@ -423,14 +498,15 @@ async def generate_title(
         },
     }
 
-    # Process the payload through the pipeline
+    # Process the payload through the pipeline using the effective user's context
     try:
-        payload = await process_pipeline_inlet_filter(request, payload, user, models)
+        payload = await process_pipeline_inlet_filter(request, payload, effective_user, effective_models)
     except Exception as e:
         raise e
 
     try:
-        return await generate_chat_completion(request, form_data=payload, user=user)
+        # Use the effective user's credentials to make the API call
+        return await generate_chat_completion(request, form_data=payload, user=effective_user)
     except Exception as e:
         log.error("Exception occurred", exc_info=True)
         return JSONResponse(
@@ -443,18 +519,23 @@ async def generate_title(
 async def generate_chat_tags(
     request: Request, form_data: dict, user=Depends(get_verified_user)
 ):
+    from open_webui.utils.models import get_all_models
+    
     if getattr(request.state, "direct", False) and hasattr(request.state, "model"):
         models = {
             request.state.model["id"]: request.state.model,
         }
     else:
-        from open_webui.utils.models import get_all_models
         models_list = await get_all_models(request, user)
         models = {model["id"]: model for model in models_list}
     
     # Check if user has access to the required Gemini 2.5 Flash Lite model
-    has_access, _ = user_has_access_to_task_model(user, models)
-    if not has_access:
+    # with inheritance from group admin if user doesn't have direct access
+    has_access_result, task_model_id, effective_user, effective_models = await user_has_access_to_task_model_with_inheritance(
+        request, user, models
+    )
+    
+    if not has_access_result:
         return JSONResponse(
             status_code=status.HTTP_403_FORBIDDEN,
             content={"detail": "Tags generation requires access to Gemini 2.5 Flash Lite model"},
@@ -467,24 +548,9 @@ async def generate_chat_tags(
             content={"detail": "Tags generation is disabled"},
         )
 
-    # Find Gemini Flash Lite model directly (ignore chat model from form_data)
-    task_model_id = find_gemini_flash_lite_model(models)
-    if task_model_id is None:
-        log.warning(f"Tags generation requires Gemini 2.5 Flash Lite model which is not available for user {user.email}")
-        return JSONResponse(
-            status_code=status.HTTP_403_FORBIDDEN,
-            content={"detail": "Tags generation requires Gemini 2.5 Flash Lite model which is not available"},
-        )
-    
-    if task_model_id not in models:
-        log.error(f"Gemini Flash Lite model {task_model_id} not found in available models for user {user.email}")
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Gemini Flash Lite model not found in available models",
-        )
-
     log.debug(
         f"generating chat tags using model {task_model_id} for user {user.email} "
+        f"(effective_user: {effective_user.email})"
     )
 
     if request.app.state.config.TAGS_GENERATION_PROMPT_TEMPLATE != "":
@@ -508,14 +574,15 @@ async def generate_chat_tags(
         },
     }
 
-    # Process the payload through the pipeline
+    # Process the payload through the pipeline using the effective user's context
     try:
-        payload = await process_pipeline_inlet_filter(request, payload, user, models)
+        payload = await process_pipeline_inlet_filter(request, payload, effective_user, effective_models)
     except Exception as e:
         raise e
 
     try:
-        return await generate_chat_completion(request, form_data=payload, user=user)
+        # Use the effective user's credentials to make the API call
+        return await generate_chat_completion(request, form_data=payload, user=effective_user)
     except Exception as e:
         log.error(f"Error generating chat completion: {e}")
         return JSONResponse(
