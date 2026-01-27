@@ -40,6 +40,13 @@
 	import Drawer from '$lib/components/common/Drawer.svelte';
 	import ChevronLeft from '$lib/components/icons/ChevronLeft.svelte';
 	import LockClosed from '$lib/components/icons/LockClosed.svelte';
+	import Info from '$lib/components/icons/Info.svelte';
+	import FileIconLight from '$lib/components/icons/FileIconLight.svelte';
+	import ImageIconLight from '$lib/components/icons/ImageIconLight.svelte';
+	import HashLight from '$lib/components/icons/HashLight.svelte';
+	import AudioLight from '$lib/components/icons/AudioLight.svelte';
+	import VideoLight from '$lib/components/icons/VideoLight.svelte';
+	import FolderOpen from '$lib/components/icons/FolderOpen.svelte';
 	import AccessControlModal from '../common/AccessControlModal.svelte';
 
 	let largeScreen = true;
@@ -279,6 +286,146 @@
 	let debounceTimeout = null;
 	let mediaQuery;
 	let dragged = false;
+
+	let filesPanelWidth = 60;
+	let filesPanelEl: HTMLDivElement | null = null;
+	let isResizingFilesPanel = false;
+	let bottomNavLeft = '0px';
+	let fileStats = {
+		totalCount: 0,
+		totalSize: 0,
+		docsCount: 0,
+		docsSize: 0,
+		imagesCount: 0,
+		imagesSize: 0,
+		audioCount: 0,
+		audioSize: 0,
+		videoCount: 0,
+		videoSize: 0,
+		otherCount: 0,
+		otherSize: 0
+	};
+
+	const startFilesPanelResize = () => {
+		if (!filesPanelEl) return;
+		isResizingFilesPanel = true;
+		document.body.style.userSelect = 'none';
+
+		const handleMouseMove = (moveEvent: MouseEvent) => {
+			if (!filesPanelEl) return;
+			const parentRect = filesPanelEl.parentElement?.getBoundingClientRect();
+			if (!parentRect) return;
+			const nextWidthPx = parentRect.right - moveEvent.clientX;
+			const nextWidthPercent = (nextWidthPx / parentRect.width) * 100;
+			filesPanelWidth = Math.min(80, Math.max(40, nextWidthPercent));
+		};
+
+		const handleMouseUp = () => {
+			isResizingFilesPanel = false;
+			document.body.style.userSelect = '';
+			window.removeEventListener('mousemove', handleMouseMove);
+			window.removeEventListener('mouseup', handleMouseUp);
+		};
+
+		window.addEventListener('mousemove', handleMouseMove);
+		window.addEventListener('mouseup', handleMouseUp);
+	};
+
+	const formatBytes = (bytes: number) => {
+		if (!bytes || bytes <= 0) return '0 B';
+		const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+		const index = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+		const value = bytes / Math.pow(1024, index);
+		return `${value.toFixed(value >= 10 || index === 0 ? 0 : 1)} ${units[index]}`;
+	};
+
+	const getFileExtension = (name: string) => {
+		if (!name) return '';
+		const trimmed = name.trim().toLowerCase();
+		const lastDot = trimmed.lastIndexOf('.');
+		return lastDot >= 0 ? trimmed.slice(lastDot + 1) : '';
+	};
+
+	const computeFileStats = (files) => {
+		const docs = new Set([
+			'pdf',
+			'doc',
+			'docx',
+			'xls',
+			'xlsx',
+			'csv',
+			'ppt',
+			'pptx',
+			'txt',
+			'md',
+			'rtf',
+			'odt',
+			'ods',
+			'odp'
+		]);
+		const images = new Set([
+			'jpg',
+			'jpeg',
+			'png',
+			'gif',
+			'bmp',
+			'tiff',
+			'webp',
+			'heic',
+			'svg'
+		]);
+		const audio = new Set(['mp3', 'wav', 'aac', 'flac', 'ogg', 'm4a', 'wma']);
+		const video = new Set(['mp4', 'mov', 'avi', 'mkv', 'webm', 'wmv', 'flv']);
+		const archives = new Set(['zip', 'rar', '7z', 'tar', 'gz']);
+
+		const stats = {
+			totalCount: 0,
+			totalSize: 0,
+			docsCount: 0,
+			docsSize: 0,
+			imagesCount: 0,
+			imagesSize: 0,
+			audioCount: 0,
+			audioSize: 0,
+			videoCount: 0,
+			videoSize: 0,
+			otherCount: 0,
+			otherSize: 0
+		};
+
+		for (const file of files ?? []) {
+			stats.totalCount += 1;
+			const size = Number(file?.size ?? file?.meta?.size ?? 0) || 0;
+			stats.totalSize += size;
+
+			const name = file?.meta?.name ?? file?.name ?? '';
+			const ext = getFileExtension(name);
+			if (docs.has(ext)) {
+				stats.docsCount += 1;
+				stats.docsSize += size;
+			} else if (images.has(ext)) {
+				stats.imagesCount += 1;
+				stats.imagesSize += size;
+			} else if (audio.has(ext)) {
+				stats.audioCount += 1;
+				stats.audioSize += size;
+			} else if (video.has(ext)) {
+				stats.videoCount += 1;
+				stats.videoSize += size;
+			} else if (archives.has(ext)) {
+				stats.otherCount += 1;
+				stats.otherSize += size;
+			} else {
+				stats.otherCount += 1;
+				stats.otherSize += size;
+			}
+		}
+
+		return stats;
+	};
+
+	$: bottomNavLeft = !$mobile && $showSidebar ? '260px' : '0px';
+	$: fileStats = computeFileStats(knowledge?.files ?? []);
 
 	const createFileFromText = (name, content) => {
 		const blob = new Blob([content], { type: 'text/plain' });
@@ -844,7 +991,7 @@
 	}}
 />
 
-<div class="flex flex-col w-full translate-y-1" id="collection-container">
+<div class="flex flex-col w-full translate-y-1 knowledge-page" id="collection-container">
 	{#if id && knowledge}
 		<AccessControlModal
 			bind:show={showAccessControlModal}
@@ -899,7 +1046,7 @@
 					</div>
 
 					{#if isSuperAdmin}
-						<div class="mt-2 px-1">
+						<div class="mt-2 px-1 w-[30%]">
 							<div class="text-xs font-semibold mb-1">{$i18n.t('Assign To')}</div>
 							<select
 								class="w-full rounded-lg py-1.5 px-2 text-xs bg-gray-50 dark:bg-gray-850"
@@ -1038,15 +1185,25 @@
 			{/if}
 
 			<div
-				class="{largeScreen ? 'shrink-0 w-72 max-w-72' : 'flex-1'}
+				class="{largeScreen ? 'shrink-0' : 'flex-1'}
 			flex
+			relative
 			py-2
 			rounded-2xl
 			border
 			border-gray-50
 			h-full
 			dark:border-gray-850"
+				class:resizable-files-panel={largeScreen}
+				style:width={largeScreen ? `${filesPanelWidth}%` : null}
+				bind:this={filesPanelEl}
 			>
+				{#if largeScreen}
+					<div
+						class="files-panel-resize-handle"
+						on:mousedown|preventDefault={startFilesPanelResize}
+					/>
+				{/if}
 				<div class=" flex flex-col w-full space-x-2 rounded-lg h-full">
 					<div class="w-full h-full flex flex-col">
 						<div class=" px-3">
@@ -1124,4 +1281,130 @@
 	{:else}
 		<Spinner />
 	{/if}
+
 </div>
+
+<nav class="knowledge-bottom-nav" style:left={bottomNavLeft}>
+	<div class="collection-info">
+		<div class="collection-info-type">
+			<HashLight/>
+			<p class="text-gray-700 dark:text-gray-300 font-medium">Total files</p>
+		</div>
+		<div class="collection-info-stats">
+			<p class="text-gray-500 dark:text-gray-500">
+				{fileStats.totalCount} files ({formatBytes(fileStats.totalSize)})
+			</p>
+		</div>
+	</div>
+	<div class="collection-info collection-info-subsection">
+		<div class="collection-info-type">
+			<FileIconLight/>
+			<p class="text-gray-700 dark:text-gray-300 font-medium">Docs</p>
+		</div>
+		<div class="collection-info-stats">
+			<p class="text-gray-500 dark:text-gray-500">
+				{fileStats.docsCount} files ({formatBytes(fileStats.docsSize)})
+			</p>
+		</div>
+	</div>
+	<div class="collection-info">
+		<div class="collection-info-type">
+			<ImageIconLight/>
+			<p class="text-gray-700 dark:text-gray-300 font-medium">Images</p>
+		</div>
+		<div class="collection-info-stats">
+			<p class="text-gray-500 dark:text-gray-500">
+				{fileStats.imagesCount} files ({formatBytes(fileStats.imagesSize)})
+			</p>
+		</div>
+	</div>
+	<div class="collection-info">
+		<div class="collection-info-type">
+			<AudioLight/>
+			<p class="text-gray-700 dark:text-gray-300 font-medium">Audio</p>
+		</div>
+		<div class="collection-info-stats">
+			<p class="text-gray-500 dark:text-gray-500">
+				{fileStats.audioCount} files ({formatBytes(fileStats.audioSize)})
+			</p>
+		</div>
+	</div>
+	<div class="collection-info">
+		<div class="collection-info-type">
+			<VideoLight/>
+			<p class="text-gray-700 dark:text-gray-300 font-medium">Video</p>
+		</div>
+		<div class="collection-info-stats">
+			<p class="text-gray-500 dark:text-gray-500">
+				{fileStats.videoCount} files ({formatBytes(fileStats.videoSize)})
+			</p>
+		</div>
+	</div>
+	<div class="collection-info">
+		<div class="collection-info-type">
+			<FolderOpen className="size-5" strokeWidth="1"/>
+			<p class="text-gray-700 dark:text-gray-300 font-medium">Other</p>
+		</div>
+		<div class="collection-info-stats">
+			<p class="text-gray-500 dark:text-gray-500">
+				{fileStats.otherCount} files ({formatBytes(fileStats.otherSize)})
+			</p>
+		</div>
+	</div>
+</nav>
+
+<style>
+	.resizable-files-panel {
+		overflow: auto;
+	}
+
+	.files-panel-resize-handle {
+		position: absolute;
+		left: -4px;
+		top: 0;
+		bottom: 0;
+		width: 8px;
+		cursor: ew-resize;
+		z-index: 2;
+	}
+
+	.knowledge-bottom-nav {
+		position: fixed;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+		/* background: rgba(255, 255, 255, 0.9); */
+		background: "currentColor";
+		backdrop-filter: blur(6px);
+		border-top: 1px solid rgba(0, 0, 0, 0.08);
+		z-index: 5;
+		display: flex;
+		gap: 16px;
+		flex-wrap: wrap;
+	}
+
+	.knowledge-page {
+		padding-bottom: calc(56px + env(safe-area-inset-bottom));
+	}
+
+	.collection-info {
+		display: flex;
+		flex-direction: column;
+		font-size: 14px;
+		margin: 0px 10px;
+	}
+
+	.collection-info-subsection {
+		margin-left: 50px;
+	}
+
+	.collection-info-stats{
+		display: flex;
+		flex-direction: column;
+	}
+	.collection-info-type{
+		display: flex;
+		gap: 3px;
+	}
+</style>
