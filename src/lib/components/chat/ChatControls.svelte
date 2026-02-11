@@ -29,6 +29,7 @@
 	export let stopResponse: Function;
 	export let showMessage: Function;
 	export let addMessages: Function;
+	export let saveChatHandler: Function;
 	export let files;
 	export let modelId;
 	export let webSearchEnabled = false;
@@ -176,7 +177,7 @@
 							<FacilitiesOverlay
 								{submitPrompt}
 								{modelId}
-								{history}
+								bind:history
 								{addMessages}
 								{webSearchEnabled}
 								bind:files
@@ -271,9 +272,10 @@
 								<FacilitiesOverlay
 									{submitPrompt}
 									{modelId}
-									{history}
+									bind:history
 									{addMessages}
 									{initChatHandler}
+									{saveChatHandler}
 									{webSearchEnabled}
 									bind:files
 									on:close={() => {
