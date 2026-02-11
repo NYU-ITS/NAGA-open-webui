@@ -1,10 +1,11 @@
 <script lang="ts">
 	import { toast } from 'svelte-sonner';
-	import { onMount, tick, getContext } from 'svelte';
+	import { onMount, onDestroy, tick, getContext } from 'svelte';
 	import { openDB, deleteDB } from 'idb';
 	import fileSaver from 'file-saver';
 	const { saveAs } = fileSaver;
-	import mermaid from 'mermaid';
+	import { mermaidService } from '$lib/services/mermaid.service';
+	import { mermaidStore } from '$lib/stores/mermaid.store';
 
 	import { goto } from '$app/navigation';
 	import { browser } from '$app/environment';
@@ -44,6 +45,7 @@
 	import SettingsModal from '$lib/components/chat/SettingsModal.svelte';
 	import ChangelogModal from '$lib/components/ChangelogModal.svelte';
 	import AccountPending from '$lib/components/layout/Overlay/AccountPending.svelte';
+	import TermsAndConditions from '$lib/components/layout/Overlay/TermsAndConditions.svelte';
 	import UpdateInfoToast from '$lib/components/layout/UpdateInfoToast.svelte';
 
 	const i18n = getContext('i18n');
@@ -54,6 +56,7 @@
 
 	let version;
 	let titleSuffix = '';
+	let themeObserver: MutationObserver | null = null;
 
 	onMount(async () => {
 		// Determine title suffix based on hostname (client-only)
@@ -63,6 +66,32 @@
 				titleSuffix = ' Dev';
 			} else if (host === 'localhost' || host === '127.0.0.1') {
 				titleSuffix = ' Local';
+			}
+
+			// Global Mermaid Initialization
+			try {
+				const currentTheme = document.documentElement.classList.contains('dark') ? 'dark' : 'light';
+				await mermaidService.initialize();
+				console.log(`[Mermaid] Global initialization successful (theme: ${currentTheme})`);
+				mermaidStore.setInitialized(true, currentTheme);
+
+				// Observe theme changes
+				themeObserver = new MutationObserver((mutations) => {
+					mutations.forEach((mutation) => {
+						if (mutation.type === 'attributes' && mutation.attributeName === 'class') {
+							const newTheme = document.documentElement.classList.contains('dark') ? 'dark' : 'light';
+							if (newTheme !== mermaidService.getTheme()) {
+								console.log(`[Mermaid] Theme change detected: ${mermaidService.getTheme()} → ${newTheme}`);
+								mermaidService.reinitialize(newTheme);
+								mermaidStore.setInitialized(true, newTheme);
+							}
+						}
+					});
+				});
+				themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+			} catch (error) {
+				console.error('[Mermaid] Global initialization failed:', error);
+				mermaidStore.setInitialized(false);
 			}
 		}
 		if ($user === undefined) {
@@ -105,14 +134,38 @@
 				settings.set(localStorageSettings);
 			}
 
-			models.set(
-				await getModels(
-					localStorage.token,
-					$config?.features?.enable_direct_connections && ($settings?.directConnections ?? null)
-				)
-			);
-			banners.set(await getBanners(localStorage.token));
-			tools.set(await getTools(localStorage.token));
+			// Parallel API calls for better performance
+			try {
+				const [modelsData, bannersData, toolsData] = await Promise.all([
+					getModels(
+						localStorage.token,
+						$config?.features?.enable_direct_connections && ($settings?.directConnections ?? null)
+					).catch((error) => {
+						console.error('Error loading models:', error);
+						return null;
+					}),
+					getBanners(localStorage.token).catch((error) => {
+						console.error('Error loading banners:', error);
+						return null;
+					}),
+					getTools(localStorage.token).catch((error) => {
+						console.error('Error loading tools:', error);
+						return null;
+					})
+				]);
+				
+				if (modelsData !== null) {
+					models.set(modelsData);
+				}
+				if (bannersData !== null) {
+					banners.set(bannersData);
+				}
+				if (toolsData !== null) {
+					tools.set(toolsData);
+				}
+			} catch (error) {
+				console.error('Error loading workspace data:', error);
+			}
 
 			document.addEventListener('keydown', async function (event) {
 				const isCtrlPressed = event.ctrlKey || event.metaKey; // metaKey is for Cmd key on Mac
@@ -223,14 +276,28 @@
 		loaded = true;
 	});
 
-	const checkForVersionUpdates = async () => {
-		version = await getVersionUpdates(localStorage.token).catch((error) => {
-			return {
-				current: WEBUI_VERSION,
-				latest: WEBUI_VERSION
-			};
-		});
-	};
+		const checkForVersionUpdates = async () => {
+			version = await getVersionUpdates(localStorage.token).catch((error) => {
+				return {
+					current: WEBUI_VERSION,
+					latest: WEBUI_VERSION
+				};
+			});
+		};
+
+	onDestroy(() => {
+		// Cleanup Mermaid service
+		if (browser) {
+			if (themeObserver) {
+				themeObserver.disconnect();
+				console.log('[Mermaid] Theme observer disconnected');
+			}
+			if (mermaidService) {
+				mermaidService.destroy();
+				console.log('[Mermaid] Global cleanup completed');
+			}
+		}
+	});
 </script>
 
 <svelte:head>
@@ -258,7 +325,11 @@
 	>
 		{#if loaded}
 			{#if !['user', 'admin'].includes($user.role)}
+				{#if $user?.info?.pilot_genai?.terms?.required}
+					<TermsAndConditions />
+				{:else}
 				<AccountPending />
+				{/if}
 			{:else if localDBChats.length > 0}
 				<div class="fixed w-full h-full flex z-50">
 					<div

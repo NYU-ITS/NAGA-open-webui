@@ -54,10 +54,90 @@ from open_webui.utils.filter import (
 
 from open_webui.env import SRC_LOG_LEVELS, GLOBAL_LOG_LEVEL, BYPASS_MODEL_ACCESS_CONTROL
 
+# OpenTelemetry instrumentation helpers
+try:
+    from open_webui.utils.otel_instrumentation import (
+        trace_span_async,
+        add_span_event,
+        set_span_attribute,
+    )
+    from opentelemetry.trace import Status, StatusCode, SpanKind
+    OTEL_AVAILABLE = True
+except ImportError:
+    OTEL_AVAILABLE = False
+    # Create no-op functions if OTEL not available
+    # NOTE: Must be regular function (not async def) to match @asynccontextmanager signature
+    def trace_span_async(*args, **kwargs):
+        span_name = kwargs.get('name', args[0] if args else 'unknown')
+        from contextlib import asynccontextmanager
+        @asynccontextmanager
+        async def _noop():
+            # Get logger at call time (log variable will be defined by then)
+            _log = logging.getLogger(__name__)
+            try:
+                _log.debug(f"[trace_span_async] Generator entering (OTEL unavailable, no-op) for span '{span_name}'")
+                yield None
+                _log.debug(f"[trace_span_async] Generator exiting normally (OTEL unavailable, no-op) for span '{span_name}'")
+            except GeneratorExit as ge:
+                _log.debug(f"[trace_span_async] GeneratorExit caught (OTEL unavailable, no-op) for span '{span_name}': {ge}")
+                # Properly handle generator exit
+                raise
+            except Exception as e:
+                _log.warning(f"[trace_span_async] Exception thrown into generator (OTEL unavailable, no-op) for span '{span_name}': {type(e).__name__}: {e}", exc_info=True)
+                # Properly handle exceptions thrown into generator - must re-raise or return
+                # Re-raising ensures the exception propagates correctly
+                raise
+        return _noop()
+    def add_span_event(*args, **kwargs):
+        pass
+    def set_span_attribute(*args, **kwargs):
+        pass
+    SpanKind = None
+    Status = None
+    StatusCode = None
+
 
 logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["MAIN"])
+
+# Safe wrapper functions that NEVER fail - OTEL is monitoring only, must not affect task execution
+def safe_add_span_event(event_name, attributes=None):
+    """Safely add span event - never fails, even if OTEL is broken"""
+    try:
+        add_span_event(event_name, attributes)
+    except Exception as e:
+        log.debug(f"OTEL add_span_event failed (non-critical): {e}")
+
+def safe_trace_span_async(*args, **kwargs):
+    """Safely create async trace span - never fails, even if OTEL is broken
+    
+    Returns an async context manager (same signature as trace_span_async).
+    Can be used with: async with safe_trace_span_async(...) as span:
+    """
+    span_name = kwargs.get('name', args[0] if args else 'unknown')
+    try:
+        log.debug(f"[safe_trace_span_async] Attempting to create span '{span_name}'")
+        return trace_span_async(*args, **kwargs)  # Returns async context manager, not a coroutine
+    except Exception as e:
+        log.warning(f"[safe_trace_span_async] OTEL trace_span_async failed (non-critical) for span '{span_name}': {type(e).__name__}: {e}", exc_info=True)
+        from contextlib import asynccontextmanager
+        @asynccontextmanager
+        async def _noop():
+            try:
+                log.debug(f"[safe_trace_span_async] Generator entering (safe fallback) for span '{span_name}'")
+                yield None
+                log.debug(f"[safe_trace_span_async] Generator exiting normally (safe fallback) for span '{span_name}'")
+            except GeneratorExit as ge:
+                log.debug(f"[safe_trace_span_async] GeneratorExit caught (safe fallback) for span '{span_name}': {ge}")
+                # Properly handle generator exit
+                raise
+            except Exception as gen_exc:
+                log.warning(f"[safe_trace_span_async] Exception thrown into generator (safe fallback) for span '{span_name}': {type(gen_exc).__name__}: {gen_exc}", exc_info=True)
+                # Properly handle exceptions thrown into generator - must re-raise or return
+                # Re-raising ensures the exception propagates correctly
+                raise
+        return _noop()
 
 
 async def generate_direct_chat_completion(
@@ -68,91 +148,142 @@ async def generate_direct_chat_completion(
 ):
     log.info("generate_direct_chat_completion")
 
-    metadata = form_data.pop("metadata", {})
+    # Extract model and user info for instrumentation
+    model_id = form_data.get("model", "unknown")
+    user_id_attr = getattr(user, "id", None)
+    user_email = getattr(user, "email", None)
+    is_streaming = form_data.get("stream", False)
+    
+    # Create span for direct chat completion
+    # CRITICAL: Use safe_trace_span_async to ensure OTEL failures never prevent chat completion
+    async with safe_trace_span_async(
+        name="llm.direct_chat_completion",
+        attributes={
+            "llm.model": model_id,
+            "llm.user.id": str(user_id_attr) if user_id_attr else None,
+            "llm.user.email": user_email,
+            "llm.stream": is_streaming,
+            "llm.temperature": form_data.get("temperature"),
+            "llm.max_tokens": form_data.get("max_tokens"),
+        },
+        kind=SpanKind.CLIENT if OTEL_AVAILABLE and SpanKind else None,
+    ) as span:
+        try:
+            # Add event: Direct LLM request started
+            safe_add_span_event("llm.direct.request", {
+                "model": model_id,
+                "message_count": len(form_data.get("messages", [])),
+            })
+            
+            metadata = form_data.pop("metadata", {})
 
-    user_id = metadata.get("user_id")
-    session_id = metadata.get("session_id")
-    request_id = str(uuid.uuid4())  # Generate a unique request ID
+            user_id = metadata.get("user_id")
+            session_id = metadata.get("session_id")
+            request_id = str(uuid.uuid4())  # Generate a unique request ID
 
-    event_caller = get_event_call(metadata)
+            event_caller = get_event_call(metadata)
 
-    channel = f"{user_id}:{session_id}:{request_id}"
+            channel = f"{user_id}:{session_id}:{request_id}"
 
-    if form_data.get("stream"):
-        q = asyncio.Queue()
+            if form_data.get("stream"):
+                q = asyncio.Queue()
 
-        async def message_listener(sid, data):
-            """
-            Handle received socket messages and push them into the queue.
-            """
-            await q.put(data)
+                async def message_listener(sid, data):
+                    """
+                    Handle received socket messages and push them into the queue.
+                    """
+                    await q.put(data)
 
-        # Register the listener
-        sio.on(channel, message_listener)
+                # Register the listener
+                sio.on(channel, message_listener)
 
-        # Start processing chat completion in background
-        res = await event_caller(
-            {
-                "type": "request:chat:completion",
-                "data": {
-                    "form_data": form_data,
-                    "model": models[form_data["model"]],
-                    "channel": channel,
-                    "session_id": session_id,
-                },
-            }
-        )
+                # Start processing chat completion in background
+                res = await event_caller(
+                    {
+                        "type": "request:chat:completion",
+                        "data": {
+                            "form_data": form_data,
+                            "model": models[form_data["model"]],
+                            "channel": channel,
+                            "session_id": session_id,
+                        },
+                    }
+                )
 
-        log.info(f"res: {res}")
+                log.info(f"res: {res}")
 
-        if res.get("status", False):
-            # Define a generator to stream responses
-            async def event_generator():
-                nonlocal q
-                try:
-                    while True:
-                        data = await q.get()  # Wait for new messages
-                        if isinstance(data, dict):
-                            if "done" in data and data["done"]:
-                                break  # Stop streaming when 'done' is received
+                if res.get("status", False):
+                    # Define a generator to stream responses
+                    async def event_generator():
+                        nonlocal q
+                        try:
+                            while True:
+                                data = await q.get()  # Wait for new messages
+                                if isinstance(data, dict):
+                                    if "done" in data and data["done"]:
+                                        break  # Stop streaming when 'done' is received
 
-                            yield f"data: {json.dumps(data)}\n\n"
-                        elif isinstance(data, str):
-                            yield data
-                except Exception as e:
-                    log.debug(f"Error in event generator: {e}")
-                    pass
+                                    yield f"data: {json.dumps(data)}\n\n"
+                                elif isinstance(data, str):
+                                    yield data
+                        except Exception as e:
+                            log.debug(f"Error in event generator: {e}")
+                            pass
 
-            # Define a background task to run the event generator
-            async def background():
-                try:
-                    del sio.handlers["/"][channel]
-                except Exception as e:
-                    pass
+                    # Define a background task to run the event generator
+                    async def background():
+                        try:
+                            del sio.handlers["/"][channel]
+                        except Exception as e:
+                            pass
 
-            # Return the streaming response
-            return StreamingResponse(
-                event_generator(), media_type="text/event-stream", background=background
-            )
-        else:
-            raise Exception(str(res))
-    else:
-        res = await event_caller(
-            {
-                "type": "request:chat:completion",
-                "data": {
-                    "form_data": form_data,
-                    "model": models[form_data["model"]],
-                    "channel": channel,
-                    "session_id": session_id,
-                },
-            }
-        )
+                    # Return the streaming response
+                    response = StreamingResponse(
+                        event_generator(), media_type="text/event-stream", background=background
+                    )
+                    
+                    # Add event: Direct LLM response received (streaming)
+                    safe_add_span_event("llm.direct.response", {
+                        "status": "success",
+                        "streaming": True,
+                    })
+                    
+                    return response
+                else:
+                    raise Exception(str(res))
+            else:
+                res = await event_caller(
+                    {
+                        "type": "request:chat:completion",
+                        "data": {
+                            "form_data": form_data,
+                            "model": models[form_data["model"]],
+                            "channel": channel,
+                            "session_id": session_id,
+                        },
+                    }
+                )
 
-        if "error" in res:
-            raise Exception(res["error"])
+                if "error" in res:
+                    raise Exception(res["error"])
 
-        return res
+                # Add event: Direct LLM response received (non-streaming)
+                safe_add_span_event("llm.direct.response", {
+                    "status": "success",
+                    "streaming": False,
+                })
+                
+                return res
+            
+        except Exception as e:
+            # Add event: Direct LLM error
+            safe_add_span_event("llm.direct.error", {
+                "error.type": type(e).__name__,
+                "error.message": str(e)[:200],
+            })
+            
+            # Re-raise exception (span status will be set by trace_span_async)
+            raise
 
 
 async def generate_chat_completion(
@@ -162,122 +293,194 @@ async def generate_chat_completion(
     bypass_filter: bool = False,
 ):
     log.debug(f"generate_chat_completion: {form_data}")
-    if BYPASS_MODEL_ACCESS_CONTROL:
-        bypass_filter = True
+    
+    # Extract model and user info for instrumentation
+    model_id = form_data.get("model", "unknown")
+    user_id = getattr(user, "id", None)
+    user_email = getattr(user, "email", None)
+    is_streaming = form_data.get("stream", False)
+    
+    # Create span for LLM chat completion
+    # CRITICAL: Use safe_trace_span_async to ensure OTEL failures never prevent chat completion
+    async with safe_trace_span_async(
+        name="llm.chat_completion",
+        attributes={
+            "llm.model": model_id,
+            "llm.user.id": str(user_id) if user_id else None,
+            "llm.user.email": user_email,
+            "llm.stream": is_streaming,
+            "llm.temperature": form_data.get("temperature"),
+            "llm.max_tokens": form_data.get("max_tokens"),
+            "llm.top_p": form_data.get("top_p"),
+        },
+        kind=SpanKind.CLIENT if OTEL_AVAILABLE and SpanKind else None,
+    ) as span:
+        try:
+            # Add event: LLM request started
+            safe_add_span_event("llm.request", {
+                "model": model_id,
+                "message_count": len(form_data.get("messages", [])),
+            })
+            
+            if BYPASS_MODEL_ACCESS_CONTROL:
+                bypass_filter = True
 
-    if hasattr(request.state, "metadata"):
-        if "metadata" not in form_data:
-            form_data["metadata"] = request.state.metadata
-        else:
-            form_data["metadata"] = {
-                **form_data["metadata"],
-                **request.state.metadata,
-            }
+            if hasattr(request.state, "metadata"):
+                if "metadata" not in form_data:
+                    form_data["metadata"] = request.state.metadata
+                else:
+                    form_data["metadata"] = {
+                        **form_data["metadata"],
+                        **request.state.metadata,
+                    }
 
-    if getattr(request.state, "direct", False) and hasattr(request.state, "model"):
-        models = {
-            request.state.model["id"]: request.state.model,
-        }
-        log.debug(f"direct connection to model: {models}")
-    else:
-        models = request.app.state.MODELS
-
-    model_id = form_data["model"]
-    if model_id not in models:
-        raise Exception("Model not found")
-
-    model = models[model_id]
-
-    if getattr(request.state, "direct", False):
-        return await generate_direct_chat_completion(
-            request, form_data, user=user, models=models
-        )
-    else:
-        # Check if user has access to the model
-        if not bypass_filter and user.role == "user":
-            try:
-                check_model_access(user, model)
-            except Exception as e:
-                raise e
-
-        if model.get("owned_by") == "arena":
-            model_ids = model.get("info", {}).get("meta", {}).get("model_ids")
-            filter_mode = model.get("info", {}).get("meta", {}).get("filter_mode")
-            if model_ids and filter_mode == "exclude":
-                model_ids = [
-                    model["id"]
-                    for model in list(request.app.state.MODELS.values())
-                    if model.get("owned_by") != "arena" and model["id"] not in model_ids
-                ]
-
-            selected_model_id = None
-            if isinstance(model_ids, list) and model_ids:
-                selected_model_id = random.choice(model_ids)
+            if getattr(request.state, "direct", False) and hasattr(request.state, "model"):
+                models = {
+                    request.state.model["id"]: request.state.model,
+                }
+                log.debug(f"direct connection to model: {models}")
             else:
-                model_ids = [
-                    model["id"]
-                    for model in list(request.app.state.MODELS.values())
-                    if model.get("owned_by") != "arena"
-                ]
-                selected_model_id = random.choice(model_ids)
+                models = request.app.state.MODELS
 
-            form_data["model"] = selected_model_id
+            if model_id not in models:
+                raise Exception("Model not found")
 
-            if form_data.get("stream") == True:
+            model = models[model_id]
 
-                async def stream_wrapper(stream):
-                    yield f"data: {json.dumps({'selected_model_id': selected_model_id})}\n\n"
-                    async for chunk in stream:
-                        yield chunk
-
-                response = await generate_chat_completion(
-                    request, form_data, user, bypass_filter=True
-                )
-                return StreamingResponse(
-                    stream_wrapper(response.body_iterator),
-                    media_type="text/event-stream",
-                    background=response.background,
+            if getattr(request.state, "direct", False):
+                response = await generate_direct_chat_completion(
+                    request, form_data, user=user, models=models
                 )
             else:
-                return {
-                    **(
-                        await generate_chat_completion(
+                # Check if user has access to the model
+                if not bypass_filter and user.role == "user":
+                    try:
+                        check_model_access(user, model)
+                    except Exception as e:
+                        raise e
+
+                if model.get("owned_by") == "arena":
+                    model_ids = model.get("info", {}).get("meta", {}).get("model_ids")
+                    filter_mode = model.get("info", {}).get("meta", {}).get("filter_mode")
+                    if model_ids and filter_mode == "exclude":
+                        model_ids = [
+                            model["id"]
+                            for model in list(request.app.state.MODELS.values())
+                            if model.get("owned_by") != "arena" and model["id"] not in model_ids
+                        ]
+
+                    selected_model_id = None
+                    if isinstance(model_ids, list) and model_ids:
+                        selected_model_id = random.choice(model_ids)
+                    else:
+                        model_ids = [
+                            model["id"]
+                            for model in list(request.app.state.MODELS.values())
+                            if model.get("owned_by") != "arena"
+                        ]
+                        selected_model_id = random.choice(model_ids)
+
+                    form_data["model"] = selected_model_id
+
+                    if form_data.get("stream") == True:
+
+                        async def stream_wrapper(stream):
+                            yield f"data: {json.dumps({'selected_model_id': selected_model_id})}\n\n"
+                            async for chunk in stream:
+                                yield chunk
+
+                        response = await generate_chat_completion(
                             request, form_data, user, bypass_filter=True
                         )
-                    ),
-                    "selected_model_id": selected_model_id,
-                }
-
-        if model.get("pipe"):
-            # Below does not require bypass_filter because this is the only route the uses this function and it is already bypassing the filter
-            return await generate_function_chat_completion(
-                request, form_data, user=user, models=models
-            )
-        if model.get("owned_by") == "ollama":
-            # Using /ollama/api/chat endpoint
-            form_data = convert_payload_openai_to_ollama(form_data)
-            response = await generate_ollama_chat_completion(
-                request=request,
-                form_data=form_data,
-                user=user,
-                bypass_filter=bypass_filter,
-            )
-            if form_data.get("stream"):
-                response.headers["content-type"] = "text/event-stream"
-                return StreamingResponse(
-                    convert_streaming_response_ollama_to_openai(response),
-                    headers=dict(response.headers),
-                    background=response.background,
-                )
-            else:
-                return convert_response_ollama_to_openai(response)
-        else:
-            return await generate_openai_chat_completion(
-                request=request,
-                form_data=form_data,
-                user=user,
-                bypass_filter=bypass_filter,
-            )
+                        response = StreamingResponse(
+                            stream_wrapper(response.body_iterator),
+                            media_type="text/event-stream",
+                            background=response.background,
+                        )
+                    else:
+                        response = {
+                            **(
+                                await generate_chat_completion(
+                                    request, form_data, user, bypass_filter=True
+                                )
+                            ),
+                            "selected_model_id": selected_model_id,
+                        }
+                elif model.get("pipe"):
+                    # Below does not require bypass_filter because this is the only route the uses this function and it is already bypassing the filter
+                    response = await generate_function_chat_completion(
+                        request, form_data, user=user, models=models
+                    )
+                elif model.get("preset"):
+                    # Preset model - check if base model is a pipe model
+                    base_model_id = model.get("info", {}).get("base_model_id")
+                    if base_model_id:
+                        # Look up base model - might be a pipe model
+                        base_model = models.get(base_model_id)
+                        if base_model and base_model.get("pipe"):
+                            # Base model is a pipe - route to function completion with base model
+                            form_data["model"] = base_model_id
+                            response = await generate_function_chat_completion(
+                                request, form_data, user=user, models=models
+                            )
+                        else:
+                            # Base model is OpenAI or not found - let OpenAI handler resolve it
+                            response = await generate_openai_chat_completion(
+                                request=request,
+                                form_data=form_data,
+                                user=user,
+                                bypass_filter=bypass_filter,
+                            )
+                    else:
+                        # No base model - shouldn't happen for preset models, fallback to OpenAI
+                        response = await generate_openai_chat_completion(
+                            request=request,
+                            form_data=form_data,
+                            user=user,
+                            bypass_filter=bypass_filter,
+                    )
+                elif model.get("owned_by") == "ollama":
+                    # Using /ollama/api/chat endpoint
+                    form_data = convert_payload_openai_to_ollama(form_data)
+                    response = await generate_ollama_chat_completion(
+                        request=request,
+                        form_data=form_data,
+                        user=user,
+                        bypass_filter=bypass_filter,
+                    )
+                    if form_data.get("stream"):
+                        response.headers["content-type"] = "text/event-stream"
+                        response = StreamingResponse(
+                            convert_streaming_response_ollama_to_openai(response),
+                            headers=dict(response.headers),
+                            background=response.background,
+                        )
+                    else:
+                        response = convert_response_ollama_to_openai(response)
+                else:
+                    response = await generate_openai_chat_completion(
+                        request=request,
+                        form_data=form_data,
+                        user=user,
+                        bypass_filter=bypass_filter,
+                    )
+            
+            # Add event: LLM response received
+            safe_add_span_event("llm.response", {
+                "status": "success",
+            })
+            
+            return response
+            
+        except Exception as e:
+            # Add event: LLM error
+            safe_add_span_event("llm.error", {
+                "error.type": type(e).__name__,
+                "error.message": str(e)[:200],  # Truncate long error messages
+            })
+            
+            # Re-raise exception (span status will be set by trace_span_async)
+            raise
 
 
 chat_completion = generate_chat_completion
@@ -304,7 +507,8 @@ async def chat_completed(request: Request, form_data: dict, user: Any):
     try:
         data = await process_pipeline_outlet_filter(request, data, user, models)
     except Exception as e:
-        return Exception(f"Error: {e}")
+        log.error(f"Error in chat_completed: {e}")
+        raise Exception(f"Error: {e}")
 
     metadata = {
         "chat_id": data["chat_id"],
@@ -337,7 +541,8 @@ async def chat_completed(request: Request, form_data: dict, user: Any):
         )
         return result
     except Exception as e:
-        return Exception(f"Error: {e}")
+        log.error(f"Error in chat_completed filter processing: {e}")
+        raise Exception(f"Error: {e}")
 
 
 async def chat_action(request: Request, action_id: str, form_data: dict, user: Any):
@@ -442,6 +647,7 @@ async def chat_action(request: Request, action_id: str, form_data: dict, user: A
                 data = action(**params)
 
         except Exception as e:
-            return Exception(f"Error: {e}")
+            log.error(f"Error in chat_action: {e}")
+            raise Exception(f"Error: {e}")
 
     return data

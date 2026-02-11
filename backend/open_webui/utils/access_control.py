@@ -34,11 +34,21 @@ def get_permissions(
     If a permission is defined in multiple groups, the most permissive value is used (True > False).
     Permissions are nested in a dict with the permission key as the key and a boolean as the value.
     """
+    from open_webui.utils.cache import get_cache_manager
+    
+    cache = get_cache_manager()
+    
+    # Check cache first
+    cached_permissions = cache.get_user_permissions(user_id)
+    if cached_permissions is not None:
+        return cached_permissions
 
     def combine_permissions(
         permissions: Dict[str, Any], group_permissions: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Combine permissions from multiple groups by taking the most permissive value."""
+        if not group_permissions:
+            return permissions
         for key, value in group_permissions.items():
             if isinstance(value, dict):
                 if key not in permissions:
@@ -60,11 +70,14 @@ def get_permissions(
 
     # Combine permissions from all user groups
     for group in user_groups:
-        group_permissions = group.permissions
+        group_permissions = group.permissions or {}
         permissions = combine_permissions(permissions, group_permissions)
 
     # Ensure all fields from default_permissions are present and filled in
     permissions = fill_missing_permissions(permissions, default_permissions)
+    
+    # Cache the result
+    cache.set_user_permissions(user_id, permissions)
 
     return permissions
 
@@ -92,13 +105,10 @@ def has_permission(
 
     permission_hierarchy = permission_key.split(".")
 
-    # Retrieve user group permissions
-    user_groups = Groups.get_groups_by_member_id(user_id)
-
-    for group in user_groups:
-        group_permissions = group.permissions
-        if get_permission(group_permissions, permission_hierarchy):
-            return True
+    # Use get_permissions which is now cached
+    user_permissions = get_permissions(user_id, default_permissions)
+    if get_permission(user_permissions, permission_hierarchy):
+        return True
 
     # Check default permissions afterward if the group permissions don't allow it
     default_permissions = fill_missing_permissions(
@@ -112,11 +122,10 @@ def has_access(
     type: str = "write",
     access_control: Optional[dict] = None,
 ) -> bool:
+    # ENFORCE: access_control=None means PRIVATE (creator only), NOT public
+    # This function should only be called for models with explicit access_control
     if access_control is None:
-        user = Users.get_user_by_id(user_id)
-        if user.role == "user":
-            return type == "read"
-        return False
+        return False  # Private by default - no access unless user is creator
 
     user_groups = Groups.get_groups_by_member_id(user_id)
     user_group_ids = [group.id for group in user_groups]

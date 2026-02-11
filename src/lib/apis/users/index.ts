@@ -29,6 +29,33 @@ export const checkIfSuperAdmin = async (token: string, email: string) => {
 	return res;
 };
 
+export const getSuperAdminEmails = async (token: string): Promise<string[]> => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/users/super-admin-emails`, {
+		method: 'GET',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			console.log(err);
+			error = err.detail;
+			return [];
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
 export const getUserGroups = async (token: string) => {
 	let error = null;
 
@@ -46,6 +73,37 @@ export const getUserGroups = async (token: string) => {
 		.catch((err) => {
 			console.log(err);
 			error = err.detail;
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const acceptTerms = async (token: string, version: number = 1) => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/users/terms/accept`, {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify({
+			accepted: true,
+			version
+		})
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			console.log(err);
+			error = err.detail ?? err;
 			return null;
 		});
 
@@ -144,10 +202,15 @@ export const updateUserRole = async (token: string, id: string, role: string) =>
 	return res;
 };
 
-export const getUsers = async (token: string) => {
+export const getUsers = async (token: string, limit?: number) => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_API_BASE_URL}/users/`, {
+	let url = `${WEBUI_API_BASE_URL}/users/`;
+	if (limit) {
+		url = `${url}?limit=${limit}`;
+	}
+
+	const res = await fetch(url, {
 		method: 'GET',
 		headers: {
 			'Content-Type': 'application/json',

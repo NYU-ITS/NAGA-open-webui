@@ -1,6 +1,6 @@
 from typing import List, Optional
 from pydantic import BaseModel
-from fastapi import APIRouter, Depends, HTTPException, status, Request, UploadFile, File
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, Request, UploadFile, File
 import logging
 
 from open_webui.models.knowledge import (
@@ -17,7 +17,13 @@ from open_webui.routers.retrieval import (
     process_files_batch,
     BatchProcessFilesForm,
 )
+from open_webui.utils.job_queue import is_job_queue_available
 from open_webui.storage.provider import Storage
+from open_webui.routers.audio import transcribe
+from open_webui.utils.file_cleanup import (
+    cleanup_file_completely,
+    cleanup_file_from_knowledge_only,
+)
 
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.utils.auth import get_verified_user
@@ -28,9 +34,92 @@ from open_webui.utils.super_admin import is_super_admin
 from open_webui.env import SRC_LOG_LEVELS
 from open_webui.models.models import Models, ModelForm
 
+# OpenTelemetry instrumentation (conditional import)
+try:
+    from open_webui.utils.otel_instrumentation import (
+        trace_span_async,
+        add_span_event,
+        set_span_attribute,
+    )
+    OTEL_AVAILABLE = True
+except ImportError:
+    OTEL_AVAILABLE = False
+    # Create no-op functions if OTEL not available
+    # NOTE: Must be regular function (not async def) to match @asynccontextmanager signature
+    def trace_span_async(*args, **kwargs):
+        span_name = kwargs.get('name', args[0] if args else 'unknown')
+        from contextlib import asynccontextmanager
+        @asynccontextmanager
+        async def _noop():
+            # Get logger at call time (log variable will be defined by then)
+            _log = logging.getLogger(__name__)
+            try:
+                _log.debug(f"[trace_span_async] Generator entering (OTEL unavailable, no-op) for span '{span_name}'")
+                yield None
+                _log.debug(f"[trace_span_async] Generator exiting normally (OTEL unavailable, no-op) for span '{span_name}'")
+            except GeneratorExit as ge:
+                _log.debug(f"[trace_span_async] GeneratorExit caught (OTEL unavailable, no-op) for span '{span_name}': {ge}")
+                # Properly handle generator exit
+                raise
+            except Exception as e:
+                _log.warning(f"[trace_span_async] Exception thrown into generator (OTEL unavailable, no-op) for span '{span_name}': {type(e).__name__}: {e}", exc_info=True)
+                # Properly handle exceptions thrown into generator - must re-raise or return
+                # Re-raising ensures the exception propagates correctly
+                raise
+        return _noop()
+    def add_span_event(*args, **kwargs):
+        pass
+    def set_span_attribute(*args, **kwargs):
+        pass
 
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["MODELS"])
+
+# Safe wrapper functions that NEVER fail - OTEL is monitoring only, must not affect task execution
+def safe_add_span_event(event_name, attributes=None):
+    """Safely add span event - never fails, even if OTEL is broken"""
+    try:
+        add_span_event(event_name, attributes)
+    except Exception as e:
+        log.debug(f"OTEL add_span_event failed (non-critical): {e}")
+
+def safe_set_span_attribute(span, key, value):
+    """Safely set span attribute - never fails, even if OTEL is broken"""
+    try:
+        if span:
+            set_span_attribute(span, key, value)
+    except Exception as e:
+        log.debug(f"OTEL set_span_attribute failed (non-critical): {e}")
+
+def safe_trace_span_async(*args, **kwargs):
+    """Safely create async trace span - never fails, even if OTEL is broken
+    
+    Returns an async context manager (same signature as trace_span_async).
+    Can be used with: async with safe_trace_span_async(...) as span:
+    """
+    span_name = kwargs.get('name', args[0] if args else 'unknown')
+    try:
+        log.debug(f"[safe_trace_span_async] Attempting to create span '{span_name}'")
+        return trace_span_async(*args, **kwargs)  # Returns async context manager, not a coroutine
+    except Exception as e:
+        log.warning(f"[safe_trace_span_async] OTEL trace_span_async failed (non-critical) for span '{span_name}': {type(e).__name__}: {e}", exc_info=True)
+        from contextlib import asynccontextmanager
+        @asynccontextmanager
+        async def _noop():
+            try:
+                log.debug(f"[safe_trace_span_async] Generator entering (safe fallback) for span '{span_name}'")
+                yield None
+                log.debug(f"[safe_trace_span_async] Generator exiting normally (safe fallback) for span '{span_name}'")
+            except GeneratorExit as ge:
+                log.debug(f"[safe_trace_span_async] GeneratorExit caught (safe fallback) for span '{span_name}': {ge}")
+                # Properly handle generator exit
+                raise
+            except Exception as gen_exc:
+                log.warning(f"[safe_trace_span_async] Exception thrown into generator (safe fallback) for span '{span_name}': {type(gen_exc).__name__}: {gen_exc}", exc_info=True)
+                # Properly handle exceptions thrown into generator - must re-raise or return
+                # Re-raising ensures the exception propagates correctly
+                raise
+        return _noop()
 
 router = APIRouter()
 
@@ -48,34 +137,49 @@ async def get_knowledge(user=Depends(get_verified_user)):
     # else:
     knowledge_bases = Knowledges.get_knowledge_bases_by_user_id(user.id, "read")
 
-    # Get files for each knowledge base
-    knowledge_with_files = []
+    # Batch file operations: Collect all file_ids from all knowledge bases first
+    all_file_ids = []
+    knowledge_file_ids_map = {}  # Maps knowledge_base.id -> list of file_ids
+    
     for knowledge_base in knowledge_bases:
-        files = []
+        file_ids = []
         if knowledge_base.data:
-            files = Files.get_file_metadatas_by_ids(
-                knowledge_base.data.get("file_ids", [])
-            )
+            file_ids = knowledge_base.data.get("file_ids", [])
+        
+        if file_ids:
+            all_file_ids.extend(file_ids)
+            knowledge_file_ids_map[knowledge_base.id] = file_ids
+        else:
+            knowledge_file_ids_map[knowledge_base.id] = []
 
+    # Single batch query for all file metadata
+    all_files_dict = {}
+    if all_file_ids:
+        all_files = Files.get_file_metadatas_by_ids(all_file_ids)
+        all_files_dict = {file.id: file for file in all_files}
+
+    # Build response with files mapped back to knowledge bases
+    knowledge_with_files = []
+    knowledge_bases_to_update = []  # Track knowledge bases with missing files
+    
+    for knowledge_base in knowledge_bases:
+        file_ids = knowledge_file_ids_map.get(knowledge_base.id, [])
+        files = []
+        
+        if file_ids:
+            # Get files from the batch-loaded dictionary
+            files = [all_files_dict[file_id] for file_id in file_ids if file_id in all_files_dict]
+            
             # Check if all files exist
-            if len(files) != len(knowledge_base.data.get("file_ids", [])):
-                missing_files = list(
-                    set(knowledge_base.data.get("file_ids", []))
-                    - set([file.id for file in files])
-                )
+            if len(files) != len(file_ids):
+                missing_files = list(set(file_ids) - set([file.id for file in files]))
                 if missing_files:
-                    data = knowledge_base.data or {}
-                    file_ids = data.get("file_ids", [])
-
-                    for missing_file in missing_files:
-                        file_ids.remove(missing_file)
-
-                    data["file_ids"] = file_ids
-                    Knowledges.update_knowledge_data_by_id(
-                        id=knowledge_base.id, data=data
-                    )
-
-                    files = Files.get_file_metadatas_by_ids(file_ids)
+                    # Track for batch update
+                    knowledge_bases_to_update.append({
+                        "knowledge_base": knowledge_base,
+                        "missing_files": missing_files,
+                        "file_ids": file_ids
+                    })
 
         knowledge_with_files.append(
             KnowledgeUserResponse(
@@ -83,6 +187,19 @@ async def get_knowledge(user=Depends(get_verified_user)):
                 files=files,
             )
         )
+    
+    # Batch update knowledge bases with missing files removed
+    for kb_update in knowledge_bases_to_update:
+        data = kb_update["knowledge_base"].data or {}
+        file_ids = [fid for fid in kb_update["file_ids"] if fid not in kb_update["missing_files"]]
+        data["file_ids"] = file_ids
+        Knowledges.update_knowledge_data_by_id(id=kb_update["knowledge_base"].id, data=data)
+        
+        # Update the response with corrected files
+        for kb_response in knowledge_with_files:
+            if kb_response.id == kb_update["knowledge_base"].id:
+                kb_response.files = [all_files_dict[fid] for fid in file_ids if fid in all_files_dict]
+                break
 
     return knowledge_with_files
 
@@ -96,34 +213,49 @@ async def get_knowledge_list(user=Depends(get_verified_user)):
     # else:
     knowledge_bases = Knowledges.get_knowledge_bases_by_user_id(user.id, "write")
 
-    # Get files for each knowledge base
-    knowledge_with_files = []
+    # Batch file operations: Collect all file_ids from all knowledge bases first
+    all_file_ids = []
+    knowledge_file_ids_map = {}  # Maps knowledge_base.id -> list of file_ids
+    
     for knowledge_base in knowledge_bases:
-        files = []
+        file_ids = []
         if knowledge_base.data:
-            files = Files.get_file_metadatas_by_ids(
-                knowledge_base.data.get("file_ids", [])
-            )
+            file_ids = knowledge_base.data.get("file_ids", [])
+        
+        if file_ids:
+            all_file_ids.extend(file_ids)
+            knowledge_file_ids_map[knowledge_base.id] = file_ids
+        else:
+            knowledge_file_ids_map[knowledge_base.id] = []
 
+    # Single batch query for all file metadata
+    all_files_dict = {}
+    if all_file_ids:
+        all_files = Files.get_file_metadatas_by_ids(all_file_ids)
+        all_files_dict = {file.id: file for file in all_files}
+
+    # Build response with files mapped back to knowledge bases
+    knowledge_with_files = []
+    knowledge_bases_to_update = []  # Track knowledge bases with missing files
+    
+    for knowledge_base in knowledge_bases:
+        file_ids = knowledge_file_ids_map.get(knowledge_base.id, [])
+        files = []
+        
+        if file_ids:
+            # Get files from the batch-loaded dictionary
+            files = [all_files_dict[file_id] for file_id in file_ids if file_id in all_files_dict]
+            
             # Check if all files exist
-            if len(files) != len(knowledge_base.data.get("file_ids", [])):
-                missing_files = list(
-                    set(knowledge_base.data.get("file_ids", []))
-                    - set([file.id for file in files])
-                )
+            if len(files) != len(file_ids):
+                missing_files = list(set(file_ids) - set([file.id for file in files]))
                 if missing_files:
-                    data = knowledge_base.data or {}
-                    file_ids = data.get("file_ids", [])
-
-                    for missing_file in missing_files:
-                        file_ids.remove(missing_file)
-
-                    data["file_ids"] = file_ids
-                    Knowledges.update_knowledge_data_by_id(
-                        id=knowledge_base.id, data=data
-                    )
-
-                    files = Files.get_file_metadatas_by_ids(file_ids)
+                    # Track for batch update
+                    knowledge_bases_to_update.append({
+                        "knowledge_base": knowledge_base,
+                        "missing_files": missing_files,
+                        "file_ids": file_ids
+                    })
 
         knowledge_with_files.append(
             KnowledgeUserResponse(
@@ -131,6 +263,20 @@ async def get_knowledge_list(user=Depends(get_verified_user)):
                 files=files,
             )
         )
+    
+    # Batch update knowledge bases with missing files removed
+    for kb_update in knowledge_bases_to_update:
+        data = kb_update["knowledge_base"].data or {}
+        file_ids = [fid for fid in kb_update["file_ids"] if fid not in kb_update["missing_files"]]
+        data["file_ids"] = file_ids
+        Knowledges.update_knowledge_data_by_id(id=kb_update["knowledge_base"].id, data=data)
+        
+        # Update the response with corrected files
+        for kb_response in knowledge_with_files:
+            if kb_response.id == kb_update["knowledge_base"].id:
+                kb_response.files = [all_files_dict[fid] for fid in file_ids if fid in all_files_dict]
+                break
+
     return knowledge_with_files
 
 
@@ -306,9 +452,10 @@ class KnowledgeFileIdForm(BaseModel):
 
 
 @router.post("/{id}/file/add", response_model=Optional[KnowledgeFilesResponse])
-def add_file_to_knowledge_by_id(
+async def add_file_to_knowledge_by_id(
     request: Request,
     id: str,
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     user=Depends(get_verified_user),
     file_metadata: dict = {},
@@ -336,136 +483,185 @@ def add_file_to_knowledge_by_id(
         )
 
     log.info(f"file.content_type: {file.content_type}")
-    try:
-
-        unsanitized_filename = file.filename
-        filename = os.path.basename(unsanitized_filename)
-
-        # replace filename with uuid
-        file_id = str(uuid.uuid4())
-        name = filename
-        filename = f"{file_id}_{filename}"
-        contents, file_path = Storage.upload_file(file.file, filename)
-
-        file_item = Files.insert_new_file(
-            user.id,
-            FileForm(
-                **{
-                    "id": file_id,
-                    "filename": name,
-                    "path": file_path,
-                    "meta": {
-                        "name": name,
-                        "content_type": file.content_type,
-                        "size": len(contents),
-                        "data": file_metadata,
-                    },
-                }
-            ),
-        )
-
+    
+    # Generate file_id early for instrumentation
+    unsanitized_filename = file.filename
+    filename = os.path.basename(unsanitized_filename)
+    file_id = str(uuid.uuid4())
+    name = filename
+    
+    # Create OTEL span for file upload
+    # CRITICAL: Use safe_trace_span_async to ensure OTEL failures never prevent file uploads
+    async with safe_trace_span_async(
+        name="file.upload",
+        attributes={
+            "file.id": file_id,
+            "file.name": name,
+            "file.content_type": file.content_type,
+            "knowledge.id": id,
+            "user.id": str(user.id) if user else None,
+        },
+    ) as span:
         try:
-            if file.content_type in [
-                "audio/mpeg",
-                "audio/wav",
-                "audio/ogg",
-                "audio/x-m4a",
-            ]:
-                file_path = Storage.get_file(file_path)
-                result = transcribe(request, file_path, user)
-                process_file(
-                    request,
-                    ProcessFileForm(file_id=file_id, content=result.get("text", "")),
-                    user=user,
-                    knowledge_id=id,  # Pass knowledge_id for single embedding
-                )
-            else:
-                # Process the file for both file and knowledge collections
-                process_file(
-                    request,
-                    ProcessFileForm(file_id=file_id),
-                    user=user,
-                    knowledge_id=id,  # Pass knowledge_id for single embedding
-                )
+            safe_add_span_event("file.upload.started", {"file_id": file_id, "filename": name})
+            
+            filename = f"{file_id}_{filename}"
+            contents, file_path = Storage.upload_file(file.file, filename)
+            
+            # Update span with file size after upload
+            safe_set_span_attribute(span, "file.size", len(contents))
+            
+            safe_add_span_event("file.upload.stored", {"file_path": file_path, "file_size": len(contents)})
 
-            file_item = Files.get_file_by_id(id=file_id)
-        except Exception as e:
-            log.exception(e)
-            log.error(f"Error processing file: {file_item.id}")
-            file_item = FileModelResponse(
-                **{
-                    **file_item.model_dump(),
-                    "error": str(e.detail) if hasattr(e, "detail") else str(e),
-                }
+            file_item = Files.insert_new_file(
+                user.id,
+                FileForm(
+                    **{
+                        "id": file_id,
+                        "filename": name,
+                        "path": file_path,
+                        "meta": {
+                            "name": name,
+                            "content_type": file.content_type,
+                            "size": len(contents),
+                            "data": file_metadata,
+                        },
+                    }
+                ),
             )
 
-        # Update knowledge base metadata
-        if file_item:
-            # Re-fetch knowledge to get latest state (avoid race conditions)
-            knowledge = Knowledges.get_knowledge_by_id(id=id)
-            if not knowledge:
+            # Process file in background
+            # Use job queue if available (distributed processing), otherwise use BackgroundTasks
+            job_id = None
+            if background_tasks or is_job_queue_available():
+                try:
+                    if file.content_type in [
+                        "audio/mpeg",
+                        "audio/wav",
+                        "audio/ogg",
+                        "audio/x-m4a",
+                    ]:
+                        # For audio files, transcribe first (this is quick), then process in background
+                        file_path_for_transcribe = Storage.get_file(file_path)
+                        result = transcribe(request, file_path_for_transcribe, user)
+                        # Note: process_file may return job_id if using job queue
+                        process_file(
+                            request,
+                            ProcessFileForm(file_id=file_id, content=result.get("text", "")),
+                            user=user,
+                            knowledge_id=id,  # Pass knowledge_id for single embedding
+                            background_tasks=background_tasks,
+                        )
+                    else:
+                        # Process the file for both file and knowledge collections in background
+                        # process_file will use job queue if available, otherwise BackgroundTasks
+                        process_file(
+                            request,
+                            ProcessFileForm(file_id=file_id),
+                            user=user,
+                            knowledge_id=id,  # Pass knowledge_id for single embedding
+                            background_tasks=background_tasks,
+                        )
+                    safe_add_span_event("file.upload.queued", {"file_id": file_id})
+                except Exception as e:
+                    log.exception(e)
+                    log.error(f"Error starting background processing for file: {file_id}")
+                    safe_add_span_event("file.upload.queue_failed", {
+                        "file_id": file_id,
+                        "error": str(e)[:200]
+                    })
+                    # Mark file as error since background task failed to start
+                    try:
+                        Files.update_file_metadata_by_id(
+                            file_id,
+                            {
+                                "processing_status": "error",
+                                "processing_error": f"Failed to start background processing: {str(e)}",
+                            },
+                        )
+                    except Exception as update_error:
+                        log.exception(f"Failed to update file status after background task error: {update_error}")
+                    # Continue anyway - file is uploaded, user can retry processing manually
+            
+            # Get file item to return
+            file_item = Files.get_file_by_id(id=file_id)
+
+            # Update knowledge base metadata
+            # Note: File is added to knowledge base immediately, but processing happens in background.
+            # The file will have processing_status="pending" or "processing" until embeddings are generated.
+            # This is acceptable - the file appears in the knowledge base UI but may not be ready for use
+            # until processing completes. Frontend should check processing_status before using files.
+            if file_item:
+                # Re-fetch knowledge to get latest state (avoid race conditions)
+                knowledge = Knowledges.get_knowledge_by_id(id=id)
+                if not knowledge:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=ERROR_MESSAGES.NOT_FOUND,
+                    )
+                
+                log.info(f"Adding file {file_id} to knowledge {id} by user {user.id} (email: {user.email})")
+                log.info(f"Knowledge owner: {knowledge.user_id}, current data: {knowledge.data}")
+                
+                # Ensure data is initialized properly
+                data = knowledge.data if knowledge.data is not None else {}
+                if not isinstance(data, dict):
+                    data = {}
+                file_ids = data.get("file_ids", [])
+                if not isinstance(file_ids, list):
+                    file_ids = []
+
+                # Add file_id if not already present (avoid duplicates)
+                if file_id not in file_ids:
+                    file_ids.append(file_id)
+                data["file_ids"] = file_ids
+
+                log.info(f"Updating knowledge {id} with data: {data}")
+
+                # Update knowledge base with new file_ids
+                updated_knowledge = Knowledges.update_knowledge_data_by_id(id=id, data=data)
+
+                if not updated_knowledge:
+                    log.error(f"Failed to update knowledge {id} with file {file_id} for user {user.id} (email: {user.email})")
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail="Failed to update knowledge base metadata. File was uploaded but may not appear in the UI.",
+                    )
+                
+                log.info(f"Update returned knowledge {id} with data: {updated_knowledge.data}")
+                
+                # Verify the update succeeded by checking file_id is in the response
+                if updated_knowledge.data and file_id in updated_knowledge.data.get("file_ids", []):
+                    files = Files.get_files_by_ids(updated_knowledge.data.get("file_ids", []))
+
+                    log.info(f"Successfully updated knowledge {id}: file {file_id} is in file_ids list")
+                    safe_add_span_event("file.upload.completed", {"file_id": file_id, "knowledge_id": id})
+                    return KnowledgeFilesResponse(
+                        **updated_knowledge.model_dump(),
+                        files=files,
+                    )
+                else:
+                    log.error(f"File {file_id} not found in updated knowledge {id} data. Updated data: {updated_knowledge.data}")
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail="File was uploaded but failed to update knowledge base metadata.",
+                    )
+            else:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=ERROR_MESSAGES.NOT_FOUND,
+                    detail=ERROR_MESSAGES.DEFAULT("Error uploading file"),
                 )
-            
-            log.info(f"Adding file {file_id} to knowledge {id} by user {user.id} (email: {user.email})")
-            log.info(f"Knowledge owner: {knowledge.user_id}, current data: {knowledge.data}")
-            
-            # Ensure data is initialized properly
-            data = knowledge.data if knowledge.data is not None else {}
-            if not isinstance(data, dict):
-                data = {}
-            file_ids = data.get("file_ids", [])
-            if not isinstance(file_ids, list):
-                file_ids = []
 
-            # Add file_id if not already present (avoid duplicates)
-            if file_id not in file_ids:
-                file_ids.append(file_id)
-            data["file_ids"] = file_ids
-
-            log.info(f"Updating knowledge {id} with data: {data}")
-
-            # Update knowledge base with new file_ids
-            updated_knowledge = Knowledges.update_knowledge_data_by_id(id=id, data=data)
-
-            if not updated_knowledge:
-                log.error(f"Failed to update knowledge {id} with file {file_id} for user {user.id} (email: {user.email})")
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Failed to update knowledge base metadata. File was uploaded but may not appear in the UI.",
-                )
-            
-            log.info(f"Update returned knowledge {id} with data: {updated_knowledge.data}")
-            
-            # Verify the update succeeded by checking file_id is in the response
-            if updated_knowledge.data and file_id in updated_knowledge.data.get("file_ids", []):
-                files = Files.get_files_by_ids(updated_knowledge.data.get("file_ids", []))
-
-                log.info(f"Successfully updated knowledge {id}: file {file_id} is in file_ids list")
-                return KnowledgeFilesResponse(
-                    **updated_knowledge.model_dump(),
-                    files=files,
-                )
-            else:
-                log.error(f"File {file_id} not found in updated knowledge {id} data. Updated data: {updated_knowledge.data}")
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="File was uploaded but failed to update knowledge base metadata.",
-                )
-        else:
+        except Exception as e:
+            log.exception(e)
+            safe_add_span_event("file.upload.error", {
+                "error.type": type(e).__name__,
+                "error.message": str(e)[:200],
+            })
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=ERROR_MESSAGES.DEFAULT("Error uploading file"),
+                detail=ERROR_MESSAGES.DEFAULT(e),
             )
-
-    except Exception as e:
-        log.exception(e)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=ERROR_MESSAGES.DEFAULT(e),
-        )
 
 
 @router.post("/{id}/file/update", response_model=Optional[KnowledgeFilesResponse])
@@ -473,6 +669,7 @@ def update_file_from_knowledge_by_id(
     request: Request,
     id: str,
     form_data: KnowledgeFileIdForm,
+    background_tasks: BackgroundTasks,
     user=Depends(get_verified_user),
 ):
     knowledge = Knowledges.get_knowledge_by_id(id=id)
@@ -505,17 +702,24 @@ def update_file_from_knowledge_by_id(
         collection_name=knowledge.id, filter={"file_id": form_data.file_id}
     )
 
-    # Add content to the vector database
-    try:
+    # Add content to the vector database (in background)
+    # Use job queue if available (distributed processing), otherwise use BackgroundTasks or synchronous
+    if background_tasks or is_job_queue_available():
+        # Process in background (uses job queue if available)
         process_file(
             request,
             ProcessFileForm(file_id=form_data.file_id, collection_name=id),
             user=user,
+            background_tasks=background_tasks,
         )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+    else:
+        # Process synchronously (backward compatibility - only if job queue and background_tasks unavailable)
+        # Note: This code path should not be reached since background_tasks is always injected by FastAPI
+        # But if somehow we get here, we'll just skip processing with a warning
+        log.warning(
+            f"Cannot process file {form_data.file_id} synchronously - "
+            "background_tasks not available and job queue not available. "
+            "File processing will need to be triggered manually."
         )
 
     if knowledge:
@@ -546,6 +750,13 @@ def remove_file_from_knowledge_by_id(
     form_data: KnowledgeFileIdForm,
     user=Depends(get_verified_user),
 ):
+    """
+    Remove a file from a knowledge collection.
+    
+    If the file is only in this knowledge collection, it will be completely deleted
+    (vector DB, SQL, physical file). If it's in multiple knowledge collections,
+    it will only be removed from this one.
+    """
     knowledge = Knowledges.get_knowledge_by_id(id=id)
     if not knowledge:
         raise HTTPException(
@@ -570,51 +781,96 @@ def remove_file_from_knowledge_by_id(
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
 
-    # Remove content from the vector database
-    VECTOR_DB_CLIENT.delete(
-        collection_name=knowledge.id, filter={"file_id": form_data.file_id}
+    log.info(
+        f"Removing file {form_data.file_id} from knowledge collection {id} "
+        f"by user {user.id} (email: {user.email})"
     )
 
-    # Remove the file's collection from vector database
-    file_collection = f"file-{form_data.file_id}"
-    if VECTOR_DB_CLIENT.has_collection(collection_name=file_collection):
-        VECTOR_DB_CLIENT.delete_collection(collection_name=file_collection)
-
-    # Delete file from database
-    Files.delete_file_by_id(form_data.file_id)
-
-    if knowledge:
-        data = knowledge.data or {}
-        file_ids = data.get("file_ids", [])
-
-        if form_data.file_id in file_ids:
-            file_ids.remove(form_data.file_id)
-            data["file_ids"] = file_ids
-
-            knowledge = Knowledges.update_knowledge_data_by_id(id=id, data=data)
-
-            if knowledge:
-                files = Files.get_files_by_ids(file_ids)
-
-                return KnowledgeFilesResponse(
-                    **knowledge.model_dump(),
-                    files=files,
-                )
-            else:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=ERROR_MESSAGES.DEFAULT("knowledge"),
-                )
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=ERROR_MESSAGES.DEFAULT("file_id"),
-            )
-    else:
+    # Check if file is actually in the current knowledge base
+    data = knowledge.data or {}
+    file_ids = data.get("file_ids", [])
+    if not isinstance(file_ids, list) or form_data.file_id not in file_ids:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=ERROR_MESSAGES.NOT_FOUND,
+            detail=ERROR_MESSAGES.DEFAULT("File is not in this knowledge collection"),
         )
+
+    # Check if file is used in other knowledge collections
+    all_knowledge_bases = Knowledges.get_knowledge_bases_by_file_id(form_data.file_id)
+    other_knowledge_bases = [
+        kb for kb in all_knowledge_bases if kb.id != id
+    ]
+
+    if other_knowledge_bases:
+        # File is used in other knowledge collections, only remove from this one
+        log.info(
+            f"File {form_data.file_id} is used in {len(other_knowledge_bases)} other "
+            f"knowledge collections, removing from {id} only"
+        )
+        success, details = cleanup_file_from_knowledge_only(
+            form_data.file_id, id
+        )
+        
+        if not success:
+            log.error(
+                f"Failed to remove file {form_data.file_id} from knowledge collection {id}: "
+                f"{details.get('errors', [])}"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=ERROR_MESSAGES.DEFAULT(
+                    f"Error removing file from knowledge collection: {details.get('errors', [])}"
+                ),
+            )
+    else:
+        # File is only in this knowledge collection, do complete cleanup
+        log.info(
+            f"File {form_data.file_id} is only in knowledge collection {id}, "
+            f"performing complete cleanup"
+        )
+        # Don't exclude current knowledge base - we want to remove from everywhere
+        success, details = cleanup_file_completely(
+            file_id=form_data.file_id,
+            exclude_knowledge_id=None,  # Remove from all knowledge bases including this one
+            delete_physical_file=True,
+        )
+        
+        if not success:
+            log.error(
+                f"Failed to completely cleanup file {form_data.file_id}: "
+                f"{details.get('errors', [])}"
+            )
+            # Check if critical operations failed
+            if not details.get("sql_deleted") or not details.get("vector_db_cleaned"):
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=ERROR_MESSAGES.DEFAULT(
+                        f"Error deleting file: {details.get('errors', [])}"
+                    ),
+                )
+
+    # Refresh knowledge base to get updated file list
+    knowledge = Knowledges.get_knowledge_by_id(id=id)
+    if not knowledge:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=ERROR_MESSAGES.DEFAULT("Error retrieving updated knowledge base"),
+        )
+
+    # Get updated file list
+    data = knowledge.data or {}
+    file_ids = data.get("file_ids", [])
+    files = Files.get_files_by_ids(file_ids) if file_ids else []
+
+    log.info(
+        f"Successfully removed file {form_data.file_id} from knowledge collection {id}. "
+        f"Remaining files: {len(files)}"
+    )
+
+    return KnowledgeFilesResponse(
+        **knowledge.model_dump(),
+        files=files,
+    )
 
 
 ############################

@@ -31,6 +31,92 @@ from open_webui.models.users import UserModel
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.env import ENV, SRC_LOG_LEVELS
 
+# OpenTelemetry instrumentation helpers
+try:
+    from open_webui.utils.otel_instrumentation import (
+        trace_span_async,
+        add_span_event,
+        set_span_attribute,
+    )
+    from opentelemetry.trace import SpanKind
+    OTEL_AVAILABLE = True
+except ImportError:
+    OTEL_AVAILABLE = False
+    # Create no-op functions if OTEL not available
+    # NOTE: Must be regular function (not async def) to match @asynccontextmanager signature
+    def trace_span_async(*args, **kwargs):
+        span_name = kwargs.get('name', args[0] if args else 'unknown')
+        from contextlib import asynccontextmanager
+        @asynccontextmanager
+        async def _noop():
+            # Get logger at call time (log variable will be defined by then)
+            _log = logging.getLogger(__name__)
+            try:
+                _log.debug(f"[trace_span_async] Generator entering (OTEL unavailable, no-op) for span '{span_name}'")
+                yield None
+                _log.debug(f"[trace_span_async] Generator exiting normally (OTEL unavailable, no-op) for span '{span_name}'")
+            except GeneratorExit as ge:
+                _log.debug(f"[trace_span_async] GeneratorExit caught (OTEL unavailable, no-op) for span '{span_name}': {ge}")
+                # Properly handle generator exit
+                raise
+            except Exception as e:
+                _log.warning(f"[trace_span_async] Exception thrown into generator (OTEL unavailable, no-op) for span '{span_name}': {type(e).__name__}: {e}", exc_info=True)
+                # Properly handle exceptions thrown into generator - must re-raise or return
+                # Re-raising ensures the exception propagates correctly
+                raise
+        return _noop()
+    def add_span_event(*args, **kwargs):
+        pass
+    def set_span_attribute(*args, **kwargs):
+        pass
+    SpanKind = None
+
+# Safe wrapper functions that NEVER fail - OTEL is monitoring only, must not affect task execution
+def safe_add_span_event(event_name, attributes=None):
+    """Safely add span event - never fails, even if OTEL is broken"""
+    try:
+        add_span_event(event_name, attributes)
+    except Exception as e:
+        log.debug(f"OTEL add_span_event failed (non-critical): {e}")
+
+def safe_set_span_attribute(span, key, value):
+    """Safely set span attribute - never fails, even if OTEL is broken"""
+    try:
+        if span:
+            set_span_attribute(span, key, value)
+    except Exception as e:
+        log.debug(f"OTEL set_span_attribute failed (non-critical): {e}")
+
+def safe_trace_span_async(*args, **kwargs):
+    """Safely create async trace span - never fails, even if OTEL is broken
+    
+    Returns an async context manager (same signature as trace_span_async).
+    Can be used with: async with safe_trace_span_async(...) as span:
+    """
+    span_name = kwargs.get('name', args[0] if args else 'unknown')
+    try:
+        log.debug(f"[safe_trace_span_async] Attempting to create span '{span_name}'")
+        return trace_span_async(*args, **kwargs)  # Returns async context manager, not a coroutine
+    except Exception as e:
+        log.warning(f"[safe_trace_span_async] OTEL trace_span_async failed (non-critical) for span '{span_name}': {type(e).__name__}: {e}", exc_info=True)
+        from contextlib import asynccontextmanager
+        @asynccontextmanager
+        async def _noop():
+            try:
+                log.debug(f"[safe_trace_span_async] Generator entering (safe fallback) for span '{span_name}'")
+                yield None
+                log.debug(f"[safe_trace_span_async] Generator exiting normally (safe fallback) for span '{span_name}'")
+            except GeneratorExit as ge:
+                log.debug(f"[safe_trace_span_async] GeneratorExit caught (safe fallback) for span '{span_name}': {ge}")
+                # Properly handle generator exit
+                raise
+            except Exception as gen_exc:
+                log.warning(f"[safe_trace_span_async] Exception thrown into generator (safe fallback) for span '{span_name}': {type(gen_exc).__name__}: {gen_exc}", exc_info=True)
+                # Properly handle exceptions thrown into generator - must re-raise or return
+                # Re-raising ensures the exception propagates correctly
+                raise
+        return _noop()
+
 
 from open_webui.utils.payload import (
     apply_model_params_to_body_openai,
@@ -580,173 +666,231 @@ async def generate_chat_completion(
     user=Depends(get_verified_user),
     bypass_filter: Optional[bool] = False,
 ):
-    if BYPASS_MODEL_ACCESS_CONTROL:
-        bypass_filter = True
+    # Extract model info for instrumentation
+    model_id = form_data.get("model", "unknown")
+    api_base_url = None
+    
+    # Create span for OpenAI API call
+    # CRITICAL: Use safe_trace_span_async to ensure OTEL failures never prevent API calls
+    async with safe_trace_span_async(
+        name="llm.openai.chat_completion",
+        attributes={
+            "llm.provider": "openai",
+            "llm.model": model_id,
+        },
+        kind=SpanKind.CLIENT if OTEL_AVAILABLE and SpanKind else None,
+    ) as span:
+        try:
+            # Add event: API request started
+            safe_add_span_event("llm.api.request", {
+                "model": model_id,
+            })
+            
+            if BYPASS_MODEL_ACCESS_CONTROL:
+                bypass_filter = True
 
-    idx = 0
+            idx = 0
 
-    payload = {**form_data}
-    metadata = payload.pop("metadata", None)
+            payload = {**form_data}
+            metadata = payload.pop("metadata", None)
 
-    model_id = form_data.get("model")
-    model_info = Models.get_model_by_id(model_id)
+            model_id = form_data.get("model")
+            model_info = Models.get_model_by_id(model_id)
 
-    # Check model info and override the payload
-    if model_info:
-        if model_info.base_model_id:
-            payload["model"] = model_info.base_model_id
-            model_id = model_info.base_model_id
+            # Check model info and override the payload
+            if model_info:
+                if model_info.base_model_id:
+                    payload["model"] = model_info.base_model_id
+                    model_id = model_info.base_model_id
 
-        params = model_info.params.model_dump()
-        payload = apply_model_params_to_body_openai(params, payload)
-        payload = apply_model_system_prompt_to_body(params, payload, metadata, user)
+                params = model_info.params.model_dump()
+                payload = apply_model_params_to_body_openai(params, payload)
+                payload = apply_model_system_prompt_to_body(params, payload, metadata, user)
 
-        # Check if user has access to the model
-        if not bypass_filter and user.role == "user":
-            if not (
-                user.id == model_info.user_id
-                or has_access(
-                    user.id, type="read", access_control=model_info.access_control
-                )
-            ):
+                # Check if user has access to the model
+                if not bypass_filter and user.role == "user":
+                    if not (
+                        user.id == model_info.user_id
+                        or has_access(
+                            user.id, type="read", access_control=model_info.access_control
+                        )
+                    ):
+                        raise HTTPException(
+                            status_code=403,
+                            detail="Model not found",
+                        )
+            elif not bypass_filter:
+                if user.role != "admin":
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Model not found",
+                    )
+
+            await get_all_models(request, user=user)
+            model = request.app.state.OPENAI_MODELS.get(model_id)
+            if model:
+                idx = model["urlIdx"]
+            else:
                 raise HTTPException(
-                    status_code=403,
+                    status_code=404,
                     detail="Model not found",
                 )
-    elif not bypass_filter:
-        if user.role != "admin":
-            raise HTTPException(
-                status_code=403,
-                detail="Model not found",
+
+            # Get the API config for the model
+            api_config = request.app.state.config.OPENAI_API_CONFIGS.get(
+                str(idx),
+                request.app.state.config.OPENAI_API_CONFIGS.get(
+                    request.app.state.config.OPENAI_API_BASE_URLS[idx], {}
+                ),  # Legacy support
             )
 
-    await get_all_models(request, user=user)
-    model = request.app.state.OPENAI_MODELS.get(model_id)
-    if model:
-        idx = model["urlIdx"]
-    else:
-        raise HTTPException(
-            status_code=404,
-            detail="Model not found",
-        )
+            prefix_id = api_config.get("prefix_id", None)
+            if prefix_id:
+                payload["model"] = payload["model"].replace(f"{prefix_id}.", "")
 
-    # Get the API config for the model
-    api_config = request.app.state.config.OPENAI_API_CONFIGS.get(
-        str(idx),
-        request.app.state.config.OPENAI_API_CONFIGS.get(
-            request.app.state.config.OPENAI_API_BASE_URLS[idx], {}
-        ),  # Legacy support
-    )
+            # Add user info to the payload if the model is a pipeline
+            if "pipeline" in model and model.get("pipeline"):
+                payload["user"] = {
+                    "name": user.name,
+                    "id": user.id,
+                    "email": user.email,
+                    "role": user.role,
+                }
 
-    prefix_id = api_config.get("prefix_id", None)
-    if prefix_id:
-        payload["model"] = payload["model"].replace(f"{prefix_id}.", "")
+            url = request.app.state.config.OPENAI_API_BASE_URLS[idx]
+            key = request.app.state.config.OPENAI_API_KEYS[idx]
+            api_base_url = url
+            
+            # Set API base URL attribute
+            safe_set_span_attribute(span, "llm.api_base", url)
 
-    # Add user info to the payload if the model is a pipeline
-    if "pipeline" in model and model.get("pipeline"):
-        payload["user"] = {
-            "name": user.name,
-            "id": user.id,
-            "email": user.email,
-            "role": user.role,
-        }
+            # Fix: o1,o3 does not support the "max_tokens" parameter, Modify "max_tokens" to "max_completion_tokens"
+            is_o1_o3 = payload["model"].lower().startswith(("o1", "o3-"))
+            if is_o1_o3:
+                payload = openai_o1_o3_handler(payload)
+            elif "api.openai.com" not in url:
+                # Remove "max_completion_tokens" from the payload for backward compatibility
+                if "max_completion_tokens" in payload:
+                    payload["max_tokens"] = payload["max_completion_tokens"]
+                    del payload["max_completion_tokens"]
 
-    url = request.app.state.config.OPENAI_API_BASE_URLS[idx]
-    key = request.app.state.config.OPENAI_API_KEYS[idx]
+            if "max_tokens" in payload and "max_completion_tokens" in payload:
+                del payload["max_tokens"]
 
-    # Fix: o1,o3 does not support the "max_tokens" parameter, Modify "max_tokens" to "max_completion_tokens"
-    is_o1_o3 = payload["model"].lower().startswith(("o1", "o3-"))
-    if is_o1_o3:
-        payload = openai_o1_o3_handler(payload)
-    elif "api.openai.com" not in url:
-        # Remove "max_completion_tokens" from the payload for backward compatibility
-        if "max_completion_tokens" in payload:
-            payload["max_tokens"] = payload["max_completion_tokens"]
-            del payload["max_completion_tokens"]
+            # Convert the modified body back to JSON
+            payload = json.dumps(payload)
 
-    if "max_tokens" in payload and "max_completion_tokens" in payload:
-        del payload["max_tokens"]
+            r = None
+            session = None
+            streaming = False
+            response = None
 
-    # Convert the modified body back to JSON
-    payload = json.dumps(payload)
-
-    r = None
-    session = None
-    streaming = False
-    response = None
-
-    try:
-        session = aiohttp.ClientSession(
-            trust_env=True, timeout=aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT)
-        )
-
-        r = await session.request(
-            method="POST",
-            url=f"{url}/chat/completions",
-            data=payload,
-            headers={
-                "Authorization": f"Bearer {key}",
-                "Content-Type": "application/json",
-                **(
-                    {
-                        "HTTP-Referer": "https://openwebui.com/",
-                        "X-Title": "Open WebUI",
-                    }
-                    if "openrouter.ai" in url
-                    else {}
-                ),
-                **(
-                    {
-                        "X-OpenWebUI-User-Name": user.name,
-                        "X-OpenWebUI-User-Id": user.id,
-                        "X-OpenWebUI-User-Email": user.email,
-                        "X-OpenWebUI-User-Role": user.role,
-                    }
-                    if ENABLE_FORWARD_USER_INFO_HEADERS
-                    else {}
-                ),
-            },
-        )
-
-        # Check if response is SSE
-        if "text/event-stream" in r.headers.get("Content-Type", ""):
-            streaming = True
-            return StreamingResponse(
-                r.content,
-                status_code=r.status,
-                headers=dict(r.headers),
-                background=BackgroundTask(
-                    cleanup_response, response=r, session=session
-                ),
-            )
-        else:
             try:
-                response = await r.json()
+                session = aiohttp.ClientSession(
+                    trust_env=True, timeout=aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT)
+                )
+
+                r = await session.request(
+                    method="POST",
+                    url=f"{url}/chat/completions",
+                    data=payload,
+                    headers={
+                        "Authorization": f"Bearer {key}",
+                        "Content-Type": "application/json",
+                        **(
+                            {
+                                "HTTP-Referer": "https://openwebui.com/",
+                                "X-Title": "Open WebUI",
+                            }
+                            if "openrouter.ai" in url
+                            else {}
+                        ),
+                        **(
+                            {
+                                "X-OpenWebUI-User-Name": user.name,
+                                "X-OpenWebUI-User-Id": user.id,
+                                "X-OpenWebUI-User-Email": user.email,
+                                "X-OpenWebUI-User-Role": user.role,
+                            }
+                            if ENABLE_FORWARD_USER_INFO_HEADERS
+                            else {}
+                        ),
+                    },
+                )
+
+                # Check if response is SSE
+                if "text/event-stream" in r.headers.get("Content-Type", ""):
+                    streaming = True
+                    # Add event: API response (streaming)
+                    safe_add_span_event("llm.api.response", {
+                        "streaming": True,
+                    })
+                    
+                    return StreamingResponse(
+                        r.content,
+                        status_code=r.status,
+                        headers=dict(r.headers),
+                        background=BackgroundTask(
+                            cleanup_response, response=r, session=session
+                        ),
+                    )
+                else:
+                    try:
+                        response = await r.json()
+                    except Exception as e:
+                        log.error(e)
+                        response = await r.text()
+
+                    r.raise_for_status()
+                    
+                    # Extract usage info if available
+                    if isinstance(response, dict) and "usage" in response:
+                        usage = response["usage"]
+                        safe_set_span_attribute(span, "llm.usage.input_tokens", usage.get("prompt_tokens"))
+                        safe_set_span_attribute(span, "llm.usage.output_tokens", usage.get("completion_tokens"))
+                        safe_set_span_attribute(span, "llm.usage.total_tokens", usage.get("total_tokens"))
+                    
+                    # Add event: API response (non-streaming)
+                    safe_add_span_event("llm.api.response", {
+                        "streaming": False,
+                        "has_usage": "usage" in response if isinstance(response, dict) else False,
+                    })
+                    
+                    return response
             except Exception as e:
-                log.error(e)
-                response = await r.text()
+                log.exception(e)
+                
+                # Add event: API error
+                safe_add_span_event("llm.api.error", {
+                    "error.type": type(e).__name__,
+                    "error.message": str(e)[:200],
+                })
 
-            r.raise_for_status()
-            return response
-    except Exception as e:
-        log.exception(e)
+                detail = None
+                if isinstance(response, dict):
+                    if "error" in response:
+                        detail = f"{response['error']['message'] if 'message' in response['error'] else response['error']}"
+                elif isinstance(response, str):
+                    detail = response
 
-        detail = None
-        if isinstance(response, dict):
-            if "error" in response:
-                detail = f"{response['error']['message'] if 'message' in response['error'] else response['error']}"
-        elif isinstance(response, str):
-            detail = response
-
-        raise HTTPException(
-            status_code=r.status if r else 500,
-            detail=detail if detail else "Open WebUI: Server Connection Error",
-        )
-    finally:
-        if not streaming and session:
-            if r:
-                r.close()
-            await session.close()
+                raise HTTPException(
+                    status_code=r.status if r else 500,
+                    detail=detail if detail else "Open WebUI: Server Connection Error",
+                )
+            finally:
+                if not streaming and session:
+                    if r:
+                        r.close()
+                    await session.close()
+        except Exception as e:
+            # Add event: LLM error
+            safe_add_span_event("llm.error", {
+                "error.type": type(e).__name__,
+                "error.message": str(e)[:200],
+            })
+            
+            # Re-raise exception (span status will be set by trace_span_async)
+            raise
 
 
 @router.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])

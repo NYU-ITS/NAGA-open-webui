@@ -61,6 +61,127 @@
 	let id = null;
 	let knowledge: Knowledge | null = null;
 	let query = '';
+	let processingPollInterval: ReturnType<typeof setInterval> | null = null;
+
+	// Track previous file states to detect transitions
+	let previousFileStates = new Map<string, string>(); // fileId -> status
+
+	// Map backend processing_status to UI status
+	const mapFileStatus = (file) => {
+		if (!file) return file;
+
+		const processingStatus = file?.meta?.processing_status;
+		let status = 'ready';
+
+		if (processingStatus === 'pending' || processingStatus === 'processing') {
+			status = 'processing';
+		} else if (processingStatus === 'error') {
+			status = 'error';
+		}
+
+		return {
+			...file,
+			status,
+			error: status === 'error' ? file?.meta?.processing_error ?? '' : ''
+		};
+	};
+
+	const normalizeKnowledge = (kb: Knowledge | null) => {
+		if (!kb) return kb;
+
+		const normalizedFiles = (kb.files ?? []).map(mapFileStatus);
+
+		return {
+			...kb,
+			files: normalizedFiles
+		};
+	};
+
+	const hasProcessingFiles = () =>
+		knowledge?.files?.some((file) => file?.status === 'processing') ?? false;
+
+	const stopProcessingPolling = () => {
+		if (processingPollInterval) {
+			clearInterval(processingPollInterval);
+			processingPollInterval = null;
+		}
+	};
+
+	const refreshKnowledge = async () => {
+		if (!id) return;
+		const res = await getKnowledgeById(localStorage.token, id).catch((e) => {
+			toast.error(`${e}`);
+			return null;
+		});
+
+		if (res) {
+			knowledge = normalizeKnowledge(res);
+		}
+	};
+
+	const startProcessingPolling = () => {
+		// Only start polling if there are files still processing
+		if (processingPollInterval || !hasProcessingFiles()) return;
+
+		processingPollInterval = setInterval(async () => {
+			// If nothing is processing anymore or knowledge is gone, stop polling
+			if (!knowledge || !hasProcessingFiles()) {
+				stopProcessingPolling();
+				return;
+			}
+
+			// Store previous states before refresh
+			const previousStates = new Map<string, string>();
+			if (knowledge?.files) {
+				knowledge.files.forEach(file => {
+					if (file.id) {
+						previousStates.set(file.id, file.status);
+					}
+				});
+			}
+
+			await refreshKnowledge();
+
+			// Detect status transitions and show appropriate toasts
+			if (knowledge?.files) {
+				knowledge.files.forEach(file => {
+					if (!file.id) return;
+					
+					const previousStatus = previousStates.get(file.id);
+					const currentStatus = file.status;
+					
+					// Detect transition from 'processing' to 'completed' (ready)
+					if (previousStatus === 'processing' && currentStatus === 'ready') {
+						toast.success($i18n.t('File processing completed'));
+					}
+					
+					// Detect transition to 'error' (if not already shown)
+					if (previousStatus !== 'error' && currentStatus === 'error') {
+						toast.error(
+							$i18n.t('File processing failed: {{error}}', {
+								error: file?.error || $i18n.t('Unknown error')
+							})
+						);
+					}
+				});
+			}
+
+			// Update previous states for next poll
+			if (knowledge?.files) {
+				previousFileStates.clear();
+				knowledge.files.forEach(file => {
+					if (file.id) {
+						previousFileStates.set(file.id, file.status);
+					}
+				});
+			}
+
+			// After refresh, check again if any files are still processing
+			if (!hasProcessingFiles()) {
+				stopProcessingPolling();
+			}
+		}, 5000);
+	};
 
 	let showAddTextContentModal = false;
 	let showSyncConfirmModal = false;
@@ -71,10 +192,50 @@
 	let allUsers = [];
 	let adminUsers = [];
 
-	$: isSuperAdmin = $user?.email && [
-		'sm11538@nyu.edu', 'ms15138@nyu.edu', 'mb484@nyu.edu',
-		'cg4532@nyu.edu', 'ht2490@nyu.edu', 'ps5226@nyu.edu'
-	].includes($user.email);
+	let isSuperAdmin = false;
+
+	import { checkIfSuperAdmin } from '$lib/apis/users';
+
+	// Combined onMount to fix race condition
+	onMount(async () => {
+		if ($user?.email && localStorage.token) {
+			try {
+				isSuperAdmin = await checkIfSuperAdmin(localStorage.token, $user.email);
+				
+				// Fetch users AFTER confirming super admin status
+				if (isSuperAdmin) {
+					const usersRes = await fetch(`${WEBUI_API_BASE_URL}/users/`, {
+						headers: { authorization: `Bearer ${localStorage.token}` }
+					});
+					if (usersRes.ok) {
+						allUsers = await usersRes.json();
+						adminUsers = allUsers.filter(u => u.role === 'admin');
+					}
+				}
+			} catch (error) {
+				console.error('Error checking super admin status:', error);
+				isSuperAdmin = false;
+			}
+		}
+	});
+
+	$: if ($user?.email && localStorage.token && !isSuperAdmin) {
+		checkIfSuperAdmin(localStorage.token, $user.email).then(async (result) => {
+			isSuperAdmin = result;
+			// Fetch users when isSuperAdmin becomes true
+			if (isSuperAdmin && adminUsers.length === 0) {
+				const usersRes = await fetch(`${WEBUI_API_BASE_URL}/users/`, {
+					headers: { authorization: `Bearer ${localStorage.token}` }
+				});
+				if (usersRes.ok) {
+					allUsers = await usersRes.json();
+					adminUsers = allUsers.filter(u => u.role === 'admin');
+				}
+			}
+		}).catch(err => {
+			console.error('Error checking super admin status:', err);
+		});
+	}
 
 	// Set assignToEmail when knowledge loads
 	$: if (isSuperAdmin && knowledge?.user_id && allUsers.length > 0 && !assignToEmail) {
@@ -167,18 +328,38 @@
 
 			if (uploadedFile) {
 				console.log(uploadedFile);
-				knowledge.files = knowledge.files.map((item) => {
-					if (item.itemId === tempItemId) {
-						item.id = uploadedFile.files[0].id;
-						item.status = 'complete';
-					}
+				// Replace local optimistic item with normalized backend response
+				knowledge = normalizeKnowledge(uploadedFile);
 
-					// Remove temporary item id
-					delete item.itemId;
-					return item;
-				});
+				// Initialize previous states for newly uploaded files
+				if (knowledge?.files) {
+					knowledge.files.forEach(file => {
+						if (file.id) {
+							previousFileStates.set(file.id, file.status);
+						}
+					});
+				}
 
-				toast.success($i18n.t('File added successfully.'));
+				// Determine status of the newly added file to tailor the toast
+				const latestFile =
+					knowledge?.files && knowledge.files.length > 0
+						? knowledge.files[0]
+						: null;
+				const status = latestFile?.status;
+
+				if (status === 'processing') {
+					toast.success($i18n.t('File uploaded and queued for processing'));
+					startProcessingPolling();
+				} else if (status === 'error') {
+					toast.error(
+						$i18n.t('File uploaded but processing failed: {{error}}', {
+							error: latestFile?.error || $i18n.t('Unknown error')
+						})
+					);
+				} else {
+					// ready or legacy
+					toast.success($i18n.t('File added and ready to use.'));
+				}
 			} else {
 				toast.error($i18n.t('Failed to upload file.'));
 				// Remove the file from the list if upload failed
@@ -367,11 +548,15 @@
 			});
 
 			if (res) {
-				knowledge = res;
+				knowledge = normalizeKnowledge(res);
 				toast.success($i18n.t('Knowledge reset successfully.'));
 
 				// Upload directory
 				uploadDirectoryHandler();
+
+				if (hasProcessingFiles()) {
+					startProcessingPolling();
+				}
 			}
 		} else {
 			uploadDirectoryHandler();
@@ -387,8 +572,12 @@
 		);
 
 		if (updatedKnowledge) {
-			knowledge = updatedKnowledge;
+			knowledge = normalizeKnowledge(updatedKnowledge);
 			toast.success($i18n.t('File added successfully.'));
+
+			if (hasProcessingFiles()) {
+				startProcessingPolling();
+			}
 		} else {
 			toast.error($i18n.t('Failed to add file.'));
 			knowledge.files = knowledge.files.filter((file) => file.id !== fileId);
@@ -405,8 +594,12 @@
 			console.log('Knowledge base updated:', updatedKnowledge);
 
 			if (updatedKnowledge) {
-				knowledge = updatedKnowledge;
+				knowledge = normalizeKnowledge(updatedKnowledge);
 				toast.success($i18n.t('File removed successfully.'));
+
+				if (hasProcessingFiles()) {
+					startProcessingPolling();
+				}
 			}
 		} catch (e) {
 			console.error('Error in deleteFileHandler:', e);
@@ -431,8 +624,12 @@
 		});
 
 		if (res && updatedKnowledge) {
-			knowledge = updatedKnowledge;
+			knowledge = normalizeKnowledge(updatedKnowledge);
 			toast.success($i18n.t('File content updated successfully.'));
+
+			if (hasProcessingFiles()) {
+				startProcessingPolling();
+			}
 		}
 	};
 
@@ -539,24 +736,27 @@
 
 		id = $page.params.id;
 
-		// Fetch users for assignment dropdown if super admin
-		if (isSuperAdmin) {
-			const usersRes = await fetch(`${WEBUI_API_BASE_URL}/users/`, {
-				headers: { authorization: `Bearer ${localStorage.token}` }
-			});
-			if (usersRes.ok) {
-				allUsers = await usersRes.json();
-				adminUsers = allUsers.filter(u => u.role === 'admin');
-			}
-		}
-
 		const res = await getKnowledgeById(localStorage.token, id).catch((e) => {
 			toast.error(`${e}`);
 			return null;
 		});
 
 		if (res) {
-			knowledge = res;
+			knowledge = normalizeKnowledge(res);
+
+			// Initialize previous states for existing files
+			if (knowledge?.files) {
+				knowledge.files.forEach(file => {
+					if (file.id) {
+						previousFileStates.set(file.id, file.status);
+					}
+				});
+			}
+
+			// Start polling if any files are currently processing
+			if (hasProcessingFiles()) {
+				startProcessingPolling();
+			}
 		} else {
 			goto('/workspace/knowledge');
 		}
@@ -573,6 +773,9 @@
 		dropZone?.removeEventListener('dragover', onDragOver);
 		dropZone?.removeEventListener('drop', onDrop);
 		dropZone?.removeEventListener('dragleave', onDragLeave);
+		stopProcessingPolling();
+		// Clear file state tracking
+		previousFileStates.clear();
 	});
 </script>
 

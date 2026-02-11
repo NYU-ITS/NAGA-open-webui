@@ -1,4 +1,5 @@
 import logging
+import time
 from typing import Optional
 
 from open_webui.models.auths import Auths
@@ -10,6 +11,7 @@ from open_webui.models.users import (
     UserSettings,
     UserUpdateForm,
 )
+from open_webui.models.groups import Groups, GroupUpdateForm
 
 
 from open_webui.socket.main import get_active_status_by_user_id
@@ -17,13 +19,110 @@ from open_webui.constants import ERROR_MESSAGES
 from open_webui.env import SRC_LOG_LEVELS
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
-from open_webui.utils.auth import get_admin_user, get_password_hash, get_verified_user
-from open_webui.utils.super_admin import is_email_super_admin
+from open_webui.utils.auth import get_admin_user, get_current_user, get_password_hash, get_verified_user
+from open_webui.utils.super_admin import is_email_super_admin, get_super_admin_emails
 
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["MODELS"])
 
 router = APIRouter()
+
+############################
+# Terms & Conditions (Pilot GenAI)
+############################
+
+
+class AcceptTermsForm(BaseModel):
+    accepted: bool = True
+    version: Optional[int] = None
+
+
+@router.post("/terms/accept", response_model=UserModel)
+async def accept_terms(
+    form_data: AcceptTermsForm,
+    request: Request,
+    user=Depends(get_current_user),  # allow pending users
+):
+    if not form_data.accepted:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Terms must be accepted to proceed.",
+        )
+
+    existing = Users.get_user_by_id(user.id)
+    if not existing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.USER_NOT_FOUND,
+        )
+
+    info = existing.info or {}
+    if not isinstance(info, dict):
+        info = {}
+
+    pilot = info.get("pilot_genai", {})
+    if not isinstance(pilot, dict):
+        pilot = {}
+
+    terms = pilot.get("terms", {})
+    if not isinstance(terms, dict):
+        terms = {}
+
+    # If no terms gate was configured for this user, treat as prohibited
+    if not terms.get("required", False):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERROR_MESSAGES.ACTION_PROHIBITED,
+        )
+
+    # Mark accepted
+    current_version = getattr(request.app.state.config, "PILOT_GENAI_TERMS_VERSION", 1)
+    terms["required"] = False
+    terms["accepted"] = True
+    terms["accepted_at"] = int(time.time())
+    terms["version"] = current_version
+    pilot["terms"] = terms
+
+    # Promote role if a target was stored; otherwise keep current role.
+    target_role = pilot.get("pending_role_target") or existing.role or "pending"
+    if target_role not in ["user", "admin", "pending"]:
+        target_role = "pending"
+    pilot.pop("pending_role_target", None)
+
+    # Post-acceptance provisioning: add user to instructor group if configured during CSV import.
+    pending_group_name = (pilot.get("pending_group_name") or "").strip()
+    assigned_group_id = None
+    if pending_group_name:
+        group = Groups.get_group_by_name(pending_group_name)
+        if group:
+            current_ids = group.user_ids or []
+            if existing.id not in current_ids:
+                updated_ids = [*current_ids, existing.id]
+                Groups.update_group_by_id(
+                    group.id,
+                    GroupUpdateForm(
+                        name=group.name,
+                        description=group.description,
+                        permissions=group.permissions,
+                        user_ids=updated_ids,
+                    ),
+                )
+            assigned_group_id = group.id
+            pilot["assigned_group_id"] = assigned_group_id
+        # clear pending group regardless (prevents repeated attempts)
+        pilot.pop("pending_group_name", None)
+
+    info["pilot_genai"] = pilot
+
+    updated = Users.update_user_by_id(existing.id, {"role": target_role, "info": info})
+    if not updated:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update user terms status.",
+        )
+
+    return updated
+
 
 ############################
 # GetUsers
@@ -62,6 +161,15 @@ async def check_if_super_admin(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=ERROR_MESSAGES.USER_NOT_FOUND,
         )
+
+
+@router.get("/super-admin-emails", response_model=list[str])
+async def get_super_admin_emails_list(user=Depends(get_verified_user)):
+    """
+    Get the list of super admin email addresses.
+    Only accessible to authenticated users.
+    """
+    return get_super_admin_emails()
 
 ############################
 # User Groups
@@ -204,8 +312,10 @@ async def update_user_role(form_data: UserRoleUpdateForm, user=Depends(get_admin
 
     # If the target user is currently an admin,
     # only the super-admin or an allowed email can change that role.
+    first_user = Users.get_first_user()
+    is_first_user = first_user is not None and user.id == first_user.id
     if target_user.role == "admin" and not (
-        user.id == Users.get_first_user().id or is_email_super_admin(user.email)
+        is_first_user or is_email_super_admin(user.email)
     ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -213,16 +323,19 @@ async def update_user_role(form_data: UserRoleUpdateForm, user=Depends(get_admin
         )
 
     # Prevent modifying the role of the first registered user.
-    if form_data.id == Users.get_first_user().id:
+    first_user = Users.get_first_user()
+    if first_user is not None and form_data.id == first_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Cannot change the role of the first registered user",
         )
 
     # Now, check if the current user is just a normal admin (not super admin(first user) or not in allowed_emails).
+    first_user_check = Users.get_first_user()
+    is_first_user_check = first_user_check is not None and user.id == first_user_check.id
     is_normal_admin = (
         user.role == "admin"
-        and user.id != Users.get_first_user().id
+        and not is_first_user_check
         and not is_email_super_admin(user.email)
     )
 
@@ -452,8 +565,10 @@ async def delete_user_by_id(user_id: str, user=Depends(get_admin_user)):
 @router.post("/{user_id}/co-admin/toggle", response_model=Optional[UserModel])
 async def toggle_co_admin_status(user_id: str, user=Depends(get_admin_user)):
     # Check if current user is super admin
+    first_user = Users.get_first_user()
+    is_first_user = first_user is not None and user.id == first_user.id
     is_super_admin = (
-        user.id == Users.get_first_user().id or 
+        is_first_user or 
         is_email_super_admin(user.email)
     )
     
@@ -478,7 +593,9 @@ async def toggle_co_admin_status(user_id: str, user=Depends(get_admin_user)):
         )
     
     # Prevent changing super admin co-admin status
-    if target_user.id == Users.get_first_user().id or is_email_super_admin(target_user.email):
+    first_user = Users.get_first_user()
+    is_target_first_user = first_user is not None and target_user.id == first_user.id
+    if is_target_first_user or is_email_super_admin(target_user.email):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Cannot change co-admin status of super admins",

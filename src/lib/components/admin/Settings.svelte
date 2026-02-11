@@ -1,4 +1,4 @@
-<script>
+<script lang="ts">
 	import { getContext, tick, onMount } from 'svelte';
 	import { toast } from 'svelte-sonner';
 
@@ -21,23 +21,24 @@
 	import Evaluations from './Settings/Evaluations.svelte';
 	import CodeExecution from './Settings/CodeExecution.svelte';
 	import { user } from '$lib/stores'; 
+	import { getSuperAdminEmails } from '$lib/apis/users';
 
-	const SPECIAL_ADMIN_EMAILS = [
-	'cg4532@nyu.edu',
-	'ms15138@nyu.edu',
-	'mb484@nyu.edu',
-	'sm11538@nyu.edu',
-	'ht2490@nyu.edu',
-	'ps5226@nyu.edu'
-	];
+	let superAdminEmails: string[] = [];
+	let canViewRestrictedTabs = false;
 
-	const canViewRestrictedTabs = () => SPECIAL_ADMIN_EMAILS.includes($user?.email);
+	const checkCanViewRestrictedTabs = () => {
+		if (!$user?.email) {
+			canViewRestrictedTabs = false;
+			return;
+		}
+		canViewRestrictedTabs = superAdminEmails.some(email => email.toLowerCase() === $user.email.toLowerCase());
+	};
 
 	const i18n = getContext('i18n');
 
 	let selectedTab = 'models';
 
-	onMount(() => {
+	onMount(async () => {
 		const containerElement = document.getElementById('admin-settings-tabs-container');
 
 		if (containerElement) {
@@ -48,7 +49,21 @@
 				}
 			});
 		}
+
+		// Fetch super admin emails from API
+		try {
+			if (localStorage.token) {
+				superAdminEmails = await getSuperAdminEmails(localStorage.token);
+				checkCanViewRestrictedTabs();
+			}
+		} catch (error) {
+			console.error('Error fetching super admin emails:', error);
+		}
 	});
+
+	$: if ($user?.email && superAdminEmails.length > 0) {
+		checkCanViewRestrictedTabs();
+	}
 </script>
 
 <div class="flex flex-col lg:flex-row w-full h-full pb-2 lg:space-x-4">
@@ -56,7 +71,7 @@
 		id="admin-settings-tabs-container"
 		class="tabs flex flex-row overflow-x-auto gap-2.5 max-w-full lg:gap-1 lg:flex-col lg:flex-none lg:w-40 dark:text-gray-200 text-sm font-medium text-left scrollbar-none"
 	>
-	{#if canViewRestrictedTabs()}
+	{#if canViewRestrictedTabs}
 		<button
 			class="px-0.5 py-1 min-w-fit rounded-lg flex-1 lg:flex-none flex text-right transition {selectedTab ===
 			'general'
@@ -84,7 +99,7 @@
 		</button>
 	{/if}
 
-	{#if canViewRestrictedTabs()}
+	{#if canViewRestrictedTabs}
 		<button
 			class="px-0.5 py-1 min-w-fit rounded-lg flex-1 md:flex-none flex text-right transition {selectedTab ===
 			'connections'
@@ -136,7 +151,7 @@
 			<div class=" self-center">{$i18n.t('Models')}</div>
 		</button>
 	
-	{#if canViewRestrictedTabs()}
+	{#if canViewRestrictedTabs}
 		<button
 			class="px-0.5 py-1 min-w-fit rounded-lg flex-1 md:flex-none flex text-right transition {selectedTab ===
 			'evaluations'
@@ -206,7 +221,7 @@
 			</div>
 			<div class=" self-center">{$i18n.t('Web Search')}</div>
 		</button>
-	{#if canViewRestrictedTabs()}
+	{#if canViewRestrictedTabs}
 		<button
 			class="px-0.5 py-1 min-w-fit rounded-lg flex-1 md:flex-none flex text-right transition {selectedTab ===
 			'code-execution'
@@ -234,7 +249,7 @@
 		</button>
 	{/if}
 
-	{#if canViewRestrictedTabs()}
+	{#if canViewRestrictedTabs}
 		<button
 			class="px-0.5 py-1 min-w-fit rounded-lg flex-1 md:flex-none flex text-right transition {selectedTab ===
 			'interface'
@@ -290,7 +305,7 @@
 		</button>
 
 
-	{#if canViewRestrictedTabs()}	
+	{#if canViewRestrictedTabs}	
 		<button
 			class="px-0.5 py-1 min-w-fit rounded-lg flex-1 md:flex-none flex text-right transition {selectedTab ===
 			'images'
@@ -318,7 +333,7 @@
 		</button>
 	{/if}
 	
-	{#if canViewRestrictedTabs()}
+	{#if canViewRestrictedTabs}
 		<button
 			class="px-0.5 py-1 min-w-fit rounded-lg flex-1 md:flex-none flex text-right transition {selectedTab ===
 			'pipelines'
@@ -350,7 +365,7 @@
 		</button>
 	{/if}
 
-	{#if canViewRestrictedTabs()}
+	{#if canViewRestrictedTabs}
 		<button
 			class="px-0.5 py-1 min-w-fit rounded-lg flex-1 md:flex-none flex text-right transition {selectedTab ===
 			'db'

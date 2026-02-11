@@ -54,9 +54,12 @@ TIMEOUT_DURATION = 3
 
 if WEBSOCKET_MANAGER == "redis":
     log.debug("Using Redis to manage websockets.")
-    SESSION_POOL = RedisDict("open-webui:session_pool", redis_url=WEBSOCKET_REDIS_URL)
-    USER_POOL = RedisDict("open-webui:user_pool", redis_url=WEBSOCKET_REDIS_URL)
-    USAGE_POOL = RedisDict("open-webui:usage_pool", redis_url=WEBSOCKET_REDIS_URL)
+    # Set TTL for session/usage pools to prevent memory growth (1 hour default)
+    # TTL is set per hash, not per field (faster, less granular)
+    # Use master for writes (SESSION_POOL, USER_POOL, USAGE_POOL all need writes)
+    SESSION_POOL = RedisDict("open-webui:session_pool", redis_url=WEBSOCKET_REDIS_URL, default_ttl=3600, use_master=True)
+    USER_POOL = RedisDict("open-webui:user_pool", redis_url=WEBSOCKET_REDIS_URL, default_ttl=3600, use_master=True)
+    USAGE_POOL = RedisDict("open-webui:usage_pool", redis_url=WEBSOCKET_REDIS_URL, default_ttl=1800, use_master=True)  # 30 min for usage
 
     clean_up_lock = RedisLock(
         redis_url=WEBSOCKET_REDIS_URL,
@@ -78,40 +81,84 @@ async def periodic_usage_pool_cleanup():
         log.debug("Usage pool cleanup lock already exists. Not running it.")
         return
     log.debug("Running periodic_usage_pool_cleanup")
+    
+    consecutive_renewal_failures = 0
+    max_renewal_failures = 3  # Allow some transient failures before giving up
+    
     try:
         while True:
             if not renew_func():
-                log.error(f"Unable to renew cleanup lock. Exiting usage pool cleanup.")
-                raise Exception("Unable to renew usage pool cleanup lock.")
+                consecutive_renewal_failures += 1
+                log.warning(
+                    f"Unable to renew cleanup lock (failure #{consecutive_renewal_failures}). "
+                    f"Lock may have expired or Redis is unavailable."
+                )
+                
+                # If we've had multiple consecutive failures, exit gracefully
+                if consecutive_renewal_failures >= max_renewal_failures:
+                    log.error(
+                        f"Too many consecutive lock renewal failures ({consecutive_renewal_failures}). "
+                        "Exiting usage pool cleanup. Another instance may take over."
+                    )
+                    break  # Exit gracefully instead of raising exception
+                
+                # For transient failures, wait a bit and try again before next iteration
+                await asyncio.sleep(1)
+                continue
+            
+            # Reset failure counter on successful renewal
+            consecutive_renewal_failures = 0
 
             now = int(time.time())
             send_usage = False
-            for model_id, connections in list(USAGE_POOL.items()):
-                # Creating a list of sids to remove if they have timed out
-                expired_sids = [
-                    sid
-                    for sid, details in connections.items()
-                    if now - details["updated_at"] > TIMEOUT_DURATION
-                ]
+            try:
+                for model_id, connections in list(USAGE_POOL.items()):
+                    # Ensure connections is a dict
+                    if not isinstance(connections, dict):
+                        log.warning(f"USAGE_POOL[{model_id}] is not a dict, resetting. Value: {connections}")
+                        try:
+                            del USAGE_POOL[model_id]
+                        except KeyError:
+                            pass  # Already deleted by another replica
+                        continue
+                    
+                    # Creating a list of sids to remove if they have timed out
+                    expired_sids = [
+                        sid
+                        for sid, details in connections.items()
+                        if isinstance(details, dict) and now - details.get("updated_at", 0) > TIMEOUT_DURATION
+                    ]
 
-                for sid in expired_sids:
-                    del connections[sid]
+                    if expired_sids:
+                        # Use truly atomic Lua script for batch field removal (single round trip)
+                        if isinstance(USAGE_POOL, RedisDict):
+                            result = USAGE_POOL.atomic_remove_dict_fields(model_id, expired_sids)
+                            if result is None:
+                                log.debug(f"Cleaning up model {model_id} from usage pool (now empty)")
+                        else:
+                            # Fallback for regular dict (single-pod mode, no Redis)
+                            for expired_sid in expired_sids:
+                                if expired_sid in connections:
+                                    del connections[expired_sid]
+                            if not connections:
+                                log.debug(f"Cleaning up model {model_id} from usage pool")
+                                del USAGE_POOL[model_id]
+                            else:
+                                USAGE_POOL[model_id] = connections
+                        send_usage = True
 
-                if not connections:
-                    log.debug(f"Cleaning up model {model_id} from usage pool")
-                    del USAGE_POOL[model_id]
-                else:
-                    USAGE_POOL[model_id] = connections
-
-                send_usage = True
-
-            if send_usage:
-                # Emit updated usage information after cleaning
-                await sio.emit("usage", {"models": get_models_in_use()})
+                if send_usage:
+                    # Emit updated usage information after cleaning
+                    await sio.emit("usage", {"models": get_models_in_use()})
+            except Exception as e:
+                log.error(f"Error in usage pool cleanup iteration: {e}", exc_info=True)
 
             await asyncio.sleep(TIMEOUT_DURATION)
+    except Exception as e:
+        log.error(f"Fatal error in periodic_usage_pool_cleanup: {e}", exc_info=True)
     finally:
         release_func()
+        log.debug("periodic_usage_pool_cleanup exited and released lock")
 
 
 app = socketio.ASGIApp(
@@ -128,18 +175,26 @@ def get_models_in_use():
 
 @sio.on("usage")
 async def usage(sid, data):
-    model_id = data["model"]
-    # Record the timestamp for the last update
-    current_time = int(time.time())
+    try:
+        model_id = data["model"]
+        # Record the timestamp for the last update
+        current_time = int(time.time())
 
-    # Store the new usage data and task
-    USAGE_POOL[model_id] = {
-        **(USAGE_POOL[model_id] if model_id in USAGE_POOL else {}),
-        sid: {"updated_at": current_time},
-    }
+        # Use truly atomic Lua script for single-round-trip update (prevents race conditions)
+        if isinstance(USAGE_POOL, RedisDict):
+            USAGE_POOL.atomic_set_dict_field(model_id, sid, {"updated_at": current_time})
+        else:
+            # Fallback for regular dict (single-pod mode, no Redis)
+            existing_usage = USAGE_POOL.get(model_id, {})
+            if not isinstance(existing_usage, dict):
+                existing_usage = {}
+            existing_usage[sid] = {"updated_at": current_time}
+            USAGE_POOL[model_id] = existing_usage
 
-    # Broadcast the usage data to all clients
-    await sio.emit("usage", {"models": get_models_in_use()})
+        # Broadcast the usage data to all clients
+        await sio.emit("usage", {"models": get_models_in_use()})
+    except Exception as e:
+        log.error(f"Error in usage handler for session {sid}: {e}", exc_info=True)
 
 
 @sio.event
@@ -152,15 +207,24 @@ async def connect(sid, environ, auth):
             user = Users.get_user_by_id(data["id"])
 
         if user:
-            SESSION_POOL[sid] = user.model_dump()
-            if user.id in USER_POOL:
-                USER_POOL[user.id] = USER_POOL[user.id] + [sid]
-            else:
-                USER_POOL[user.id] = [sid]
+            try:
+                SESSION_POOL[sid] = user.model_dump()
+                # Atomic append to prevent race conditions (fast single round trip)
+                # Fallback to regular dict operations if RedisDict not available
+                if isinstance(USER_POOL, RedisDict):
+                    USER_POOL.atomic_append_to_list(user.id, sid)
+                else:
+                    # Fallback for regular dict (single-pod mode, no Redis)
+                    existing_sessions = USER_POOL.get(user.id, [])
+                    if not isinstance(existing_sessions, list):
+                        existing_sessions = []
+                    USER_POOL[user.id] = existing_sessions + [sid]
 
-            # print(f"user {user.name}({user.id}) connected with session ID {sid}")
-            await sio.emit("user-list", {"user_ids": list(USER_POOL.keys())})
-            await sio.emit("usage", {"models": get_models_in_use()})
+                # print(f"user {user.name}({user.id}) connected with session ID {sid}")
+                await sio.emit("user-list", {"user_ids": list(USER_POOL.keys())})
+                await sio.emit("usage", {"models": get_models_in_use()})
+            except Exception as e:
+                log.error(f"Error in connect handler for user {user.id}: {e}", exc_info=True)
 
 
 @sio.on("user-join")
@@ -178,22 +242,32 @@ async def user_join(sid, data):
     if not user:
         return
 
-    SESSION_POOL[sid] = user.model_dump()
-    if user.id in USER_POOL:
-        USER_POOL[user.id] = USER_POOL[user.id] + [sid]
-    else:
-        USER_POOL[user.id] = [sid]
+    try:
+        SESSION_POOL[sid] = user.model_dump()
+        # Atomic append to prevent race conditions (fast single round trip)
+        # Fallback to regular dict operations if RedisDict not available
+        if isinstance(USER_POOL, RedisDict):
+            USER_POOL.atomic_append_to_list(user.id, sid)
+        else:
+            # Fallback for regular dict (single-pod mode, no Redis)
+            existing_sessions = USER_POOL.get(user.id, [])
+            if not isinstance(existing_sessions, list):
+                existing_sessions = []
+            USER_POOL[user.id] = existing_sessions + [sid]
 
-    # Join all the channels
-    channels = Channels.get_channels_by_user_id(user.id)
-    log.debug(f"{channels=}")
-    for channel in channels:
-        await sio.enter_room(sid, f"channel:{channel.id}")
+        # Join all the channels
+        channels = Channels.get_channels_by_user_id(user.id)
+        log.debug(f"{channels=}")
+        for channel in channels:
+            await sio.enter_room(sid, f"channel:{channel.id}")
 
-    # print(f"user {user.name}({user.id}) connected with session ID {sid}")
+        # print(f"user {user.name}({user.id}) connected with session ID {sid}")
 
-    await sio.emit("user-list", {"user_ids": list(USER_POOL.keys())})
-    return {"id": user.id, "name": user.name}
+        await sio.emit("user-list", {"user_ids": list(USER_POOL.keys())})
+        return {"id": user.id, "name": user.name}
+    except Exception as e:
+        log.error(f"Error in user_join handler for user {user.id}: {e}", exc_info=True)
+        return None
 
 
 @sio.on("join-channels")
@@ -233,13 +307,19 @@ async def channel_events(sid, data):
     event_type = event_data["type"]
 
     if event_type == "typing":
+        # Safely get user from session pool
+        user_data = SESSION_POOL.get(sid)
+        if not user_data:
+            log.warning(f"Session {sid} not found in SESSION_POOL for channel-events")
+            return
+        
         await sio.emit(
             "channel-events",
             {
                 "channel_id": data["channel_id"],
                 "message_id": data.get("message_id", None),
                 "data": event_data,
-                "user": UserNameResponse(**SESSION_POOL[sid]).model_dump(),
+                "user": UserNameResponse(**user_data).model_dump(),
             },
             room=room,
         )
@@ -252,20 +332,34 @@ async def user_list(sid):
 
 @sio.event
 async def disconnect(sid):
-    if sid in SESSION_POOL:
-        user = SESSION_POOL[sid]
-        del SESSION_POOL[sid]
+    try:
+        if sid in SESSION_POOL:
+            user = SESSION_POOL[sid]
+            del SESSION_POOL[sid]
 
-        user_id = user["id"]
-        USER_POOL[user_id] = [_sid for _sid in USER_POOL[user_id] if _sid != sid]
+            user_id = user["id"]
+            # Use truly atomic Lua script for list item removal (single round trip)
+            if isinstance(USER_POOL, RedisDict):
+                USER_POOL.atomic_remove_from_list(user_id, sid)
+                # Note: atomic_remove_from_list handles key deletion if list becomes empty
+            else:
+                # Fallback for regular dict (single-pod mode, no Redis)
+                existing_sessions = USER_POOL.get(user_id, [])
+                if not isinstance(existing_sessions, list):
+                    existing_sessions = []
+                filtered_sessions = [_sid for _sid in existing_sessions if _sid != sid]
+                if len(filtered_sessions) == 0:
+                    if user_id in USER_POOL:
+                        del USER_POOL[user_id]
+                else:
+                    USER_POOL[user_id] = filtered_sessions
 
-        if len(USER_POOL[user_id]) == 0:
-            del USER_POOL[user_id]
-
-        await sio.emit("user-list", {"user_ids": list(USER_POOL.keys())})
-    else:
-        pass
-        # print(f"Unknown session ID {sid} disconnected")
+            await sio.emit("user-list", {"user_ids": list(USER_POOL.keys())})
+        else:
+            pass
+            # print(f"Unknown session ID {sid} disconnected")
+    except Exception as e:
+        log.error(f"Error in disconnect handler for session {sid}: {e}", exc_info=True)
 
 
 def get_event_emitter(request_info):
@@ -358,7 +452,11 @@ def get_user_ids_from_room(room):
 
     active_user_ids = list(
         set(
-            [SESSION_POOL.get(session_id[0])["id"] for session_id in active_session_ids]
+            [
+                user_data["id"]
+                for session_id in active_session_ids
+                if (user_data := SESSION_POOL.get(session_id[0])) is not None
+            ]
         )
     )
     return active_user_ids

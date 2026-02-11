@@ -4,10 +4,22 @@
 	import { onMount, getContext, createEventDispatcher } from 'svelte';
 
 	import { user } from '$lib/stores';
+	import { getSuperAdminEmails } from '$lib/apis/users';
 
-	const SPECIAL_ADMIN_EMAILS = ['cg4532@nyu.edu','ms15138@nyu.edu','mb484@nyu.edu','sm11538@nyu.edu','ht2490@nyu.edu','ps5226@nyu.edu'];
+	let superAdminEmails: string[] = [];
+	let canViewFileSettings = false;
 
-	const canViewFileSettings = () => SPECIAL_ADMIN_EMAILS.includes($user?.email);
+	const checkCanViewFileSettings = () => {
+		if (!$user?.email) {
+			canViewFileSettings = false;
+			return;
+		}
+		canViewFileSettings = superAdminEmails.some(email => email.toLowerCase() === $user.email.toLowerCase());
+	};
+
+	$: if ($user?.email && superAdminEmails.length > 0) {
+		checkCanViewFileSettings();
+	}
 
 	const dispatch = createEventDispatcher();
 
@@ -45,7 +57,7 @@
 	let showResetUploadDirConfirm = false;
 
 	let embeddingEngine = 'portkey';
-	let embeddingModel = 'text-embedding-d47871';
+	let embeddingModel = '';  // CRITICAL RBAC: No default - each admin must set their own model
 	let embeddingBatchSize = 1;
 	let rerankingModel = '';
 
@@ -60,9 +72,9 @@
 	let showDocumentIntelligenceConfig = false;
 
 	let textSplitter = '';
-	let chunkSize = 0;
-	let chunkOverlap = 0;
-	let pdfExtractImages = true;
+	let chunkSize = 1000;
+	let chunkOverlap = 200;
+	let pdfExtractImages = false;  // CRITICAL: Default to false - image extraction causes 2+ minute slowdowns/hangs
 
 	let RAG_FULL_CONTEXT = false;
 	let BYPASS_EMBEDDING_AND_RETRIEVAL = false;
@@ -74,7 +86,7 @@
 	let OpenAIKey = '';
 
 	let PortkeyUrl = 'https://ai-gateway.apps.cloud.rt.nyu.edu/v1';
-	let PortkeyKey = 'dogDlg+W3/1qn7LsU3oTuJHDEopS';
+	let PortkeyKey = '';  // Admin must provide API key - no default
 
 	let OllamaUrl = '';
 	let OllamaKey = '';
@@ -104,21 +116,22 @@
 			return;
 		}
 
-		if (embeddingEngine === 'openai' && embeddingModel === '') {
-			toast.error(
-				$i18n.t(
-					'Model filesystem path detected. Model shortname is required for update, cannot continue.'
-				)
-			);
+		// Embedding model is mandatory for OpenAI/Portkey engines
+		if (
+			(embeddingEngine === 'openai' || embeddingEngine === 'portkey') &&
+			(embeddingModel === '' || embeddingModel.trim() === '')
+		) {
+			toast.error($i18n.t('Embedding model required.'));
 			return;
 		}
 
-		if (embeddingEngine === 'openai' && (OpenAIKey === '' || OpenAIUrl === '')) {
-			toast.error($i18n.t('OpenAI URL/Key required.'));
+		// API key is mandatory for OpenAI/Portkey engines (URL may fall back on backend)
+		if (embeddingEngine === 'openai' && OpenAIKey === '') {
+			toast.error($i18n.t('OpenAI API key required.'));
 			return;
 		}
-		if (embeddingEngine === 'portkey' && (PortkeyKey === '' || PortkeyUrl === '')) {
-			toast.error($i18n.t('PORTKEY URL/Key required.'));
+		if (embeddingEngine === 'portkey' && PortkeyKey === '') {
+			toast.error($i18n.t('PORTKEY API key required.'));
 			return;
 		}
 
@@ -146,8 +159,24 @@
 		updateEmbeddingModelLoading = false;
 
 		if (res) {
-			console.log('embeddingModelUpdateHandler:', res);
+			console.log('[RBAC_UI] embeddingModelUpdateHandler response:', res);
 			if (res.status === true) {
+				// CRITICAL RBAC: Update UI state from backend response to ensure we show the correct per-admin values
+				// This prevents one admin from seeing another admin's values on the same pod
+				if (res.embedding_model !== undefined) {
+					embeddingModel = res.embedding_model || '';
+					console.log('[RBAC_UI] Updated embeddingModel from response:', embeddingModel);
+				}
+				if (res.openai_config?.key !== undefined) {
+					if (embeddingEngine === 'portkey') {
+						PortkeyKey = res.openai_config.key || '';
+					} else if (embeddingEngine === 'openai') {
+						OpenAIKey = res.openai_config.key || '';
+					}
+					console.log('[RBAC_UI] Updated API key from response (masked)');
+				}
+				// Re-fetch config to ensure we have the latest values
+				await setEmbeddingConfig();
 				toast.success($i18n.t('Embedding model set to "{{embedding_model}}"', res), {
 					duration: 1000 * 10
 				});
@@ -206,6 +235,8 @@
 			}
 		}
 
+		console.log('BEFORE SAVE - chunkSize:', chunkSize, 'chunkOverlap:', chunkOverlap);
+		
 		const res = await updateRAGConfig(localStorage.token, {
 			email: $user.email,
 			pdf_extract_images: pdfExtractImages,
@@ -232,6 +263,29 @@
 			}
 		});
 
+		console.log('AFTER SAVE - Response:', res);
+		console.log('AFTER SAVE - res.chunk:', res?.chunk);
+		
+		// CRITICAL: Update UI state from backend response (backend may have corrected 0 values to defaults)
+		if (res && res.chunk) {
+			const newChunkSize = (res.chunk.chunk_size && res.chunk.chunk_size > 0) ? res.chunk.chunk_size : 1000;
+			const newChunkOverlap = (res.chunk.chunk_overlap && res.chunk.chunk_overlap > 0) ? res.chunk.chunk_overlap : 200;
+			console.log('UPDATING UI - newChunkSize:', newChunkSize, 'newChunkOverlap:', newChunkOverlap);
+			textSplitter = res.chunk.text_splitter;
+			chunkSize = newChunkSize;
+			chunkOverlap = newChunkOverlap;
+			console.log('AFTER UPDATE - chunkSize:', chunkSize, 'chunkOverlap:', chunkOverlap);
+		} else {
+			console.error('NO RESPONSE OR NO CHUNK IN RESPONSE!', res);
+			// Force re-fetch if response is missing
+			const refreshRes = await getRAGConfig(localStorage.token, $user.email);
+			if (refreshRes && refreshRes.chunk) {
+				chunkSize = (refreshRes.chunk.chunk_size && refreshRes.chunk.chunk_size > 0) ? refreshRes.chunk.chunk_size : 1000;
+				chunkOverlap = (refreshRes.chunk.chunk_overlap && refreshRes.chunk.chunk_overlap > 0) ? refreshRes.chunk.chunk_overlap : 200;
+				textSplitter = refreshRes.chunk.text_splitter;
+			}
+		}
+
 		await updateQuerySettings(localStorage.token, {email: $user.email, ...querySettings});
 
 		if (fileMaxSize === '' || fileMaxSize === null) {
@@ -249,17 +303,8 @@
 
 		if (embeddingConfig) {
 			embeddingEngine = embeddingConfig.embedding_engine || 'portkey';
-			if (!embeddingConfig.embedding_model) {
-				if (embeddingConfig.embedding_engine === 'portkey') {
-					embeddingModel = 'text-embedding-d47871'; 
-				} else if (embeddingConfig.embedding_engine === '') {
-					embeddingModel = 'sentence-transformers/all-MiniLM-L6-v2';
-				} else {
-					embeddingModel = '';
-				}
-			} else {
-				embeddingModel = embeddingConfig.embedding_model;
-			}
+			// Do not apply any fallback/default for model name; it must be explicitly set per admin.
+			embeddingModel = embeddingConfig.embedding_model || '';
 
 
 
@@ -278,8 +323,9 @@
 			OllamaKey = embeddingConfig.ollama_config.key;
 			OllamaUrl = embeddingConfig.ollama_config.url;
 		} else {
-		embeddingEngine = 'portkey';
-		embeddingModel = 'text-embedding-d47871';
+			// No embedding config yet for this admin; force explicit entry.
+			embeddingEngine = 'portkey';
+			embeddingModel = '';
 		}
 	};
 
@@ -296,6 +342,16 @@
 	};
 
 	onMount(async () => {
+		// Fetch super admin emails from API
+		try {
+			if (localStorage.token) {
+				superAdminEmails = await getSuperAdminEmails(localStorage.token);
+				checkCanViewFileSettings();
+			}
+		} catch (error) {
+			console.error('Error fetching super admin emails:', error);
+		}
+
 		await setEmbeddingConfig();
 		await setRerankingConfig();
 
@@ -303,12 +359,21 @@
 
 		const res = await getRAGConfig(localStorage.token, $user.email);
 
+		console.log('ONMOUNT - getRAGConfig response:', res);
+		console.log('ONMOUNT - res.chunk:', res?.chunk);
+
 		if (res) {
 			pdfExtractImages = res.pdf_extract_images;
 
 			textSplitter = res.chunk.text_splitter;
-			chunkSize = res.chunk.chunk_size;
-			chunkOverlap = res.chunk.chunk_overlap;
+			// Use defaults if backend returns 0, null, undefined, or invalid (means not configured)
+			// Backend should never return 0, but handle it defensively
+			const loadedChunkSize = (res.chunk.chunk_size && res.chunk.chunk_size > 0) ? res.chunk.chunk_size : 1000;
+			const loadedChunkOverlap = (res.chunk.chunk_overlap && res.chunk.chunk_overlap > 0) ? res.chunk.chunk_overlap : 200;
+			console.log('ONMOUNT - Setting chunkSize:', loadedChunkSize, 'chunkOverlap:', loadedChunkOverlap);
+			chunkSize = loadedChunkSize;
+			chunkOverlap = loadedChunkOverlap;
+			console.log('ONMOUNT - After setting, chunkSize:', chunkSize, 'chunkOverlap:', chunkOverlap);
 
 			RAG_FULL_CONTEXT = res.RAG_FULL_CONTEXT;
 			BYPASS_EMBEDDING_AND_RETRIEVAL = res.BYPASS_EMBEDDING_AND_RETRIEVAL;
@@ -470,7 +535,11 @@
 										placeholder={$i18n.t('Enter Chunk Size')}
 										bind:value={chunkSize}
 										autocomplete="off"
-										min="0"
+										min="1"
+										on:input={(e) => {
+											const val = parseInt(e.target.value) || 0;
+											chunkSize = val > 0 ? val : 1000;
+										}}
 									/>
 								</div>
 							</div>
@@ -488,6 +557,10 @@
 										bind:value={chunkOverlap}
 										autocomplete="off"
 										min="0"
+										on:input={(e) => {
+											const val = parseInt(e.target.value) || 0;
+											chunkOverlap = val > 0 ? val : 200;
+										}}
 									/>
 								</div>
 							</div>
@@ -519,7 +592,7 @@
 										} else if (e.target.value === 'openai') {
 											embeddingModel = 'text-embedding-3-small';
 										} else if (e.target.value === 'portkey') {
-											embeddingModel = 'text-embedding-d47871'
+											embeddingModel = '@openai-embedding/text-embedding-3-small'
 										} else if (e.target.value === '') {
 											embeddingModel = 'sentence-transformers/all-MiniLM-L6-v2';
 										}
@@ -846,7 +919,7 @@
 				</div>
 			{/if}
 
-			{#if canViewFileSettings()}
+			{#if canViewFileSettings}
 				<div class="mb-3">
 					<div class=" mb-2.5 text-base font-medium">{$i18n.t('Files')}</div>
 

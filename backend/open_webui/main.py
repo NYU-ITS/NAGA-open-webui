@@ -47,7 +47,11 @@ from starlette.responses import Response, StreamingResponse
 
 from open_webui.utils import logger
 from open_webui.utils.audit import AuditLevel, AuditLoggingMiddleware
-from open_webui.utils.logger import start_logger
+from open_webui.utils.logger import start_logger, NYC_TIMEZONE
+
+# Set timezone early - before any logging happens
+import os
+os.environ["TZ"] = "America/New_York"
 from open_webui.socket.main import (
     app as socket_app,
     periodic_usage_pool_cleanup,
@@ -174,6 +178,7 @@ from open_webui.config import (
     RAG_FULL_CONTEXT,
     BYPASS_EMBEDDING_AND_RETRIEVAL,
     RAG_EMBEDDING_MODEL,
+    RAG_EMBEDDING_MODEL_USER,
     RAG_EMBEDDING_MODEL_AUTO_UPDATE,
     RAG_EMBEDDING_MODEL_TRUST_REMOTE_CODE,
     RAG_RERANKING_MODEL,
@@ -248,6 +253,7 @@ from open_webui.config import (
     ADMIN_EMAIL,
     SHOW_ADMIN_DETAILS,
     JWT_EXPIRES_IN,
+    PILOT_GENAI_TERMS_VERSION,
     ENABLE_SIGNUP,
     ENABLE_LOGIN_FORM,
     ENABLE_API_KEY,
@@ -361,13 +367,15 @@ from open_webui.utils.auth import (
 from open_webui.utils.oauth import OAuthManager
 from open_webui.utils.security_headers import SecurityHeadersMiddleware
 
-from open_webui.tasks import stop_task, list_tasks  # Import from tasks.py
+from open_webui.tasks import stop_task, list_tasks, periodic_task_cleanup, startup_cleanup  # Import from tasks.py
 
 
 if SAFE_MODE:
     print("SAFE MODE ENABLED")
     Functions.deactivate_all_functions()
 
+# Initialize logging early - will be reconfigured by start_logger() with NYC timezone
+# This is temporary initialization before start_logger() is called in lifespan()
 logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["MAIN"])
@@ -498,6 +506,41 @@ def ensure_chat_group_id_column():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     start_logger()
+    
+    # Initialize OpenTelemetry SDK (Phase 1)
+    otel_initialized = False
+    try:
+        from open_webui.utils.otel_config import (
+            initialize_otel,
+            shutdown_otel,
+            instrument_fastapi,
+            instrument_requests,
+        )
+        otel_initialized = initialize_otel()
+        if otel_initialized:
+            log.info("OpenTelemetry SDK initialized successfully")
+            
+            # Instrument FastAPI (after app is created)
+            try:
+                fastapi_instrumented = instrument_fastapi(app)
+                if fastapi_instrumented:
+                    log.info("FastAPI auto-instrumentation enabled")
+            except Exception as e:
+                log.warning(f"FastAPI instrumentation failed: {e}", exc_info=True)
+            
+            # Instrument requests library
+            try:
+                requests_instrumented = instrument_requests()
+                if requests_instrumented:
+                    log.info("Requests library auto-instrumentation enabled")
+            except Exception as e:
+                log.warning(f"Requests instrumentation failed: {e}", exc_info=True)
+        else:
+            log.debug("OpenTelemetry not initialized (disabled or misconfigured)")
+    except Exception as e:
+        # Don't crash if OTEL fails - log and continue
+        log.warning(f"OpenTelemetry initialization failed: {e}", exc_info=True)
+    
     if RESET_CONFIG_ON_START:
         reset_config()
 
@@ -505,6 +548,24 @@ async def lifespan(app: FastAPI):
         get_license_data(app, app.state.config.LICENSE_KEY)
 
     asyncio.create_task(periodic_usage_pool_cleanup())
+    asyncio.create_task(periodic_task_cleanup())
+    # Clean up orphaned tasks on startup (fixes memory leak on pod restart)
+    startup_task = asyncio.create_task(startup_cleanup())
+    # Add error callback to log failures (BUG #6 fix)
+    # BUG #11 fix: Ensure log is available in callback by using logging.getLogger explicitly
+    def startup_cleanup_done_callback(task):
+        # Use logging.getLogger to ensure logger is available even if module-level log isn't
+        callback_log = logging.getLogger(__name__)
+        try:
+            if task.exception() is not None:
+                callback_log.error(f"Startup cleanup failed: {task.exception()}", exc_info=task.exception())
+        except Exception as e:
+            # Fallback to print if logging also fails
+            try:
+                callback_log.error(f"Error in startup cleanup callback: {e}", exc_info=True)
+            except Exception:
+                print(f"CRITICAL: Failed to log startup cleanup error: {e}", file=sys.stderr)
+    startup_task.add_done_callback(startup_cleanup_done_callback)
     ensure_group_created_by_column()
     ensure_model_created_by_column()
     ensure_tool_created_by_column()
@@ -535,8 +596,16 @@ async def lifespan(app: FastAPI):
                 log.warning(f"Failed to copy KaTeX fonts from node_modules: {e}")
     except Exception as e:
         log.debug(f"KaTeX font cache init failed: {e}")
-        
+    
     yield
+    
+    # Shutdown OpenTelemetry (flush remaining spans/metrics)
+    if otel_initialized:
+        try:
+            from open_webui.utils.otel_config import shutdown_otel
+            shutdown_otel()
+        except Exception as e:
+            log.warning(f"OpenTelemetry shutdown failed: {e}", exc_info=True)
 
 
 app = FastAPI(
@@ -604,6 +673,7 @@ app.state.config.ENABLE_API_KEY_ENDPOINT_RESTRICTIONS = (
 app.state.config.API_KEY_ALLOWED_ENDPOINTS = API_KEY_ALLOWED_ENDPOINTS
 
 app.state.config.JWT_EXPIRES_IN = JWT_EXPIRES_IN
+app.state.config.PILOT_GENAI_TERMS_VERSION = PILOT_GENAI_TERMS_VERSION
 
 app.state.config.SHOW_ADMIN_DETAILS = SHOW_ADMIN_DETAILS
 app.state.config.ADMIN_EMAIL = ADMIN_EMAIL
@@ -690,6 +760,7 @@ app.state.config.CHUNK_OVERLAP = CHUNK_OVERLAP
 
 app.state.config.RAG_EMBEDDING_ENGINE = RAG_EMBEDDING_ENGINE
 app.state.config.RAG_EMBEDDING_MODEL = RAG_EMBEDDING_MODEL
+app.state.config.RAG_EMBEDDING_MODEL_USER = RAG_EMBEDDING_MODEL_USER
 app.state.config.RAG_EMBEDDING_BATCH_SIZE = RAG_EMBEDDING_BATCH_SIZE
 app.state.config.RAG_RERANKING_MODEL = RAG_RERANKING_MODEL
 app.state.config.RAG_TEMPLATE = RAG_TEMPLATE
@@ -700,6 +771,9 @@ app.state.config.RAG_OPENAI_API_KEY = RAG_OPENAI_API_KEY
 app.state.config.RAG_OLLAMA_BASE_URL = RAG_OLLAMA_BASE_URL
 app.state.config.RAG_OLLAMA_API_KEY = RAG_OLLAMA_API_KEY
 
+# CRITICAL: Force PDF_EXTRACT_IMAGES to False to prevent hangs (image extraction causes 2+ minute slowdowns)
+# Override the PersistentConfig value regardless of what's in the database
+PDF_EXTRACT_IMAGES.value = False
 app.state.config.PDF_EXTRACT_IMAGES = PDF_EXTRACT_IMAGES
 
 app.state.config.YOUTUBE_LOADER_LANGUAGE = YOUTUBE_LOADER_LANGUAGE
@@ -770,18 +844,41 @@ except Exception as e:
     pass
 
 
+# At startup, use default API key (no user context yet)
+# Per-user API keys are used during actual document processing
+# Portkey is the default and only supported embedding engine
+# Get base URL value - handle PersistentConfig objects properly
+# If value is empty, fall back to Portkey gateway URL (default from config.py)
+base_url_config = app.state.config.RAG_OPENAI_API_BASE_URL
+base_url = (
+    base_url_config.value
+    if hasattr(base_url_config, 'value')
+    else str(base_url_config)
+)
+# Fallback to Portkey gateway URL if empty (default from config.py)
+if not base_url or base_url.strip() == "":
+    base_url = "https://ai-gateway.apps.cloud.rt.nyu.edu/v1"
+    log.warning(f"RAG_OPENAI_API_BASE_URL is empty, using Portkey default gateway: {base_url}")
+
+# Ensure engine is set to portkey (default and only supported)
+engine_value = (
+    app.state.config.RAG_EMBEDDING_ENGINE.value
+    if hasattr(app.state.config.RAG_EMBEDDING_ENGINE, 'value')
+    else str(app.state.config.RAG_EMBEDDING_ENGINE)
+)
+if engine_value != "portkey":
+    log.warning(f"Embedding engine was '{engine_value}', forcing to 'portkey' (default and only supported)")
+    # Force engine to portkey by updating the config value
+    app.state.config.RAG_EMBEDDING_ENGINE.update("portkey")
+
 app.state.EMBEDDING_FUNCTION = get_embedding_function(
     app.state.config.RAG_EMBEDDING_ENGINE,
     app.state.config.RAG_EMBEDDING_MODEL,
     app.state.ef,
+    base_url,
     (
-        app.state.config.RAG_OPENAI_API_BASE_URL
-        if app.state.config.RAG_EMBEDDING_ENGINE == "openai"
-        or app.state.config.RAG_EMBEDDING_ENGINE == "portkey"
-        else app.state.config.RAG_OLLAMA_BASE_URL
-    ),
-    (
-        app.state.config.RAG_OPENAI_API_KEY
+        # UserScopedConfig - use default at startup (empty or env var)
+        app.state.config.RAG_OPENAI_API_KEY.default
         if app.state.config.RAG_EMBEDDING_ENGINE == "openai"
         or app.state.config.RAG_EMBEDDING_ENGINE == "portkey"
         else app.state.config.RAG_OLLAMA_API_KEY
@@ -1065,6 +1162,10 @@ if audit_level != AuditLevel.NONE:
 @app.get("/api/models")
 async def get_models(request: Request, user=Depends(get_verified_user)):
     def get_filtered_models(models, user):
+        # Batch fetch all model info first
+        model_ids = [model["id"] for model in models if not model.get("arena")]
+        model_info_dict = Models.get_models_by_ids(model_ids) if model_ids else {}
+        
         filtered_models = []
         for model in models:
             if model.get("arena"):
@@ -1078,12 +1179,38 @@ async def get_models(request: Request, user=Depends(get_verified_user)):
                     filtered_models.append(model)
                 continue
 
-            model_info = Models.get_model_by_id(model["id"])
+            # Use batch-fetched model info
+            model_info = model_info_dict.get(model["id"])
             if model_info:
-                if user.id == model_info.user_id or has_access(
-                    user.id, type="read", access_control=model_info.access_control
-                ):
+                # Model exists in database - check database access control
+                from open_webui.utils.workspace_access import item_assigned_to_user_groups
+                
+                # Check if user is creator
+                if user.id == model_info.user_id:
                     filtered_models.append(model)
+                    continue
+                
+                # ENFORCE: If access_control is None, treat as PRIVATE (skip for other users)
+                if model_info.access_control is None:
+                    continue  # Skip models without access_control (private to creator only)
+                
+                # Check group assignments
+                if item_assigned_to_user_groups(user.id, model_info, "read"):
+                    filtered_models.append(model)
+                    continue
+                
+                # Check has_access for models with explicit access_control
+                if has_access(user.id, type="read", access_control=model_info.access_control):
+                    filtered_models.append(model)
+            else:
+                # Model not in database (e.g., Portkey/external models or pipe models)
+                # Pipe models come from get_function_models() which already filters based on access
+                # Trust the filtering done in get_function_models() for pipe models
+                if model.get("pipe"):
+                    # Pipe model - already filtered by get_function_models()
+                    # Include it since it passed the access check there
+                    filtered_models.append(model)
+                # else: Non-pipe model not in database - skip implicitly by not adding
 
         return filtered_models
 

@@ -175,21 +175,58 @@ class KnowledgeTable:
         self, user_id: str, permission: str = "write"
     ) -> list[KnowledgeUserModel]:
         with get_db() as db:
-            all_knowledge_bases = (
-                db.query(Knowledge).order_by(Knowledge.updated_at.desc()).all()
+            # Optimize: First get knowledge bases owned by user (SQL filter)
+            # Then get all others for access control checks
+            owned_knowledge = (
+                db.query(Knowledge)
+                .filter(Knowledge.user_id == user_id)
+                .order_by(Knowledge.updated_at.desc())
+                .all()
             )
+            
+            # Get all other knowledge bases for access control checks
+            other_knowledge = (
+                db.query(Knowledge)
+                .filter(Knowledge.user_id != user_id)
+                .order_by(Knowledge.updated_at.desc())
+                .all()
+            )
+            
+            # Combine and dedupe (in case of any overlap)
+            all_knowledge_bases = owned_knowledge + other_knowledge
             knowledge_for_user = []
+            
+            # Batch fetch all unique user_ids to avoid N+1 queries
+            unique_user_ids = list(set([kb.user_id for kb in all_knowledge_bases]))
+            users_dict = {}
+            if unique_user_ids:
+                # Use batch method if available, otherwise fall back to individual lookups
+                batch_users = Users.get_users_by_user_ids(unique_user_ids)
+                users_dict = {user.id: user.model_dump() for user in batch_users}
+                # Fill in None for any user_ids not found
+                for uid in unique_user_ids:
+                    if uid not in users_dict:
+                        users_dict[uid] = None
 
             for knowledge in all_knowledge_bases:
-                if (knowledge.user_id == user_id or 
-                    has_access(user_id, permission, knowledge.access_control) or
-                    self._item_assigned_to_user_groups(user_id, knowledge, permission)):
-                    user = Users.get_user_by_id(knowledge.user_id)
+                # Check ownership first (fast path)
+                if knowledge.user_id == user_id:
                     knowledge_for_user.append(
                         KnowledgeUserModel.model_validate(
                             {
                                 **KnowledgeModel.model_validate(knowledge).model_dump(),
-                                "user": user.model_dump() if user else None,
+                                "user": users_dict.get(knowledge.user_id),
+                            }
+                        )
+                    )
+                # Then check access control (slower, but only for non-owned items)
+                elif (has_access(user_id, permission, knowledge.access_control) or
+                      self._item_assigned_to_user_groups(user_id, knowledge, permission)):
+                    knowledge_for_user.append(
+                        KnowledgeUserModel.model_validate(
+                            {
+                                **KnowledgeModel.model_validate(knowledge).model_dump(),
+                                "user": users_dict.get(knowledge.user_id),
                             }
                         )
                     )
@@ -326,6 +363,79 @@ class KnowledgeTable:
                 return True
             except Exception:
                 return False
+
+    def get_knowledge_bases_by_file_id(self, file_id: str) -> list[KnowledgeModel]:
+        """
+        Find all knowledge bases that contain the specified file_id in their file_ids list.
+        
+        This method works with both SQLite and PostgreSQL databases via SQLAlchemy ORM.
+        It loads all knowledge bases and filters in Python, which is acceptable for
+        typical use cases. For very large datasets, consider optimizing with a database
+        query that uses JSON functions (PostgreSQL jsonb_path_exists or SQLite json_each).
+        
+        Args:
+            file_id: The file ID to search for
+            
+        Returns:
+            List of KnowledgeModel instances that contain this file_id
+        """
+        knowledge_bases = []
+        try:
+            with get_db() as db:
+                # Load all knowledge bases - works for both SQLite and PostgreSQL
+                # SQLAlchemy ORM abstracts database differences
+                all_knowledge = db.query(Knowledge).all()
+                for knowledge in all_knowledge:
+                    if knowledge.data and isinstance(knowledge.data, dict):
+                        file_ids = knowledge.data.get("file_ids", [])
+                        if isinstance(file_ids, list) and file_id in file_ids:
+                            knowledge_model = KnowledgeModel.model_validate(knowledge)
+                            # Ensure data structure is normalized
+                            if knowledge_model.data is None:
+                                knowledge_model.data = {"file_ids": []}
+                            elif not isinstance(knowledge_model.data, dict):
+                                knowledge_model.data = {"file_ids": []}
+                            elif "file_ids" not in knowledge_model.data:
+                                knowledge_model.data["file_ids"] = []
+                            knowledge_bases.append(knowledge_model)
+        except Exception as e:
+            log.exception(f"Error finding knowledge bases for file_id {file_id}: {e}")
+        return knowledge_bases
+
+    def remove_file_from_all_knowledge_bases(self, file_id: str) -> bool:
+        """
+        Remove a file_id from all knowledge bases that contain it.
+        This updates the knowledge.data.file_ids list for each affected knowledge base.
+        
+        Args:
+            file_id: The file ID to remove from all knowledge bases
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            knowledge_bases = self.get_knowledge_bases_by_file_id(file_id)
+            success = True
+            
+            for knowledge in knowledge_bases:
+                if knowledge.data and isinstance(knowledge.data, dict):
+                    file_ids = knowledge.data.get("file_ids", [])
+                    if isinstance(file_ids, list) and file_id in file_ids:
+                        file_ids.remove(file_id)
+                        knowledge.data["file_ids"] = file_ids
+                        
+                        # Update the knowledge base
+                        updated = self.update_knowledge_data_by_id(knowledge.id, knowledge.data)
+                        if not updated:
+                            log.error(f"Failed to remove file {file_id} from knowledge base {knowledge.id}")
+                            success = False
+                        else:
+                            log.info(f"Removed file {file_id} from knowledge base {knowledge.id}")
+            
+            return success
+        except Exception as e:
+            log.exception(f"Error removing file {file_id} from all knowledge bases: {e}")
+            return False
 
 
 Knowledges = KnowledgeTable()

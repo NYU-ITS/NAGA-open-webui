@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
 import time 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse, StreamingResponse
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.env import SRC_LOG_LEVELS
@@ -16,9 +16,11 @@ from open_webui.models.files import (
     Files,
 )
 from open_webui.routers.retrieval import ProcessFileForm, process_file
+from open_webui.utils.job_queue import is_job_queue_available
 from open_webui.routers.audio import transcribe
 from open_webui.storage.provider import Storage
 from open_webui.utils.auth import get_admin_user, get_verified_user
+from open_webui.utils.file_cleanup import cleanup_file_completely
 from pydantic import BaseModel
 
 log = logging.getLogger(__name__)
@@ -35,6 +37,7 @@ router = APIRouter()
 @router.post("/", response_model=FileModelResponse)
 def upload_file(
     request: Request,
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     user=Depends(get_verified_user),
     file_metadata: dict = {},
@@ -67,41 +70,53 @@ def upload_file(
             ),
         )
 
-        try:
-            if file.content_type in [
-                "audio/mpeg",
-                "audio/wav",
-                "audio/ogg",
-                "audio/x-m4a",
-            ]:
-                
-                file_path = Storage.get_file(file_path)
-                result = transcribe(request, file_path, user)
-                process_file(
-                    request,
-                    ProcessFileForm(file_id=id, content=result.get("text", "")),
-                    user=user,
-                )
-            else:
-                process_file(request, ProcessFileForm(file_id=id), user=user)
-            
-            ## Store EXPIRY timing which will be used for download link expiry to (30 minutes) /start
-            #expiry=time.time() + 1800
-            #Files.update_file_metadata_by_id(id, {"download_expiry": expiry})
-            #log.info(f"[UPLOAD] File ID {id} - download expiry set to {expiry} (in 30 min) for download link.")
-
-            ##  Store EXPIRY timing which will  be used for download link expiry(30 minutes) /end
-
-            file_item = Files.get_file_by_id(id=id)
-        except Exception as e:
-            log.exception(e)
-            log.error(f"Error processing file: {file_item.id}")
-            file_item = FileModelResponse(
-                **{
-                    **file_item.model_dump(),
-                    "error": str(e.detail) if hasattr(e, "detail") else str(e),
-                }
-            )
+        # Process file in background
+        # NOTE: process_file will set processing_status="pending" when it enqueues the job
+        # We don't set it here to avoid race condition where process_file sees "pending" and skips processing
+        # Use job queue if available (distributed processing), otherwise use BackgroundTasks
+        if background_tasks or is_job_queue_available():
+            try:
+                if file.content_type in [
+                    "audio/mpeg",
+                    "audio/wav",
+                    "audio/ogg",
+                    "audio/x-m4a",
+                ]:
+                    # For audio files, transcribe first (this is quick), then process in background
+                    file_path = Storage.get_file(file_path)
+                    result = transcribe(request, file_path, user)
+                    process_file(
+                        request,
+                        ProcessFileForm(file_id=id, content=result.get("text", "")),
+                        user=user,
+                        background_tasks=background_tasks,
+                    )
+                else:
+                    # Process in background (uses job queue if available)
+                    process_file(
+                        request,
+                        ProcessFileForm(file_id=id),
+                        user=user,
+                        background_tasks=background_tasks,
+                    )
+            except Exception as e:
+                log.exception(e)
+                log.error(f"Error starting background processing for file: {id}")
+                # Mark file as error since background task failed to start
+                try:
+                    Files.update_file_metadata_by_id(
+                        id,
+                        {
+                            "processing_status": "error",
+                            "processing_error": f"Failed to start background processing: {str(e)}",
+                        },
+                    )
+                except Exception as update_error:
+                    log.exception(f"Failed to update file status after background task error: {update_error}")
+                # Continue anyway - file is uploaded, user can retry processing manually
+        
+        # Get file item to return
+        file_item = Files.get_file_by_id(id=id)
 
         if file_item:
             return file_item
@@ -257,6 +272,68 @@ async def get_file_by_id(id: str, user=Depends(get_verified_user)):
 ############################
 
 
+@router.get("/{id}/status")
+def get_file_processing_status(id: str, user=Depends(get_verified_user)):
+    """
+    Get the processing status of a file.
+    Returns processing_status, processing_started_at, processing_completed_at, and processing_error if any.
+    
+    Status values:
+    - "not_started": File has never been processed
+    - "pending": Processing task is queued
+    - "processing": Processing is in progress
+    - "completed": Processing completed successfully
+    - "error": Processing failed
+    """
+    # Validate UUID format (file IDs are UUIDs)
+    try:
+        uuid.UUID(id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid file ID format",
+        )
+    
+    file = Files.get_file_by_id(id)
+    
+    if not file:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+    
+    # Check permissions
+    if file.user_id != user.id and user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+    
+    # Extract processing status from metadata
+    meta = file.meta or {}
+    processing_status = meta.get("processing_status")
+    
+    # Handle legacy files (uploaded before background processing feature)
+    # If no status, check if file has collection_name (indicates it was processed)
+    if processing_status is None:
+        if meta.get("collection_name"):
+            # Legacy file that was processed before status tracking was added
+            processing_status = "completed"
+        else:
+            # File that has never been processed
+            processing_status = "not_started"
+    
+    return {
+        "file_id": id,
+        "filename": file.filename,
+        "processing_status": processing_status,
+        "processing_started_at": meta.get("processing_started_at"),
+        "processing_completed_at": meta.get("processing_completed_at"),
+        "processing_error": meta.get("processing_error"),
+        "collection_name": meta.get("collection_name"),
+    }
+
+
 @router.get("/{id}/data/content")
 async def get_file_data_content_by_id(id: str, user=Depends(get_verified_user)):
     file = Files.get_file_by_id(id)
@@ -281,16 +358,22 @@ class ContentForm(BaseModel):
 
 @router.post("/{id}/data/content/update")
 async def update_file_data_content_by_id(
-    request: Request, id: str, form_data: ContentForm, user=Depends(get_verified_user)
+    request: Request,
+    id: str,
+    form_data: ContentForm,
+    background_tasks: BackgroundTasks,
+    user=Depends(get_verified_user),
 ):
     file = Files.get_file_by_id(id)
 
     if file and (file.user_id == user.id or user.role == "admin"):
         try:
+            # process_file will use job queue if available, otherwise BackgroundTasks
             process_file(
                 request,
                 ProcessFileForm(file_id=id, content=form_data.content),
                 user=user,
+                background_tasks=background_tasks,
             )
             file = Files.get_file_by_id(id=id)
         except Exception as e:
@@ -447,29 +530,65 @@ async def get_file_content_by_id(id: str, user=Depends(get_verified_user)):
 
 @router.delete("/{id}")
 async def delete_file_by_id(id: str, user=Depends(get_verified_user)):
+    """
+    Delete a file completely from all systems.
+    
+    This endpoint performs complete cleanup:
+    - Removes from all knowledge collections (vector DB and metadata)
+    - Deletes file-specific collection from vector DB
+    - Deletes from SQL database
+    - Deletes physical file from storage
+    """
     file = Files.get_file_by_id(id)
-    if file and (file.user_id == user.id or user.role == "admin"):
-        # We should add Chroma cleanup here
-
-        result = Files.delete_file_by_id(id)
-        if result:
-            try:
-                Storage.delete_file(file.path)
-            except Exception as e:
-                log.exception(e)
-                log.error("Error deleting files")
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=ERROR_MESSAGES.DEFAULT("Error deleting files"),
-                )
-            return {"message": "File deleted successfully"}
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=ERROR_MESSAGES.DEFAULT("Error deleting file"),
-            )
-    else:
+    if not file:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
+    
+    # Check permissions
+    if file.user_id != user.id and user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+    
+    log.info(
+        f"Deleting file {id} (filename: {file.filename}) "
+        f"by user {user.id} (email: {user.email})"
+    )
+    
+    # Use centralized cleanup utility for complete deletion
+    success, details = cleanup_file_completely(
+        file_id=id,
+        exclude_knowledge_id=None,  # Delete from all knowledge collections
+        delete_physical_file=True,
+    )
+    
+    if success:
+        log.info(f"Successfully deleted file {id} completely")
+        return {"message": "File deleted successfully"}
+    else:
+        # Log errors but still return success if critical operations completed
+        # (SQL deletion and vector DB cleanup are critical)
+        errors = details.get("errors", [])
+        log.warning(
+            f"File {id} deletion completed with some errors: {errors}. "
+            f"Details: {details}"
+        )
+        
+        # If critical operations failed, raise an error
+        if not details.get("sql_deleted") or not details.get("vector_db_cleaned"):
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=ERROR_MESSAGES.DEFAULT(
+                    f"Error deleting file: {', '.join(errors) if errors else 'Unknown error'}"
+                ),
+            )
+        
+        # If only non-critical operations failed (like physical file deletion),
+        # still return success but log the warnings
+        return {
+            "message": "File deleted successfully",
+            "warnings": errors if errors else None,
+        }

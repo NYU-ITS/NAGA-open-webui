@@ -2,7 +2,7 @@ import time
 from typing import Optional
 
 from open_webui.internal.db import Base, JSONField, get_db
-
+from open_webui.utils.super_admin import get_super_admin_emails
 
 from open_webui.models.chats import Chats
 from open_webui.models.groups import Groups
@@ -139,7 +139,7 @@ class UsersTable:
             user_count = self.get_num_users()
 
             if user_count == 0:
-                REQUIRED_FIRST_EMAIL = ["sm11538@nyu.edu", "ms15138@nyu.edu", "mb484@nyu.edu", "cg4532@nyu.edu", "ht2490@nyu.edu", "ps5226@nyu.edu"]
+                REQUIRED_FIRST_EMAIL = get_super_admin_emails()
                 # If it's not the required email, raise an error.
                 if email.lower() not in [em.lower() for em in REQUIRED_FIRST_EMAIL]:
                     raise ValueError(
@@ -172,10 +172,19 @@ class UsersTable:
             return user if result else None
 
     def get_user_by_id(self, id: str) -> Optional[UserModel]:
+        from open_webui.utils.cache import get_cache_manager
+        
+        cache = get_cache_manager()
+        
         try:
             with get_db() as db:
                 user = db.query(User).filter_by(id=id).first()
-                return UserModel.model_validate(user)
+                if user:
+                    user_model = UserModel.model_validate(user)
+                    # Cache the role for quick access
+                    cache.set_user_role(id, user_model.role)
+                    return user_model
+                return None
         except Exception:
             return None
 
@@ -183,7 +192,9 @@ class UsersTable:
         try:
             with get_db() as db:
                 user = db.query(User).filter_by(api_key=api_key).first()
-                return UserModel.model_validate(user)
+                if user:
+                    return UserModel.model_validate(user)
+                return None
         except Exception:
             return None
 
@@ -212,6 +223,8 @@ class UsersTable:
 
             if skip:
                 query = query.offset(skip)
+            
+            # Only apply limit if explicitly specified (frontend handles pagination)
             if limit:
                 query = query.limit(limit)
 
@@ -253,11 +266,22 @@ class UsersTable:
             return None
 
     def update_user_role_by_id(self, id: str, role: str) -> Optional[UserModel]:
+        from open_webui.utils.cache import get_cache_manager
+        
+        cache = get_cache_manager()
+        
         try:
             with get_db() as db:
                 db.query(User).filter_by(id=id).update({"role": role})
                 db.commit()
                 user = db.query(User).filter_by(id=id).first()
+                
+                # Invalidate cache for user role and all related data
+                cache.invalidate_user_role(id)
+                cache.invalidate_user_permissions(id)
+                cache.invalidate_user_settings(id)
+                cache.invalidate_auth_user(id)  # Invalidate auth cache when role changes
+                
                 return UserModel.model_validate(user)
         except Exception:
             return None
@@ -265,6 +289,10 @@ class UsersTable:
     def update_user_profile_image_url_by_id(
         self, id: str, profile_image_url: str
     ) -> Optional[UserModel]:
+        from open_webui.utils.cache import get_cache_manager
+        
+        cache = get_cache_manager()
+        
         try:
             with get_db() as db:
                 db.query(User).filter_by(id=id).update(
@@ -273,6 +301,10 @@ class UsersTable:
                 db.commit()
 
                 user = db.query(User).filter_by(id=id).first()
+                
+                # Invalidate auth cache when profile image changes
+                cache.invalidate_auth_user(id)
+                
                 return UserModel.model_validate(user)
         except Exception:
             return None
@@ -293,29 +325,49 @@ class UsersTable:
     def update_user_oauth_sub_by_id(
         self, id: str, oauth_sub: str
     ) -> Optional[UserModel]:
+        from open_webui.utils.cache import get_cache_manager
+        
+        cache = get_cache_manager()
+        
         try:
             with get_db() as db:
                 db.query(User).filter_by(id=id).update({"oauth_sub": oauth_sub})
                 db.commit()
 
                 user = db.query(User).filter_by(id=id).first()
+                
+                # Invalidate auth cache when OAuth sub changes
+                cache.invalidate_auth_user(id)
+                
                 return UserModel.model_validate(user)
         except Exception:
             return None
 
     def update_user_by_id(self, id: str, updated: dict) -> Optional[UserModel]:
+        from open_webui.utils.cache import get_cache_manager
+        
+        cache = get_cache_manager()
+        
         try:
             with get_db() as db:
                 db.query(User).filter_by(id=id).update(updated)
                 db.commit()
 
                 user = db.query(User).filter_by(id=id).first()
+                
+                # Invalidate auth cache when user data changes
+                cache.invalidate_auth_user(id)
+                
                 return UserModel.model_validate(user)
                 # return UserModel(**user.dict())
         except Exception:
             return None
 
     def update_user_settings_by_id(self, id: str, updated: dict) -> Optional[UserModel]:
+        from open_webui.utils.cache import get_cache_manager
+        
+        cache = get_cache_manager()
+        
         try:
             with get_db() as db:
                 user_settings = db.query(User).filter_by(id=id).first().settings
@@ -329,13 +381,21 @@ class UsersTable:
                 db.commit()
 
                 user = db.query(User).filter_by(id=id).first()
+                
+                # Invalidate all user settings cache
+                cache.invalidate_user_settings(id)
+                
                 return UserModel.model_validate(user)
         except Exception:
             return None
 
     def delete_user_by_id(self, id: str) -> bool:
+        from open_webui.utils.cache import get_cache_manager
+        
+        cache = get_cache_manager()
+        
         try:
-            # Remove User from Groups
+            # Remove User from Groups (this will invalidate cache)
             Groups.remove_user_from_all_groups(id)
 
             # Delete User Chats
@@ -346,6 +406,9 @@ class UsersTable:
                     db.query(User).filter_by(id=id).delete()
                     db.commit()
 
+                # Invalidate all user cache
+                cache.invalidate_all_user_data(id)
+                
                 return True
             else:
                 return False
@@ -353,10 +416,30 @@ class UsersTable:
             return False
 
     def update_user_api_key_by_id(self, id: str, api_key: str) -> str:
+        from open_webui.utils.cache import get_cache_manager
+        import hashlib
+        
+        cache = get_cache_manager()
+        
+        # Get old API key before update to invalidate it
+        old_api_key = self.get_user_api_key_by_id(id)
+        
         try:
             with get_db() as db:
                 result = db.query(User).filter_by(id=id).update({"api_key": api_key})
                 db.commit()
+                
+                # Invalidate old API key cache if it existed
+                if old_api_key:
+                    old_api_key_hash = hashlib.sha256(old_api_key.encode()).hexdigest()
+                    cache.invalidate_api_key(old_api_key_hash)
+                
+                # Invalidate all API keys for this user (in case of key rotation)
+                cache.invalidate_all_api_keys_for_user(id)
+                
+                # Also invalidate auth user cache since API key changed
+                cache.invalidate_auth_user(id)
+                
                 return True if result == 1 else False
         except Exception:
             return False

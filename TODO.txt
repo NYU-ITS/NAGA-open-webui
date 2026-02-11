@@ -1,0 +1,242 @@
+1. Redis and Cache: users in a  group inherit the settings, API keys and virtual keys and so many other things from the settings set by the group admin that the user belongs to. These settings are stored inside postgres SQL tables and pulled from the database, using functions and APIs when needed. These can be slow and inefficient at times. We need to make this pull faster and we can consider redis or cache for this. Remember that our application is a multi-replica system deployed on OpenShift with stateful set, postgres for vectors and sqls and also redis. With that said, the redis and cache needs to have updated information. This means, if a user is added as a "User" and the redis stores the user's role as "User", and soon after the user is promoted to "Admin" role, the cache (which still displays role as "User") should not be considered. The role is not set as "Admin". The cache should be cleaned up when changes are made appropriately so as to make sure that the data is not inconsistent EVER. This applies for all kinds of data being stored such as settings inherited from Admin, API keys, virtual keys, and so on. All updates/edits/changes/deletes/ etc will need to be cleared from redis or cache when changed. When a new interaction occurs and the data is pulled from postgres indicating that the user is now actually an "Admin", the new role is now stored inside the redis memory and this redis or cache stored information can be used for the next and the next-to-next times as well. (unless the information is changed/edited/deleted/updated/)
+2. Deleting files from knowledge collections does NOT currently delete the uploaded file from the Uploads directory, vector db or the SQL tables cleanly. This needs to be implemented cleanly.
+3. Improvements in codebases - better and more consistent logging, docstrings, and documentations for APIs for quick lookups.
+4. Clean ups - Document redundant code files, chunks and snippets to be reviewed and removed. 
+5. Error handling and loggings needs to be improved.
+6. [NO NEED YET] A lot of LLMs and interactions with LLMs are from Pipes and not Ollama or direct connections to OpenAI. The base models like Gemini or Claude should be added just like how easily OpenAI models are added instead of adding them as a Pipe.
+7. Workflow and testing for GitHub builds and deploy. 
+8. Make file processing (embedding generation) run in background using FastAPI BackgroundTasks so users can navigate the app (go to new chats, switch workspaces, etc.) while files are being processed. Currently, file processing blocks the HTTP request, which means if users close the tab or navigate away, processing may be interrupted.
+9. Embeddings virtual keys need to be set by the admins themselves NOT the default one.
+10. Make the app more suitable for distributed multi-replica environment managed by kubernetes. When I developed, it was good for single pod systems but now that we are scaling, I am not sure what i can do to make the app more distributed friednly and also multi-replica friendly. List down the things based on your understnading of the codebase all the things I could do to make it more scale-friendly.
+11. Multi replica for redis
+12 Data consistency — cache invalidation (CRITICAL)
+Why: Stale cache can show incorrect roles/settings after changes.
+Tasks:
+Implement cache invalidation on user role changes
+Invalidate cache on group membership changes
+Invalidate cache on admin config changes (API keys, virtual keys, settings)
+Add cache invalidation hooks in all update/delete operations
+Impact: Ensures cache reflects current database state.
+Files to update:
+backend/open_webui/utils/cache.py — add invalidation methods
+backend/open_webui/models/users.py — add invalidation on role/group updates
+backend/open_webui/routers/users.py — call invalidation on changes
+
+13. Security — RBAC for Functions/Pipes (CRITICAL)
+Why: Security gap — admins can access functions created by other admins.
+Tasks:
+Add access_control column to Function table (database migration)
+Update Functions.get_functions() to use three-tier RBAC (owner/direct/group)
+Fix pipe access bug — regular users currently see all pipes
+Add execution-time RBAC checks in generate_function_chat_completion() and chat_action()
+Impact: Prevents unauthorized access to functions/pipes across admin boundaries.
+
+14. Migration issue (HIGH)
+Issue: Alembic migration error — database at revision that doesn't exist.
+Tasks:
+Add bridge migration for 817da597db81 OR manually stamp database
+Review migration error handling in backend/open_webui/config.py
+
+MINOR:
+1. Auto completion should be DISABLED for all. Chat title generator should need to be set to gemini flash 2.5 lite as default if available, else no auto completion. 
+2. Pipe function to be handled better.
+
+
+## Issues Found from OpenShift Deployment Logs (2025-12-10)
+
+### CRITICAL - Migration Issue
+- [ ] Fix Alembic migration error: Database at revision '817da597db81' which doesn't exist in current branch
+  - Location: Migration system on startup
+  - Impact: Schema may be out of sync, potential data integrity issues
+  - Solution: Add bridge migration for '817da597db81' OR manually stamp database to known good revision
+  - Reference: logs_on_openshift.txt lines 6-70
+
+### CRITICAL - Background Task Exception Handling
+- [ ] Fix periodic_usage_pool_cleanup() to handle lock renewal failures gracefully
+  - Location: backend/open_webui/socket/main.py line 85
+  - Problem: Raises exception when Redis lock renewal fails, crashes background task
+  - Impact: Background cleanup stops, usage pool may grow unbounded
+  - Solution: Catch exceptions and log warning instead of raising, allow task to continue or exit gracefully
+  - Reference: logs_on_openshift.txt lines 739-801
+
+### HIGH PRIORITY - Lock Release Warning
+- [ ] Investigate and fix lock ID mismatch warning in RedisLock
+  - Location: backend/open_webui/socket/utils.py line 152 (release_lock)
+  - Problem: "Lock usage_cleanup_lock was not released: lock_id mismatch or lock already released"
+  - Impact: Potential race condition, locks may not be properly released
+  - Reference: logs_on_openshift.txt line 802
+
+### MEDIUM PRIORITY - Migration Error Handling
+- [ ] Review migration error handling - currently too permissive
+  - Location: backend/open_webui/config.py line 63
+  - Problem: Migration errors are caught and logged but app continues - may run with inconsistent schema
+  - Impact: Potential data corruption if schema doesn't match code expectations
+  - Solution: Decide on strategy - fail fast or continue with warnings
+
+### LOW PRIORITY - Performance Investigation (DETAILED ANALYSIS COMPLETE)
+- [ ] Optimize slow API response times for chat completions
+  - **Performance Breakdown (from logs_on_openshift.txt lines 726-844):**
+    - Autocompletion (typing "#"): ~24 seconds - User-initiated, external API latency
+    - Search Query Generation: ~25 seconds - External API call to ai-gateway.apps.cloud.rt.nyu.edu
+    - Embedding Generation: ~0.3 seconds - Fast, not a bottleneck
+    - Chat Completion: ~11 seconds - External API call
+    - **Total user-perceived time: ~36 seconds** (from message submit to response)
+  
+  - **Root Cause:** External API latency (ai-gateway.apps.cloud.rt.nyu.edu) is the primary bottleneck
+    - Search query generation: 25 seconds
+    - Chat completion: 11 seconds
+    - Both are sequential and cannot be fully parallelized (embeddings depend on queries)
+  
+  - **Optimization Opportunities:**
+    1. **Query Generation Optimization:**
+       - Consider skipping query generation if user message is already a good query (e.g., <50 chars, simple questions)
+       - Use faster/smaller model for query generation (already using TASK_MODEL, but could use even smaller)
+       - Cache query generation results for similar messages (hash-based caching)
+       - Add timeout and fallback to user message if query generation takes >5 seconds
+    
+    2. **Embedding Generation Optimization:**
+       - Already fast at 0.3s, but could pre-generate embeddings for common queries [no]
+       - Batch embedding requests if multiple queries are generated
+    
+    3. **General Optimizations:**
+       - Add request timeout handling with graceful degradation
+       - Implement circuit breaker pattern for external API calls
+       - Add response caching for repeated queries
+       - Consider streaming query generation if supported by API
+       - Monitor and log slow external API calls for SLA tracking
+    
+    4. **Code Location for Optimizations:**
+       - `backend/open_webui/routers/tasks.py:391-470` - generate_queries endpoint
+       - `backend/open_webui/utils/middleware.py:516-579` - chat_completion_files_handler (query generation)
+       - `backend/open_webui/routers/openai.py:577+` - generate_chat_completion (main completion flow)
+  
+  - **Recommendations:**
+    - Priority 1: Add timeout and fallback for query generation (skip if >5s, use user message)
+    - Priority 2: Implement caching for query generation (cache key: hash of messages + model)
+    - Priority 3: Add skip logic for simple/short user messages (skip query generation entirely)
+    - Priority 4: Monitor external API performance and consider API gateway optimization
+  
+  - **Note:** Autocompletion is a separate user-triggered feature (typing "#"), not part of main chat flow. Its 24s latency is acceptable for a background suggestion feature, but could also benefit from timeout/caching.
+  
+  - Reference: logs_on_openshift.txt lines 726-844
+
+### NOTES
+- HTTP 304 status codes are NORMAL (cache validation, not errors)
+- Model requests are succeeding (all 200 OK)
+- Empty vector search results may be expected if no documents match
+
+## RBAC Security Issues - Functions, Pipes, and Pipelines (2025-01-XX)
+
+### CRITICAL - Functions Missing RBAC Implementation
+- [ ] Add `access_control` column to `Function` database table (currently missing, unlike Tools/Models/Prompts/Knowledge)
+- [ ] Update `Functions.get_functions()` to use proper RBAC checks:
+  - Currently only filters by `created_by == user_email` (line 137-154 in `models/functions.py`)
+  - Should use three-tier access check pattern like Tools/Prompts/Models:
+    1. Owner check: `function.user_id == user.id`
+    2. Direct access: `has_access(user.id, "read", function.access_control)`
+    3. Group-based: `item_assigned_to_user_groups(user.id, function, "read")`
+- [ ] Add execution-time RBAC enforcement in `generate_function_chat_completion()` and `chat_action()`
+  - Currently relies only on UI-level filtering (what appears in model list)
+  - No execution-time enforcement for admins (line 197 in `utils/chat.py` only checks regular users)
+  - Location: `backend/open_webui/functions.py` and `backend/open_webui/utils/chat.py`
+
+### HIGH PRIORITY - Pipes (Functions with type="pipe") RBAC Bug
+- [ ] Fix access control bug in `get_function_models()` (line 76 in `functions.py`):
+  - Current: `if (user.role == "admin" and pipe.created_by == user.email) or (user.role == "user") or is_super_admin(user):`
+  - Problem: Regular users see ALL pipes (should only see pipes they have access to)
+  - Admins only see pipes they created (correct behavior)
+  - Should use same three-tier RBAC pattern as Functions above
+- [ ] Add execution-time access check before pipe execution
+  - Location: `backend/open_webui/functions.py:142` (`generate_function_chat_completion`)
+  - Currently no validation that user has access to pipe before executing
+
+### HIGH PRIORITY - Actions RBAC Enforcement
+- [ ] Add execution-time RBAC check in `chat_action()` function
+  - Currently filtered in UI (`get_all_models()` line 218 filters by `created_by`)
+  - No execution-time enforcement if user directly calls action API
+  - Location: `backend/open_webui/utils/chat.py:343` (`chat_action`)
+  - Should verify: `action.user_id == user.id OR has_access() OR item_assigned_to_user_groups()`
+
+### MEDIUM PRIORITY - Pipelines RBAC Implementation
+- [ ] Implement RBAC for Pipelines (external plugin endpoints)
+  - Currently: All endpoints require `get_admin_user`, but any admin can access any pipeline
+  - No group-based access control
+  - Pipelines are external (not in database), so need to decide on access control strategy
+  - Location: `backend/open_webui/routers/pipelines.py`
+  - Options:
+    1. Store pipeline metadata in database with access_control field
+    2. Add access_control to pipeline configuration/metadata
+    3. Implement group-based filtering at API level
+
+### NOTES
+- Current protection is UI-level filtering (what appears in model/action lists)
+- Execution-time enforcement is missing for admins (only regular users have `check_model_access()`)
+- `check_model_access()` doesn't work for pipes (they're not in Models table)
+- Expected behavior: Admin A creates Function → only Admin A and users in Admin A's groups (if granted) can see/use it. Admin B cannot see or use it.
+- This matches the pattern used by Tools, Prompts, Models, and Knowledge resources
+
+
+
+
+
+
+
+File deletion implementation status
+Implemented
+Centralized cleanup utility (backend/open_webui/utils/file_cleanup.py):
+cleanup_file_completely() — full deletion
+cleanup_file_from_knowledge_only() — partial removal from one knowledge base
+Cleanup steps in cleanup_file_completely():
+Removes from all knowledge collections (vector DB) — line 98-106
+Removes from knowledge base metadata (file_ids lists) — line 110-135
+Deletes file-specific collection (file-{file_id}) — line 137-150
+Deletes from SQL database — line 152-165
+Deletes physical file from storage — line 167-182
+Endpoints using cleanup:
+POST /{id}/file/remove (knowledge.py:633) — calls cleanup functions
+DELETE /{id} (files.py:532) — calls cleanup_file_completely()
+Storage deletion:
+LocalStorageProvider.delete_file() — deletes from UPLOAD_DIR/uploads/
+Works with S3, GCS, Azure storage providers
+Potential issues
+Path handling in LocalStorageProvider.delete_file() (line 76-83):
+   filename = file_path.split("/")[-1]   file_path = f"{UPLOAD_DIR}/{filename}"
+Assumes the stored path is just a filename
+If file.path is a full path, this may not match the actual file location
+Should verify: does file.path contain the full path or just the filename?
+Error handling:
+Errors are logged but don't fail the operation
+If physical file deletion fails, the function still returns success if SQL/vector DB deletion succeeded
+This is acceptable, but worth noting
+Multi-knowledge-base handling:
+Correctly handles files in multiple knowledge bases
+If file is only in one KB → complete cleanup
+If file is in multiple KBs → only removes from the specified KB
+Verification needed
+Check what format file.path uses:
+If it's just a filename → current implementation works
+If it's a full path → may need to adjust LocalStorageProvider.delete_file()
+Recommendation
+The implementation looks complete. To verify:
+Check the format of file.path in the database
+Test file deletion end-to-end:
+Delete a file from a knowledge collection
+Verify it's removed from vector DB
+Verify it's removed from SQL
+Verify the physical file is deleted from UPLOAD_DIR
+Conclusion
+The TODO item appears complete. The cleanup utility covers:
+Vector DB (knowledge collections + file-specific collections)
+SQL database
+Physical file storage
+Knowledge base metadata
+The only potential gap is the path handling in LocalStorageProvider.delete_file() if file.path is stored as a full path rather than just a filename.
+Should I check the actual format of file.path in your database or test the deletion flow?
+
+
+
+
+
+1. oetl
+2. cache and redis invalidation of data
+3. deplyo langfuse and data editatble ui like directus

@@ -94,7 +94,8 @@
 	export let accessControl;
 
 	$: if (!edit && !clone && accessControl === undefined) {
-	// New tool: default to private access
+		// ENFORCE: Default to PRIVATE access (not public)
+		// Models are PRIVATE by default and must be explicitly shared via group assignments
 		accessControl = {
 			read: { group_ids: [], user_ids: [] },
 			write: { group_ids: [], user_ids: [] }
@@ -193,9 +194,9 @@
 			try {
 				isSuperAdmin = await checkIfSuperAdmin(localStorage.token, $user.email);
 				
-				// If super admin, fetch all users for the filter
+				// If super admin, fetch all users for the filter (pass high limit to get all users)
 				if (isSuperAdmin) {
-					allUsers = await getUsers(localStorage.token);
+					allUsers = await getUsers(localStorage.token, 1000);
 				}
 			} catch (error) {
 				console.error('Error checking super admin status:', error);

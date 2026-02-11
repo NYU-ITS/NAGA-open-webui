@@ -17,18 +17,50 @@ log.setLevel(SRC_LOG_LEVELS["RAG"])
 
 
 def get_task_model_id(
-    default_model_id: str, task_model: str, task_model_external: str, models
-) -> str:
-    # Set the task model
-    task_model_id = default_model_id
-    # Check if the user has a custom task model and use that model
-    if models[task_model_id].get("owned_by") == "ollama":
-        if task_model and task_model in models:
-            task_model_id = task_model
+    model_id: str,
+    task_model: Optional[str],
+    task_model_external: Optional[str],
+    models: dict
+) -> Optional[str]:
+    """
+    Get the task model ID for task execution.
+    Priority: task_model_external > task_model > find Gemini Flash Lite in models
+    
+    Args:
+        model_id: The chat model ID being used (for reference)
+        task_model: The configured global TASK_MODEL
+        task_model_external: The per-user TASK_MODEL_EXTERNAL (can be None or empty string)
+        models: Dictionary of model_id -> model info
+        
+    Returns:
+        The task model ID if found, None otherwise
+    """
+    from open_webui.routers.tasks import find_gemini_flash_lite_model
+    
+    # Priority 1: Use per-user external task model if set
+    if task_model_external and task_model_external.strip():
+        if task_model_external in models:
+            log.debug(f"Using per-user task model: {task_model_external}")
+            return task_model_external
+        else:
+            log.warning(f"Per-user task model '{task_model_external}' not found in available models")
+    
+    # Priority 2: Use global task model if set
+    if task_model and task_model.strip():
+        if task_model in models:
+            log.debug(f"Using global task model: {task_model}")
+            return task_model
+        else:
+            log.warning(f"Global task model '{task_model}' not found in available models")
+    
+    # Priority 3: Fall back to finding Gemini Flash Lite model
+    task_model_id = find_gemini_flash_lite_model(models)
+    
+    if task_model_id:
+        log.debug(f"Found task model (Gemini Flash Lite): {task_model_id}")
     else:
-        if task_model_external and task_model_external in models:
-            task_model_id = task_model_external
-
+        log.debug("Gemini Flash Lite model not found for task execution")
+    
     return task_model_id
 
 

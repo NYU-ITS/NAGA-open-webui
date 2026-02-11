@@ -6,6 +6,7 @@ import pkgutil
 import sys
 import shutil
 from pathlib import Path
+from typing import Optional
 
 import markdown
 from bs4 import BeautifulSoup
@@ -93,6 +94,7 @@ log_sources = [
     "WEBHOOK",
     "SOCKET",
     "OAUTH",
+    "WORKER",
 ]
 
 SRC_LOG_LEVELS = {}
@@ -136,6 +138,32 @@ VERSION = PACKAGE_DATA["version"]
 
 
 # Function to parse each section
+def _safe_int_env(env_var: str, default: int, min_value: Optional[int] = None, max_value: Optional[int] = None) -> int:
+    """Safely parse integer environment variable with validation.
+    
+    Args:
+        env_var: Environment variable name
+        default: Default value if env var is not set or invalid
+        min_value: Optional minimum allowed value
+        max_value: Optional maximum allowed value
+        
+    Returns:
+        Parsed integer value, or default if parsing fails or value is out of range
+    """
+    try:
+        value = int(os.environ.get(env_var, str(default)))
+        if min_value is not None and value < min_value:
+            log.warning(f"{env_var}={value} is below minimum {min_value}, using default {default}")
+            return default
+        if max_value is not None and value > max_value:
+            log.warning(f"{env_var}={value} is above maximum {max_value}, using default {default}")
+            return default
+        return value
+    except (ValueError, TypeError) as e:
+        log.warning(f"Invalid {env_var} value '{os.environ.get(env_var)}': {e}. Using default {default}")
+        return default
+
+
 def parse_section(section):
     items = []
     for li in section.find_all("li"):
@@ -333,6 +361,110 @@ ENABLE_REALTIME_CHAT_SAVE = (
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
+# Redis Sentinel configuration for high availability
+# If REDIS_USE_SENTINEL is True, application will use Sentinel instead of direct Redis URL
+REDIS_USE_SENTINEL = os.environ.get("REDIS_USE_SENTINEL", "False").lower() == "true"
+# Sentinel hosts (comma-separated list, e.g., "redis-sentinel:26379" or "sentinel1:26379,sentinel2:26379")
+REDIS_SENTINEL_HOSTS = os.environ.get("REDIS_SENTINEL_HOSTS", "")
+# Master name that Sentinel monitors (default: "mymaster")
+REDIS_SENTINEL_SERVICE_NAME = os.environ.get("REDIS_SENTINEL_SERVICE_NAME", "mymaster")
+# Sentinel password (if required, optional)
+REDIS_SENTINEL_PASSWORD = os.environ.get("REDIS_SENTINEL_PASSWORD", None)
+
+# Redis connection pool configuration
+# Higher values support more concurrent requests but use more memory
+# Default: 100 connections (increased from 50 for high-concurrency environments)
+# For multi-replica deployments, each pod maintains its own pool
+REDIS_MAX_CONNECTIONS = _safe_int_env("REDIS_MAX_CONNECTIONS", 100, min_value=10, max_value=500)
+
+####################################
+# RAG THREAD POOL
+####################################
+
+# Thread pool size for RAG (Retrieval Augmented Generation) operations
+# RAG operations include: embedding queries, vector search, context retrieval
+# Each thread can handle one RAG operation at a time
+# Higher values allow more concurrent RAG queries but use more memory/CPU
+# Default: 50 threads per pod (supports ~50 concurrent RAG queries per pod)
+# For 200 users across 4 pods: 50 × 4 = 200 concurrent RAG operations
+# Note: Threads compete for CPU cores, so setting this higher than 2× CPU count
+# provides diminishing returns and increases context switching overhead
+# Recommended: 50-100 for 4 CPU pods, can go higher with PgBouncer for connection pooling
+RAG_THREAD_POOL_SIZE = _safe_int_env("RAG_THREAD_POOL_SIZE", 50, min_value=5, max_value=200)
+
+####################################
+# JOB QUEUE (RQ - Redis Queue)
+####################################
+
+# Enable/disable job queue for distributed processing
+# If False, falls back to FastAPI BackgroundTasks (in-memory, single pod only)
+ENABLE_JOB_QUEUE = os.environ.get("ENABLE_JOB_QUEUE", "True").lower() == "true"
+
+# Job timeout in seconds (default: 1 hour for large files)
+try:
+    JOB_TIMEOUT = int(os.environ.get("JOB_TIMEOUT", "3600"))
+    if JOB_TIMEOUT < 60:
+        log.warning(f"JOB_TIMEOUT={JOB_TIMEOUT} is too small (minimum 60 seconds), using default 3600")
+        JOB_TIMEOUT = 3600
+    elif JOB_TIMEOUT > 86400:
+        log.warning(f"JOB_TIMEOUT={JOB_TIMEOUT} is too large (maximum 86400 seconds), using default 3600")
+        JOB_TIMEOUT = 3600
+except (ValueError, TypeError) as e:
+    log.warning(f"Invalid JOB_TIMEOUT value '{os.environ.get('JOB_TIMEOUT')}': {e}. Using default 3600")
+    JOB_TIMEOUT = 3600
+
+# Maximum number of retries for failed jobs
+try:
+    JOB_MAX_RETRIES = int(os.environ.get("JOB_MAX_RETRIES", "3"))
+    if JOB_MAX_RETRIES < 0:
+        log.warning(f"JOB_MAX_RETRIES={JOB_MAX_RETRIES} cannot be negative, using default 3")
+        JOB_MAX_RETRIES = 3
+    elif JOB_MAX_RETRIES > 10:
+        log.warning(f"JOB_MAX_RETRIES={JOB_MAX_RETRIES} is too large (maximum 10), using default 3")
+        JOB_MAX_RETRIES = 3
+except (ValueError, TypeError) as e:
+    log.warning(f"Invalid JOB_MAX_RETRIES value '{os.environ.get('JOB_MAX_RETRIES')}': {e}. Using default 3")
+    JOB_MAX_RETRIES = 3
+
+# Retry delay in seconds
+try:
+    JOB_RETRY_DELAY = int(os.environ.get("JOB_RETRY_DELAY", "60"))
+    if JOB_RETRY_DELAY < 1:
+        log.warning(f"JOB_RETRY_DELAY={JOB_RETRY_DELAY} is too small (minimum 1 second), using default 60")
+        JOB_RETRY_DELAY = 60
+    elif JOB_RETRY_DELAY > 3600:
+        log.warning(f"JOB_RETRY_DELAY={JOB_RETRY_DELAY} is too large (maximum 3600 seconds), using default 60")
+        JOB_RETRY_DELAY = 60
+except (ValueError, TypeError) as e:
+    log.warning(f"Invalid JOB_RETRY_DELAY value '{os.environ.get('JOB_RETRY_DELAY')}': {e}. Using default 60")
+    JOB_RETRY_DELAY = 60
+
+# Job result TTL in seconds (default: 1 hour)
+try:
+    JOB_RESULT_TTL = int(os.environ.get("JOB_RESULT_TTL", "3600"))
+    if JOB_RESULT_TTL < 0:
+        log.warning(f"JOB_RESULT_TTL={JOB_RESULT_TTL} cannot be negative, using default 3600")
+        JOB_RESULT_TTL = 3600
+    elif JOB_RESULT_TTL > 604800:  # 7 days
+        log.warning(f"JOB_RESULT_TTL={JOB_RESULT_TTL} is too large (maximum 604800 seconds), using default 3600")
+        JOB_RESULT_TTL = 3600
+except (ValueError, TypeError) as e:
+    log.warning(f"Invalid JOB_RESULT_TTL value '{os.environ.get('JOB_RESULT_TTL')}': {e}. Using default 3600")
+    JOB_RESULT_TTL = 3600
+
+# Job failure TTL in seconds (default: 24 hours)
+try:
+    JOB_FAILURE_TTL = int(os.environ.get("JOB_FAILURE_TTL", "86400"))
+    if JOB_FAILURE_TTL < 0:
+        log.warning(f"JOB_FAILURE_TTL={JOB_FAILURE_TTL} cannot be negative, using default 86400")
+        JOB_FAILURE_TTL = 86400
+    elif JOB_FAILURE_TTL > 604800:  # 7 days
+        log.warning(f"JOB_FAILURE_TTL={JOB_FAILURE_TTL} is too large (maximum 604800 seconds), using default 86400")
+        JOB_FAILURE_TTL = 86400
+except (ValueError, TypeError) as e:
+    log.warning(f"Invalid JOB_FAILURE_TTL value '{os.environ.get('JOB_FAILURE_TTL')}': {e}. Using default 86400")
+    JOB_FAILURE_TTL = 86400
+
 ####################################
 # WEBUI_AUTH (Required for security)
 ####################################
@@ -441,3 +573,68 @@ AUDIT_EXCLUDED_PATHS = os.getenv("AUDIT_EXCLUDED_PATHS", "/chats,/chat,/folders"
 )
 AUDIT_EXCLUDED_PATHS = [path.strip() for path in AUDIT_EXCLUDED_PATHS]
 AUDIT_EXCLUDED_PATHS = [path.lstrip("/") for path in AUDIT_EXCLUDED_PATHS]
+
+####################################
+# OPENTELEMETRY CONFIGURATION
+####################################
+
+# OpenTelemetry master switch
+OTEL_ENABLED = os.environ.get("OTEL_ENABLED", "false").lower() == "true"
+
+# Service identification
+OTEL_SERVICE_NAME = os.environ.get("OTEL_SERVICE_NAME", "open-webui")
+OTEL_SERVICE_VERSION = VERSION  # Use existing VERSION from package.json
+
+# OTLP exporter configuration (defaults to sidecar pattern)
+OTEL_EXPORTER_OTLP_ENDPOINT = os.environ.get(
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "http://localhost:4317"  # Standard OTEL Collector sidecar port
+)
+OTEL_EXPORTER_OTLP_PROTOCOL = os.environ.get(
+    "OTEL_EXPORTER_OTLP_PROTOCOL",
+    "grpc"
+).lower()
+
+# Sampling configuration
+OTEL_TRACES_SAMPLER = os.environ.get("OTEL_TRACES_SAMPLER", "parentbased_traceidratio")
+try:
+    OTEL_TRACES_SAMPLER_ARG = float(os.environ.get("OTEL_TRACES_SAMPLER_ARG", "1.0"))
+    if OTEL_TRACES_SAMPLER_ARG < 0.0 or OTEL_TRACES_SAMPLER_ARG > 1.0:
+        log.warning(
+            f"OTEL_TRACES_SAMPLER_ARG={OTEL_TRACES_SAMPLER_ARG} is out of range [0.0, 1.0], using default 1.0"
+        )
+        OTEL_TRACES_SAMPLER_ARG = 1.0
+except (ValueError, TypeError) as e:
+    log.warning(f"Invalid OTEL_TRACES_SAMPLER_ARG value: {e}. Using default 1.0")
+    OTEL_TRACES_SAMPLER_ARG = 1.0
+
+# Exporter configuration
+OTEL_LOGS_EXPORTER = os.environ.get("OTEL_LOGS_EXPORTER", "none")  # We use Loguru
+OTEL_METRICS_EXPORTER = os.environ.get("OTEL_METRICS_EXPORTER", "otlp")
+
+# OpenTelemetry Instrumentation Configuration
+OTEL_INSTRUMENTATION_FASTAPI_ENABLED = os.environ.get(
+    "OTEL_INSTRUMENTATION_FASTAPI_ENABLED", "true"
+).lower() == "true"
+
+OTEL_INSTRUMENTATION_REQUESTS_ENABLED = os.environ.get(
+    "OTEL_INSTRUMENTATION_REQUESTS_ENABLED", "true"
+).lower() == "true"
+
+# Exclude paths from FastAPI instrumentation (comma-separated)
+OTEL_INSTRUMENTATION_FASTAPI_EXCLUDED_PATHS = [
+    path.strip()
+    for path in os.environ.get(
+        "OTEL_INSTRUMENTATION_FASTAPI_EXCLUDED_PATHS", "/health,/health/db,/static"
+    ).split(",")
+    if path.strip()
+]
+
+# Capture request/response headers (comma-separated, empty = none)
+OTEL_INSTRUMENTATION_FASTAPI_CAPTURE_HEADERS = [
+    header.strip()
+    for header in os.environ.get(
+        "OTEL_INSTRUMENTATION_FASTAPI_CAPTURE_HEADERS", ""
+    ).split(",")
+    if header.strip()
+]

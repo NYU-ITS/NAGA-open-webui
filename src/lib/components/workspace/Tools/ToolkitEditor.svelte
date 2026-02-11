@@ -38,15 +38,70 @@
 	let allUsers = [];
 	let adminUsers = [];
 
-	$: isSuperAdmin = $user?.email && [
-		'sm11538@nyu.edu', 'ms15138@nyu.edu', 'mb484@nyu.edu',
-		'cg4532@nyu.edu', 'ht2490@nyu.edu', 'ps5226@nyu.edu'
-	].includes($user.email);
+	let isSuperAdmin = false;
 
-	// Set assignToEmail immediately based on context
-	$: if (isSuperAdmin) {
-		if (edit && tool?.created_by && !assignToEmail) {
-			assignToEmail = tool.created_by;
+	import { checkIfSuperAdmin } from '$lib/apis/users';
+
+	// Combined onMount to fix race condition
+	onMount(async () => {
+		if ($user?.email && localStorage.token) {
+			try {
+				isSuperAdmin = await checkIfSuperAdmin(localStorage.token, $user.email);
+				
+				// Fetch users AFTER confirming super admin status
+				if (isSuperAdmin) {
+					const res = await fetch(`${WEBUI_API_BASE_URL}/users/`, {
+						headers: { authorization: `Bearer ${localStorage.token}` }
+					});
+					if (res.ok) {
+						allUsers = await res.json();
+						adminUsers = allUsers.filter(u => u.role === 'admin');
+						
+						if (edit && tool?.user_id && !assignToEmail) {
+							const owner = allUsers.find(u => u.id === tool.user_id);
+							if (owner) assignToEmail = owner.email;
+						} else if (!edit && !assignToEmail) {
+							assignToEmail = $user.email;
+						}
+					}
+				}
+			} catch (error) {
+				console.error('Error checking super admin status:', error);
+				isSuperAdmin = false;
+			}
+		}
+	});
+
+	$: if ($user?.email && localStorage.token && !isSuperAdmin) {
+		checkIfSuperAdmin(localStorage.token, $user.email).then(async (result) => {
+			isSuperAdmin = result;
+			// Fetch users when isSuperAdmin becomes true
+			if (isSuperAdmin && adminUsers.length === 0) {
+				const res = await fetch(`${WEBUI_API_BASE_URL}/users/`, {
+					headers: { authorization: `Bearer ${localStorage.token}` }
+				});
+				if (res.ok) {
+					allUsers = await res.json();
+					adminUsers = allUsers.filter(u => u.role === 'admin');
+					
+					if (edit && tool?.user_id && !assignToEmail) {
+						const owner = allUsers.find(u => u.id === tool.user_id);
+						if (owner) assignToEmail = owner.email;
+					} else if (!edit && !assignToEmail) {
+						assignToEmail = $user.email;
+					}
+				}
+			}
+		}).catch(err => {
+			console.error('Error checking super admin status:', err);
+		});
+	}
+
+	// Set assignToEmail based on context
+	$: if (isSuperAdmin && adminUsers.length > 0) {
+		if (edit && tool?.user_id && !assignToEmail) {
+			const owner = allUsers.find(u => u.id === tool.user_id);
+			if (owner) assignToEmail = owner.email;
 		} else if (!edit && $user?.email && !assignToEmail) {
 			assignToEmail = $user.email;
 		}
@@ -210,25 +265,6 @@ class Tools:
 		}
 	};
 
-	onMount(async () => {
-		if (isSuperAdmin) {
-			const res = await fetch(`${WEBUI_API_BASE_URL}/users/`, {
-				headers: { authorization: `Bearer ${localStorage.token}` }
-			});
-			if (res.ok) {
-				allUsers = await res.json();
-				adminUsers = allUsers.filter(u => u.role === 'admin');
-				
-				if (edit && tool?.user_id) {
-					const owner = allUsers.find(u => u.id === tool.user_id);
-					if (owner) assignToEmail = owner.email;
-				} else if (!edit) {
-					// Default to current user when creating
-					assignToEmail = $user.email;
-				}
-			}
-		}
-	});
 </script>
 
 <AccessControlModal

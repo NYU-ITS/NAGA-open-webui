@@ -31,6 +31,20 @@
 
 	const i18n = getContext('i18n');
 
+	function getTermsStatus(u) {
+		const terms = u?.info?.pilot_genai?.terms;
+		if (!terms) return '';
+		if (terms?.accepted) {
+			const v = terms?.version ?? '';
+			const at = terms?.accepted_at ? dayjs(terms.accepted_at * 1000).format('LLL') : '';
+			return `T&C v${v} accepted at ${at}`;
+		}
+		if (terms?.required) {
+			return 'T&C required';
+		}
+		return '';
+	}
+
 	// Cache for super admin status - stores { email: boolean }
 	let superAdminCache = {};
 	
@@ -39,24 +53,30 @@
 
 	// function to override the label if the user is truly "admin" + super admin
 	async function getRoleLabel(user) {
-		if (user.role === 'admin') {
-			// Check cache first
-			if (superAdminCache[user.email] === undefined) {
-				try {
-					const isSuperAdmin = await checkIfSuperAdmin(localStorage.token, user.email);
-					superAdminCache[user.email] = isSuperAdmin;
-				} catch (error) {
-					console.error('Error checking super admin status:', error);
-					superAdminCache[user.email] = false;
-				}
-			}
-
-			if (superAdminCache[user.email]) {
-				return 'super admin';
-			} else if (user.info?.is_co_admin) {
-				return 'co-admin';
+		// Check cache first for super admin status (check ALL users, not just admins)
+		if (superAdminCache[user.email] === undefined) {
+			try {
+				const isSuperAdmin = await checkIfSuperAdmin(localStorage.token, user.email);
+				superAdminCache[user.email] = isSuperAdmin;
+			} catch (error) {
+				console.error('Error checking super admin status:', error);
+				superAdminCache[user.email] = false;
 			}
 		}
+
+		// If user is super admin, always return 'super admin' regardless of role
+		if (superAdminCache[user.email]) {
+			return 'super admin';
+		}
+
+		// For non-super-admins, check role and co-admin status
+		if (user.role === 'admin') {
+			if (user.info?.is_co_admin) {
+				return 'co-admin';
+			}
+			return 'admin';
+		}
+
 		return user.role;
 	}
 
@@ -368,24 +388,13 @@
 				<th
 					scope="col"
 					class="px-3 py-1.5 cursor-pointer select-none"
-					on:click={() => setSortKey('oauth_sub')}
 				>
 					<div class="flex gap-1.5 items-center">
-						{$i18n.t('OAuth ID')}
+						{$i18n.t('Terms & Conditions')}
 
-						{#if sortKey === 'oauth_sub'}
-							<span class="font-normal"
-								>{#if sortOrder === 'asc'}
-									<ChevronUp className="size-2" />
-								{:else}
-									<ChevronDown className="size-2" />
-								{/if}
-							</span>
-						{:else}
-							<span class="invisible">
-								<ChevronUp className="size-2" />
-							</span>
-						{/if}
+						<span class="invisible">
+							<ChevronUp className="size-2" />
+						</span>
 					</div>
 				</th>
 
@@ -476,7 +485,7 @@
 						{dayjs(user.created_at * 1000).format('LL')}
 					</td>
 
-					<td class=" px-3 py-1"> {user.oauth_sub ?? ''} </td>
+					<td class=" px-3 py-1"> {getTermsStatus(user)} </td>
 
 					<td class="px-3 py-1 text-right">
 						<div class="flex justify-end w-full">
@@ -519,7 +528,7 @@
 								</button>
 							</Tooltip>
 
-							{#if user.role !== 'admin'}
+							{#if user.role !== 'admin' && !superAdminCache[user.email]}
 								<Tooltip content={$i18n.t('Delete User')}>
 									<button
 										class="self-center w-fit text-sm px-2 py-2 hover:bg-black/5 dark:hover:bg-white/5 rounded-xl"

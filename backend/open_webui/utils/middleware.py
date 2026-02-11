@@ -16,9 +16,21 @@ import ast
 
 from uuid import uuid4
 from concurrent.futures import ThreadPoolExecutor
+import atexit
 
 
 from fastapi import Request
+
+from open_webui.env import RAG_THREAD_POOL_SIZE
+
+# Module-level ThreadPoolExecutor for RAG operations
+# This avoids creating a new thread pool for each request (expensive)
+# Max workers is configurable via RAG_THREAD_POOL_SIZE environment variable
+# Default: 50 threads per pod (supports ~50 concurrent RAG queries per pod)
+_RAG_EXECUTOR = ThreadPoolExecutor(max_workers=RAG_THREAD_POOL_SIZE, thread_name_prefix="rag_worker")
+
+# Ensure executor is properly cleaned up on shutdown
+atexit.register(_RAG_EXECUTOR.shutdown, wait=False)
 from fastapi import BackgroundTasks
 
 from starlette.responses import Response, StreamingResponse
@@ -36,6 +48,7 @@ from open_webui.routers.tasks import (
     generate_title,
     generate_image_prompt,
     generate_chat_tags,
+    find_gemini_flash_lite_model,
 )
 from open_webui.routers.retrieval import process_web_search, SearchForm
 from open_webui.routers.images import image_generations, GenerateImageForm
@@ -51,7 +64,11 @@ from open_webui.models.users import UserModel
 from open_webui.models.functions import Functions
 from open_webui.models.models import Models
 
-from open_webui.retrieval.utils import get_sources_from_files
+from open_webui.retrieval.utils import (
+    get_sources_from_files,
+    get_embedding_function,
+)
+from open_webui.routers.retrieval import get_ef
 
 
 from open_webui.utils.chat import generate_chat_completion
@@ -93,6 +110,8 @@ from open_webui.env import (
 from open_webui.constants import TASKS
 
 
+# Logging will be configured by start_logger() with NYC timezone
+# This is temporary - standard logging will be intercepted by Loguru
 logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["MAIN"])
@@ -137,7 +156,7 @@ async def chat_completion_tools_handler(
     task_model_id = get_task_model_id(
         body["model"],
         request.app.state.config.TASK_MODEL,
-        request.app.state.config.TASK_MODEL_EXTERNAL,
+        request.app.state.config.TASK_MODEL_EXTERNAL.get(user.email),
         models,
     )
 
@@ -321,9 +340,9 @@ async def chat_web_search_handler(
         )
         return form_data
 
-    all_results = []
-
-    for searchQuery in queries:
+    # Parallelize web search queries for faster processing
+    async def process_single_search(searchQuery: str):
+        """Process a single search query and return results with the query for tracking"""
         await event_emitter(
             {
                 "type": "status",
@@ -346,31 +365,7 @@ async def chat_web_search_handler(
                 ),
                 user=user,
             )
-
-            if results:
-                all_results.append(results)
-                files = form_data.get("files", [])
-
-                if results.get("collection_name"):
-                    files.append(
-                        {
-                            "collection_name": results["collection_name"],
-                            "name": searchQuery,
-                            "type": "web_search",
-                            "urls": results["filenames"],
-                        }
-                    )
-                elif results.get("docs"):
-                    files.append(
-                        {
-                            "docs": results.get("docs", []),
-                            "name": searchQuery,
-                            "type": "web_search",
-                            "urls": results["filenames"],
-                        }
-                    )
-
-                form_data["files"] = files
+            return {"query": searchQuery, "results": results, "error": None}
         except Exception as e:
             log.exception(e)
             await event_emitter(
@@ -385,6 +380,48 @@ async def chat_web_search_handler(
                     },
                 }
             )
+            return {"query": searchQuery, "results": None, "error": str(e)}
+
+    # Process all queries in parallel
+    search_tasks = [process_single_search(query) for query in queries]
+    search_results = await asyncio.gather(*search_tasks, return_exceptions=True)
+
+    # Collect successful results and update form_data
+    all_results = []
+    files = form_data.get("files", [])
+
+    for search_result in search_results:
+        if isinstance(search_result, Exception):
+            log.exception(f"Exception in parallel search: {search_result}")
+            continue
+        
+        query = search_result.get("query")
+        results = search_result.get("results")
+        error = search_result.get("error")
+
+        if results and not error:
+            all_results.append(results)
+
+            if results.get("collection_name"):
+                files.append(
+                    {
+                        "collection_name": results["collection_name"],
+                        "name": query,
+                        "type": "web_search",
+                        "urls": results["filenames"],
+                    }
+                )
+            elif results.get("docs"):
+                files.append(
+                    {
+                        "docs": results.get("docs", []),
+                        "name": query,
+                        "type": "web_search",
+                        "urls": results["filenames"],
+                    }
+                )
+
+    form_data["files"] = files
 
     if all_results:
         urls = []
@@ -519,6 +556,23 @@ async def chat_completion_files_handler(
     sources = []
 
     if files := body.get("metadata", {}).get("files", None):
+        # RAG debug: which files/kbs are attached to this chat
+        file_ids = [str(f.get("id", "")) for f in files]
+        def _rag_file_name(f):
+            n = f.get("name") or f.get("filename")
+            if n:
+                return str(n)
+            _file = f.get("file")
+            if isinstance(_file, dict):
+                _data = _file.get("data") or {}
+                n = _data.get("name") if isinstance(_data, dict) else None
+                if n:
+                    return str(n)
+            return str(f.get("id") or "")
+        file_names = [_rag_file_name(f) for f in files]
+        log.info(
+            f"[RAG Chat] files_attached={len(files)} | file_ids={file_ids} | file_names={file_names} | user={user.email if user else None}"
+        )
         queries = []
         try:
             queries_response = await generate_queries(
@@ -545,31 +599,99 @@ async def chat_completion_files_handler(
                 queries_response = {"queries": [queries_response]}
 
             queries = queries_response.get("queries", [])
-        except:
-            pass
+            log.info(f"[RAG Chat] query_expansion | queries_count={len(queries)} | queries={queries[:5]}{'...' if len(queries) > 5 else ''}")
+            log.debug(f"RAG query expansion generated {len(queries)} queries: {queries}")
+        except Exception as e:
+            # Query expansion failed - this is OK, we'll use the user's message as fallback
+            # This commonly happens when Gemini 2.5 Flash Lite is not available
+            log.debug(f"RAG query expansion failed (using user message as fallback): {e}")
 
         if len(queries) == 0:
             queries = [get_last_user_message(body["messages"])]
+            log.info(f"[RAG Chat] using user message as query (expansion failed or empty) | queries_count=1")
+            log.debug(f"Using user message as RAG query fallback: {queries}")
 
         try:
-            # Offload get_sources_from_files to a separate thread
-            loop = asyncio.get_running_loop()
-            with ThreadPoolExecutor() as executor:
-                sources = await loop.run_in_executor(
-                    executor,
-                    lambda: get_sources_from_files(
-                        request=request,
-                        files=files,
-                        queries=queries,
-                        embedding_function=lambda query: request.app.state.EMBEDDING_FUNCTION(
-                            query, user=user
+            # RBAC: Create embedding function on-the-fly using user's per-admin model/key
+            # This ensures each user uses their own (or their group admin's) model/key
+            user_email = user.email if user else None
+            if not user_email:
+                log.error("No user email available for RAG query - cannot determine per-admin model/key")
+                sources = []
+            else:
+                # Get per-admin model and key for the user
+                owner_model = request.app.state.config.RAG_EMBEDDING_MODEL_USER.get(user_email)
+                owner_key = request.app.state.config.RAG_OPENAI_API_KEY.get(user_email)
+                
+                # Validate both are present (no fallback)
+                if not owner_model or not owner_model.strip():
+                    log.error(
+                        f"No embedding model configured for user {user_email}. "
+                        f"RAG query will fail. Please configure in Settings > Documents."
+                    )
+                    sources = []
+                elif not owner_key or not owner_key.strip():
+                    log.error(
+                        f"No embedding API key configured for user {user_email}. "
+                        f"RAG query will fail. Please configure in Settings > Documents."
+                    )
+                    sources = []
+                else:
+                    # Get base URL (global, with fallback)
+                    base_url_config = request.app.state.config.RAG_OPENAI_API_BASE_URL
+                    base_url = (
+                        base_url_config.value
+                        if hasattr(base_url_config, 'value')
+                        else str(base_url_config)
+                    )
+                    if not base_url or base_url.strip() == "":
+                        base_url = "https://ai-gateway.apps.cloud.rt.nyu.edu/v1"
+                    
+                    # Create embedding function using per-admin model/key
+                    ef = get_ef(
+                        request.app.state.config.RAG_EMBEDDING_ENGINE,
+                        owner_model,  # RBAC: Per-admin model (not global)
+                    )
+                    user_embedding_function = get_embedding_function(
+                        request.app.state.config.RAG_EMBEDDING_ENGINE,
+                        owner_model,  # RBAC: Per-admin model (not global)
+                        ef,
+                        base_url,
+                        owner_key,  # RBAC: Per-admin key (not global)
+                        request.app.state.config.RAG_EMBEDDING_BATCH_SIZE,
+                    )
+                    
+                    # Offload get_sources_from_files to module-level thread pool (more efficient)
+                    loop = asyncio.get_running_loop()
+                    sources = await loop.run_in_executor(
+                        _RAG_EXECUTOR,
+                        lambda: get_sources_from_files(
+                            request=request,
+                            files=files,
+                            queries=queries,
+                            embedding_function=lambda query: user_embedding_function(
+                                query, user=user
+                            ),
+                            k=request.app.state.config.TOP_K.get(user.email),
+                            reranking_function=request.app.state.rf,
+                            r=request.app.state.config.RELEVANCE_THRESHOLD,
+                            hybrid_search=request.app.state.config.ENABLE_RAG_HYBRID_SEARCH.get(user.email),
+                            full_context=request.app.state.config.RAG_FULL_CONTEXT.get(user.email),
                         ),
-                        k=request.app.state.config.TOP_K.get(user.email),
-                        reranking_function=request.app.state.rf,
-                        r=request.app.state.config.RELEVANCE_THRESHOLD,
-                        hybrid_search=request.app.state.config.ENABLE_RAG_HYBRID_SEARCH.get(user.email),
-                        full_context=request.app.state.config.RAG_FULL_CONTEXT.get(user.email),
-                    ),
+                    )
+                # RAG debug: summary of context retrieved (what the model got per file)
+                total_chunks = 0
+                summary_parts = []
+                for s in sources:
+                    doc_list = s.get("document") if isinstance(s.get("document"), list) else []
+                    chunk_count = len(doc_list)
+                    total_chunks += chunk_count
+                    src = s.get("source") or {}
+                    sid = src.get("id", "")
+                    sname = src.get("name") or src.get("filename") or sid
+                    summary_parts.append(f"file_id={sid} name={sname} chunks={chunk_count}")
+                log.info(
+                    f"[RAG Context Summary] total_chunks={total_chunks} | sources_count={len(sources)} | per_source: {' | '.join(summary_parts)}"
                 )
         except Exception as e:
             log.exception(e)
@@ -648,7 +770,7 @@ async def process_chat_payload(request, form_data, metadata, user, model):
     task_model_id = get_task_model_id(
         form_data["model"],
         request.app.state.config.TASK_MODEL,
-        request.app.state.config.TASK_MODEL_EXTERNAL,
+        request.app.state.config.TASK_MODEL_EXTERNAL.get(user.email),
         models,
     )
 
@@ -798,7 +920,9 @@ async def process_chat_payload(request, form_data, metadata, user, model):
             sources.extend(flags.get("sources", []))
             s1 = f"{model}"
             log.info(f"Working within inbuilt RAG: {s1}")
-            log.info(f"Models: {models[task_model_id]}")
+            # Debug log for task model (may be None if user doesn't have access to Gemini Flash Lite)
+            if task_model_id and task_model_id in models:
+                log.debug(f"Task model: {models[task_model_id]}")
         except Exception as e:
             log.exception(e)
     else:
@@ -875,12 +999,23 @@ async def process_chat_response(
             messages = get_message_list(message_map, message.get("id"))
 
             if tasks and messages:
+                # Get available models and find Gemini Flash Lite before running tasks
+                from open_webui.utils.models import get_all_models
+                models_list = await get_all_models(request, user)
+                models = {model["id"]: model for model in models_list}
+                task_model_id = find_gemini_flash_lite_model(models)
+                
+                # If Gemini Flash Lite is not available, skip all background tasks
+                if not task_model_id:
+                    log.debug(f"Gemini Flash Lite not available for user {user.email}, skipping background tasks")
+                    return  # Exit early, don't run any tasks
+                
                 if TASKS.TITLE_GENERATION in tasks:
                     if tasks[TASKS.TITLE_GENERATION]:
                         res = await generate_title(
                             request,
                             {
-                                "model": message["model"],
+                                # Remove "model" key - task endpoint will find Gemini Flash Lite directly
                                 "messages": messages,
                                 "chat_id": metadata["chat_id"],
                             },
@@ -935,7 +1070,7 @@ async def process_chat_response(
                     res = await generate_chat_tags(
                         request,
                         {
-                            "model": message["model"],
+                            # Remove "model" key - task endpoint will find Gemini Flash Lite directly
                             "messages": messages,
                             "chat_id": metadata["chat_id"],
                         },

@@ -23,6 +23,7 @@
 	let taskConfig = {
 		TASK_MODEL: '',
 		TASK_MODEL_EXTERNAL: '',
+		TASK_MODEL_ID: '',
 		ENABLE_TITLE_GENERATION: true,
 		TITLE_GENERATION_PROMPT_TEMPLATE: '',
 		IMAGE_PROMPT_GENERATION_PROMPT_TEMPLATE: '',
@@ -33,7 +34,8 @@
 		ENABLE_SEARCH_QUERY_GENERATION: true,
 		ENABLE_RETRIEVAL_QUERY_GENERATION: true,
 		QUERY_GENERATION_PROMPT_TEMPLATE: '',
-		TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE: ''
+		TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE: '',
+		HAS_TASK_MODEL_ACCESS: false
 	};
 
 	let promptSuggestions = [];
@@ -98,48 +100,28 @@
 					</Tooltip>
 				</div>
 
-				<div class=" mb-2.5 flex w-full gap-2">
-					<div class="flex-1">
-						<div class=" text-xs mb-1">{$i18n.t('Local Models')}</div>
-						<select
-							aria-label="Local Models"
-							class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
-							bind:value={taskConfig.TASK_MODEL}
-							placeholder={$i18n.t('Select a model')}
-						>
-							<option value="" selected>{$i18n.t('Current Model')}</option>
-							{#each $models.filter((m) => m.owned_by === 'ollama') as model}
-								<option value={model.id} class="bg-gray-100 dark:bg-gray-700">
-									{model.name}
-								</option>
-							{/each}
-						</select>
-					</div>
-
-					<div class="flex-1">
-						<div class=" text-xs mb-1">{$i18n.t('External Models')}</div>
-						<select
-							aria-label="External Models"
-							class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
-							bind:value={taskConfig.TASK_MODEL_EXTERNAL}
-							placeholder={$i18n.t('Select a model')}
-						>
-							<option value="" selected>{$i18n.t('Current Model')}</option>
-							{#each $models as model}
-								<option value={model.id} class="bg-gray-100 dark:bg-gray-700">
-									{model.name}
-								</option>
-							{/each}
-						</select>
+				<div class="mb-2.5 flex w-full items-center justify-between">
+					<div class="text-xs font-medium">{$i18n.t('Task Model')}</div>
+					<div class="text-xs" class:text-gray-500={!taskConfig.HAS_TASK_MODEL_ACCESS}>
+						{#if taskConfig.HAS_TASK_MODEL_ACCESS && taskConfig.TASK_MODEL_ID}
+							{taskConfig.TASK_MODEL_ID}
+						{:else}
+							{$i18n.t('Not Available')}
+						{/if}
 					</div>
 				</div>
+				{#if !taskConfig.HAS_TASK_MODEL_ACCESS}
+					<div class="text-xs text-red-500 dark:text-red-400 mt-1 mb-2.5">
+						Task features require access to Gemini 2.5 Flash Lite model
+					</div>
+				{/if}
 
 				<div class="mb-2.5 flex w-full items-center justify-between">
 					<div class=" self-center text-xs font-medium">
 						{$i18n.t('Title Generation')}
 					</div>
 
-					<Switch bind:state={taskConfig.ENABLE_TITLE_GENERATION} />
+					<Switch bind:state={taskConfig.ENABLE_TITLE_GENERATION} disabled={!taskConfig.HAS_TASK_MODEL_ACCESS} />
 				</div>
 
 				{#if taskConfig.ENABLE_TITLE_GENERATION}
@@ -166,7 +148,7 @@
 						{$i18n.t('Tags Generation')}
 					</div>
 
-					<Switch bind:state={taskConfig.ENABLE_TAGS_GENERATION} />
+					<Switch bind:state={taskConfig.ENABLE_TAGS_GENERATION} disabled={!taskConfig.HAS_TASK_MODEL_ACCESS} />
 				</div>
 
 				{#if taskConfig.ENABLE_TAGS_GENERATION}
@@ -193,7 +175,7 @@
 						{$i18n.t('Retrieval Query Generation')}
 					</div>
 
-					<Switch bind:state={taskConfig.ENABLE_RETRIEVAL_QUERY_GENERATION} />
+					<Switch bind:state={taskConfig.ENABLE_RETRIEVAL_QUERY_GENERATION} disabled={!taskConfig.HAS_TASK_MODEL_ACCESS} />
 				</div>
 
 				<div class="mb-2.5 flex w-full items-center justify-between">
@@ -201,7 +183,7 @@
 						{$i18n.t('Web Search Query Generation')}
 					</div>
 
-					<Switch bind:state={taskConfig.ENABLE_SEARCH_QUERY_GENERATION} />
+					<Switch bind:state={taskConfig.ENABLE_SEARCH_QUERY_GENERATION} disabled={!taskConfig.HAS_TASK_MODEL_ACCESS} />
 				</div>
 
 				<div class="mb-2.5">
@@ -227,7 +209,7 @@
 					</div>
 
 					<Tooltip content={$i18n.t('Enable autocomplete generation for chat messages')}>
-						<Switch bind:state={taskConfig.ENABLE_AUTOCOMPLETE_GENERATION} />
+						<Switch bind:state={taskConfig.ENABLE_AUTOCOMPLETE_GENERATION} disabled={!taskConfig.HAS_TASK_MODEL_ACCESS} />
 					</Tooltip>
 				</div>
 

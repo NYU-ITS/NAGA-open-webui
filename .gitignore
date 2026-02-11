@@ -310,3 +310,70 @@ cypress/screenshots
 
 # docker-compose for local development
 docker-compose.local.yaml
+docker-compose.local.m1.yaml
+docker-compose.dev.yaml
+docker-compose.dev.sh
+
+# Redis deployment info (local deployment artifacts, not for version control)
+redis-deployment-info/
+
+# Test files (hidden tests directory)
+.tests/
+
+# Portkey SDK documentation and evaluation files
+.portkey sdk/
+
+# Performance analysis documentation (not for version control)
+PERFORMANCE_ANALYSIS.md
+
+# Redis cache bug reports and analysis (not for version control)
+REDIS_CACHE_*.md
+REDIS_CACHE_*.txt
+logs_on_openshift.txt
+
+# Test frameworks (not for version control)
+test_frameworks/
+
+# Documentation fixes (not for version control)
+.documentations_fixes/
+
+# Cursor IDE files
+.cursor/
+
+# Kubernetes manifests with hardcoded secrets (OpenShift-specific, keep local only)
+kubernetes/manifest/base/rq-worker-deployment-openshift.yaml
+kubernetes/manifest/redis/redis-secret.yaml
+
+# Local deployment documentation and verification files (keep local only)
+COMPREHENSIVE_SYSTEM_VERIFICATION.md
+DEPLOYMENT_STATUS_REPORT.md
+DEPLOYMENT_VERIFICATION_SUCCESS.md
+RAG_QA_LOG_ANALYSIS.md
+SECRETS_REMOVAL_SUMMARY.md
+SECURITY_AUDIT_REPORT.md
+FINAL_SECURITY_CHECK.md
+MANIFEST_TRACKING_ANSWER.md
+MANIFEST_TRACKING_GUIDELINES.md
+SYSTEM_STATUS_SUMMARY.md
+quick_health_check.sh
+
+# Local deployment reference folder (namespace-specific deployment files)
+.local-deployment/
+# Exported configurations from OpenShift (may contain sensitive data)
+.local-deployment/exported-from-openshift/
+
+# PyMuPDF performance testing files (local testing only)
+pymupdftest.py
+PYMUPDF_PERFORMANCE_ANALYSIS.md
+images/
+
+# Documentation and test files (local only, not for version control)
+DEPENDENCIES_CLEANUP.md
+DEPENDENCIES_REMOVED.md
+REDIS_DEVELOPMENT_TIMELINE.md
+REDIS_OPENSHIFT_DEPLOYMENT_DOCUMENTATION.md
+TEST_FINAL_SUMMARY.md
+TEST_RESULTS.md
+TEST_SUMMARY.md
+llm_portkey.py
+.test_otel_generators/

@@ -22,13 +22,61 @@
 	let allUsers = [];
 	let adminUsers = [];
 
-	$: isSuperAdmin = $user?.email && [
-		'sm11538@nyu.edu', 'ms15138@nyu.edu', 'mb484@nyu.edu',
-		'cg4532@nyu.edu', 'ht2490@nyu.edu', 'ps5226@nyu.edu'
-	].includes($user.email);
+	let isSuperAdmin = false;
+
+	import { checkIfSuperAdmin } from '$lib/apis/users';
+
+	// Combined onMount to fix race condition
+	onMount(async () => {
+		if ($user?.email && localStorage.token) {
+			try {
+				isSuperAdmin = await checkIfSuperAdmin(localStorage.token, $user.email);
+				
+				// Fetch users AFTER confirming super admin status
+				if (isSuperAdmin) {
+					const res = await fetch(`${WEBUI_API_BASE_URL}/users/`, {
+						headers: { authorization: `Bearer ${localStorage.token}` }
+					});
+					if (res.ok) {
+						allUsers = await res.json();
+						adminUsers = allUsers.filter(u => u.role === 'admin');
+						
+						if (!edit && !assignToEmail) {
+							assignToEmail = $user.email;
+						}
+					}
+				}
+			} catch (error) {
+				console.error('Error checking super admin status:', error);
+				isSuperAdmin = false;
+			}
+		}
+	});
+
+	$: if ($user?.email && localStorage.token && !isSuperAdmin) {
+		checkIfSuperAdmin(localStorage.token, $user.email).then(async (result) => {
+			isSuperAdmin = result;
+			// Fetch users when isSuperAdmin becomes true
+			if (isSuperAdmin && adminUsers.length === 0) {
+				const res = await fetch(`${WEBUI_API_BASE_URL}/users/`, {
+					headers: { authorization: `Bearer ${localStorage.token}` }
+				});
+				if (res.ok) {
+					allUsers = await res.json();
+					adminUsers = allUsers.filter(u => u.role === 'admin');
+					
+					if (!edit && !assignToEmail) {
+						assignToEmail = $user.email;
+					}
+				}
+			}
+		}).catch(err => {
+			console.error('Error checking super admin status:', err);
+		});
+	}
 
 	// Set assignToEmail for creating
-	$: if (isSuperAdmin && !edit && $user?.email && !assignToEmail) {
+	$: if (isSuperAdmin && !edit && $user?.email && !assignToEmail && adminUsers.length > 0) {
 		assignToEmail = $user.email;
 	}
 
@@ -70,22 +118,6 @@
 
 		loading = false;
 	};
-
-	onMount(async () => {
-		if (isSuperAdmin) {
-			const res = await fetch(`${WEBUI_API_BASE_URL}/users/`, {
-				headers: { authorization: `Bearer ${localStorage.token}` }
-			});
-			if (res.ok) {
-				allUsers = await res.json();
-				adminUsers = allUsers.filter(u => u.role === 'admin');
-				
-				if (!edit) {
-					assignToEmail = $user.email;
-				}
-			}
-		}
-	});
 </script>
 
 <div class="w-full max-h-full">

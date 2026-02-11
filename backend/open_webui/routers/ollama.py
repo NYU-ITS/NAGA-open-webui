@@ -60,8 +60,94 @@ from open_webui.env import (
 )
 from open_webui.constants import ERROR_MESSAGES
 
+# OpenTelemetry instrumentation helpers
+try:
+    from open_webui.utils.otel_instrumentation import (
+        trace_span_async,
+        add_span_event,
+        set_span_attribute,
+    )
+    from opentelemetry.trace import SpanKind
+    OTEL_AVAILABLE = True
+except ImportError:
+    OTEL_AVAILABLE = False
+    # Create no-op functions if OTEL not available
+    # NOTE: Must be regular function (not async def) to match @asynccontextmanager signature
+    def trace_span_async(*args, **kwargs):
+        span_name = kwargs.get('name', args[0] if args else 'unknown')
+        from contextlib import asynccontextmanager
+        @asynccontextmanager
+        async def _noop():
+            # Get logger at call time (log variable will be defined by then)
+            _log = logging.getLogger(__name__)
+            try:
+                _log.debug(f"[trace_span_async] Generator entering (OTEL unavailable, no-op) for span '{span_name}'")
+                yield None
+                _log.debug(f"[trace_span_async] Generator exiting normally (OTEL unavailable, no-op) for span '{span_name}'")
+            except GeneratorExit as ge:
+                _log.debug(f"[trace_span_async] GeneratorExit caught (OTEL unavailable, no-op) for span '{span_name}': {ge}")
+                # Properly handle generator exit
+                raise
+            except Exception as e:
+                _log.warning(f"[trace_span_async] Exception thrown into generator (OTEL unavailable, no-op) for span '{span_name}': {type(e).__name__}: {e}", exc_info=True)
+                # Properly handle exceptions thrown into generator - must re-raise or return
+                # Re-raising ensures the exception propagates correctly
+                raise
+        return _noop()
+    def add_span_event(*args, **kwargs):
+        pass
+    def set_span_attribute(*args, **kwargs):
+        pass
+    SpanKind = None
+
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["OLLAMA"])
+
+# Safe wrapper functions that NEVER fail - OTEL is monitoring only, must not affect task execution
+def safe_add_span_event(event_name, attributes=None):
+    """Safely add span event - never fails, even if OTEL is broken"""
+    try:
+        add_span_event(event_name, attributes)
+    except Exception as e:
+        log.debug(f"OTEL add_span_event failed (non-critical): {e}")
+
+def safe_set_span_attribute(span, key, value):
+    """Safely set span attribute - never fails, even if OTEL is broken"""
+    try:
+        if span:
+            set_span_attribute(span, key, value)
+    except Exception as e:
+        log.debug(f"OTEL set_span_attribute failed (non-critical): {e}")
+
+def safe_trace_span_async(*args, **kwargs):
+    """Safely create async trace span - never fails, even if OTEL is broken
+    
+    Returns an async context manager (same signature as trace_span_async).
+    Can be used with: async with safe_trace_span_async(...) as span:
+    """
+    span_name = kwargs.get('name', args[0] if args else 'unknown')
+    try:
+        log.debug(f"[safe_trace_span_async] Attempting to create span '{span_name}'")
+        return trace_span_async(*args, **kwargs)  # Returns async context manager, not a coroutine
+    except Exception as e:
+        log.warning(f"[safe_trace_span_async] OTEL trace_span_async failed (non-critical) for span '{span_name}': {type(e).__name__}: {e}", exc_info=True)
+        from contextlib import asynccontextmanager
+        @asynccontextmanager
+        async def _noop():
+            try:
+                log.debug(f"[safe_trace_span_async] Generator entering (safe fallback) for span '{span_name}'")
+                yield None
+                log.debug(f"[safe_trace_span_async] Generator exiting normally (safe fallback) for span '{span_name}'")
+            except GeneratorExit as ge:
+                log.debug(f"[safe_trace_span_async] GeneratorExit caught (safe fallback) for span '{span_name}': {ge}")
+                # Properly handle generator exit
+                raise
+            except Exception as gen_exc:
+                log.warning(f"[safe_trace_span_async] Exception thrown into generator (safe fallback) for span '{span_name}': {type(gen_exc).__name__}: {gen_exc}", exc_info=True)
+                # Properly handle exceptions thrown into generator - must re-raise or return
+                # Re-raising ensures the exception propagates correctly
+                raise
+        return _noop()
 
 
 ##########################################
@@ -1098,81 +1184,126 @@ async def generate_chat_completion(
     user=Depends(get_verified_user),
     bypass_filter: Optional[bool] = False,
 ):
-    if BYPASS_MODEL_ACCESS_CONTROL:
-        bypass_filter = True
+    # Extract model info for instrumentation
+    model_id = form_data.get("model", "unknown")
+    is_streaming = form_data.get("stream", True)
+    
+    # Create span for Ollama API call
+    # CRITICAL: Use safe_trace_span_async to ensure OTEL failures never prevent API calls
+    async with safe_trace_span_async(
+        name="llm.ollama.chat_completion",
+        attributes={
+            "llm.provider": "ollama",
+            "llm.model": model_id,
+            "llm.stream": is_streaming,
+        },
+        kind=SpanKind.CLIENT if OTEL_AVAILABLE and SpanKind else None,
+    ) as span:
+        try:
+            # Add event: API request started
+            safe_add_span_event("llm.api.request", {
+                "model": model_id,
+                "provider": "ollama",
+            })
+            
+            if BYPASS_MODEL_ACCESS_CONTROL:
+                bypass_filter = True
 
-    metadata = form_data.pop("metadata", None)
-    try:
-        form_data = GenerateChatCompletionForm(**form_data)
-    except Exception as e:
-        log.exception(e)
-        raise HTTPException(
-            status_code=400,
-            detail=str(e),
-        )
-
-    payload = {**form_data.model_dump(exclude_none=True)}
-    if "metadata" in payload:
-        del payload["metadata"]
-
-    model_id = payload["model"]
-    model_info = Models.get_model_by_id(model_id)
-
-    if model_info:
-        if model_info.base_model_id:
-            payload["model"] = model_info.base_model_id
-
-        params = model_info.params.model_dump()
-
-        if params:
-            if payload.get("options") is None:
-                payload["options"] = {}
-
-            payload["options"] = apply_model_params_to_body_ollama(
-                params, payload["options"]
-            )
-            payload = apply_model_system_prompt_to_body(params, payload, metadata, user)
-
-        # Check if user has access to the model
-        if not bypass_filter and user.role == "user":
-            if not (
-                user.id == model_info.user_id
-                or has_access(
-                    user.id, type="read", access_control=model_info.access_control
-                )
-            ):
+            metadata = form_data.pop("metadata", None)
+            try:
+                form_data = GenerateChatCompletionForm(**form_data)
+            except Exception as e:
+                log.exception(e)
                 raise HTTPException(
-                    status_code=403,
-                    detail="Model not found",
+                    status_code=400,
+                    detail=str(e),
                 )
-    elif not bypass_filter:
-        if user.role != "admin":
-            raise HTTPException(
-                status_code=403,
-                detail="Model not found",
+
+            payload = {**form_data.model_dump(exclude_none=True)}
+            if "metadata" in payload:
+                del payload["metadata"]
+
+            model_id = payload["model"]
+            model_info = Models.get_model_by_id(model_id)
+
+            if model_info:
+                if model_info.base_model_id:
+                    payload["model"] = model_info.base_model_id
+
+                params = model_info.params.model_dump()
+
+                if params:
+                    if payload.get("options") is None:
+                        payload["options"] = {}
+
+                    payload["options"] = apply_model_params_to_body_ollama(
+                        params, payload["options"]
+                    )
+                    payload = apply_model_system_prompt_to_body(params, payload, metadata, user)
+
+                # Check if user has access to the model
+                if not bypass_filter and user.role == "user":
+                    if not (
+                        user.id == model_info.user_id
+                        or has_access(
+                            user.id, type="read", access_control=model_info.access_control
+                        )
+                    ):
+                        raise HTTPException(
+                            status_code=403,
+                            detail="Model not found",
+                        )
+            elif not bypass_filter:
+                if user.role != "admin":
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Model not found",
+                    )
+
+            if ":" not in payload["model"]:
+                payload["model"] = f"{payload['model']}:latest"
+
+            url, url_idx = await get_ollama_url(request, payload["model"], url_idx)
+            
+            # Set API base URL attribute
+            safe_set_span_attribute(span, "llm.api_base", url)
+            
+            api_config = request.app.state.config.OLLAMA_API_CONFIGS.get(
+                str(url_idx),
+                request.app.state.config.OLLAMA_API_CONFIGS.get(url, {}),  # Legacy support
             )
 
-    if ":" not in payload["model"]:
-        payload["model"] = f"{payload['model']}:latest"
+            prefix_id = api_config.get("prefix_id", None)
+            if prefix_id:
+                payload["model"] = payload["model"].replace(f"{prefix_id}.", "")
 
-    url, url_idx = await get_ollama_url(request, payload["model"], url_idx)
-    api_config = request.app.state.config.OLLAMA_API_CONFIGS.get(
-        str(url_idx),
-        request.app.state.config.OLLAMA_API_CONFIGS.get(url, {}),  # Legacy support
-    )
-
-    prefix_id = api_config.get("prefix_id", None)
-    if prefix_id:
-        payload["model"] = payload["model"].replace(f"{prefix_id}.", "")
-
-    return await send_post_request(
-        url=f"{url}/api/chat",
-        payload=json.dumps(payload),
-        stream=form_data.stream,
-        key=get_api_key(url_idx, url, request.app.state.config.OLLAMA_API_CONFIGS),
-        content_type="application/x-ndjson",
-        user=user,
-    )
+            response = await send_post_request(
+                url=f"{url}/api/chat",
+                payload=json.dumps(payload),
+                stream=form_data.stream,
+                key=get_api_key(url_idx, url, request.app.state.config.OLLAMA_API_CONFIGS),
+                content_type="application/x-ndjson",
+                user=user,
+            )
+            
+            # Add event: API response received
+            safe_add_span_event("llm.api.response", {
+                "streaming": is_streaming,
+                "provider": "ollama",
+            })
+            
+            return response
+            
+        except Exception as e:
+            # Add event: API error
+            safe_add_span_event("llm.api.error", {
+                "error.type": type(e).__name__,
+                "error.message": str(e)[:200],
+                "provider": "ollama",
+            })
+            
+            # Re-raise exception (span status will be set by trace_span_async)
+            raise
 
 
 # TODO: we should update this part once Ollama supports other types
