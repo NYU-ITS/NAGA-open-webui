@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 
 from open_webui.utils.auth import get_admin_user, get_verified_user
+from open_webui.utils.redis_models import invalidate_models_for_user, invalidate_models_for_all_users
 from open_webui.utils.access_control import has_access, has_permission
 from open_webui.utils.super_admin import is_super_admin
 from open_webui.models.functions import Functions
@@ -88,6 +89,8 @@ async def create_new_model(
         
         model = Models.insert_new_model(form_data, creator_user_id, creator_email)
         if model:
+            invalidate_models_for_user(str(creator_user_id))
+            invalidate_models_for_user(str(user.id))
             return model
         else:
             raise HTTPException(
@@ -156,6 +159,8 @@ async def toggle_model_by_id(id: str, user=Depends(get_verified_user)):
             model = Models.toggle_model_by_id(id)
 
             if model:
+                invalidate_models_for_user(str(model.user_id))
+                invalidate_models_for_user(str(user.id))
                 return model
             else:
                 raise HTTPException(
@@ -204,6 +209,8 @@ async def update_model_by_id(
         )
 
     model = Models.update_model_by_id(id, form_data)
+    invalidate_models_for_user(str(model.user_id))
+    invalidate_models_for_user(str(user.id))
     return model
 
 
@@ -232,10 +239,15 @@ async def delete_model_by_id(id: str, user=Depends(get_verified_user)):
         )
 
     result = Models.delete_model_by_id(id)
+    if result:
+        invalidate_models_for_user(str(model.user_id))
+        invalidate_models_for_user(str(user.id))
     return result
 
 
 @router.delete("/delete/all", response_model=bool)
 async def delete_all_models(user=Depends(get_admin_user)):
     result = Models.delete_all_models()
+    if result:
+        invalidate_models_for_all_users()
     return result

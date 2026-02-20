@@ -72,6 +72,7 @@ from open_webui.routers.retrieval import get_ef
 
 
 from open_webui.utils.chat import generate_chat_completion
+from open_webui.utils.redis_models import get_models_for_request
 from open_webui.utils.task import (
     get_task_model_id,
     rag_template,
@@ -772,7 +773,7 @@ async def process_chat_payload(request, form_data, metadata, user, model):
             request.state.model["id"]: request.state.model,
         }
     else:
-        models = request.app.state.MODELS
+        models = get_models_for_request(request)
 
     task_model_id = get_task_model_id(
         form_data["model"],

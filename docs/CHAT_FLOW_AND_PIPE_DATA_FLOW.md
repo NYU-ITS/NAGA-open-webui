@@ -738,7 +738,13 @@ models:user:{user_id}
 - **Read:** `models = redis.get(f"models:user:{user_id}")` → parse JSON → use for `model_id in models` and `model = models[model_id]`.
 - **Write:** After `get_all_models(request, user)` returns, `redis.setex(f"models:user:{user_id}", ttl, json.dumps(models_dict))`.
 - **Fallback:** On cache miss, call `get_all_models(request, user)`, write to Redis, then use.
-- **Invalidation:** On create/update/delete of model or access control, delete `models:user:{user_id}` for affected users.
+- **Invalidation:** On create/update/delete of model or access control, delete `models:user:{user_id}` for affected users. Next chat request from that user will get a cache miss, call `get_all_models`, and repopulate the cache.
+
+**Implementation notes (as built):**
+
+The original design suggested setting `request.app.state.MODELS` for downstream readers. In practice, `request.app.state` is shared across all requests on a pod. With async concurrency, User B's request could overwrite `app.state.MODELS` while User A's request is still running, causing User A to see User B's models and hit "Model not found". **Modification:** Store per-user models in `request.state.MODELS` (request-scoped) instead. Add `get_models_for_request(request)` that returns `request.state.MODELS` when set, else `request.app.state.MODELS`. All chat-path readers (main.py, middleware, chat.py) use this helper so each request sees only its own models.
+
+For JSON serialization: model dicts can contain `datetime` (e.g. `custom_model.created_at`). **Modification:** Use `json.dumps(models_dict, default=str)` so non-serializable types are converted to strings; output remains plain JSON.
 
 #### 7.2.2 Other `app.state` attributes
 
@@ -789,6 +795,11 @@ models:user:{user_id}
 | 2.7 | Invalidation on model/access change | On create/update/delete of model or access control, delete `models:user:{user_id}` for affected users. Identify write paths (models CRUD, group assignments). | 1 day |
 | 2.8 | Testing | Unit tests for get/set; multi-user overwrite test; multi-pod test (different pods serving different users). | 1 day |
 
+**Implementation status (2.4, 2.7):**
+
+- **2.4:** Implemented via `ensure_models_for_request(request, user)` which tries Redis first, falls back to `get_all_models`, writes to Redis, and stores in `request.state.MODELS` (not `request.app.state.MODELS`—see 7.2.1 implementation notes). Integrated in `chat_completion`, `chat_completed`, `chat_action`. Readers use `get_models_for_request(request)`.
+- **2.7:** Implemented. `invalidate_models_for_user(user_id)` deletes `models:user:{user_id}`. `invalidate_models_for_all_users()` scans and deletes all `models:user:*` keys. Called from: `routers/models.py` (create, toggle, update, delete, delete_all) and `routers/knowledge.py` (delete_knowledge_by_id when models are updated to remove knowledge references).
+
 **Total Phase 2 estimate:** 4–5 days.
 
 #### Phase 3: Optional refinements
@@ -807,8 +818,11 @@ models:user:{user_id}
 | `open-webui:user_pool` | Redis hash | 3600s | User → session_ids (existing) |
 | `open-webui:usage_pool` | Redis hash | 1800s | Usage tracking (existing) |
 
+**Invalidation (implementation):** `invalidate_models_for_user(user_id)` deletes `models:user:{user_id}`. `invalidate_models_for_all_users()` scans `models:user:*` and deletes all keys (used when delete_all_models is called).
+
 ### 7.6 Files to Modify (Redis Model Cache)
 
+**Original plan:**
 - `backend/open_webui/main.py` – chat_completion: read models from Redis, fallback to get_all_models, write to Redis
 - `backend/open_webui/utils/models.py` – get_all_models: write to Redis after building; add get/set helpers
 - `backend/open_webui/utils/chat.py` – chat_completed and other readers: use Redis-backed models when available
@@ -816,6 +830,17 @@ models:user:{user_id}
 - `backend/open_webui/routers/facilities.py` – use Redis-backed models
 - `backend/open_webui/routers/tasks.py` – use Redis-backed models
 - New or existing: `backend/open_webui/utils/redis_models.py` – get_models_for_user, set_models_for_user, invalidate_models_for_user
+
+**Implementation status:**
+- `backend/open_webui/main.py` – Done. Uses `ensure_models_for_request`, `get_models_for_request`.
+- `backend/open_webui/utils/models.py` – Not modified (2.5 deferred). Redis write happens in `ensure_models_for_request` after `get_all_models`.
+- `backend/open_webui/utils/chat.py` – Done. `chat_completed`, `chat_action`, and `generate_chat_completion` use `ensure_models_for_request` and `get_models_for_request`.
+- `backend/open_webui/utils/middleware.py` – Done. `process_chat_payload` uses `get_models_for_request`.
+- `backend/open_webui/routers/facilities.py` – Deferred (2.6). Still uses `request.app.state.MODELS`.
+- `backend/open_webui/routers/tasks.py` – Deferred (2.6). Still uses `request.app.state.MODELS`.
+- `backend/open_webui/utils/redis_models.py` – Done. Exports: `get_models_for_user`, `set_models_for_user`, `invalidate_models_for_user`, `invalidate_models_for_all_users`, `get_models_for_request`, `ensure_models_for_request`.
+- `backend/open_webui/routers/models.py` – Invalidation added to create, toggle, update, delete, delete_all.
+- `backend/open_webui/routers/knowledge.py` – Invalidation added to `delete_knowledge_by_id` when models are updated.
 
 ---
 

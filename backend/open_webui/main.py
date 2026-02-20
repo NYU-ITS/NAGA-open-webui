@@ -350,6 +350,7 @@ from open_webui.utils.models import (
     get_all_base_models,
     check_model_access,
 )
+from open_webui.utils.redis_models import ensure_models_for_request, get_models_for_request
 from open_webui.utils.chat import (
     generate_chat_completion as chat_completion_handler,
     chat_completed as chat_completed_handler,
@@ -1259,11 +1260,10 @@ async def chat_completion(
 ):
     pod_id = os.environ.get("HOSTNAME", "unknown")
     log.debug(f"[DEBUG] [WS-CHAT 1] [inside chat_completion() from main.py] POST /api/chat/completions handled on pod={pod_id}, user={user.email} (id={user.id}).")
-    models_was_empty = not request.app.state.MODELS
-    if models_was_empty:
-        log.debug(f"[DEBUG] [inside chat_completion() from main.py] request.app.state.MODELS is empty. Calling get_all_models().")
-        await get_all_models(request, user=user)
-        log.debug(f"[DEBUG] [inside chat_completion() from main.py] get_all_models() returned {len(request.app.state.MODELS)} models. The models are: {request.app.state.MODELS}. The length of the models is {len(request.app.state.MODELS)}.")
+    models_was_empty = not get_models_for_request(request)
+    await ensure_models_for_request(request, user)
+    models = get_models_for_request(request)
+    log.debug(f"[DEBUG] [inside chat_completion() from main.py] ensure_models_for_request completed. models has {len(models)} entries.")
 
     model_item = form_data.pop("model_item", {})
     tasks = form_data.pop("background_tasks", None)
@@ -1273,20 +1273,20 @@ async def chat_completion(
         if not model_item.get("direct", False):
             log.debug("The model_item is not direct!")
             model_id = form_data.get("model", None)
-            log.debug("checking if the model_id is in request.app.state.MODELS...")
-            if model_id not in request.app.state.MODELS:
-                log.info(f"[MODEL NOT FOUND ERROR IS RAISED] inside chat_completion() from main.py - >> model_id: {model_id} not found in request.app.state.MODELS. The models are: {request.app.state.MODELS}. The length of the models is {len(request.app.state.MODELS)}.")
-                log.info(f"[DEBUG] [inside chat_completion() from main.py] The model_id is {model_id} but it is not found in request.app.state.MODELS.")
-                current_keys = list(request.app.state.MODELS.keys())
+            log.debug("checking if the model_id is in models...")
+            if model_id not in models:
+                log.info(f"[MODEL NOT FOUND ERROR IS RAISED] inside chat_completion() from main.py - >> model_id: {model_id} not found in models. The models are: {models}. The length of the models is {len(models)}.")
+                log.info(f"[DEBUG] [inside chat_completion() from main.py] The model_id is {model_id} but it is not found in models.")
+                current_keys = list(models.keys())
                 log.info(
-                    f"[MODEL NOT FOUND ERROR IS RAISED] model_id={model_id} not in app.state.MODELS. "
+                    f"[MODEL NOT FOUND ERROR IS RAISED] model_id={model_id} not in models. "
                     f"user={user.email} (id={user.id}), pod={pod_id}, MODELS_was_empty_before_request={models_was_empty}, "
                     f"current_MODELS_count={len(current_keys)}, current_MODELS_keys_sample={current_keys[:30]!r}"
                 )
                 raise Exception("Model not found")
 
-            log.debug("The model_id is in request.app.state.MODELS! So, we can proceed with the chat completion.")
-            model = request.app.state.MODELS[model_id]
+            log.debug("The model_id is in models! So, we can proceed with the chat completion.")
+            model = models[model_id]
             model_info = Models.get_model_by_id(model_id)
 
             # Check if user has access to the model

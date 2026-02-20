@@ -33,6 +33,7 @@ from open_webui.utils.super_admin import is_super_admin
 
 from open_webui.env import SRC_LOG_LEVELS
 from open_webui.models.models import Models, ModelForm
+from open_webui.utils.redis_models import invalidate_models_for_user
 
 # OpenTelemetry instrumentation (conditional import)
 try:
@@ -904,6 +905,7 @@ async def delete_knowledge_by_id(id: str, user=Depends(get_verified_user)):
     log.info(f"Found {len(models)} models to check for knowledge base {id}")
 
     # Update models that reference this knowledge base
+    models_updated = False
     for model in models:
         if model.meta and hasattr(model.meta, "knowledge"):
             knowledge_list = model.meta.knowledge or []
@@ -925,6 +927,11 @@ async def delete_knowledge_by_id(id: str, user=Depends(get_verified_user)):
                     is_active=model.is_active,
                 )
                 Models.update_model_by_id(model.id, model_form)
+                models_updated = True
+                invalidate_models_for_user(str(model.user_id))
+
+    if models_updated:
+        invalidate_models_for_user(str(user.id))
 
     # Clean up vector DB
     try:

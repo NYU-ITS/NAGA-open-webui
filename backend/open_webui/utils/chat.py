@@ -41,7 +41,8 @@ from open_webui.models.models import Models
 
 
 from open_webui.utils.plugin import load_function_module_by_id
-from open_webui.utils.models import get_all_models, check_model_access
+from open_webui.utils.models import check_model_access
+from open_webui.utils.redis_models import ensure_models_for_request, get_models_for_request
 from open_webui.utils.payload import convert_payload_openai_to_ollama
 from open_webui.utils.response import (
     convert_response_ollama_to_openai,
@@ -343,7 +344,7 @@ async def generate_chat_completion(
                 }
                 log.debug(f"direct connection to model: {models}")
             else:
-                models = request.app.state.MODELS
+                models = get_models_for_request(request)
 
             if model_id not in models:
                 raise Exception("Model not found")
@@ -367,9 +368,9 @@ async def generate_chat_completion(
                     filter_mode = model.get("info", {}).get("meta", {}).get("filter_mode")
                     if model_ids and filter_mode == "exclude":
                         model_ids = [
-                            model["id"]
-                            for model in list(request.app.state.MODELS.values())
-                            if model.get("owned_by") != "arena" and model["id"] not in model_ids
+                            m["id"]
+                            for m in list(models.values())
+                            if m.get("owned_by") != "arena" and m["id"] not in model_ids
                         ]
 
                     selected_model_id = None
@@ -377,9 +378,9 @@ async def generate_chat_completion(
                         selected_model_id = random.choice(model_ids)
                     else:
                         model_ids = [
-                            model["id"]
-                            for model in list(request.app.state.MODELS.values())
-                            if model.get("owned_by") != "arena"
+                            m["id"]
+                            for m in list(models.values())
+                            if m.get("owned_by") != "arena"
                         ]
                         selected_model_id = random.choice(model_ids)
 
@@ -494,19 +495,16 @@ chat_completion = generate_chat_completion
 
 async def chat_completed(request: Request, form_data: dict, user: Any):
     log.debug("[DEBUG] [inside chat_completed() from chat.py] chat_completed() called.")
-    if not request.app.state.MODELS:
-        log.debug("[DEBUG] [inside chat_completed() from chat.py] request.app.state.MODELS is empty. Calling get_all_models().")
-        await get_all_models(request, user=user)
-        log.debug(f"[DEBUG] [inside chat_completed() from chat.py] get_all_models() returned. request.app.state.MODELS has {len(request.app.state.MODELS)} models.")
-
+    await ensure_models_for_request(request, user)
     if getattr(request.state, "direct", False) and hasattr(request.state, "model"):
         log.debug("[DEBUG] [inside chat_completed() from chat.py] Using direct model from request.state.")
         models = {
             request.state.model["id"]: request.state.model,
         }
     else:
-        log.debug("[DEBUG] [inside chat_completed() from chat.py] Using request.app.state.MODELS.")
-        models = request.app.state.MODELS
+        log.debug("[DEBUG] [inside chat_completed() from chat.py] Using get_models_for_request.")
+        models = get_models_for_request(request)
+    log.debug(f"[DEBUG] [inside chat_completed() from chat.py] ensure_models_for_request completed. models has {len(models)} entries.")
 
     data = form_data
     model_id = data["model"]
@@ -574,15 +572,14 @@ async def chat_action(request: Request, action_id: str, form_data: dict, user: A
     if not action:
         raise Exception(f"Action not found: {action_id}")
 
-    if not request.app.state.MODELS:
-        await get_all_models(request, user=user)
+    await ensure_models_for_request(request, user)
 
     if getattr(request.state, "direct", False) and hasattr(request.state, "model"):
         models = {
             request.state.model["id"]: request.state.model,
         }
     else:
-        models = request.app.state.MODELS
+        models = get_models_for_request(request)
 
     data = form_data
     model_id = data["model"]
