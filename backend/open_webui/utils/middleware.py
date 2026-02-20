@@ -2217,6 +2217,38 @@ async def process_chat_response(
                     log.debug(
                         f"[DEBUG] [WS-CHAT 19] [inside process_chat_response() from middleware.py] final persist (cancelled path): skipped (ENABLE_REALTIME_CHAT_SAVE=True). chat_id={metadata.get('chat_id')}, message_id={metadata.get('message_id')}."
                     )
+            except Exception as e:
+                # Client disconnect (ConnectionResetError, etc.) or other stream errors.
+                # Persist whatever content we have so it survives refresh.
+                log.warning(
+                    f"Stream error (client likely disconnected): {type(e).__name__}: {e}"
+                )
+                log.debug(
+                    f"[DEBUG] [WS-CHAT 18] [inside process_chat_response() from middleware.py] stream error (exception path). pod={pod_id}, chat_id={metadata.get('chat_id')}, message_id={metadata.get('message_id')}. Attempting final persist with accumulated content."
+                )
+                if not ENABLE_REALTIME_CHAT_SAVE:
+                    try:
+                        log.debug(
+                            f"[DEBUG] [WS-CHAT 19] [inside process_chat_response() from middleware.py] final persist (exception path): saving message to DB. pod={pod_id}, chat_id={metadata.get('chat_id')}, message_id={metadata.get('message_id')}."
+                        )
+                        Chats.upsert_message_to_chat_by_id_and_message_id(
+                            metadata["chat_id"],
+                            metadata["message_id"],
+                            {
+                                "content": serialize_content_blocks(content_blocks),
+                            },
+                        )
+                        log.debug(
+                            f"[DEBUG] [WS-CHAT 19] [inside process_chat_response() from middleware.py] final persist (exception path): completed. chat_id={metadata.get('chat_id')}, message_id={metadata.get('message_id')}."
+                        )
+                    except Exception as persist_err:
+                        log.exception(
+                            f"Final persist failed on stream error: {persist_err}"
+                        )
+                else:
+                    log.debug(
+                        f"[DEBUG] [WS-CHAT 19] [inside process_chat_response() from middleware.py] final persist (exception path): skipped (ENABLE_REALTIME_CHAT_SAVE=True). chat_id={metadata.get('chat_id')}, message_id={metadata.get('message_id')}."
+                    )
 
             if response.background is not None:
                 await response.background()
