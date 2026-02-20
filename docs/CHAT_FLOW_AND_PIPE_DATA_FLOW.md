@@ -955,8 +955,13 @@ All logs use: `log.debug("[DEBUG] [WS-CHAT N] ...")` so you can grep for `WS-CHA
 | 12 | `middleware.py` | `process_chat_response` | event_emitter/event_caller set; responses will be emitted |
 | 13 | `middleware.py` | `process_chat_response` | no valid session_id/chat_id/message_id; event_emitter=None (BROKE: no emitter) |
 | 14 | `middleware.py` | `process_chat_response` | streaming path: event_emitter is None; fallback without socket emit |
-| 15 | `middleware.py` | `process_chat_response` | streaming path: persisting message to DB |
+| 15 | `middleware.py` | `process_chat_response` | streaming path: persisting message to DB (start of stream) |
 | 16 | `middleware.py` | `process_chat_response` | non-streaming: about to emit chat:completion |
-| 17 | `socket/main.py` | `__event_emitter__` | emitting chat-events from pod to session_ids; chat_id, message_id, event_type |
+| 17 | `socket/main.py` | `__event_emitter__` | emitting chat-events from pod to session_ids; chat_id, message_id, event_type (repeated per chunk) |
+| 18 | `middleware.py` | `process_chat_response` | **stream finished** – stream iteration completed; proceeding to final persist and done event. (If cancelled: stream cancelled, client likely disconnected; attempting final persist before exit.) |
+| 19 | `middleware.py` | `process_chat_response` | **final persist** – saving message to DB (before/after `upsert_message_to_chat_by_id_and_message_id`). Variants: normal path, cancelled path, or skipped (ENABLE_REALTIME_CHAT_SAVE=True). Non-streaming path also logs here. |
+| 20 | `middleware.py` | `process_chat_response` | **done=True event** – about to emit chat:completion with done=True; after emit: "chat:completion with done=True emitted successfully". Non-streaming path logs before emit. |
 
-**How to read the logs on OpenShift:** Grep for `WS-CHAT` to see the sequence. Example success path: 0 or 0a → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 10 → 11 → 12 → 15 → 17 (repeated for each chunk). If you see 9 or 13 or 14, the flow broke (no emitter). The last number before the gap is where it stopped.
+**How to read the logs on OpenShift:** Grep for `WS-CHAT` to see the sequence. Example success path: 0 or 0a → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 10 → 11 → 12 → 15 → 17 (repeated for each chunk) → **18 → 19 → 20** (stream end). If you see 9 or 13 or 14, the flow broke (no emitter). The last number before the gap is where it stopped.
+
+**Stream completion debugging (18/19/20):** Use these to diagnose "response lost on refresh" issues. Normal completion: 18 (stream finished) → 19 (final persist) → 20 (done=True emitted). Client disconnect: 18 (stream cancelled) → 19 (final persist on cancelled path). If 18 shows "cancelled" and 19 shows "completed", the message was saved despite disconnect. If 19 never appears, the final persist did not run and the response will be lost on refresh.

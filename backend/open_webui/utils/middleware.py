@@ -1173,6 +1173,9 @@ async def process_chat_response(
 
                     title = Chats.get_chat_title_by_id(metadata["chat_id"])
 
+                    log.debug(
+                        f"[DEBUG] [WS-CHAT 20] [inside process_chat_response() from middleware.py] non-streaming: emitting chat:completion with done=True. pod={pod_id}, chat_id={metadata.get('chat_id')}, message_id={metadata.get('message_id')}, session_id={metadata.get('session_id')}."
+                    )
                     await event_emitter(
                         {
                             "type": "chat:completion",
@@ -1185,6 +1188,9 @@ async def process_chat_response(
                     )
 
                     # Save message in the database
+                    log.debug(
+                        f"[DEBUG] [WS-CHAT 19] [inside process_chat_response() from middleware.py] non-streaming: final persist. pod={pod_id}, chat_id={metadata.get('chat_id')}, message_id={metadata.get('message_id')}."
+                    )
                     Chats.upsert_message_to_chat_by_id_and_message_id(
                         metadata["chat_id"],
                         metadata["message_id"],
@@ -2125,6 +2131,9 @@ async def process_chat_response(
                             log.debug(e)
                             break
 
+                log.debug(
+                    f"[DEBUG] [WS-CHAT 18] [inside process_chat_response() from middleware.py] stream finished. pod={pod_id}, chat_id={metadata.get('chat_id')}, message_id={metadata.get('message_id')}, session_id={metadata.get('session_id')}. Proceeding to final persist and done event."
+                )
                 title = Chats.get_chat_title_by_id(metadata["chat_id"])
                 data = {
                     "done": True,
@@ -2134,6 +2143,9 @@ async def process_chat_response(
 
                 if not ENABLE_REALTIME_CHAT_SAVE:
                     # Save message in the database
+                    log.debug(
+                        f"[DEBUG] [WS-CHAT 19] [inside process_chat_response() from middleware.py] final persist: saving message to DB. pod={pod_id}, chat_id={metadata.get('chat_id')}, message_id={metadata.get('message_id')}."
+                    )
                     Chats.upsert_message_to_chat_by_id_and_message_id(
                         metadata["chat_id"],
                         metadata["message_id"],
@@ -2141,7 +2153,17 @@ async def process_chat_response(
                             "content": serialize_content_blocks(content_blocks),
                         },
                     )
+                    log.debug(
+                        f"[DEBUG] [WS-CHAT 19] [inside process_chat_response() from middleware.py] final persist: completed. chat_id={metadata.get('chat_id')}, message_id={metadata.get('message_id')}."
+                    )
+                else:
+                    log.debug(
+                        f"[DEBUG] [WS-CHAT 19] [inside process_chat_response() from middleware.py] final persist: skipped (ENABLE_REALTIME_CHAT_SAVE=True, content already persisted incrementally). chat_id={metadata.get('chat_id')}, message_id={metadata.get('message_id')}."
+                    )
 
+                log.debug(
+                    f"[DEBUG] [WS-CHAT 20] [inside process_chat_response() from middleware.py] emitting chat:completion with done=True. pod={pod_id}, chat_id={metadata.get('chat_id')}, message_id={metadata.get('message_id')}, session_id={metadata.get('session_id')}."
+                )
                 # Send a webhook notification if the user is not active
                 if get_active_status_by_user_id(user.id) is None:
                     webhook_url = Users.get_user_webhook_url_by_id(user.id)
@@ -2164,20 +2186,36 @@ async def process_chat_response(
                         "data": data,
                     }
                 )
+                log.debug(
+                    f"[DEBUG] [WS-CHAT 20] [inside process_chat_response() from middleware.py] chat:completion with done=True emitted successfully. chat_id={metadata.get('chat_id')}, message_id={metadata.get('message_id')}."
+                )
 
                 await background_tasks_handler()
             except asyncio.CancelledError:
                 log.warning("Task was cancelled!")
+                log.debug(
+                    f"[DEBUG] [WS-CHAT 18] [inside process_chat_response() from middleware.py] stream cancelled (client likely disconnected). pod={pod_id}, chat_id={metadata.get('chat_id')}, message_id={metadata.get('message_id')}. Attempting final persist before exit."
+                )
                 await event_emitter({"type": "task-cancelled"})
 
                 if not ENABLE_REALTIME_CHAT_SAVE:
                     # Save message in the database
+                    log.debug(
+                        f"[DEBUG] [WS-CHAT 19] [inside process_chat_response() from middleware.py] final persist (cancelled path): saving message to DB. pod={pod_id}, chat_id={metadata.get('chat_id')}, message_id={metadata.get('message_id')}."
+                    )
                     Chats.upsert_message_to_chat_by_id_and_message_id(
                         metadata["chat_id"],
                         metadata["message_id"],
                         {
                             "content": serialize_content_blocks(content_blocks),
                         },
+                    )
+                    log.debug(
+                        f"[DEBUG] [WS-CHAT 19] [inside process_chat_response() from middleware.py] final persist (cancelled path): completed. chat_id={metadata.get('chat_id')}, message_id={metadata.get('message_id')}. (Note: done=True event was NOT emitted - client disconnected.)"
+                    )
+                else:
+                    log.debug(
+                        f"[DEBUG] [WS-CHAT 19] [inside process_chat_response() from middleware.py] final persist (cancelled path): skipped (ENABLE_REALTIME_CHAT_SAVE=True). chat_id={metadata.get('chat_id')}, message_id={metadata.get('message_id')}."
                     )
 
             if response.background is not None:
