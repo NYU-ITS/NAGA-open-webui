@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 
 from pydantic import BaseModel
 from typing import Optional
+import fnmatch
 import logging
 import re
 
@@ -51,6 +52,14 @@ GEMINI_FLASH_LITE_PATTERNS = [
     "gemini-2.5-flash-lite-preview",     # Preview version
 ]
 
+# Glob patterns for pipe-prefixed model IDs (e.g. llm_portkey.@vertexai/gemini-2.5-flash-lite)
+# Matches any pipe that exposes the Gemini Flash Lite model - RBAC enforced via models dict
+GEMINI_FLASH_LITE_GLOB_PATTERNS = [
+    "*vertexai/gemini-2.5-flash-lite",
+    "*vertexai/gemini-2-5-flash-lite",
+    "*gemini*2*5*flash*lite*",
+]
+
 # Preferred model ID to set when configuring
 PREFERRED_TASK_MODEL_ID = "@vertexai/gemini-2.5-flash-lite"
 
@@ -59,16 +68,24 @@ def find_gemini_flash_lite_model(models: dict) -> Optional[str]:
     """
     Find the Gemini 2.5 Flash Lite model in the available models.
     
-    Checks both exact matches and pattern-based matching to handle
-    different model ID formats from Portkey or other providers.
+    Checks glob patterns first (for pipe-prefixed IDs), then exact matches,
+    partial matches, and name-based matching. Models dict is RBAC-filtered,
+    so only accessible models are considered.
     
     Args:
-        models: Dictionary of model_id -> model info
+        models: Dictionary of model_id -> model info (already filtered by user access)
         
     Returns:
         The model ID if found, None otherwise
     """
-    # First, check for exact matches
+    # First, check glob patterns (handles llm_*.*vertexai/gemini-2.5-flash-lite etc.)
+    for model_id in models.keys():
+        for glob_pattern in GEMINI_FLASH_LITE_GLOB_PATTERNS:
+            if fnmatch.fnmatch(model_id, glob_pattern):
+                log.debug(f"Found Gemini Flash Lite model (glob match): {model_id} ~ {glob_pattern}")
+                return model_id
+
+    # Second, check for exact matches
     for pattern in GEMINI_FLASH_LITE_PATTERNS:
         if pattern in models:
             log.debug(f"Found Gemini Flash Lite model (exact match): {pattern}")

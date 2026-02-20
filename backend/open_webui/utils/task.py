@@ -1,3 +1,4 @@
+import fnmatch
 import logging
 import math
 import re
@@ -14,6 +15,27 @@ from open_webui.config import DEFAULT_RAG_TEMPLATE
 
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["RAG"])
+
+
+def _resolve_model_pattern(pattern: str, models: dict) -> Optional[str]:
+    """
+    Resolve a glob pattern to the first matching model ID in the user's models dict.
+    Models dict is RBAC-filtered, so only accessible models are considered.
+    
+    Args:
+        pattern: Glob pattern (e.g. *vertexai/gemini-2.5-flash-lite)
+        models: Dictionary of model_id -> model info
+        
+    Returns:
+        First matching model_id, or None
+    """
+    if "*" not in pattern:
+        return None
+    for model_id in models.keys():
+        if fnmatch.fnmatch(model_id, pattern):
+            log.debug(f"Resolved task model pattern '{pattern}' -> '{model_id}'")
+            return model_id
+    return None
 
 
 def get_task_model_id(
@@ -42,16 +64,22 @@ def get_task_model_id(
         if task_model_external in models:
             log.debug(f"Using per-user task model: {task_model_external}")
             return task_model_external
-        else:
-            log.warning(f"Per-user task model '{task_model_external}' not found in available models")
+        # Support glob pattern (e.g. *vertexai/gemini-2.5-flash-lite) - resolves within RBAC-filtered models
+        resolved = _resolve_model_pattern(task_model_external, models)
+        if resolved:
+            return resolved
+        log.warning(f"Per-user task model '{task_model_external}' not found in available models")
     
     # Priority 2: Use global task model if set
     if task_model and task_model.strip():
         if task_model in models:
             log.debug(f"Using global task model: {task_model}")
             return task_model
-        else:
-            log.warning(f"Global task model '{task_model}' not found in available models")
+        # Support glob pattern - resolves within RBAC-filtered models
+        resolved = _resolve_model_pattern(task_model, models)
+        if resolved:
+            return resolved
+        log.warning(f"Global task model '{task_model}' not found in available models")
     
     # Priority 3: Fall back to finding Gemini Flash Lite model
     task_model_id = find_gemini_flash_lite_model(models)
