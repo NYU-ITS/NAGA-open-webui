@@ -1,6 +1,6 @@
 <script lang="ts">
 	import dayjs from 'dayjs';
-	import { toast } from '$lib/components/common/sonner';
+	import { toast } from 'svelte-sonner';
 	import { tick, getContext, onMount } from 'svelte';
 
 	import { models, settings } from '$lib/stores';

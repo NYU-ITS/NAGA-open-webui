@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { marked } from 'marked';
 
-	import { toast } from '$lib/components/common/sonner';
+	import { toast } from 'svelte-sonner';
 	import Sortable from 'sortablejs';
 
 	import fileSaver from 'file-saver';

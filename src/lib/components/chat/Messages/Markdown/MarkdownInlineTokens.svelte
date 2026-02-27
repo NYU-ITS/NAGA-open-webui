@@ -1,6 +1,6 @@
 <script lang="ts">
 	import DOMPurify from 'dompurify';
-	import { toast } from '$lib/components/common/sonner';
+	import { toast } from 'svelte-sonner';
 
 	import type { Token } from 'marked';
 	import { getContext } from 'svelte';

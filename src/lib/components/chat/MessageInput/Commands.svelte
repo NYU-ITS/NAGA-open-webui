@@ -1,6 +1,6 @@
 <script>
 	import { createEventDispatcher, onMount } from 'svelte';
-	import { toast } from '$lib/components/common/sonner';
+	import { toast } from 'svelte-sonner';
 
 	const dispatch = createEventDispatcher();
 

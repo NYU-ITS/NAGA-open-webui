@@ -10,10 +10,3 @@ declare global {
 }
 
 export {};
-
-// Svelte context typing
-declare module 'svelte' {
-	interface ContextMap {
-		i18n: import('svelte/store').Readable<import('i18next').i18n>;
-	}
-}
