@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { toast } from '$lib/components/common/sonner';
+	import { toast } from 'svelte-sonner';
 	import dayjs from 'dayjs';
 	import { createEventDispatcher } from 'svelte';
 	import { onMount, getContext } from 'svelte';

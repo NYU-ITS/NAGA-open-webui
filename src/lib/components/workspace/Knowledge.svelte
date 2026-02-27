@@ -5,7 +5,7 @@
 	import relativeTime from 'dayjs/plugin/relativeTime';
 	dayjs.extend(relativeTime);
 
-	import { toast } from '$lib/components/common/sonner';
+	import { toast } from 'svelte-sonner';
 	import { onMount, getContext } from 'svelte';
 	const i18n = getContext('i18n');
 

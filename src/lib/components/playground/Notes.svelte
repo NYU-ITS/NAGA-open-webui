@@ -9,7 +9,7 @@
 	import Mic from '../icons/Mic.svelte';
 	import VoiceRecording from '../chat/MessageInput/VoiceRecording.svelte';
 	import Tooltip from '../common/Tooltip.svelte';
-	import { toast } from '$lib/components/common/sonner';
+	import { toast } from 'svelte-sonner';
 
 	let name = '';
 	let content = '';

@@ -234,12 +234,4 @@ type SessionUser = {
 	name: string;
 	role: string;
 	profile_image_url: string;
-	permissions?: {
-		workspace?: {
-			models?: boolean;
-			knowledge?: boolean;
-			prompts?: boolean;
-			tools?: boolean;
-		};
-	};
 };
