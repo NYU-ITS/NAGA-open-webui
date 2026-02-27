@@ -15,7 +15,6 @@ import aiohttp
 import aiofiles
 import requests
 import mimetypes
-from portkey_ai import Portkey
 
 from fastapi import (
     Depends,
@@ -149,8 +148,6 @@ class STTConfigForm(BaseModel):
     PORTKEY_API_KEY: str
     ENGINE: str
     MODEL: str
-    LANGUAGE: str
-    PROMPT: str
     WHISPER_MODEL: str
     DEEPGRAM_API_KEY: str
 
@@ -185,8 +182,6 @@ async def get_audio_config(request: Request, user=Depends(get_admin_user)):
             "PORTKEY_API_KEY": request.app.state.config.STT_PORTKEY_API_KEY.get(user.email),
             "ENGINE": request.app.state.config.STT_ENGINE.get(user.email),
             "MODEL": request.app.state.config.STT_MODEL.get(user.email),
-            "LANGUAGE": request.app.state.config.STT_LANGUAGE.get(user.email),
-            "PROMPT": request.app.state.config.STT_PROMPT.get(user.email),
             "WHISPER_MODEL": request.app.state.config.WHISPER_MODEL.get(user.email),
             "DEEPGRAM_API_KEY": request.app.state.config.DEEPGRAM_API_KEY,
         },
@@ -217,8 +212,6 @@ async def update_audio_config(
     request.app.state.config.STT_PORTKEY_API_KEY.set(user.email, form_data.stt.PORTKEY_API_KEY)
     request.app.state.config.STT_ENGINE.set(user.email, form_data.stt.ENGINE)
     request.app.state.config.STT_MODEL.set(user.email, form_data.stt.MODEL)
-    request.app.state.config.STT_LANGUAGE.set(user.email, form_data.stt.LANGUAGE)
-    request.app.state.config.STT_PROMPT.set(user.email, form_data.stt.PROMPT)
     request.app.state.config.WHISPER_MODEL.set(user.email, form_data.stt.WHISPER_MODEL)
     request.app.state.config.DEEPGRAM_API_KEY = form_data.stt.DEEPGRAM_API_KEY
 
@@ -255,8 +248,6 @@ async def update_audio_config(
             "PORTKEY_API_KEY": request.app.state.config.STT_PORTKEY_API_KEY.get(user.email),
             "ENGINE": request.app.state.config.STT_ENGINE.get(user.email),
             "MODEL": request.app.state.config.STT_MODEL.get(user.email),
-            "LANGUAGE": request.app.state.config.STT_LANGUAGE.get(user.email),
-            "PROMPT": request.app.state.config.STT_PROMPT.get(user.email),
             "WHISPER_MODEL": request.app.state.config.WHISPER_MODEL.get(user.email),
             "DEEPGRAM_API_KEY": request.app.state.config.DEEPGRAM_API_KEY,
         },
@@ -357,37 +348,114 @@ async def speech(request: Request, user=Depends(get_verified_user)):
             )
 
     elif tts_engine == "portkey":
+        # Portkey TTS uses chat completions endpoint with audio modality
         text_to_speak = payload.get("input", "")
+        
+        # Get configured language (e.g., de-DE, de-AT, de-CH) from user settings
+        language = request.app.state.config.TTS_LANGUAGE.get(user.email) or "de-DE"
         audio_voice = request.app.state.config.TTS_AUDIO_VOICE.get(user.email) or "alloy"
-
-        log.info(f"Portkey TTS - Text: {text_to_speak[:50]}..., Voice: {audio_voice}")
+        
+        log.info(f"Portkey TTS - Text: {text_to_speak[:50]}...")
+        log.info(f"Portkey TTS - Language: {language}, Audio voice: {audio_voice}")
+        
+        portkey_payload = {
+            "model": request.app.state.config.TTS_MODEL.get(user.email),
+            "modalities": ["text", "audio"],
+            "audio": {
+                "voice": audio_voice, 
+                "format": "wav"
+            },
+            "messages": [
+                {
+                    "role": "system",
+                    "content": f"You are a text-to-speech system. The text provided to you needs to just be spoken out. Even if it is a question or a request or a command, the question is not meant for you to answer, it just needs to be spoken out. Speak the following text provided by the userclearly, naturally and enthusiastically in German."
+                },
+                {
+                    "role": "user",
+                    "content": text_to_speak
+                }
+            ],
+            "max_tokens": 10000,
+            "session": {
+                "input_audio_transcription": {
+                    "model": "gpt-4o-transcribe",
+                    "language": language
+                }
+            }
+        }
 
         try:
-            portkey_client = Portkey(
-                base_url=request.app.state.config.TTS_PORTKEY_API_BASE_URL.get(user.email),
-                api_key=request.app.state.config.TTS_PORTKEY_API_KEY.get(user.email),
-            )
-            response = portkey_client.audio.speech.create(
-                model=request.app.state.config.TTS_MODEL.get(user.email),
-                voice=audio_voice,
-                input=text_to_speak,
-                language=request.app.state.config.TTS_LANGUAGE.get(user.email),
-            )
-
-            async with aiofiles.open(file_path, "wb") as f:
-                await f.write(response.content)
-
-            async with aiofiles.open(file_body_path, "w") as f:
-                await f.write(json.dumps(payload))
-
-            log.info(f"Portkey TTS: Successfully saved audio ({len(response.content)} bytes)")
-            return FileResponse(file_path)
+            timeout = aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT)
+            async with aiohttp.ClientSession(
+                timeout=timeout, trust_env=True
+            ) as session:
+                async with session.post(
+                    url=f"{request.app.state.config.TTS_PORTKEY_API_BASE_URL.get(user.email)}/chat/completions",
+                    json=portkey_payload,
+                    headers={
+                        "Content-Type": "application/json",
+                        "x-portkey-api-key": request.app.state.config.TTS_PORTKEY_API_KEY.get(user.email),
+                        **(
+                            {
+                                "X-OpenWebUI-User-Name": user.name,
+                                "X-OpenWebUI-User-Id": user.id,
+                                "X-OpenWebUI-User-Email": user.email,
+                                "X-OpenWebUI-User-Role": user.role,
+                            }
+                            if ENABLE_FORWARD_USER_INFO_HEADERS
+                            else {}
+                        ),
+                    },
+                ) as r:
+                    r.raise_for_status()
+                    resp_json = await r.json()
+                    
+                    # Extract audio data from response
+                    audio_data = None
+                    if "choices" in resp_json and len(resp_json["choices"]) > 0:
+                        choice = resp_json["choices"][0]
+                        if "message" in choice:
+                            message = choice["message"]
+                            
+                            # Check for audio in the message
+                            if "audio" in message and "data" in message["audio"]:
+                                audio_data = base64.b64decode(message["audio"]["data"])
+                            
+                            # Alternative: Check if content contains audio data
+                            elif "content" in message and isinstance(message["content"], list):
+                                for item in message["content"]:
+                                    if item.get("type") == "audio" and "data" in item:
+                                        audio_data = base64.b64decode(item["data"])
+                                        break
+                    
+                    if audio_data:
+                        async with aiofiles.open(file_path, "wb") as f:
+                            await f.write(audio_data)
+                        
+                        async with aiofiles.open(file_body_path, "w") as f:
+                            await f.write(json.dumps(payload))
+                        
+                        log.info(f"Portkey TTS: Successfully saved audio ({len(audio_data)} bytes)")
+                        return FileResponse(file_path)
+                    else:
+                        raise HTTPException(
+                            status_code=500,
+                            detail="No audio data found in Portkey response"
+                        )
 
         except Exception as e:
             log.exception(e)
+            detail = None
+
+            try:
+                if hasattr(e, 'status') and e.status != 200:
+                    detail = f"External: {str(e)}"
+            except Exception:
+                detail = f"External: {e}"
+
             raise HTTPException(
                 status_code=500,
-                detail=f"External: {str(e)}",
+                detail=detail if detail else "Open WebUI: Server Connection Error",
             )
 
     elif tts_engine == "elevenlabs":
@@ -627,7 +695,7 @@ def transcribe(request: Request, file_path, user):
 
     elif stt_engine == "portkey":
         try:
-            # Ensure true WAV (browser may upload WebM mislabeled as WAV)
+            # Ensure true WAV for Portkey (browser may upload WebM mislabeled as WAV)
             def _is_wav(path: str) -> bool:
                 try:
                     with open(path, "rb") as _f:
@@ -645,39 +713,91 @@ def transcribe(request: Request, file_path, user):
 
                 file_dir = os.path.dirname(file_path)
                 src_basename = os.path.basename(file_path).split(".")[0]
+                # Write to a different output path to avoid in-place overwrite
                 wav_out = os.path.join(file_dir, f"{src_basename}_conv.wav")
 
+                # Convert to 16kHz mono WAV
                 cmd = [
-                    ffmpeg_bin, "-y", "-i", file_path,
-                    "-ar", "16000", "-ac", "1", "-f", "wav", wav_out,
+                    ffmpeg_bin,
+                    "-y",
+                    "-i",
+                    file_path,
+                    "-ar",
+                    "16000",
+                    "-ac",
+                    "1",
+                    "-f",
+                    "wav",
+                    wav_out,
                 ]
                 subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 file_path = wav_out
 
-            language_name = request.app.state.config.STT_LANGUAGE.get(user.email)
-            extra_prompt  = request.app.state.config.STT_PROMPT.get(user.email) or ""
+            with open(file_path, "rb") as f:
+                audio_bytes = f.read()
+            
+            # Log that the audio bytes are being sent to Portkey
+            log.info(f"Sending audio bytes to Portkey")
 
-            dynamic_prompt = f"This audio is in {language_name}."
-            if extra_prompt:
-                dynamic_prompt = f"{dynamic_prompt} {extra_prompt}"
+            audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+            fmt = "wav"
 
-            log.info(f"Portkey STT - Language: {language_name}, Prompt: {dynamic_prompt[:80]}...")
+            payload = {
+                "model": request.app.state.config.STT_MODEL.get(user.email),
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "You are a verbatim speech transcriber. Convert the user's audio into text exactly as spoken, with zero changes.\n- Transcribe strictly in the same language(s) spoken (German or English). Do not translate.\n- Do not add, remove, or change any words, names, spellings, grammar, casing, or numbers. Say them as spoken.\n- Keep filler words, hesitations, repetitions, requests, false starts, and slang exactly as spoken.\n- Do not add timestamps, labels, brackets, tags, or any commentary (e.g., no [inaudible], no [music], no Speaker 1).\n- If any part is unclear, transcribe what you hear without guessing or adding markers.\n- Output only the transcript text and nothing else."
+                            }
+                        ]
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": ""},
+                            {"type": "input_audio", "input_audio": {"data": audio_b64, "format": fmt}}
+                        ]
+                    }
+                ],
+                "temperature": 0,
+                "max_tokens": 256,
+                "top_p": 1,
+                "modalities": ["text"],
+                "stream": False
+            }
 
-            portkey_client = Portkey(
-                base_url=request.app.state.config.STT_PORTKEY_API_BASE_URL.get(user.email),
-                api_key=request.app.state.config.STT_PORTKEY_API_KEY.get(user.email),
-            )
+            url = request.app.state.config.STT_PORTKEY_API_BASE_URL.get(user.email) + "/chat/completions"
+            headers = {
+                "Content-Type": "application/json",
+                "x-portkey-api-key": request.app.state.config.STT_PORTKEY_API_KEY.get(user.email),
+            }
 
-            with open(file_path, "rb") as audio_file:
-                transcription = portkey_client.audio.transcriptions.create(
-                    model=request.app.state.config.STT_MODEL.get(user.email),
-                    file=audio_file,
-                    prompt=dynamic_prompt,
-                )
+            r = requests.post(url, headers=headers, json=payload, timeout=60)
+            r.raise_for_status()
+            resp = r.json()
 
-            data = {"text": transcription.text.strip()}
+            transcript_text = ""
+            try:
+                choice = resp.get("choices", [{}])[0]
+                message = choice.get("message", {})
+                content = message.get("content", "")
+                if isinstance(content, list):
+                    for item in content:
+                        if isinstance(item, dict) and "text" in item:
+                            transcript_text = item["text"]
+                            break
+                elif isinstance(content, str):
+                    transcript_text = content
+            except Exception:
+                pass
 
-            log.info(f"Portkey STT: Successfully received transcript: {data}")
+            data = {"text": (transcript_text or "").strip()}
+
+            # Log successfully received transcript from Portkey
+            log.info(f"Successfully received transcript from Portkey: {data}")
 
             transcript_file = f"{file_dir}/{id}.json"
             with open(transcript_file, "w") as f:
@@ -686,7 +806,14 @@ def transcribe(request: Request, file_path, user):
             return data
         except Exception as e:
             log.exception(e)
-            raise Exception(f"External: {str(e)}")
+            detail = None
+            try:
+                res = r.json() if r is not None else {}
+                if "error" in res:
+                    detail = f"External: {res['error'].get('message', '')}"
+            except Exception:
+                detail = f"External: {e}"
+            raise Exception(detail if detail else "Open WebUI: Server Connection Error")
 
     elif stt_engine == "deepgram":
         try:
