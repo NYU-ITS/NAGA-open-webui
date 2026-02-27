@@ -285,6 +285,12 @@
 		}
 	};
 
+	// Save flow with backend confirmation:
+	// - submitHandler() orchestrates the whole save, including validation and verification.
+	// - updateRAGConfig() persists RAG_FULL_CONTEXT, BYPASS_EMBEDDING_AND_RETRIEVAL, chunk params, file limits, and content extraction.
+	// - updateQuerySettings() persists querySettings (k, r, template, hybrid).
+	// - verifyRagConfig() and verifyQuerySettings() re-fetch (getRAGConfig/getQuerySettings) and compare to expected values.
+	// - saveInProgress controls UI state during save; expected* values normalize inputs (e.g., chunkSize defaults).
 	const submitHandler = async () => {
 		saveInProgress = true;
 		try {
@@ -315,6 +321,8 @@
 			const expectedFileMaxSize = normalizeNumber(fileMaxSize, 5);
 			const expectedFileMaxCount = normalizeNumber(fileMaxCount, 2);
 
+			// expectedRagConfig is the source of truth used by verifyRagConfig()
+			// to confirm the backend persisted the exact values we intended to save.
 			const expectedRagConfig = {
 				pdf_extract_images: pdfExtractImages,
 				enable_google_drive_integration: enableGoogleDriveIntegration,
@@ -396,6 +404,7 @@
 
 			dispatch('save');
 
+			// expectedQuerySettings is used by verifyQuerySettings() to confirm query settings persisted.
 			const expectedQuerySettings = {
 				k: querySettings.k,
 				r: querySettings.r,
