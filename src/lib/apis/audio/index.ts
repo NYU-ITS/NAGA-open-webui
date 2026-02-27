@@ -50,8 +50,6 @@ type AudioConfigPayload = {
         PORTKEY_API_KEY?: string;
         ENGINE: string;
         MODEL: string;
-        LANGUAGE?: string;
-        PROMPT?: string;
         WHISPER_MODEL: string;
         DEEPGRAM_API_KEY: string;
     };
