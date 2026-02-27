@@ -2907,7 +2907,12 @@ AUDIO_STT_ENGINE = UserScopedConfig(
 
 AUDIO_STT_MODEL = UserScopedConfig(
     "audio.stt.model",
-    os.getenv("AUDIO_STT_MODEL", ""),
+    os.getenv("AUDIO_STT_MODEL", "@gpt-4o-mini-transcribe/gpt-4o-mini-transcribe"),
+)
+
+AUDIO_STT_PROMPT = UserScopedConfig(
+    "audio.stt.prompt",
+    os.getenv("AUDIO_STT_PROMPT", ""),
 )
 
 AUDIO_TTS_OPENAI_API_BASE_URL = UserScopedConfig(
@@ -2942,7 +2947,7 @@ AUDIO_TTS_ENGINE = UserScopedConfig(
 
 AUDIO_TTS_MODEL = UserScopedConfig(
     "audio.tts.model",
-    os.getenv("AUDIO_TTS_MODEL", "@openai-4o-mini-audio/gpt-4o-mini-audio-preview"),  # Portkey audio model
+    os.getenv("AUDIO_TTS_MODEL", "@gpt-4o-mini-tts/gpt-4o-mini-tts"),
 )
 
 AUDIO_TTS_VOICE = UserScopedConfig(
@@ -2952,7 +2957,12 @@ AUDIO_TTS_VOICE = UserScopedConfig(
 
 AUDIO_TTS_LANGUAGE = UserScopedConfig(
     "audio.tts.language",
-    os.getenv("AUDIO_TTS_LANGUAGE", "de-DE"),  # Default German (Germany)
+    os.getenv("AUDIO_TTS_LANGUAGE", "German"),
+)
+
+AUDIO_STT_LANGUAGE = UserScopedConfig(
+    "audio.stt.language",
+    os.getenv("AUDIO_STT_LANGUAGE", "German"),
 )
 
 AUDIO_TTS_AUDIO_VOICE = UserScopedConfig(
