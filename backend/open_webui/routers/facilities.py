@@ -18,6 +18,7 @@ from open_webui.retrieval.vector.connector import VECTOR_DB_CLIENT
 from open_webui.utils.auth import get_verified_user
 from open_webui.retrieval.web.tavily import search_tavily
 from open_webui.retrieval.web.main import SearchResult
+from open_webui.utils.models import get_models_for_user
 
 # facilities prompt template
 FACILITIES_PROMPT = """You are an expert grant writer specializing in the 'Facilities, Equipment, and Other Resources' section of academic proposals for {sponsor} grants.
@@ -505,7 +506,8 @@ async def generate_facilities_response(request: Request, form_data: FacilitiesRe
             raise HTTPException(status_code=400, detail="Invalid sponsor. Must be 'NSF' or 'NIH'")
         
         # Get model information for knowledge base access
-        model = request.app.state.MODELS.get(form_data.model)
+        models = await get_models_for_user(request, user)
+        model = models.get(form_data.model)
         if not model:
             raise HTTPException(status_code=400, detail="Model not found")
         
@@ -981,7 +983,8 @@ async def generate_facilities_section(request: Request, form_data: SingleSection
                 error="Empty section text"
             )
 
-        model = request.app.state.MODELS.get(form_data.model)
+        models = await get_models_for_user(request, user)
+        model = models.get(form_data.model)
         if not model:
             raise HTTPException(status_code=400, detail="Model not found")
 
@@ -1688,7 +1691,8 @@ async def extract_form_data_from_files(request: Request, form_data: ExtractFormD
             raise HTTPException(status_code=400, detail="No files provided")
         
         # Get model information
-        model = request.app.state.MODELS.get(form_data.model)
+        models = await get_models_for_user(request, user)
+        model = models.get(form_data.model)
         if not model:
             raise HTTPException(status_code=400, detail="Model not found")
         

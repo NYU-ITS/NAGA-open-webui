@@ -18,6 +18,7 @@ from open_webui.utils.task import (
     get_task_model_id,
 )
 from open_webui.utils.auth import get_admin_user, get_verified_user
+from open_webui.utils.models import get_models_for_user
 from open_webui.constants import TASKS
 
 from open_webui.routers.pipelines import process_pipeline_inlet_filter
@@ -161,8 +162,7 @@ async def get_task_config(request: Request, user=Depends(get_verified_user)):
     from open_webui.utils.models import get_all_models
     models_list = await get_all_models(request, user)
     
-    # Convert to dict for fast lookup (get_all_models returns a list)
-    # Also available at request.app.state.MODELS after the call
+    # Convert to dict for fast lookup (get_all_models returns a list and caches per-user)
     models = {model["id"]: model for model in models_list}
     
     # DEBUG: Log all available models to help identify correct Gemini model ID
@@ -533,7 +533,7 @@ async def generate_image_prompt(
             request.state.model["id"]: request.state.model,
         }
     else:
-        models = request.app.state.MODELS
+        models = await get_models_for_user(request, user)
 
     model_id = form_data["model"]
     if model_id not in models:

@@ -13,6 +13,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.access_control import has_access, has_permission
+from open_webui.utils.models import (
+    invalidate_models_cache,
+    get_affected_user_ids_for_model,
+)
 from open_webui.utils.super_admin import is_super_admin
 from open_webui.models.functions import Functions
 from open_webui.models.users import Users
@@ -88,6 +92,9 @@ async def create_new_model(
         
         model = Models.insert_new_model(form_data, creator_user_id, creator_email)
         if model:
+            # Invalidate creator and requester (super admin creating on behalf of function creator)
+            affected = list(set([creator_user_id, user.id]))
+            invalidate_models_cache(request, affected_user_ids=affected)
             return model
         else:
             raise HTTPException(
@@ -145,7 +152,9 @@ async def get_model_by_id(id: str, user=Depends(get_verified_user)):
 
 
 @router.post("/model/toggle", response_model=Optional[ModelResponse])
-async def toggle_model_by_id(id: str, user=Depends(get_verified_user)):
+async def toggle_model_by_id(
+    request: Request, id: str, user=Depends(get_verified_user)
+):
     model = Models.get_model_by_id(id)
     if model:
         if (
@@ -153,9 +162,11 @@ async def toggle_model_by_id(id: str, user=Depends(get_verified_user)):
             or model.user_id == user.id
             or has_access(user.id, "write", model.access_control)
         ):
+            affected = get_affected_user_ids_for_model(model)
             model = Models.toggle_model_by_id(id)
 
             if model:
+                invalidate_models_cache(request, affected_user_ids=affected)
                 return model
             else:
                 raise HTTPException(
@@ -181,6 +192,7 @@ async def toggle_model_by_id(id: str, user=Depends(get_verified_user)):
 
 @router.post("/model/update", response_model=Optional[ModelModel])
 async def update_model_by_id(
+    request: Request,
     id: str,
     form_data: ModelForm,
     user=Depends(get_verified_user),
@@ -203,7 +215,12 @@ async def update_model_by_id(
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
         )
 
+    affected_before = get_affected_user_ids_for_model(model)
     model = Models.update_model_by_id(id, form_data)
+    if model:
+        affected_after = get_affected_user_ids_for_model(model)
+        affected = list(set(affected_before) | set(affected_after))
+        invalidate_models_cache(request, affected_user_ids=affected)
     return model
 
 
@@ -213,7 +230,9 @@ async def update_model_by_id(
 
 
 @router.delete("/model/delete", response_model=bool)
-async def delete_model_by_id(id: str, user=Depends(get_verified_user)):
+async def delete_model_by_id(
+    request: Request, id: str, user=Depends(get_verified_user)
+):
     model = Models.get_model_by_id(id)
     if not model:
         raise HTTPException(
@@ -231,11 +250,16 @@ async def delete_model_by_id(id: str, user=Depends(get_verified_user)):
             detail=ERROR_MESSAGES.UNAUTHORIZED,
         )
 
+    affected = get_affected_user_ids_for_model(model)
     result = Models.delete_model_by_id(id)
+    if result:
+        invalidate_models_cache(request, affected_user_ids=affected)
     return result
 
 
 @router.delete("/delete/all", response_model=bool)
-async def delete_all_models(user=Depends(get_admin_user)):
+async def delete_all_models(request: Request, user=Depends(get_admin_user)):
     result = Models.delete_all_models()
+    if result:
+        invalidate_models_cache(request)  # clear all users' cache
     return result
