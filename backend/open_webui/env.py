@@ -381,9 +381,9 @@ REDIS_MAX_CONNECTIONS = _safe_int_env("REDIS_MAX_CONNECTIONS", 100, min_value=10
 # MODELS CACHE (In-Memory LRU)
 ####################################
 
-# Max number of users to cache in memory per pod (LRU eviction). Must be >= 1.
+# Max number of users to cache in memory per pod (LRU eviction).
 # Default: 1000 (top 1000 users by recent access per pod)
-MODELS_CACHE_MAX_USERS = _safe_int_env("MODELS_CACHE_MAX_USERS", 1000, min_value=1, max_value=10000)
+MODELS_CACHE_MAX_USERS = _safe_int_env("MODELS_CACHE_MAX_USERS", 1000, min_value=100, max_value=10000)
 
 ####################################
 # RAG THREAD POOL

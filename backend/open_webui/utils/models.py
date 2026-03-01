@@ -419,9 +419,9 @@ def _get_redis_connection_for_subscribe():
             from urllib.parse import urlparse
             sentinel = get_redis_sentinel_connection()
             if sentinel is None:
-                return Redis.from_url(REDIS_URL, decode_responses=True)
+                return Redis.from_url(REDIS_URL, decode_responses=True, socket_timeout=None)
             master_kwargs = {
-                "socket_timeout": 30,
+                "socket_timeout": None,  # Block indefinitely for pub/sub listen()
                 "socket_connect_timeout": 5,
                 "decode_responses": True,
             }
@@ -429,7 +429,7 @@ def _get_redis_connection_for_subscribe():
             if parsed.password:
                 master_kwargs["password"] = parsed.password
             return sentinel.master_for(REDIS_SENTINEL_SERVICE_NAME, **master_kwargs)
-        return Redis.from_url(REDIS_URL, decode_responses=True)
+        return Redis.from_url(REDIS_URL, decode_responses=True, socket_timeout=None)
     except Exception:
         return None
 
