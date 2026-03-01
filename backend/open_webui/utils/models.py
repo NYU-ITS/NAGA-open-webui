@@ -336,7 +336,7 @@ def _ensure_models_cache(request):
     mod = getattr(request.app.state, "MODELS", None)
     if not isinstance(mod, dict):
         maxsize = getattr(
-            getattr(request.app.state, "config", None),
+            request.app.state,
             "MODELS_CACHE_MAX_USERS",
             1000,
         )

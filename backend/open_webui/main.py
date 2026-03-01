@@ -1037,7 +1037,7 @@ app.state.config.AUTOCOMPLETE_GENERATION_INPUT_MAX_LENGTH = (
 #
 ########################################
 
-app.state.config.MODELS_CACHE_MAX_USERS = MODELS_CACHE_MAX_USERS
+app.state.MODELS_CACHE_MAX_USERS = MODELS_CACHE_MAX_USERS
 app.state.MODELS = _ModelsLRUCache(maxsize=MODELS_CACHE_MAX_USERS)
 
 
