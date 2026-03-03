@@ -346,38 +346,28 @@
 		return lastDot >= 0 ? trimmed.slice(lastDot + 1) : '';
 	};
 
-	const computeFileStats = (files) => {
-		const docs = new Set([
-			'pdf',
-			'doc',
-			'docx',
-			'xls',
-			'xlsx',
-			'csv',
-			'ppt',
-			'pptx',
-			'txt',
-			'md',
-			'rtf',
-			'odt',
-			'ods',
-			'odp'
-		]);
-		const images = new Set([
-			'jpg',
-			'jpeg',
-			'png',
-			'gif',
-			'bmp',
-			'tiff',
-			'webp',
-			'heic',
-			'svg'
-		]);
-		const audio = new Set(['mp3', 'wav', 'aac', 'flac', 'ogg', 'm4a', 'wma']);
-		const video = new Set(['mp4', 'mov', 'avi', 'mkv', 'webm', 'wmv', 'flv']);
-		const archives = new Set(['zip', 'rar', '7z', 'tar', 'gz']);
+	const DOC_EXTENSIONS = new Set([
+		'pdf',
+		'doc',
+		'docx',
+		'xls',
+		'xlsx',
+		'csv',
+		'ppt',
+		'pptx',
+		'txt',
+		'md',
+		'rtf',
+		'odt',
+		'ods',
+		'odp'
+	]);
+	const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'gif', 'bmp', 'tiff', 'webp', 'heic', 'svg']);
+	const AUDIO_EXTENSIONS = new Set(['mp3', 'wav', 'aac', 'flac', 'ogg', 'm4a', 'wma']);
+	const VIDEO_EXTENSIONS = new Set(['mp4', 'mov', 'avi', 'mkv', 'webm', 'wmv', 'flv']);
+	const ARCHIVE_EXTENSIONS = new Set(['zip', 'rar', '7z', 'tar', 'gz']);
 
+	const computeFileStats = (files) => {
 		const stats = {
 			totalCount: 0,
 			totalSize: 0,
@@ -400,19 +390,19 @@
 
 			const name = file?.meta?.name ?? file?.name ?? '';
 			const ext = getFileExtension(name);
-			if (docs.has(ext)) {
+			if (DOC_EXTENSIONS.has(ext)) {
 				stats.docsCount += 1;
 				stats.docsSize += size;
-			} else if (images.has(ext)) {
+			} else if (IMAGE_EXTENSIONS.has(ext)) {
 				stats.imagesCount += 1;
 				stats.imagesSize += size;
-			} else if (audio.has(ext)) {
+			} else if (AUDIO_EXTENSIONS.has(ext)) {
 				stats.audioCount += 1;
 				stats.audioSize += size;
-			} else if (video.has(ext)) {
+			} else if (VIDEO_EXTENSIONS.has(ext)) {
 				stats.videoCount += 1;
 				stats.videoSize += size;
-			} else if (archives.has(ext)) {
+			} else if (ARCHIVE_EXTENSIONS.has(ext)) {
 				stats.otherCount += 1;
 				stats.otherSize += size;
 			} else {
