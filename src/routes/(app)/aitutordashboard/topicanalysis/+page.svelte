@@ -1,8 +1,72 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { toast } from 'svelte-sonner';
+	import { TESTING_AI_TUTOR } from '$lib/constants';
 
-	onMount(() => {
+	onMount(async () => {
 		console.log('AI Tutor Dashboard - Topic Analysis loaded');
+
+		try {
+			// TODO: Confirm endpoint contract for topic analysis data.
+			const topicResponse = await fetch('/api/v1/analysis/topics/by-homework', {
+				method: 'GET',
+				headers: {
+					Authorization: `Bearer ${localStorage.token}`
+				}
+			});
+
+			if (!topicResponse.ok) {
+				throw new Error('Topic analysis fetch failed');
+			}
+
+			const topicData = await topicResponse.json();
+			if (Array.isArray(topicData?.items)) {
+				topicByHomework = topicData.items;
+			}
+
+			if (TESTING_AI_TUTOR) {
+				toast.success(
+					'[SUCCESS][GET]: getTopicAnalysis() fetches topic data like (using placeholder).'
+				);
+			}
+		} catch (error) {
+			if (TESTING_AI_TUTOR) {
+				toast.warning('[FAIL][GET]: getTopicAnalysis() fetches topic data like (using placeholder).');
+			}
+			console.error('Topic analysis API failed:', error);
+		}
+
+		try {
+			// TODO: Confirm endpoint contract for practice question set status.
+			const practiceResponse = await fetch('/api/v1/analysis/practice-questions', {
+				method: 'GET',
+				headers: {
+					Authorization: `Bearer ${localStorage.token}`
+				}
+			});
+
+			if (!practiceResponse.ok) {
+				throw new Error('Practice question set fetch failed');
+			}
+
+			const practiceData = await practiceResponse.json();
+			if (Array.isArray(practiceData?.items)) {
+				practiceQuestions = practiceData.items;
+			}
+
+			if (TESTING_AI_TUTOR) {
+				toast.success(
+					'[SUCCESS][GET]: getPracticeQuestionSets() fetches question sets like (using placeholder).'
+				);
+			}
+		} catch (error) {
+			if (TESTING_AI_TUTOR) {
+				toast.warning(
+					'[FAIL][GET]: getPracticeQuestionSets() fetches question sets like (using placeholder).'
+				);
+			}
+			console.error('Practice question set API failed:', error);
+		}
 	});
 
 	// State for expandable homework sections
@@ -17,8 +81,9 @@
 		expandedHomework = expandedHomework; // Trigger reactivity
 	}
 
+	// TODO: Wire to API: analysis topic-by-homework endpoint (not implemented yet)
 	// Sample data for Topic Analysis by Homework
-	const topicByHomework = [
+	let topicByHomework = [
 		{
 			id: 'homework1',
 			homework: 'Homework 1',
@@ -117,8 +182,9 @@
 		}
 	];
 
+	// TODO: Wire to API: analysis practice question set status endpoint (not implemented yet)
 	// Sample data for Practice Question Set
-	const practiceQuestions = [
+	let practiceQuestions = [
 		{
 			homework: 'Homework 1',
 			status: 'approved',

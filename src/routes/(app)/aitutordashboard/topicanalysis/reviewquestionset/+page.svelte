@@ -1,9 +1,46 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { toast } from 'svelte-sonner';
 	import { goto } from '$app/navigation';
+	import { TESTING_AI_TUTOR } from '$lib/constants';
 
-	onMount(() => {
+	onMount(async () => {
 		console.log('Review Question Set loaded');
+
+		try {
+			// TODO: Confirm endpoint contract for question set details.
+			const response = await fetch(
+				`/api/v1/analysis/question-sets/detail?homework=${encodeURIComponent(selectedHomework)}`,
+				{
+					method: 'GET',
+					headers: {
+						Authorization: `Bearer ${localStorage.token}`
+					}
+				}
+			);
+
+			if (!response.ok) {
+				throw new Error('Question set detail fetch failed');
+			}
+
+			const data = await response.json();
+			if (data) {
+				questionData = data;
+			}
+
+			if (TESTING_AI_TUTOR) {
+				toast.success(
+					'[SUCCESS][GET]: getQuestionSetDetail() fetches question set data like (using placeholder).'
+				);
+			}
+		} catch (error) {
+			if (TESTING_AI_TUTOR) {
+				toast.warning(
+					'[FAIL][GET]: getQuestionSetDetail() fetches question set data like (using placeholder).'
+				);
+			}
+			console.error('Question set detail API failed:', error);
+		}
 	});
 
 	let selectedHomework = 'Homework 1';
@@ -18,8 +55,9 @@
 		'Homework 7'
 	];
 
+	// TODO: Wire to API: analysis question set details endpoint (not implemented yet)
 	// Sample question data in JSON format
-	const questionData = {
+	let questionData = {
 		version: 'Version 1 - AI generated',
 		status: 'approved',
 		date: '2026-01-02 12:23:12',
@@ -53,15 +91,94 @@
 	}
 
 	function handleApprove() {
+		try {
+			// TODO: Confirm endpoint contract for question set approval.
+			fetch('/api/v1/analysis/question-sets/approve', {
+				method: 'POST',
+				headers: {
+					Authorization: `Bearer ${localStorage.token}`,
+					'Content-Type': 'application/json'
+				},
+				body: JSON.stringify({ homework: selectedHomework })
+			})
+				.then((response) => {
+					if (!response.ok) {
+						throw new Error('Question set approval failed');
+					}
+
+					if (TESTING_AI_TUTOR) {
+						toast.success(
+							'[SUCCESS][POST]: approveQuestionSet() posts approval data like (using placeholder).'
+						);
+					}
+				})
+				.catch((error) => {
+					if (TESTING_AI_TUTOR) {
+						toast.warning(
+							'[FAIL][POST]: approveQuestionSet() posts approval data like (using placeholder).'
+						);
+					}
+					console.error('Question set approval API failed:', error);
+				});
+		} catch (error) {
+			if (TESTING_AI_TUTOR) {
+				toast.warning('[FAIL][POST]: approveQuestionSet() posts approval data like (using placeholder).');
+			}
+			console.error('Question set approval API failed:', error);
+		}
+
+		// TODO: Wire to API: approve question set (not implemented yet)
 		// Handle approval logic
 		alert('Question set approved!');
 	}
 
 	function handleEdit() {
+		if (TESTING_AI_TUTOR) {
+			toast.warning('[FAIL][POST]: editQuestionSet() posts edits like (using placeholder).');
+		}
+		// TODO: Wire to API: edit question set (not implemented yet)
 		alert('Edit functionality coming soon');
 	}
 
 	function handleDownload() {
+		try {
+			// TODO: Confirm endpoint contract for question set download.
+			fetch(
+				`/api/v1/analysis/question-sets/download?homework=${encodeURIComponent(selectedHomework)}`,
+				{
+					method: 'GET',
+					headers: {
+						Authorization: `Bearer ${localStorage.token}`
+					}
+				}
+			)
+				.then((response) => {
+					if (!response.ok) {
+						throw new Error('Question set download failed');
+					}
+
+					if (TESTING_AI_TUTOR) {
+						toast.success(
+							'[SUCCESS][GET]: downloadQuestionSet() fetches file data like (using placeholder).'
+						);
+					}
+				})
+				.catch((error) => {
+					if (TESTING_AI_TUTOR) {
+						toast.warning(
+							'[FAIL][GET]: downloadQuestionSet() fetches file data like (using placeholder).'
+						);
+					}
+					console.error('Question set download API failed:', error);
+				});
+		} catch (error) {
+			if (TESTING_AI_TUTOR) {
+				toast.warning('[FAIL][GET]: downloadQuestionSet() fetches file data like (using placeholder).');
+			}
+			console.error('Question set download API failed:', error);
+		}
+
+		// TODO: Wire to API: download question set file (not implemented yet)
 		const dataStr = JSON.stringify(questionData, null, 2);
 		const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
 		const exportFileDefaultName = `${selectedHomework}_questions.json`;
@@ -73,6 +190,45 @@
 	}
 
 	function handleUpload() {
+		try {
+			// TODO: Confirm endpoint contract for question set upload.
+			fetch('/api/v1/analysis/question-sets/upload', {
+				method: 'POST',
+				headers: {
+					Authorization: `Bearer ${localStorage.token}`,
+					'Content-Type': 'application/json'
+				},
+				body: JSON.stringify({ homework: selectedHomework, data: questionData })
+			})
+				.then((response) => {
+					if (!response.ok) {
+						throw new Error('Question set upload failed');
+					}
+
+					if (TESTING_AI_TUTOR) {
+						toast.success(
+							'[SUCCESS][POST]: uploadQuestionSet() posts question set data like (using placeholder).'
+						);
+					}
+				})
+				.catch((error) => {
+					if (TESTING_AI_TUTOR) {
+						toast.warning(
+							'[FAIL][POST]: uploadQuestionSet() posts question set data like (using placeholder).'
+						);
+					}
+					console.error('Question set upload API failed:', error);
+				});
+		} catch (error) {
+			if (TESTING_AI_TUTOR) {
+				toast.warning(
+					'[FAIL][POST]: uploadQuestionSet() posts question set data like (using placeholder).'
+				);
+			}
+			console.error('Question set upload API failed:', error);
+		}
+
+		// TODO: Wire to API: upload question set (not implemented yet)
 		alert('Upload functionality coming soon');
 	}
 </script>

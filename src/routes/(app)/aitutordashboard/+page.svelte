@@ -1,14 +1,48 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { toast } from 'svelte-sonner';
+	import { TESTING_AI_TUTOR } from '$lib/constants';
 
 	let chartsContainer: HTMLElement;
 
-	onMount(() => {
+	onMount(async () => {
 		console.log('AI Tutor Dashboard - Summary loaded');
+
+		try {
+			// TODO: Confirm endpoint contract for dashboard summary data.
+			const response = await fetch('/api/v1/analysis/summary', {
+				method: 'GET',
+				headers: {
+					Authorization: `Bearer ${localStorage.token}`
+				}
+			});
+
+			if (!response.ok) {
+				throw new Error('Dashboard summary fetch failed');
+			}
+
+			const data = await response.json();
+			if (Array.isArray(data?.homeworkStats)) {
+				homeworkStats = data.homeworkStats;
+			}
+			if (Array.isArray(data?.charts)) {
+				charts = data.charts;
+			}
+
+			if (TESTING_AI_TUTOR) {
+				toast.success('[SUCCESS][GET]: getDashboardSummary() fetches summary data like (using placeholder).');
+			}
+		} catch (error) {
+			if (TESTING_AI_TUTOR) {
+				toast.warning('[FAIL][GET]: getDashboardSummary() fetches summary data like (using placeholder).');
+			}
+			console.error('Summary dashboard API failed:', error);
+		}
 	});
 
+	// TODO: Wire to API: analysis dashboard summary endpoint (not implemented yet)
 	// Sample data for Statistics table
-	const homeworkStats = [
+	let homeworkStats = [
 		{
 			homework: 'Homework 1',
 			totalProblems: 15,
@@ -74,8 +108,9 @@
 		}
 	];
 
+	// TODO: Wire to API: analysis charts endpoint (not implemented yet)
 	// Generate placeholder charts (5 charts, show 3 by default)
-	const charts = [
+	let charts = [
 		{ id: 1, title: 'Average Accuracy Trend' },
 		{ id: 2, title: 'Problem Completion Rate' },
 		{ id: 3, title: 'Common Error Types' },

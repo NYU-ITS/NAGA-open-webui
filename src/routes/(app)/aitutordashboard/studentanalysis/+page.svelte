@@ -1,8 +1,40 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { toast } from 'svelte-sonner';
+	import { TESTING_AI_TUTOR } from '$lib/constants';
 
-	onMount(() => {
+	onMount(async () => {
 		console.log('AI Tutor Dashboard - Student Analysis loaded');
+
+		try {
+			// TODO: Confirm endpoint contract for student analysis summary.
+			const response = await fetch('/api/v1/analysis/students/summary', {
+				method: 'GET',
+				headers: {
+					Authorization: `Bearer ${localStorage.token}`
+				}
+			});
+
+			if (!response.ok) {
+				throw new Error('Student analysis fetch failed');
+			}
+
+			const data = await response.json();
+			if (Array.isArray(data?.items)) {
+				studentData = data.items;
+			}
+
+			if (TESTING_AI_TUTOR) {
+				toast.success(
+					'[SUCCESS][GET]: getStudentAnalysis() fetches student data like (using placeholder).'
+				);
+			}
+		} catch (error) {
+			if (TESTING_AI_TUTOR) {
+				toast.warning('[FAIL][GET]: getStudentAnalysis() fetches student data like (using placeholder).');
+			}
+			console.error('Student analysis API failed:', error);
+		}
 	});
 
 	type SortField = 'name' | 'accuracy' | null;
@@ -56,8 +88,9 @@
 	$: isFilterActive =
 		selectedHomework !== 'All' || selectedStudentName !== 'All' || selectedStudentEmail !== 'All';
 
+	// TODO: Wire to API: analysis student summary endpoint (not implemented yet)
 	// Sample data for Student Analysis
-	const studentData = [
+	let studentData = [
 		{
 			name: 'Emma Johnson',
 			email: 'emma.johnson@nyu.edu',
