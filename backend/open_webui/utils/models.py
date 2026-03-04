@@ -149,9 +149,12 @@ async def get_all_models(request, user: UserModel = None):
     log.debug("[DEBUG] [inside get_all_models()] get_all_base_models() returned models.")
     log.debug(f"[DEBUG] [inside get_all_models()] get_all_base_models() defined inside functions.py called from models.py returned {len(models)} models. Not sure if these models are pre-filtered to reflect the user's own models/models accessible to the user or not prefiltered but lists ALL models/functions. Here are the models: {models}")
 
-    # If there are no models, return an empty list
-    if len(models) == 0:
-        log.debug("[DEBUG] [inside get_all_models()] get_all_models() returning an empty list because get_all_base_models() returned an empty list.")
+    # If there are no base models and we will not add custom presets below, return early.
+    # Note: We still process custom_models even when models is empty, so presets can be
+    # added via the "infer pipe from base_model_id" path (e.g. when only preset is assigned).
+    custom_models = Models.get_all_models(user.id, user.email)
+    if len(models) == 0 and len(custom_models) == 0:
+        log.debug("[DEBUG] [inside get_all_models()] get_all_models() returning an empty list (no base models, no custom models).")
         return []
 
     # Add arena models
@@ -200,8 +203,8 @@ async def get_all_models(request, user: UserModel = None):
     ]
     log.debug(f"[DEBUG] [inside get_all_models()] Now, filtering for active action_ids based on the global_action_ids. enabled_action_ids: {enabled_action_ids}. Length of enabled_action_ids:{len(enabled_action_ids)}")
 
-    custom_models = Models.get_all_models(user.id, user.email)
-    log.debug(f"[DEBUG] [inside get_all_models()] custom_models: {custom_models}. Length of custom_models: {len(custom_models)}. The Models.get_all_models() returned {Models.get_all_models(user.id, user.email)}. This is for user: {user.email} and user_id: {user.id}")
+    # custom_models already fetched above for early-return check
+    log.debug(f"[DEBUG] [inside get_all_models()] custom_models: {custom_models}. Length of custom_models: {len(custom_models)}. This is for user: {user.email} and user_id: {user.id}")
     for custom_model in custom_models:
         if custom_model.base_model_id is None:
             log.debug(f"the custom.base_model_id is None for custom model: {custom_model}")

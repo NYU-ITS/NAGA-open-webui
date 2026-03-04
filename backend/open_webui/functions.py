@@ -324,8 +324,10 @@ async def get_function_models(request, user: UserModel = None):
 
                     # For users AND co-admins: only include models that are explicitly assigned to their groups
                     # Super admins and admins who created the pipe see all models; co-admins see only assigned models
+                    # Include if: sub_pipe in accessible_model_ids (direct assignment) OR pipe in accessible_pipe_ids
+                    # (preset-only assignment: accessible_model_ids has preset ids, accessible_pipe_ids has pipe ids)
                     if not user_is_super_admin and (user.role == "user" or (user.role == "admin" and not is_pipe_creator)):
-                        if sub_pipe_id not in accessible_model_ids:
+                        if sub_pipe_id not in accessible_model_ids and pipe.id not in accessible_pipe_ids:
                             log.debug(f"Skipping model {sub_pipe_id} - not assigned to user's/co-admin's groups")
                             continue
                     
@@ -352,8 +354,9 @@ async def get_function_models(request, user: UserModel = None):
 
                 # For users AND co-admins: only include models that are explicitly assigned to their groups
                 # Super admins and admins who created the pipe see all models
+                # Include if: pipe in accessible_model_ids (direct) OR pipe in accessible_pipe_ids (preset-only)
                 if not user_is_super_admin and (user.role == "user" or (user.role == "admin" and not is_pipe_creator)):
-                    if pipe.id not in accessible_model_ids:
+                    if pipe.id not in accessible_model_ids and pipe.id not in accessible_pipe_ids:
                         log.debug(f"Skipping model {pipe.id} - not assigned to user's/co-admin's groups")
                         return models  # Return empty list
                 
