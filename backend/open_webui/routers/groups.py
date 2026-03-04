@@ -100,14 +100,6 @@ async def update_group_by_id(
 
         group = Groups.update_group_by_id(id, form_data)
         if group:
-            if form_data.user_ids is not None:
-                log.info(
-                    "[MODEL_DEBUG] Group updated via API | group_id=%s | group_name=%s | member_count=%s | member_ids=%s",
-                    id,
-                    group.name,
-                    len(group.user_ids or []),
-                    group.user_ids or [],
-                )
             return group
         else:
             raise HTTPException(

@@ -178,14 +178,8 @@ async def get_function_models(request, user: UserModel = None):
         user_groups = Groups.get_groups_by_member_id(user.id)
         user_group_ids = set(g.id for g in user_groups)
         
-        group_names = [g.name for g in user_groups]
-        log.info(
-            "[MODEL_DEBUG] User group membership | email=%s | group_count=%s | group_names=%s | group_ids=%s",
-            user.email,
-            len(user_groups),
-            group_names,
-            list(user_group_ids),
-        )
+        log.debug(f"[MODEL_VISIBILITY] User {user.email} (id={user.id}) belongs to {len(user_groups)} groups")
+        log.debug(f"[MODEL_VISIBILITY] User group IDs: {user_group_ids}")
         
         # Fetch ALL models with access_control in ONE query
         # Build sets of accessible model IDs and pipe IDs
@@ -227,12 +221,8 @@ async def get_function_models(request, user: UserModel = None):
                         # Model ID without dot - might be a standalone pipe ID
                         accessible_pipe_ids.add(model_id_for_pipe)
         
-        log.info(
-            "[MODEL_DEBUG] Models access resolved | email=%s | accessible_models=%s | accessible_pipes=%s",
-            user.email,
-            list(accessible_model_ids),
-            list(accessible_pipe_ids),
-        )
+        log.debug(f"[MODEL_VISIBILITY] User {user.email} has access to {len(accessible_model_ids)} models: {accessible_model_ids}")
+        log.debug(f"[MODEL_VISIBILITY] User {user.email} has access to pipes: {accessible_pipe_ids}")
     
     # STEP 1: Filter pipes based on access (fast, no module loading)
     accessible_pipes = []
@@ -547,14 +537,6 @@ async def generate_function_chat_completion(
                 params = model_info.params.model_dump()
                 form_data = apply_model_params_to_body_openai(params, form_data)
                 form_data = apply_model_system_prompt_to_body(params, form_data, metadata, user)
-            else:
-                # Preset routed here with form_data["model"]=base_model_id (base not in DB).
-                # Use metadata["model"] from main.py (preset dump) to apply system prompt/params.
-                meta_model = metadata.get("model") or {}
-                params = meta_model.get("params")
-                if isinstance(params, dict):
-                    form_data = apply_model_params_to_body_openai(params, form_data)
-                    form_data = apply_model_system_prompt_to_body(params, form_data, metadata, user)
 
             pipe_id = get_pipe_id(form_data)
             function_module = get_function_module_by_id(request, pipe_id)

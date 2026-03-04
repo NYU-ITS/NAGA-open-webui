@@ -242,13 +242,9 @@ async def get_all_models(request, user: UserModel = None):
                     break
 
             # If base not in models (e.g. base pipe model hidden from user), infer pipe from
-            # base_model_id format (pipe_id.model_slug) when prefix matches a known pipe.
-            if pipe is None and custom_model.base_model_id:
-                bid = str(custom_model.base_model_id)
-                if "." in bid:
-                    pipe_id_prefix = bid.split(".", 1)[0]
-                    if any(f.id == pipe_id_prefix for f in Functions.get_functions_by_type("pipe", active_only=True)):
-                        pipe = {"type": "pipe"}
+            # base_model_id format (pipe_id.model_slug) so preset can route to the pipe.
+            if pipe is None and custom_model.base_model_id and "." in str(custom_model.base_model_id):
+                pipe = {"type": "pipe"}
 
             if custom_model.meta:
                 meta = custom_model.meta.model_dump()
@@ -537,30 +533,25 @@ async def get_models_for_user(request, user) -> dict:
     cached_emails = [cache._email_map.get(uid, uid) for uid in cache.keys()]
     models = cache.get(user_id)
     if models is None:
-        log.info(
-            "[MODEL_DEBUG] Models cache MISS for user | email=%s | user_id=%s | action=refetching from DB | cache_entries=%s",
+        log.debug(
+            "[models cache] miss user_email=%s user_id=%s cache_size=%s cached_users=%s",
             user_email,
             user_id,
             len(cache),
+            cached_emails,
         )
         await get_all_models(request, user=user)
         models = cache.get(user_id, {})
-        model_ids = list(models.keys()) if models else []
-        log.info(
-            "[MODEL_DEBUG] Models cache MISS result | email=%s | models_count=%s | model_ids=%s",
-            user_email,
-            len(models),
-            model_ids,
-        )
     else:
-        model_ids = list(models.keys()) if models else []
-        log.info(
-            "[MODEL_DEBUG] Models cache HIT for user | email=%s | user_id=%s | models_count=%s | model_ids=%s | cache_entries=%s",
+        model_names = [m.get("name", m.get("id", "")) for m in (models or {}).values()]
+        log.debug(
+            "[models cache] hit user_email=%s user_id=%s models_count=%s model_names=%s cache_size=%s cached_users=%s",
             user_email,
             user_id,
             len(models),
-            model_ids,
+            model_names,
             len(cache),
+            cached_emails,
         )
     return models
 
