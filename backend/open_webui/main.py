@@ -1250,8 +1250,13 @@ async def get_models(request: Request, user=Depends(get_verified_user)):
     before_filter = len(models)
     if user.role == "user" and not BYPASS_MODEL_ACCESS_CONTROL:
         models = get_filtered_models(models, user)
-        log.info("[MODEL_ACCESS] User %s GET /api/models: before=%s after=%s ids=%s",
-                 user.email, before_filter, len(models), [m["id"] for m in models])
+        log.info(
+            "[MODEL_DEBUG] GET /api/models final | email=%s | before_filter=%s | after_filter=%s | model_ids=%s",
+            user.email,
+            before_filter,
+            len(models),
+            [m["id"] for m in models],
+        )
     return {"data": models}
 
 

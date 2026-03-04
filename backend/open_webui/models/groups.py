@@ -256,6 +256,17 @@ class GroupTable:
                     cache.invalidate_user_permissions(user_id)
                     cache.invalidate_user_settings(user_id)
                 
+                added = set(new_user_ids) - set(old_user_ids)
+                removed = set(old_user_ids) - set(new_user_ids)
+                log.info(
+                    "[MODEL_DEBUG] Group membership changed | group_id=%s | group_name=%s | added_user_ids=%s | removed_user_ids=%s | total_members=%s | NOTE: models cache NOT invalidated here",
+                    id,
+                    new_group.name if new_group else "?",
+                    list(added),
+                    list(removed),
+                    len(new_user_ids),
+                )
+                
                 return new_group
         except Exception as e:
             log.exception(e)
