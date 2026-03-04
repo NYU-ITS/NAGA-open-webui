@@ -1178,7 +1178,7 @@ async def get_models(request: Request, user=Depends(get_verified_user)):
         # Batch fetch all model info first
         model_ids = [model["id"] for model in models if not model.get("arena")]
         model_info_dict = Models.get_models_by_ids(model_ids) if model_ids else {}
-        
+
         filtered_models = []
         for model in models:
             if model.get("arena"):
@@ -1247,13 +1247,11 @@ async def get_models(request: Request, user=Depends(get_verified_user)):
         )
 
     # Filter out models that the user does not have access to
+    before_filter = len(models)
     if user.role == "user" and not BYPASS_MODEL_ACCESS_CONTROL:
         models = get_filtered_models(models, user)
-        log.debug(f"[DEBUG] [inside get_models() from main.py] get_filtered_models() applied; returning {len(models)} models to user.")
-
-    log.debug(
-        f"/api/models returned filtered models accessible to the user: {json.dumps([model['id'] for model in models])}"
-    )
+        log.info("[MODEL_ACCESS] User %s GET /api/models: before=%s after=%s ids=%s",
+                 user.email, before_filter, len(models), [m["id"] for m in models])
     return {"data": models}
 
 

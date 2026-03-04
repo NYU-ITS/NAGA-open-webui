@@ -320,7 +320,9 @@ async def get_all_models(request, user: UserModel = None):
             model["actions"].extend(
                 get_action_items_from_module(action_function, function_module)
             )
-    log.debug(f"get_all_models() returned {len(models)} models")
+    preset_ids = [m["id"] for m in models if m.get("preset")]
+    log.info("[MODEL_ACCESS] User %s models: total=%s custom_from_db=%s presets=%s",
+             user.email if user else "?", len(models), len(custom_models), preset_ids)
 
     _ensure_models_cache(request)
     user_id = user.id if user else ""
