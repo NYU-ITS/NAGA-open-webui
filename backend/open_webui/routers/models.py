@@ -1,4 +1,3 @@
-import logging
 from typing import Optional
 
 from open_webui.models.models import (
@@ -24,7 +23,6 @@ from open_webui.models.users import Users
 
 
 router = APIRouter()
-log = logging.getLogger(__name__)
 
 
 ###########################
@@ -94,15 +92,9 @@ async def create_new_model(
         
         model = Models.insert_new_model(form_data, creator_user_id, creator_email)
         if model:
-            # Invalidate all affected users (creator + group members who now have access)
-            affected = get_affected_user_ids_for_model(model)
+            # Invalidate creator and requester (super admin creating on behalf of function creator)
+            affected = list(set([creator_user_id, user.id]))
             invalidate_models_cache(request, affected_user_ids=affected)
-            log.info(
-                "[MODEL_ACCESS] Admin saved model id=%s base=%s read_groups=%s affected_users=%s",
-                model.id, model.base_model_id,
-                (model.access_control or {}).get("read", {}).get("group_ids", []),
-                len(affected),
-            )
             return model
         else:
             raise HTTPException(
@@ -229,10 +221,6 @@ async def update_model_by_id(
         affected_after = get_affected_user_ids_for_model(model)
         affected = list(set(affected_before) | set(affected_after))
         invalidate_models_cache(request, affected_user_ids=affected)
-        log.info(
-            "[MODEL_ACCESS] Admin updated model id=%s read_groups=%s affected_users=%s",
-            model.id, (model.access_control or {}).get("read", {}).get("group_ids", []), len(affected),
-        )
     return model
 
 
