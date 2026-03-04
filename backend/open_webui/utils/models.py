@@ -29,6 +29,9 @@ from open_webui.env import SRC_LOG_LEVELS, GLOBAL_LOG_LEVEL, REDIS_URL
 from open_webui.models.users import UserModel
 from open_webui.socket.utils import get_redis_pool, get_redis_master_connection
 
+from open_webui.models.users import Users
+from open_webui.utils.super_admin import get_super_admin_emails
+
 # Redis pub/sub channel for cross-pod models cache invalidation
 MODELS_INVALIDATE_CHANNEL = "open_webui:models:invalidate"
 
@@ -65,8 +68,6 @@ MODELS_INVALIDATE_ALL = "all"
 
 def _get_super_admin_user_ids() -> list:
     """Return user_ids for all super admins (they see all models, so must be invalidated on any model change)."""
-    from open_webui.models.users import Users
-    from open_webui.utils.super_admin import get_super_admin_emails
 
     ids = []
     for email in get_super_admin_emails() or []:
