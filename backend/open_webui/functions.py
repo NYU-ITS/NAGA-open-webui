@@ -206,11 +206,10 @@ async def get_function_models(request, user: UserModel = None):
                     if model.base_model_id:
                         # This is a preset model - use base_model_id to find the pipe
                         model_id_for_pipe = model.base_model_id
-                        # IMPORTANT: Also add base_model_id to accessible_model_ids
-                        # so that when filtering sub-pipes, the underlying model is accessible
-                        accessible_model_ids.add(model.base_model_id)
+                        # Do NOT add base_model_id to accessible_model_ids - users should only
+                        # see the custom preset, not the base pipe model. The preset routes to
+                        # the pipe under the hood via utils/models.py and chat.py.
                         log.debug(f"[MODEL_VISIBILITY] Model '{model.id}' is a preset, using base_model_id '{model.base_model_id}' for pipe extraction")
-                        log.debug(f"[MODEL_VISIBILITY] Added base_model_id '{model.base_model_id}' to accessible_model_ids")
                     
                     # Extract pipe ID from the appropriate model ID
                     # e.g., "llm_portkey.@gpt-4o/gpt-4o" -> "llm_portkey"
