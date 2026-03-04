@@ -567,6 +567,25 @@ async def generate_facilities_response(request: Request, form_data: FacilitiesRe
                 error="Please fill in at least one form field"
             )
         
+
+        section_generation_instructions = {}
+        if form_data.sponsor == "NSF":
+            section_generation_instructions = {
+               }
+        else:  # NIH
+            section_generation_instructions = {
+                "1. Project Title": "",
+                "2. Laboratory": """Describe where the work will be performed. Include the lab's location (campus, building, and room number). If the PI has a dedicated laboratory, list its size in square feet. If sharing space with another PI or working in a mentor's laboratory, explain that arrangement and what space is available for the project.
+Describe how the lab is outfitted — be specific about capabilities pertinent to the project. List availability of biological safety cabinets, chemical fume hoods, tissue culture incubators, bench- and micro-centrifuges, refrigerators, and freezers. If sharing space, explain what resources are specifically available for the study.
+If more than one laboratory will be used, describe each separately with a bolded title for each Research Space.""",
+                "3. Animal": """Describe where animals are housed and the proximity to the PI's laboratory. List any specific procedure rooms, surgical suites, or other equipment available for animal studies. Explain what institutional resources are available such as veterinary care, basic husbandry, and IACUC support. Include AAALAC accreditation if mentioned.""",
+                "4. Computer": """Describe computer resources available including PCs, their operating systems, and basic software needed for the research (list any specialized statistical or graphical software, Office suite, etc.). Describe Internet access and the computers available to lab staff. If specialized computing (mainframe access, HPC clusters, GPU resources) is needed for the project, document its availability.""",
+                "5. Office": """Indicate any dedicated office space and list its size in square feet. Provide the office location and proximity to the lab (campus, building, and room number). List any office space available to employees, students, postdocs, etc., its size, and whether it is dedicated or located in/near the lab.""",
+                "6. Clinical": """Detail any clinical resources available to support the work. List any support from ACTSI, CTSI, or any clinical cores (biostatistics cores, biorepositories, imaging cores, clinical pharmacology units). Include information about patient populations or clinical cohorts if available.""",
+                "7. Other": """List any other institutional, departmental, or divisional resources necessary for the project that do not fit into the Laboratory, Animal, Computer, Office, Clinical, or Equipment sections. Include libraries, shared core facilities, mentorship programs, training resources, collaborative arrangements, and unique scientific environment features.""",
+                "8. Equipment": """List major items of equipment already available for this project. For each piece of equipment, identify its location and pertinent capabilities where appropriate. Be comprehensive — enumerate ALL equipment with exact names, models, specifications, and quantities as mentioned in the sources. Include sequencers, centrifuges, microscopes, PCR machines, flow cytometers, imaging systems, and any other research instruments."""
+            }
+        
         # Import the file processing function from middleware (moved outside loop for efficiency)
         from open_webui.utils.middleware import chat_completion_files_handler
         
@@ -582,9 +601,7 @@ async def generate_facilities_response(request: Request, form_data: FacilitiesRe
             logging.info(f"Processing section: {section}")
             logging.info(f"Web search enabled flag: {form_data.web_search_enabled}")
             
-            # Improved query construction: use user text directly for better semantic matching
-            # The section context is preserved in the prompt later, so we don't need it in the query
-            query = user_text
+            query = f"{section}: {user_text}"
             
             # (query expansion, hybrid search, reranking, TOP_K config)
             all_file_results = []
@@ -783,7 +800,7 @@ async def generate_facilities_response(request: Request, form_data: FacilitiesRe
             
             # For NSF: Individual sections are processed separately
             # The grouping under NSF headers happens in the response formatting
-            section_specific_instructions = ""
+            section_specific_instructions = section_generation_instructions.get(section, "")
             integration_instructions = ""
             
             # Use the section name as-is for the prompt (will be grouped later in response for NSF)
@@ -1656,9 +1673,9 @@ Analyze the provided document content and extract information for the following 
 **CRITICAL EXTRACTION REQUIREMENTS:**
 1. Extract ONLY information that is directly relevant to this specific section based on the definition provided
 2. Focus on MAIN KEYWORDS and KEY INFORMATION - identify the most important facts
-3. Maximum 5 lines of text - be concise but comprehensive
+3. Extract ALL relevant details - include every specific item, name, model, specification, and number mentioned in the document for this section
 4. Include all main points that fit the section definition
-5. If the section asks for specific details (like square footage, location, equipment names, models), extract those if mentioned
+5. If the section asks for specific details (like square footage, location, equipment names, models), extract ALL of them
 6. **CRITICAL: If no relevant information is found for this section, you MUST NOT return anything (nothing, not even "empty string" or "not available" or any other text)**
 7. Do not invent or assume information not present in the document
 8. Focus on factual information that can be directly used in a grant proposal
@@ -1666,13 +1683,13 @@ Analyze the provided document content and extract information for the following 
 10. Prioritize specific details (names, numbers, locations) over general statements
 
 **Output Format:**
-- Maximum 5 lines
 - Each line should be a complete, meaningful statement
-- Include key keywords, names, numbers, and specific details
+- Include ALL key keywords, names, numbers, equipment models, and specific details found in the document
 - Cover all main aspects mentioned in the section definition
+- For equipment-heavy sections, list every piece of equipment with its model/specification if mentioned
 - **If nothing is found: return absolutely nothing (empty string, no text at all - do NOT write "empty string", "not available", "no information found", or any other placeholder text)**
 
-Return ONLY the extracted information for this section (max 5 lines), nothing else. If no relevant information is found, return a completely empty string with no text whatsoever."""
+Return ONLY the extracted information for this section, nothing else. If no relevant information is found, return a completely empty string with no text whatsoever."""
 
 @router.post("/extract-form-data", response_model=ExtractFormDataResponse)
 async def extract_form_data_from_files(request: Request, form_data: ExtractFormDataRequest, user=Depends(get_verified_user)):
@@ -1761,7 +1778,7 @@ async def extract_form_data_from_files(request: Request, form_data: ExtractFormD
     Describe relevant Laboratory, Clinical, Animal, Computer, and Office facilities/resources that are
     physically available to the project. Focus on physical spaces, not individual pieces of equipment.
 
-    Look for:
+    Look for (examples only; extract any other relevant facilities information mentioned):
     - Laboratory spaces (research labs, experimental labs, wet/dry labs, structural labs, robotics labs).
     - Clinical or animal facilities, if present.
     - Computer facilities as physical spaces (data centers, server rooms, visualization labs).
@@ -1794,7 +1811,7 @@ async def extract_form_data_from_files(request: Request, form_data: ExtractFormD
     - Scientific instruments, sensors, motion capture systems, specialized cameras, etc.
     - Any clearly experimental hardware platform built or used specifically for research.
 
-    Look for:
+    Look for (examples only; extract any other relevant instruments or platforms mentioned):
     - Named testbeds, platforms, or systems explicitly used in experiments.
     - Descriptions of what the instrument or platform enables (e.g., “high-data-rate mmWave experimentation”, “full-scale building connection testing”).
     - Distinction between experimental hardware and general-purpose computing.
@@ -1825,7 +1842,7 @@ async def extract_form_data_from_files(request: Request, form_data: ExtractFormD
     - Secure data enclaves, big-data platforms (Hadoop, Spark clusters, large databases).
     - Visualization facilities that are primarily computing-centered (e.g., tiled display walls with dedicated compute).
 
-    Look for:
+    Look for (examples only; extract any other relevant computing or data infrastructure mentioned):
     - Named clusters or facilities (e.g., 'Shamu cluster', 'Research Computing Facility', 'HPC cluster').
     - Descriptions of CPU cores, memory, TB of storage, networking, or similar capacity-related info.
     - References to secure computing environments for sensitive or large datasets.
@@ -1846,7 +1863,7 @@ async def extract_form_data_from_files(request: Request, form_data: ExtractFormD
     DEFINITION:
     Facilities, resources, or infrastructure located at or provided by NYU.
 
-    Look for:
+    Look for (examples only; extract any other NYU-provided resources mentioned):
     - Mentions of NYU, New York University, internal university facilities
     - NYU-specific labs, centers, institutes, facilities
     - NYU resources, NYU infrastructure, NYU equipment
@@ -1876,7 +1893,7 @@ async def extract_form_data_from_files(request: Request, form_data: ExtractFormD
 
     Guidelines:
     - Only include facilities clearly attributed to external institutions (non-NYU).
-    - Summarize these as external resources that complement NYU’s internal facilities.
+    - Summarize these as external resources that complement NYU's internal facilities.
     - Do NOT include NYU facilities in this section."""
         },
 
@@ -1960,13 +1977,15 @@ async def extract_form_data_from_files(request: Request, form_data: ExtractFormD
     - Lab location: campus, building name, and room number.
     - Whether the PI has a dedicated laboratory; list its size in square feet if mentioned.
     - If the PI shares space with another PI or works in a mentor's laboratory, note that and explain what space is available for the project.
-    - Lab outfitting and capabilities pertinent to the project: biological safety cabinets, chemical fume hoods, tissue culture incubators, bench- and micro-centrifuges, refrigerators, freezers, and other relevant equipment.
+    - How the lab is outfitted — be specific about capabilities pertinent to the project.
+    - Availability of biological safety cabinets, chemical fume hoods, tissue culture incubators, bench- and micro-centrifuges, refrigerators, freezers, and other relevant equipment.
     - If sharing space, what resources are specifically available for the study.
     - If more than one laboratory will be used, extract information for each lab separately.
 
     Guidelines:
     - Focus on where the work will be performed and how the lab is equipped.
-    - Include specific capabilities pertinent to the proposed research.
+    - Be specific about capabilities pertinent to the proposed research.
+    - If multiple labs are described, extract each separately so they can be presented with distinct titles.
     - Do NOT include animal facilities here (those go under Animal).
     - Do NOT include computers/servers here (those go under Computer).
     - Do NOT extract any financial or budget information."""
@@ -2085,22 +2104,26 @@ async def extract_form_data_from_files(request: Request, form_data: ExtractFormD
 
         "equipment": {
             "label": "8. Equipment",
-            "instructions": """Extract information about major equipment available for the research.
+            "instructions": """Extract major items of equipment already available for the project.
 
     DEFINITION:
-    Research equipment, instruments, and tools available for the proposed project, including both
-    specialized and general-purpose research devices.
+    List major items of equipment already available for this project and, if appropriate,
+    identify location and pertinent capabilities.
 
     Look for:
-    - Named equipment, instruments, and tools with models or specifications (if mentioned).
+    - Named equipment, instruments, and tools with models, specifications, and quantities.
+    - Location of each piece of equipment (building, room, facility name) if mentioned.
+    - Pertinent capabilities of the equipment relevant to the proposed research.
     - Major research instruments: microscopes, spectrometers, sequencers, imaging systems, flow cytometers.
-    - Laboratory equipment: centrifuges, PCR machines, gel electrophoresis systems, mass spectrometers.
+    - Laboratory equipment: centrifuges, PCR machines, gel electrophoresis systems, mass spectrometers, sonicators, homogenizers.
     - Shared or core facility equipment available for use.
     - Any equipment specifically relevant to the proposed research methods.
+    - Any other major equipment items mentioned in the document (e.g., autoclaves, thermocyclers, lyophilizers, hybridization ovens, cell sorters, confocal microscopes).
 
     Guidelines:
+    - Be comprehensive — extract ALL equipment items mentioned, with their exact names, models, and counts.
+    - Include the location and capabilities of equipment where this information is provided.
     - Focus on equipment that is directly relevant to the proposed research.
-    - Include equipment names, types, models, and brief specs if present.
     - Do NOT include computers or general office equipment (those go under Computer or Office).
     - Do NOT extract any financial or budget information (no prices, no purchase details)."""
         }
