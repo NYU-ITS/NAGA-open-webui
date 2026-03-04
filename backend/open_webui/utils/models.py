@@ -241,11 +241,6 @@ async def get_all_models(request, user: UserModel = None):
                         pipe = model["pipe"]
                     break
 
-            # If base not in models (e.g. base pipe model hidden from user), infer pipe from
-            # base_model_id format (pipe_id.model_slug) so preset can route to the pipe.
-            if pipe is None and custom_model.base_model_id and "." in str(custom_model.base_model_id):
-                pipe = {"type": "pipe"}
-
             if custom_model.meta:
                 meta = custom_model.meta.model_dump()
                 if "actionIds" in meta:
