@@ -318,15 +318,23 @@ async def get_all_models(request, user: UserModel = None):
 
     _ensure_models_cache(request)
     user_id = user.id if user else ""
+    user_email = user.email if user else ""
     request.app.state.MODELS[user_id] = {model["id"]: model for model in models}
     cache = request.app.state.MODELS
+    # Track user_id -> email mapping for logging
+    if not hasattr(cache, '_email_map'):
+        cache._email_map = {}
+    cache._email_map[user_id] = user_email
+    cached_emails = [cache._email_map.get(uid, uid) for uid in cache.keys()]
     model_names = [m.get("name", m.get("id", "")) for m in models]
     log.debug(
-        "[models cache] stored user_id=%s models_count=%s model_names=%s cache_size=%s",
+        "[models cache] stored user_email=%s user_id=%s models_count=%s model_names=%s cache_size=%s cached_users=%s",
+        user_email,
         user_id,
         len(models),
         model_names,
         len(cache),
+        cached_emails,
     )
     return models
 
@@ -510,24 +518,32 @@ async def get_models_for_user(request, user) -> dict:
     if user is None:
         return {}
     user_id = user.id
+    user_email = user.email if hasattr(user, 'email') else ""
     cache = request.app.state.MODELS
+    if not hasattr(cache, '_email_map'):
+        cache._email_map = {}
+    cached_emails = [cache._email_map.get(uid, uid) for uid in cache.keys()]
     models = cache.get(user_id)
     if models is None:
         log.debug(
-            "[models cache] miss user_id=%s cache_size=%s",
+            "[models cache] miss user_email=%s user_id=%s cache_size=%s cached_users=%s",
+            user_email,
             user_id,
             len(cache),
+            cached_emails,
         )
         await get_all_models(request, user=user)
         models = cache.get(user_id, {})
     else:
         model_names = [m.get("name", m.get("id", "")) for m in (models or {}).values()]
         log.debug(
-            "[models cache] hit user_id=%s models_count=%s model_names=%s cache_size=%s",
+            "[models cache] hit user_email=%s user_id=%s models_count=%s model_names=%s cache_size=%s cached_users=%s",
+            user_email,
             user_id,
             len(models),
             model_names,
             len(cache),
+            cached_emails,
         )
     return models
 

@@ -1227,8 +1227,9 @@ async def get_models(request: Request, user=Depends(get_verified_user)):
 
         return filtered_models
 
-    models = await get_all_models(request, user=user)
-    log.debug(f"[DEBUG] [inside get_models() from main.py] get_all_models() returned {len(models)} models.")
+    models_list = await get_models_for_user(request, user)
+    models = list(models_list.values()) if isinstance(models_list, dict) else models_list
+    log.debug(f"[DEBUG] [inside get_models() from main.py] get_models_for_user() returned {len(models)} models.")
 
     # Filter out filter pipelines
     models = [
