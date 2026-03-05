@@ -66,6 +66,7 @@
 						>
 
 						<a
+							id="tutorial-admin-functions-tab"
 							class="min-w-fit rounded-full p-1.5 {$page.url.pathname.includes('/admin/functions')
 								? 'text-[#57068c] dark:text-white'
 								: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"

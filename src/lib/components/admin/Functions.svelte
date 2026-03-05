@@ -219,6 +219,7 @@
 
 		<div>
 			<a
+				id="tutorial-functions-add-btn"
 				class=" px-2 py-2 rounded-xl hover:bg-gray-700/10 dark:hover:bg-gray-100/10 dark:text-gray-300 dark:hover:text-white transition font-medium text-sm flex items-center space-x-1"
 				href="/admin/functions/create"
 			>
@@ -300,6 +301,7 @@
 
 					<Tooltip content={$i18n.t('Valves')}>
 						<button
+							id="tutorial-functions-valves-btn"
 							class="self-center w-fit text-sm px-2 py-2 dark:text-gray-300 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 rounded-xl"
 							type="button"
 							on:click={() => {

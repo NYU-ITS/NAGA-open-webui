@@ -893,6 +893,7 @@
 						}}
 					>
 						<button
+							id="tutorial-user-menu-btn"
 							class=" flex items-center rounded-xl py-2.5 px-2.5 w-full hover:bg-[#8900E1] dark:hover:bg-gray-700 transition"
 							on:click={() => {
 								showDropdown = !showDropdown;

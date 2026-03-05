@@ -47,6 +47,7 @@
 	import AccountPending from '$lib/components/layout/Overlay/AccountPending.svelte';
 	import TermsAndConditions from '$lib/components/layout/Overlay/TermsAndConditions.svelte';
 	import UpdateInfoToast from '$lib/components/layout/UpdateInfoToast.svelte';
+	import TutorialOverlay from '$lib/components/tutorial/TutorialOverlay.svelte';
 
 	const i18n = getContext('i18n');
 
@@ -386,6 +387,7 @@
 
 			<Sidebar />
 			<slot />
+			<TutorialOverlay />
 		{/if}
 	</div>
 </div>
