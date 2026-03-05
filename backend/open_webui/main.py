@@ -349,7 +349,7 @@ from open_webui.utils.katex_compiler import KaTeXCompiler
 
 
 from open_webui.utils.models import (
-    _ModelsLRUCache,
+    ModelsLRUCache,
     get_all_models,
     get_all_base_models,
     get_models_for_user,
@@ -1038,7 +1038,7 @@ app.state.config.AUTOCOMPLETE_GENERATION_INPUT_MAX_LENGTH = (
 ########################################
 
 app.state.MODELS_CACHE_MAX_USERS = MODELS_CACHE_MAX_USERS
-app.state.MODELS = _ModelsLRUCache(maxsize=MODELS_CACHE_MAX_USERS)
+app.state.MODELS = ModelsLRUCache(maxsize=MODELS_CACHE_MAX_USERS)
 
 
 class RedirectMiddleware(BaseHTTPMiddleware):

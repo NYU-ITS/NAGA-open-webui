@@ -36,14 +36,16 @@ from open_webui.utils.super_admin import get_super_admin_emails
 MODELS_INVALIDATE_CHANNEL = "open_webui:models:invalidate"
 
 
-class _ModelsLRUCache(OrderedDict):
+class ModelsLRUCache(OrderedDict):
     """
     LRU cache for models per user. Evicts least recently used when maxsize is exceeded.
     maxsize must be >= 1. Subclass of OrderedDict so isinstance(..., dict) passes.
+    _email_map (user_id -> email) is kept in sync for debug logging and is bounded by eviction.
     """
 
     def __init__(self, maxsize=1000, *args, **kwargs):
         self.maxsize = maxsize
+        self._email_map = {}
         super().__init__(*args, **kwargs)
 
     def __getitem__(self, key):
@@ -62,6 +64,28 @@ class _ModelsLRUCache(OrderedDict):
             return default
         self.move_to_end(key)
         return super().get(key, default)
+
+    def popitem(self, last=True):
+        key, value = super().popitem(last=last)
+        self._email_map.pop(key, None)
+        return key, value
+
+    def pop(self, key, *default):
+        had = key in self
+        result = super().pop(key, *default)
+        if had:
+            self._email_map.pop(key, None)
+        return result
+
+    def clear(self):
+        super().clear()
+        self._email_map.clear()
+
+    def __delitem__(self, key):
+        super().__delitem__(key)
+        self._email_map.pop(key, None)
+
+
 # Payload meaning "clear entire cache for all users"
 MODELS_INVALIDATE_ALL = "all"
 
@@ -322,9 +346,6 @@ async def get_all_models(request, user: UserModel = None):
     user_email = user.email if user else ""
     request.app.state.MODELS[user_id] = {model["id"]: model for model in models}
     cache = request.app.state.MODELS
-    # Track user_id -> email mapping for logging
-    if not hasattr(cache, '_email_map'):
-        cache._email_map = {}
     cache._email_map[user_id] = user_email
     cached_emails = [cache._email_map.get(uid, uid) for uid in cache.keys()]
     model_names = [m.get("name", m.get("id", "")) for m in models]
@@ -349,7 +370,7 @@ def _ensure_models_cache(request):
             "MODELS_CACHE_MAX_USERS",
             1000,
         )
-        request.app.state.MODELS = _ModelsLRUCache(maxsize=maxsize)
+        request.app.state.MODELS = ModelsLRUCache(maxsize=maxsize)
 
 
 def _get_redis_connection_for_publish():
@@ -521,8 +542,6 @@ async def get_models_for_user(request, user) -> dict:
     user_id = user.id
     user_email = user.email if hasattr(user, 'email') else ""
     cache = request.app.state.MODELS
-    if not hasattr(cache, '_email_map'):
-        cache._email_map = {}
     cached_emails = [cache._email_map.get(uid, uid) for uid in cache.keys()]
     models = cache.get(user_id)
     if models is None:

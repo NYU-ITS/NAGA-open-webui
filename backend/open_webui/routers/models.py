@@ -92,8 +92,10 @@ async def create_new_model(
         
         model = Models.insert_new_model(form_data, creator_user_id, creator_email)
         if model:
-            # Invalidate creator and requester (super admin creating on behalf of function creator)
-            affected = list(set([creator_user_id, user.id]))
+            # Invalidate creator, requester, and all users affected by this model's access_control
+            affected = list(
+                set([creator_user_id, user.id]) | set(get_affected_user_ids_for_model(model))
+            )
             invalidate_models_cache(request, affected_user_ids=affected)
             return model
         else:
