@@ -14,6 +14,8 @@
 	$: isLast = $tutorialState.currentStep === steps.length - 1;
 	// freeInteract: overlay is non-blocking — user can type in inputs / code editor
 	$: freeInteract = step?.freeInteract ?? false;
+	// selectAll: querySelectorAll is used — every match is spotlighted, any click advances
+	$: selectAll = step?.selectAll ?? false;
 
 	// ── Spotlight geometry ────────────────────────────────────────────────────
 	const PAD = 8;
@@ -46,25 +48,50 @@
 	$: rightW = Math.max(0, vw - rightX);
 
 	// ── Click-listener management ─────────────────────────────────────────────
-	let currentEl: Element | null = null;
-	let currentHandler: (() => void) | null = null;
+	// Array-based so multiple elements (e.g. selectAll) can all be wired at once.
+	// Any one of them firing advances the tutorial and all listeners are removed.
+	let currentListeners: Array<{ el: Element; fn: () => void }> = [];
 
-	function removeClickListener() {
-		if (currentEl && currentHandler) {
-			currentEl.removeEventListener('click', currentHandler);
+	function removeClickListeners() {
+		for (const { el, fn } of currentListeners) {
+			el.removeEventListener('click', fn);
 		}
-		currentEl = null;
-		currentHandler = null;
+		currentListeners = [];
 	}
 
-	function attachClickListener(el: Element) {
-		removeClickListener();
-		currentHandler = () => {
+	function attachClickListeners(els: Element[]) {
+		removeClickListeners();
+		const advance = () => {
 			if (isLast) dismissTutorial();
 			else nextTutorialStep();
 		};
-		currentEl = el;
-		el.addEventListener('click', currentHandler);
+		for (const el of els) {
+			el.addEventListener('click', advance);
+			currentListeners.push({ el, fn: advance });
+		}
+	}
+
+	// ── Window-event advance (advanceOn) ──────────────────────────────────────
+	// When a step sets advanceOn, we listen for a custom window event instead of
+	// a click — e.g. waiting for a successful API response before proceeding.
+	let windowAdvanceListener: { event: string; fn: () => void } | null = null;
+
+	function removeWindowAdvanceListener() {
+		if (windowAdvanceListener) {
+			window.removeEventListener(windowAdvanceListener.event, windowAdvanceListener.fn);
+			windowAdvanceListener = null;
+		}
+	}
+
+	function attachWindowAdvanceListener(eventName: string) {
+		removeWindowAdvanceListener();
+		const advance = () => {
+			removeWindowAdvanceListener();
+			if (isLast) dismissTutorial();
+			else nextTutorialStep();
+		};
+		windowAdvanceListener = { event: eventName, fn: advance };
+		window.addEventListener(eventName, advance);
 	}
 
 	// ── Target tracking ───────────────────────────────────────────────────────
@@ -74,7 +101,8 @@
 
 	function trackTarget() {
 		cancelAnimationFrame(rafId);
-		removeClickListener();
+		removeClickListeners();
+		removeWindowAdvanceListener();
 
 		if (!step?.selector) {
 			hasTarget = false;
@@ -82,31 +110,59 @@
 			return;
 		}
 
-		const primaryEl = document.querySelector(step.selector);
-		if (!primaryEl) {
-			hasTarget = false;
-			allSpotlightRects = [];
-			// Retry — element may not be mounted yet (e.g. after navigation)
-			rafId = requestAnimationFrame(trackTarget);
-			return;
-		}
-
-		const pr = primaryEl.getBoundingClientRect();
-		primaryRect = { top: pr.top, left: pr.left, width: pr.width, height: pr.height };
-
-		// Compute rects for extra spotlights (best-effort — skip missing ones)
-		const extraRects = (step.extraSpotlights ?? [])
-			.map((sel) => {
-				const el = document.querySelector(sel);
-				if (!el) return null;
+		if (step.selectAll) {
+			// ── selectAll: highlight every matching element, any click advances ──
+			const allEls = Array.from(document.querySelectorAll(step.selector));
+			if (allEls.length === 0) {
+				hasTarget = false;
+				allSpotlightRects = [];
+				rafId = requestAnimationFrame(trackTarget);
+				return;
+			}
+			const rects = allEls.map((el) => {
 				const r = el.getBoundingClientRect();
 				return { top: r.top, left: r.left, width: r.width, height: r.height };
-			})
-			.filter((r): r is { top: number; left: number; width: number; height: number } => r !== null);
+			});
+			allSpotlightRects = rects;
+			primaryRect = rects[0]; // used for tooltip positioning
+			hasTarget = true;
+			attachClickListeners(allEls);
+		} else {
+			// ── single element (normal / freeInteract) ────────────────────────
+			const primaryEl = document.querySelector(step.selector);
+			if (!primaryEl) {
+				hasTarget = false;
+				allSpotlightRects = [];
+				rafId = requestAnimationFrame(trackTarget);
+				return;
+			}
 
-		allSpotlightRects = [primaryRect, ...extraRects];
-		hasTarget = true;
-		attachClickListener(primaryEl);
+			const pr = primaryEl.getBoundingClientRect();
+			primaryRect = { top: pr.top, left: pr.left, width: pr.width, height: pr.height };
+
+			// Extra visual spotlights (best-effort — skip missing ones)
+			const extraRects = (step.extraSpotlights ?? [])
+				.map((sel) => {
+					const el = document.querySelector(sel);
+					if (!el) return null;
+					const r = el.getBoundingClientRect();
+					return { top: r.top, left: r.left, width: r.width, height: r.height };
+				})
+				.filter(
+					(r): r is { top: number; left: number; width: number; height: number } => r !== null
+				);
+
+			allSpotlightRects = [primaryRect, ...extraRects];
+			hasTarget = true;
+			if (step.advanceOn) {
+				// Element is spotlighted so the user knows what to interact with,
+				// but the tutorial only advances when the named window event fires
+				// (e.g. after a successful API save response).
+				attachWindowAdvanceListener(step.advanceOn);
+			} else {
+				attachClickListeners([primaryEl]);
+			}
+		}
 	}
 
 	// ── Window events ─────────────────────────────────────────────────────────
@@ -131,7 +187,8 @@
 		window.removeEventListener('keydown', onKeyDown);
 		window.removeEventListener('resize', onResize);
 		cancelAnimationFrame(rafId);
-		removeClickListener();
+		removeClickListeners();
+		removeWindowAdvanceListener();
 	});
 
 	// ── Tooltip sizing & positioning ──────────────────────────────────────────
@@ -144,7 +201,7 @@
 
 	$: tooltipTop = (() => {
 		if (!hasTarget) return '50%';
-		// freeInteract: pin to top-right corner — never overlaps editor content
+		// freeInteract: pin to top-right corner so the tooltip never overlaps editor inputs
 		if (freeInteract) return '16px';
 		const placement = step?.tooltipPlacement ?? 'auto';
 		const above = Math.max(8, spotTop - 16 - tooltipHeight);
@@ -156,7 +213,7 @@
 
 	$: tooltipLeft = (() => {
 		if (!hasTarget) return '50%';
-		// freeInteract: right-aligned, 16 px from edge
+		// freeInteract: right-aligned, 16 px from screen edge
 		if (freeInteract) return `${Math.max(8, window.innerWidth - 360 - 16)}px`;
 		const l = primaryRect.left;
 		const maxLeft = window.innerWidth - 360;
@@ -177,14 +234,19 @@
 
 {#if $tutorialState.active}
 	{#if hasTarget}
-		{#if freeInteract}
+		{#if freeInteract || selectAll}
 			<!--
-				freeInteract mode: use an SVG mask so MULTIPLE elements can be spotlighted
-				while the rest of the screen dims.  The SVG is pointer-events-none so the
-				user can freely click, type, and interact with everything on the page.
+				SVG mask: punches a transparent hole for every spotlighted element.
+
+				freeInteract — pointer-events-none: entire page stays interactive
+				  (user must type in inputs, paste code, etc.)
+
+				selectAll — default SVG pointer-events (visiblePainted): the opaque
+				  dim layer blocks clicks outside the holes; only the spotlighted
+				  elements (holes) pass clicks through to the underlying DOM.
 			-->
 			<svg
-				class="fixed inset-0 z-[9990] pointer-events-none"
+				class="fixed inset-0 z-[9990] {freeInteract ? 'pointer-events-none' : ''}"
 				style="width:{vw}px; height:{vh}px;"
 				aria-hidden="true"
 			>

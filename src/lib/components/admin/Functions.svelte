@@ -365,7 +365,7 @@
 					</FunctionMenu>
 				{/if}
 
-				<div class=" self-center mx-1">
+				<div class=" self-center mx-1 tutorial-function-switch">
 					<Tooltip content={func.is_active ? $i18n.t('Enabled') : $i18n.t('Disabled')}>
 						<Switch
 							bind:state={func.is_active}

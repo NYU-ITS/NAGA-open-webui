@@ -9,6 +9,8 @@ export type TutorialStep = {
 	freeInteract?: boolean; // when true the overlay is non-blocking so users can edit inputs freely
 	tooltipPlacement?: 'above' | 'below' | 'auto'; // force tooltip position relative to spotlight
 	extraSpotlights?: string[]; // additional CSS selectors to spotlight visually alongside the primary
+	selectAll?: boolean; // when true, querySelectorAll is used — all matches are spotlighted and any click advances
+	advanceOn?: string; // custom window event name — tutorial advances on this event instead of a click
 };
 
 const LLM_FUNCTION_CODE = `"""
@@ -197,35 +199,36 @@ export const SETUP_LLM_STEPS: TutorialStep[] = [
 	{
 		stepIndex: 1,
 		selector: '#tutorial-user-menu-btn',
-		title: 'Step 1 of 7 — Open your menu',
+		title: 'Step 1 of 8 — Open your menu',
 		message: 'Click the avatar to start.'
 	},
 	{
 		stepIndex: 2,
 		selector: '#tutorial-admin-panel-link',
-		title: 'Step 2 of 7 — Admin Panel',
+		title: 'Step 2 of 8 — Admin Panel',
 		message: 'Find Admin Panel in the avatar menu.'
 	},
 	{
 		stepIndex: 3,
 		selector: '#tutorial-admin-functions-tab',
-		title: 'Step 3 of 7 — Functions',
+		title: 'Step 3 of 8 — Functions',
 		message: "Let's first set up an LLM Function."
 	},
 	{
 		stepIndex: 4,
 		selector: '#tutorial-functions-add-btn',
-		title: 'Step 4 of 7 — Create a Function',
+		title: 'Step 4 of 8 — Create a Function',
 		message: 'Create a new Function by clicking the + button.'
 	},
 	{
 		stepIndex: 5,
 		selector: '#tutorial-function-editor-save',
-		title: 'Step 5 of 7 — Configure the Function',
+		title: 'Step 5 of 8 — Configure the Function',
 		message:
 			'1. Put "LLM" in the Function Title and Function Description.\n2. Click "Copy Code" below and paste it, replacing all existing code.\n3. Hit Save.',
 		copyText: LLM_FUNCTION_CODE,
 		freeInteract: true, // user needs to type in inputs and code editor — tooltip pins to corner
+		advanceOn: 'tutorial:function-saved', // advance only when the API save succeeds, not on click
 		extraSpotlights: [
 			'#tutorial-function-name',
 			'#tutorial-function-description',
@@ -235,17 +238,24 @@ export const SETUP_LLM_STEPS: TutorialStep[] = [
 	{
 		stepIndex: 6,
 		selector: '#tutorial-functions-valves-btn',
-		title: 'Step 6 of 7 — Open Valves',
+		title: 'Step 6 of 8 — Open Valves',
 		message: 'Click the gear icon next to your new LLM function.'
 	},
 	{
 		stepIndex: 7,
 		selector: '#tutorial-valves-save',
-		title: 'Step 7 of 7 — Enter your API Key',
+		title: 'Step 7 of 8 — Enter your API Key',
 		message: 'Click "Default", paste your PortKey API Key, then hit Save.'
 	},
 	{
 		stepIndex: 8,
+		selector: '.tutorial-function-switch',
+		title: 'Step 8 of 8 — Enable the Function',
+		message: "Don't forget to enable the chosen function.",
+		selectAll: true // highlight every switch on the page — clicking any one advances
+	},
+	{
+		stepIndex: 9,
 		selector: null,
 		title: '🎉 LLM Setup Complete!',
 		message:

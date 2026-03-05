@@ -46,6 +46,8 @@
 
 		if (res) {
 			toast.success($i18n.t('Function created successfully'));
+			// Signal the tutorial that the save succeeded so it can advance to the next step.
+			window.dispatchEvent(new CustomEvent('tutorial:function-saved'));
 			functions.set(await getFunctions(localStorage.token));
 			models.set(
 				await getModels(
