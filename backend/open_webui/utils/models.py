@@ -1,8 +1,10 @@
+import asyncio
 import json
 import time
 import logging
 import sys
 import threading
+from contextlib import nullcontext
 from collections import OrderedDict
 
 from aiocache import cached
@@ -40,50 +42,51 @@ class ModelsLRUCache(OrderedDict):
     """
     LRU cache for models per user. Evicts least recently used when maxsize is exceeded.
     maxsize must be >= 1. Subclass of OrderedDict so isinstance(..., dict) passes.
-    _email_map (user_id -> email) is kept in sync for debug logging and is bounded by eviction.
+    Thread-safe: use _lock when the same cache is used from request handlers (async) and
+    the Redis invalidation listener (background thread).
     """
 
     def __init__(self, maxsize=1000, *args, **kwargs):
         self.maxsize = maxsize
-        self._email_map = {}
+        self._lock = threading.RLock()
         super().__init__(*args, **kwargs)
 
     def __getitem__(self, key):
-        self.move_to_end(key)
-        return super().__getitem__(key)
+        with self._lock:
+            self.move_to_end(key)
+            return super().__getitem__(key)
 
     def __setitem__(self, key, value):
-        if key in self:
-            self.move_to_end(key)
-        elif self.maxsize > 0 and len(self) >= self.maxsize:
-            self.popitem(last=False)
-        super().__setitem__(key, value)
+        with self._lock:
+            if key in self:
+                self.move_to_end(key)
+            elif self.maxsize > 0 and len(self) >= self.maxsize:
+                self.popitem(last=False)
+            super().__setitem__(key, value)
 
     def get(self, key, default=None):
-        if key not in self:
-            return default
-        self.move_to_end(key)
-        return super().get(key, default)
+        with self._lock:
+            if key not in self:
+                return default
+            self.move_to_end(key)
+            return super().get(key, default)
 
     def popitem(self, last=True):
-        key, value = super().popitem(last=last)
-        self._email_map.pop(key, None)
-        return key, value
+        with self._lock:
+            key, value = super().popitem(last=last)
+            return key, value
 
     def pop(self, key, *default):
-        had = key in self
-        result = super().pop(key, *default)
-        if had:
-            self._email_map.pop(key, None)
-        return result
+        with self._lock:
+            return super().pop(key, *default)
 
     def clear(self):
-        super().clear()
-        self._email_map.clear()
+        with self._lock:
+            super().clear()
 
     def __delitem__(self, key):
-        super().__delitem__(key)
-        self._email_map.pop(key, None)
+        with self._lock:
+            super().__delitem__(key)
 
 
 # Payload meaning "clear entire cache for all users"
@@ -168,19 +171,16 @@ async def get_all_base_models(request: Request, user: UserModel = None):
 
 
 async def get_all_models(request, user: UserModel = None):
-    log.debug("[DEBUG] [inside get_all_models()] get_all_models() is called...")
+    log.debug("[get_all_models] called")
     models = await get_all_base_models(request, user=user)
-    log.debug("[DEBUG] [inside get_all_models()] get_all_base_models() returned models.")
-    log.debug(f"[DEBUG] [inside get_all_models()] get_all_base_models() defined inside functions.py called from models.py returned {len(models)} models. Not sure if these models are pre-filtered to reflect the user's own models/models accessible to the user or not prefiltered but lists ALL models/functions. Here are the models: {models}")
+    log.debug("[get_all_models] base_models_count=%s models=%s", len(models), models)
 
-    # If there are no models, return an empty list
     if len(models) == 0:
-        log.debug("[DEBUG] [inside get_all_models()] get_all_models() returning an empty list because get_all_base_models() returned an empty list.")
+        log.debug("[get_all_models] returning empty list, no base models found")
         return []
 
-    # Add arena models
     if request.app.state.config.ENABLE_EVALUATION_ARENA_MODELS:
-        log.debug("[DEBUG] get_all_models() adding arena models because ENABLE_EVALUATION_ARENA_MODELS is True. We should set the env var to FALSE")
+        log.debug("[get_all_models] adding arena models (ENABLE_EVALUATION_ARENA_MODELS=True)")
         arena_models = []
         if len(request.app.state.config.EVALUATION_ARENA_MODELS) > 0:
             arena_models = [
@@ -217,18 +217,29 @@ async def get_all_models(request, user: UserModel = None):
     global_action_ids = [
         function.id for function in Functions.get_global_action_functions()
     ]
-    log.debug(f"[DEBUG] [inside get_all_models()] global_action_ids: {global_action_ids}. Length of global_action_ids: {len(global_action_ids)}. The Functions.get_global_action_functions() returned {Functions.get_global_action_functions()}")
     enabled_action_ids = [
         function.id
         for function in Functions.get_functions_by_type("action", active_only=True)
     ]
-    log.debug(f"[DEBUG] [inside get_all_models()] Now, filtering for active action_ids based on the global_action_ids. enabled_action_ids: {enabled_action_ids}. Length of enabled_action_ids:{len(enabled_action_ids)}")
+    log.debug(
+        "[get_all_models] global_action_ids=%s enabled_action_ids=%s",
+        global_action_ids,
+        enabled_action_ids,
+    )
 
     custom_models = Models.get_all_models(user.id, user.email)
-    log.debug(f"[DEBUG] [inside get_all_models()] custom_models: {custom_models}. Length of custom_models: {len(custom_models)}. The Models.get_all_models() returned {Models.get_all_models(user.id, user.email)}. This is for user: {user.email} and user_id: {user.id}")
+    log.debug(
+        "[get_all_models] custom_models=%s custom_models_count=%s user_email=%s user_id=%s",
+        custom_models,
+        len(custom_models),
+        user.email,
+        user.id,
+    )
+    model_ids_set = {model["id"] for model in models}
+    models_to_remove = []
     for custom_model in custom_models:
         if custom_model.base_model_id is None:
-            log.debug(f"the custom.base_model_id is None for custom model: {custom_model}")
+            log.debug("[get_all_models] custom_model base_model_id is None for: %s", custom_model)
             for model in models:
                 if (
                     custom_model.id == model["id"]
@@ -246,10 +257,10 @@ async def get_all_models(request, user: UserModel = None):
 
                         model["action_ids"] = action_ids
                     else:
-                        models.remove(model)
+                        models_to_remove.append(model)
 
         elif custom_model.is_active and (
-            custom_model.id not in [model["id"] for model in models]
+            custom_model.id not in model_ids_set
         ):
             owned_by = "openai"
             pipe = None
@@ -284,6 +295,9 @@ async def get_all_models(request, user: UserModel = None):
                 }
             )
 
+    for model in models_to_remove:
+        models.remove(model)
+
     # Process action_ids to get the actions
     def get_action_items_from_module(function, module):
         actions = []
@@ -316,6 +330,7 @@ async def get_all_models(request, user: UserModel = None):
         else:
             function_module, _, _ = load_function_module_by_id(function_id)
             request.app.state.FUNCTIONS[function_id] = function_module
+        return function_module
 
     current_user_email = user.email if user else None
 
@@ -339,24 +354,18 @@ async def get_all_models(request, user: UserModel = None):
             model["actions"].extend(
                 get_action_items_from_module(action_function, function_module)
             )
-    log.debug(f"get_all_models() returned {len(models)} models")
+    log.debug("[get_all_models] returned models_count=%s", len(models))
 
     _ensure_models_cache(request)
     user_id = user.id if user else ""
-    user_email = user.email if user else ""
     request.app.state.MODELS[user_id] = {model["id"]: model for model in models}
-    cache = request.app.state.MODELS
-    cache._email_map[user_id] = user_email
-    cached_emails = [cache._email_map.get(uid, uid) for uid in cache.keys()]
-    model_names = [m.get("name", m.get("id", "")) for m in models]
     log.debug(
-        "[models cache] stored user_email=%s user_id=%s models_count=%s model_names=%s cache_size=%s cached_users=%s",
-        user_email,
-        user_id,
+        "[models cache] stored user_email=%s models_count=%s model_names=%s cache_size=%s",
+        user.email if user else "",
         len(models),
-        model_names,
-        len(cache),
-        cached_emails,
+        [m.get("name", m.get("id", "")) for m in models],
+        len(request.app.state.MODELS),
+        
     )
     return models
 
@@ -489,11 +498,13 @@ def start_models_cache_invalidation_listener(app) -> None:
                         mod = getattr(app.state, "MODELS", None)
                         if not isinstance(mod, dict):
                             continue
+                        lock = getattr(mod, "_lock", None)
                         data = message.get("data")
                         # "all" or legacy "1" = clear entire cache
                         if data == MODELS_INVALIDATE_ALL or data == "1":
-                            size_before = len(mod)
-                            mod.clear()
+                            with (lock if lock else nullcontext()):
+                                size_before = len(mod)
+                                mod.clear()
                             log.debug(
                                 "[models cache] listener cleared all users cache_size_before=%s",
                                 size_before,
@@ -502,20 +513,24 @@ def start_models_cache_invalidation_listener(app) -> None:
                             try:
                                 user_ids = json.loads(data)
                                 if isinstance(user_ids, list):
-                                    size_before = len(mod)
-                                    for uid in user_ids:
-                                        mod.pop(str(uid), None)
+                                    with (lock if lock else nullcontext()):
+                                        size_before = len(mod)
+                                        for uid in user_ids:
+                                            mod.pop(str(uid), None)
+                                        size_after = len(mod)
                                     if user_ids:
                                         log.debug(
                                             "[models cache] listener cleared user_ids=%s cache_size_before=%s cache_size_after=%s",
                                             user_ids,
                                             size_before,
-                                            len(mod),
+                                            size_after,
                                         )
                                 else:
-                                    mod.clear()
+                                    with (lock if lock else nullcontext()):
+                                        mod.clear()
                             except (json.JSONDecodeError, TypeError):
-                                mod.clear()
+                                with (lock if lock else nullcontext()):
+                                    mod.clear()
             except Exception as e:
                 log.warning("Models cache invalidation listener error: %s. Reconnecting in 10s.", e)
                 if redis_conn:
@@ -530,41 +545,92 @@ def start_models_cache_invalidation_listener(app) -> None:
     log.info("Models cache invalidation listener started (Redis pub/sub)")
 
 
+# Per-user async locks to prevent cache stampede (multiple concurrent get_all_models for same user)
+# Only accessed from the async event loop thread (request handlers), never from the Redis
+# listener thread, so no threading.Lock is needed -- the event loop is single-threaded and
+# code between `await` points runs atomically.
+_user_fetch_locks: dict[str, asyncio.Lock] = {}
+
+
+def _maybe_cleanup_user_fetch_locks(request: Request) -> None:
+    """
+    Lazily clean up per-user fetch locks when the map grows beyond a reasonable bound.
+    Keep locks only for users that still have an entry in the in-memory models cache.
+    """
+    max_users = getattr(request.app.state, "MODELS_CACHE_MAX_USERS", 1000)
+
+    if len(_user_fetch_locks) <= 2 * max_users:
+        return
+
+    cache = getattr(request.app.state, "MODELS", {})
+    if not isinstance(cache, dict):
+        cache_user_ids = set()
+    elif getattr(cache, "_lock", None) is not None:
+        with cache._lock:
+            cache_user_ids = set(cache.keys())
+    else:
+        cache_user_ids = set(cache.keys())
+
+    stale_user_ids = [
+        user_id for user_id in list(_user_fetch_locks.keys()) if user_id not in cache_user_ids
+    ]
+
+    for stale_user_id in stale_user_ids:
+        _user_fetch_locks.pop(stale_user_id, None)
+
+
+def _get_user_fetch_lock(request: Request, user_id: str) -> asyncio.Lock:
+    """Get or create an asyncio.Lock for the given user_id to prevent concurrent fetches."""
+    _maybe_cleanup_user_fetch_locks(request)
+
+    if user_id not in _user_fetch_locks:
+        _user_fetch_locks[user_id] = asyncio.Lock()
+    return _user_fetch_locks[user_id]
+
+
 async def get_models_for_user(request, user) -> dict:
     """
     Return the model dict for the current user (model_id -> model).
     Uses per-user cache; refreshes from get_all_models if not cached.
+    Uses a per-user async lock to prevent cache stampede (multiple concurrent
+    requests for the same user all triggering get_all_models at once).
     Call this instead of reading request.app.state.MODELS directly.
     """
     _ensure_models_cache(request)
     if user is None:
         return {}
     user_id = user.id
-    user_email = user.email if hasattr(user, 'email') else ""
     cache = request.app.state.MODELS
-    cached_emails = [cache._email_map.get(uid, uid) for uid in cache.keys()]
+
+    # Fast path: cache hit (no lock needed)
     models = cache.get(user_id)
-    if models is None:
+    if models is not None:
         log.debug(
-            "[models cache] miss user_email=%s user_id=%s cache_size=%s cached_users=%s",
-            user_email,
-            user_id,
+            "[models cache] hit user_email=%s models_count=%s model_names=%s cache_size=%s",
+            user.email, len(models),
+            [m.get("name", m.get("id", "")) for m in models.values()],
             len(cache),
-            cached_emails,
         )
+        return models
+
+    # Cache miss: use per-user lock so only one request fetches at a time
+    fetch_lock = _get_user_fetch_lock(request, user_id)
+    async with fetch_lock:
+        # Re-check after acquiring lock (another request may have filled it)
+        models = cache.get(user_id)
+        if models is not None:
+            log.debug(
+                "[models cache] hit (after lock) user_email=%s models_count=%s model_names=%s cache_size=%s",
+                user.email, len(models),
+                [m.get("name", m.get("id", "")) for m in models.values()],
+                len(cache),
+            )
+            return models
+
+        log.debug("[models cache] miss user_email=%s cache_size=%s", user.email, len(cache))
         await get_all_models(request, user=user)
         models = cache.get(user_id, {})
-    else:
-        model_names = [m.get("name", m.get("id", "")) for m in (models or {}).values()]
-        log.debug(
-            "[models cache] hit user_email=%s user_id=%s models_count=%s model_names=%s cache_size=%s cached_users=%s",
-            user_email,
-            user_id,
-            len(models),
-            model_names,
-            len(cache),
-            cached_emails,
-        )
+
     return models
 
 
