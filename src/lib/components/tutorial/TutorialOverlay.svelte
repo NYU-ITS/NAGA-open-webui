@@ -47,28 +47,33 @@
 	$: rightX = spotLeft + spotW;
 	$: rightW = Math.max(0, vw - rightX);
 
-	// ── Click-listener management ─────────────────────────────────────────────
-	// Array-based so multiple elements (e.g. selectAll) can all be wired at once.
-	// Any one of them firing advances the tutorial and all listeners are removed.
-	let currentListeners: Array<{ el: Element; fn: () => void }> = [];
+	// ── Click-listener management — document-level capture delegation ────────
+	// We attach a single listener on document in CAPTURE phase so it fires
+	// before any bubble-phase handler (including bits-ui, Tippy, etc.) can
+	// call stopPropagation. `closest(selector)` handles both single-element
+	// and selectAll steps uniformly.
+	let documentClickDelegate: ((e: MouseEvent) => void) | null = null;
 
 	function removeClickListeners() {
-		for (const { el, fn } of currentListeners) {
-			el.removeEventListener('click', fn);
+		if (documentClickDelegate) {
+			document.removeEventListener('click', documentClickDelegate, true);
+			documentClickDelegate = null;
 		}
-		currentListeners = [];
 	}
 
-	function attachClickListeners(els: Element[]) {
+	// selector: CSS string — any click whose target is inside a matching
+	// element will advance the tutorial.
+	function attachClickListeners(selector: string) {
 		removeClickListeners();
-		const advance = () => {
-			if (isLast) dismissTutorial();
-			else nextTutorialStep();
+		const handler = (e: MouseEvent) => {
+			if ((e.target as Element).closest(selector)) {
+				removeClickListeners();
+				if (isLast) dismissTutorial();
+				else nextTutorialStep();
+			}
 		};
-		for (const el of els) {
-			el.addEventListener('click', advance);
-			currentListeners.push({ el, fn: advance });
-		}
+		documentClickDelegate = handler;
+		document.addEventListener('click', handler, true);
 	}
 
 	// ── Window-event advance (advanceOn) ──────────────────────────────────────
@@ -126,7 +131,8 @@
 			allSpotlightRects = rects;
 			primaryRect = rects[0]; // used for tooltip positioning
 			hasTarget = true;
-			attachClickListeners(allEls);
+			// Any click inside any matching element advances via closest() delegation
+			attachClickListeners(step.selector!);
 		} else {
 			// ── single element (normal / freeInteract) ────────────────────────
 			const primaryEl = document.querySelector(step.selector);
@@ -160,7 +166,8 @@
 				// (e.g. after a successful API save response).
 				attachWindowAdvanceListener(step.advanceOn);
 			} else {
-				attachClickListeners([primaryEl]);
+				// Document capture delegation: fires before any stopPropagation in bubble phase
+				attachClickListeners(step.selector!);
 			}
 		}
 	}

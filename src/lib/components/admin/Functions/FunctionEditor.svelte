@@ -319,7 +319,7 @@ class Pipe:
 							</Tooltip>
 						</div>
 
-						<div class="flex-1">
+						<div class="flex-1" id="tutorial-function-name">
 							<Tooltip content={$i18n.t('e.g. My Filter')} placement="top-start">
 								<input
 									class="w-full text-2xl font-medium bg-transparent outline-hidden font-primary"
@@ -360,6 +360,7 @@ class Pipe:
 							placement="top-start"
 						>
 							<input
+								id="tutorial-function-description"
 								class="w-full text-sm bg-transparent outline-hidden"
 								type="text"
 								placeholder={$i18n.t('Function Description')}
@@ -370,7 +371,7 @@ class Pipe:
 					</div>
 				</div>
 
-				<div class="mb-2 flex-1 overflow-auto h-0 rounded-lg">
+				<div class="mb-2 flex-1 overflow-auto h-0 rounded-lg" id="tutorial-code-editor">
 					<CodeEditor
 						bind:this={codeEditor}
 						value={content}
