@@ -252,9 +252,10 @@ class GroupTable:
                     for user_id in old_user_ids:
                         cache.invalidate_user_permissions(user_id)
                 
-                # If members changed, invalidate cache for affected users
+                # If members changed, invalidate cache only for users whose membership changed
+                # not all group members
                 new_user_ids = new_group.user_ids if new_group else []
-                affected_user_ids = list(set(old_user_ids) | set(new_user_ids))
+                affected_user_ids = list(set(old_user_ids) ^ set(new_user_ids))
                 if affected_user_ids_out is not None:
                     affected_user_ids_out.extend(affected_user_ids)
                 for user_id in affected_user_ids:

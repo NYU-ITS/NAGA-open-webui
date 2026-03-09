@@ -1017,9 +1017,7 @@ async def process_chat_response(
 
             if tasks and messages:
                 # Get available models and find Gemini Flash Lite before running tasks
-                from open_webui.utils.models import get_all_models
-                models_list = await get_all_models(request, user)
-                models = {model["id"]: model for model in models_list}
+                models = await get_models_for_user(request, user)
                 task_model_id = find_gemini_flash_lite_model(models)
                 
                 # If Gemini Flash Lite is not available, skip all background tasks
