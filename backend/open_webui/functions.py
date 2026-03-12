@@ -168,8 +168,9 @@ async def get_function_models(request, user: UserModel = None):
     
     # For users: pre-fetch user's groups and all models assigned to those groups
     user_group_ids = set()  # Initialize as set for consistency
-    accessible_model_ids = set()  # Model IDs assigned to user's groups
+    accessible_model_ids = set()  # Model IDs assigned to user's groups (preset IDs or direct base model IDs)
     accessible_pipe_ids = set()  # Pipe IDs that have models assigned to user's groups
+    accessible_base_model_ids = set()  # base_model_id of presets user can see (sub_pipe_ids for manifold)
     
     # For users AND admins (co-admins), we need to check group-based access
     # Pre-fetch groups for both roles
@@ -206,11 +207,11 @@ async def get_function_models(request, user: UserModel = None):
                     if model.base_model_id:
                         # This is a preset model - use base_model_id to find the pipe
                         model_id_for_pipe = model.base_model_id
-                        # IMPORTANT: Also add base_model_id to accessible_model_ids
-                        # so that when filtering sub-pipes, the underlying model is accessible
-                        accessible_model_ids.add(model.base_model_id)
+                        accessible_base_model_ids.add(model.base_model_id)
+                        # Do NOT add base_model_id to accessible_model_ids - users should only
+                        # see the custom preset, not the base pipe model. The preset routes to
+                        # the pipe under the hood via utils/models.py and chat.py.
                         log.debug(f"[MODEL_VISIBILITY] Model '{model.id}' is a preset, using base_model_id '{model.base_model_id}' for pipe extraction")
-                        log.debug(f"[MODEL_VISIBILITY] Added base_model_id '{model.base_model_id}' to accessible_model_ids")
                     
                     # Extract pipe ID from the appropriate model ID
                     # e.g., "llm_portkey.@gpt-4o/gpt-4o" -> "llm_portkey"
@@ -222,8 +223,13 @@ async def get_function_models(request, user: UserModel = None):
                         # Model ID without dot - might be a standalone pipe ID
                         accessible_pipe_ids.add(model_id_for_pipe)
         
-        log.debug(f"[MODEL_VISIBILITY] User {user.email} has access to {len(accessible_model_ids)} models: {accessible_model_ids}")
-        log.debug(f"[MODEL_VISIBILITY] User {user.email} has access to pipes: {accessible_pipe_ids}")
+        log.info(
+            "[MODEL_DEBUG] Models access resolved | email=%s | accessible_models=%s | accessible_pipes=%s | accessible_base_models=%s",
+            user.email,
+            list(accessible_model_ids),
+            list(accessible_pipe_ids),
+            list(accessible_base_model_ids),
+        )
     
     # STEP 1: Filter pipes based on access (fast, no module loading)
     accessible_pipes = []
@@ -315,6 +321,9 @@ async def get_function_models(request, user: UserModel = None):
 
                     # For users AND co-admins: only include models that are explicitly assigned to their groups
                     # Super admins and admins who created the pipe see all models; co-admins see only assigned models
+                    # Include ONLY if sub_pipe_id in accessible_model_ids (direct base model assignment to group).
+                    # Preset-only: do NOT include base sub_pipes; preset is added via get_all_models custom_models
+                    # with infer pipe. Including accessible_base_model_ids would expose raw base to user.
                     if not user_is_super_admin and (user.role == "user" or (user.role == "admin" and not is_pipe_creator)):
                         if sub_pipe_id not in accessible_model_ids:
                             log.debug(f"Skipping model {sub_pipe_id} - not assigned to user's/co-admin's groups")
@@ -343,6 +352,8 @@ async def get_function_models(request, user: UserModel = None):
 
                 # For users AND co-admins: only include models that are explicitly assigned to their groups
                 # Super admins and admins who created the pipe see all models
+                # For single pipe: only include if pipe.id in accessible_model_ids (direct assignment)
+                # Preset-only: do NOT include raw pipe; preset added via get_all_models with infer pipe
                 if not user_is_super_admin and (user.role == "user" or (user.role == "admin" and not is_pipe_creator)):
                     if pipe.id not in accessible_model_ids:
                         log.debug(f"Skipping model {pipe.id} - not assigned to user's/co-admin's groups")
@@ -538,6 +549,14 @@ async def generate_function_chat_completion(
                 params = model_info.params.model_dump()
                 form_data = apply_model_params_to_body_openai(params, form_data)
                 form_data = apply_model_system_prompt_to_body(params, form_data, metadata, user)
+            else:
+                # Preset routed here with form_data["model"]=base_model_id (base not in DB).
+                # Use metadata["model"] from main.py (preset dump) to apply system prompt/params.
+                meta_model = metadata.get("model") or {}
+                params = meta_model.get("params")
+                if isinstance(params, dict):
+                    form_data = apply_model_params_to_body_openai(params, form_data)
+                    form_data = apply_model_system_prompt_to_body(params, form_data, metadata, user)
 
             pipe_id = get_pipe_id(form_data)
             function_module = get_function_module_by_id(request, pipe_id)

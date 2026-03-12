@@ -14,6 +14,7 @@ from open_webui.config import CACHE_DIR
 from open_webui.constants import ERROR_MESSAGES
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from open_webui.utils.auth import get_admin_user, get_verified_user
+from open_webui.utils.models import invalidate_models_cache
 from open_webui.env import SRC_LOG_LEVELS
 
 log = logging.getLogger(__name__)
@@ -80,6 +81,7 @@ async def create_new_function(
             function_cache_dir.mkdir(parents=True, exist_ok=True)
 
             if function:
+                invalidate_models_cache(request)
                 return function
             else:
                 raise HTTPException(
@@ -123,7 +125,9 @@ async def get_function_by_id(id: str, user=Depends(get_admin_user)):
 
 
 @router.post("/id/{id}/toggle", response_model=Optional[FunctionModel])
-async def toggle_function_by_id(id: str, user=Depends(get_admin_user)):
+async def toggle_function_by_id(
+    request: Request, id: str, user=Depends(get_admin_user)
+):
     function = Functions.get_function_by_id(id)
     if function:
         function = Functions.update_function_by_id(
@@ -131,6 +135,7 @@ async def toggle_function_by_id(id: str, user=Depends(get_admin_user)):
         )
 
         if function:
+            invalidate_models_cache(request)
             return function
         else:
             raise HTTPException(
@@ -150,7 +155,9 @@ async def toggle_function_by_id(id: str, user=Depends(get_admin_user)):
 
 
 @router.post("/id/{id}/toggle/global", response_model=Optional[FunctionModel])
-async def toggle_global_by_id(id: str, user=Depends(get_admin_user)):
+async def toggle_global_by_id(
+    request: Request, id: str, user=Depends(get_admin_user)
+):
     function = Functions.get_function_by_id(id)
     if function:
         function = Functions.update_function_by_id(
@@ -158,6 +165,7 @@ async def toggle_global_by_id(id: str, user=Depends(get_admin_user)):
         )
 
         if function:
+            invalidate_models_cache(request)
             return function
         else:
             raise HTTPException(
@@ -196,6 +204,7 @@ async def update_function_by_id(
         function = Functions.update_function_by_id(id, updated)
 
         if function:
+            invalidate_models_cache(request)
             return function
         else:
             raise HTTPException(
@@ -222,6 +231,7 @@ async def delete_function_by_id(
     result = Functions.delete_function_by_id(id)
 
     if result:
+        invalidate_models_cache(request)
         FUNCTIONS = request.app.state.FUNCTIONS
         if id in FUNCTIONS:
             del FUNCTIONS[id]
@@ -305,6 +315,7 @@ async def update_function_valves_by_id(
                 form_data = {k: v for k, v in form_data.items() if v is not None}
                 valves = Valves(**form_data)
                 Functions.update_function_valves_by_id(id, valves.model_dump())
+                invalidate_models_cache(request)
                 return valves.model_dump()
             except Exception as e:
                 log.exception(f"Error updating function values by id {id}: {e}")
