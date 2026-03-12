@@ -2,15 +2,19 @@
 	import { onMount } from 'svelte';
 	import { toast } from 'svelte-sonner';
 	import { goto } from '$app/navigation';
+	import { page } from '$app/stores';
 	import { TESTING_AI_TUTOR } from '$lib/constants';
 
-	onMount(async () => {
-		console.log('Review Question Set loaded');
+	const AI_TUTOR_API_BASE = 'http://localhost:8000';
 
+	let selectedHomework = '';
+	let homeworkOptions: string[] = [];
+
+	async function loadQuestionSet() {
+		if (!selectedHomework) return;
 		try {
-			// TODO: Confirm endpoint contract for question set details.
 			const response = await fetch(
-				`/api/v1/analysis/question-sets/detail?homework=${encodeURIComponent(selectedHomework)}`,
+				`${AI_TUTOR_API_BASE}/practice?homework_id=${encodeURIComponent(selectedHomework)}`,
 				{
 					method: 'GET',
 					headers: {
@@ -24,42 +28,64 @@
 			}
 
 			const data = await response.json();
-			if (data) {
-				questionData = data;
+			if (Array.isArray(data) && data.length > 0) {
+				const latest = [...data].sort(
+					(a, b) => Number(b?.version_number ?? 0) - Number(a?.version_number ?? 0)
+				)[0];
+				questionData = {
+					id: latest.id,
+					version: `Version ${latest.version_number ?? 1} - ${latest.source ?? 'AI generated'}`,
+					status: latest.status ?? 'pending',
+					date: latest.created_at ?? '',
+					questions: [{ markdown: latest.problem_data ?? '' }]
+				};
 			}
 
 			if (TESTING_AI_TUTOR) {
-				toast.success(
-					'[SUCCESS][GET]: getQuestionSetDetail() fetches question set data like (using placeholder).'
-				);
+				toast.success('[SUCCESS][GET]: Loaded practice question set from /practice.');
 			}
 		} catch (error) {
 			if (TESTING_AI_TUTOR) {
-				toast.warning(
-					'[FAIL][GET]: getQuestionSetDetail() fetches question set data like (using placeholder).'
-				);
+				toast.warning('[FAIL][GET]: Practice question set fallback to placeholder data.');
 			}
 			console.error('Question set detail API failed:', error);
 		}
+	}
+
+	onMount(async () => {
+		console.log('Review Question Set loaded');
+		try {
+			const response = await fetch(`${AI_TUTOR_API_BASE}/homework`, {
+				method: 'GET',
+				headers: {
+					Authorization: `Bearer ${localStorage.token}`
+				}
+			});
+			if (response.ok) {
+				const data = await response.json();
+				if (Array.isArray(data)) {
+					homeworkOptions = data.map((hw) => hw.id);
+				}
+			}
+		} catch (error) {
+			console.error('Homework list API failed:', error);
+		}
+
+		const queryHomeworkId = $page.url.searchParams.get('homework_id');
+		selectedHomework = queryHomeworkId || homeworkOptions[0] || 'Homework 1';
+		await loadQuestionSet();
 	});
 
-	let selectedHomework = 'Homework 1';
+	$: if (selectedHomework) {
+		loadQuestionSet();
+	}
 
-	const homeworkOptions = [
-		'Homework 1',
-		'Homework 2',
-		'Homework 3',
-		'Homework 4',
-		'Homework 5',
-		'Homework 6',
-		'Homework 7'
-	];
-
-	// TODO: Wire to API: analysis question set details endpoint (not implemented yet)
+	// Placeholder fallback when backend has no question set yet.
 	// Sample question data in JSON format
 	let questionData = {
+		id: '',
 		version: 'Version 1 - AI generated',
-		status: 'approved',
+		status: 'pending',
 		date: '2026-01-02 12:23:12',
 		questions: [
 			{
@@ -92,143 +118,82 @@
 
 	function handleApprove() {
 		try {
-			// TODO: Confirm endpoint contract for question set approval.
-			fetch('/api/v1/analysis/question-sets/approve', {
-				method: 'POST',
-				headers: {
-					Authorization: `Bearer ${localStorage.token}`,
-					'Content-Type': 'application/json'
-				},
-				body: JSON.stringify({ homework: selectedHomework })
-			})
-				.then((response) => {
-					if (!response.ok) {
-						throw new Error('Question set approval failed');
-					}
-
-					if (TESTING_AI_TUTOR) {
-						toast.success(
-							'[SUCCESS][POST]: approveQuestionSet() posts approval data like (using placeholder).'
-						);
-					}
-				})
-				.catch((error) => {
-					if (TESTING_AI_TUTOR) {
-						toast.warning(
-							'[FAIL][POST]: approveQuestionSet() posts approval data like (using placeholder).'
-						);
-					}
-					console.error('Question set approval API failed:', error);
-				});
-		} catch (error) {
-			if (TESTING_AI_TUTOR) {
-				toast.warning('[FAIL][POST]: approveQuestionSet() posts approval data like (using placeholder).');
+			if (!questionData.id) {
+				throw new Error('No practice question set id available for approval');
 			}
-			console.error('Question set approval API failed:', error);
-		}
 
-		// TODO: Wire to API: approve question set (not implemented yet)
-		// Handle approval logic
-		alert('Question set approved!');
-	}
-
-	function handleEdit() {
-		if (TESTING_AI_TUTOR) {
-			toast.warning('[FAIL][POST]: editQuestionSet() posts edits like (using placeholder).');
-		}
-		// TODO: Wire to API: edit question set (not implemented yet)
-		alert('Edit functionality coming soon');
-	}
-
-	function handleDownload() {
-		try {
-			// TODO: Confirm endpoint contract for question set download.
 			fetch(
-				`/api/v1/analysis/question-sets/download?homework=${encodeURIComponent(selectedHomework)}`,
+				`${AI_TUTOR_API_BASE}/practice/${encodeURIComponent(questionData.id)}/status?status=approved`,
 				{
-					method: 'GET',
+					method: 'PATCH',
 					headers: {
-						Authorization: `Bearer ${localStorage.token}`
+						Authorization: `Bearer ${localStorage.token}`,
+						'Content-Type': 'application/json'
 					}
 				}
 			)
 				.then((response) => {
 					if (!response.ok) {
-						throw new Error('Question set download failed');
+						throw new Error('Question set approval failed');
 					}
 
+					questionData = { ...questionData, status: 'approved', date: new Date().toISOString() };
 					if (TESTING_AI_TUTOR) {
-						toast.success(
-							'[SUCCESS][GET]: downloadQuestionSet() fetches file data like (using placeholder).'
-						);
+						toast.success('[SUCCESS][PATCH]: approveQuestionSet() updates /practice/{id}/status.');
 					}
 				})
 				.catch((error) => {
 					if (TESTING_AI_TUTOR) {
-						toast.warning(
-							'[FAIL][GET]: downloadQuestionSet() fetches file data like (using placeholder).'
-						);
+						toast.warning('[FAIL][PATCH]: approveQuestionSet() failed.');
 					}
-					console.error('Question set download API failed:', error);
+					console.error('Question set approval API failed:', error);
 				});
 		} catch (error) {
 			if (TESTING_AI_TUTOR) {
-				toast.warning('[FAIL][GET]: downloadQuestionSet() fetches file data like (using placeholder).');
+				toast.warning('[FAIL][PATCH]: approveQuestionSet() failed.');
 			}
-			console.error('Question set download API failed:', error);
+			console.error('Question set approval API failed:', error);
 		}
+	}
 
-		// TODO: Wire to API: download question set file (not implemented yet)
-		const dataStr = JSON.stringify(questionData, null, 2);
-		const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
-		const exportFileDefaultName = `${selectedHomework}_questions.json`;
+	function handleEdit() {
+		if (TESTING_AI_TUTOR) {
+			toast.warning('[MISSING][POST]: editQuestionSet() endpoint not implemented in backend yet.');
+		}
+		// MISSING: Frontend intends to submit instructor edits for an existing practice question set.
+		// MISSING: Expected future backend endpoint (example): PATCH /practice/{practice_id}
+		alert('Edit functionality coming soon');
+	}
 
-		const linkElement = document.createElement('a');
-		linkElement.setAttribute('href', dataUri);
-		linkElement.setAttribute('download', exportFileDefaultName);
-		linkElement.click();
+	function handleDownload() {
+		// MISSING: Frontend intends to download server-generated question set file by homework/version.
+		// MISSING: Expected future backend endpoint (example): GET /practice/{practice_id}/download
+		// Current fallback: local download of currently loaded JSON payload.
+		try {
+			if (TESTING_AI_TUTOR) {
+				toast.warning('[MISSING][GET]: downloadQuestionSet() backend endpoint not implemented yet.');
+			}
+
+			const dataStr = JSON.stringify(questionData, null, 2);
+			const dataUri = 'data:application/json;charset=utf-8,' + encodeURIComponent(dataStr);
+			const exportFileDefaultName = `${selectedHomework}_questions.json`;
+
+			const linkElement = document.createElement('a');
+			linkElement.setAttribute('href', dataUri);
+			linkElement.setAttribute('download', exportFileDefaultName);
+			linkElement.click();
+		} catch (error) {
+			console.error('Question set download fallback failed:', error);
+		}
 	}
 
 	function handleUpload() {
-		try {
-			// TODO: Confirm endpoint contract for question set upload.
-			fetch('/api/v1/analysis/question-sets/upload', {
-				method: 'POST',
-				headers: {
-					Authorization: `Bearer ${localStorage.token}`,
-					'Content-Type': 'application/json'
-				},
-				body: JSON.stringify({ homework: selectedHomework, data: questionData })
-			})
-				.then((response) => {
-					if (!response.ok) {
-						throw new Error('Question set upload failed');
-					}
-
-					if (TESTING_AI_TUTOR) {
-						toast.success(
-							'[SUCCESS][POST]: uploadQuestionSet() posts question set data like (using placeholder).'
-						);
-					}
-				})
-				.catch((error) => {
-					if (TESTING_AI_TUTOR) {
-						toast.warning(
-							'[FAIL][POST]: uploadQuestionSet() posts question set data like (using placeholder).'
-						);
-					}
-					console.error('Question set upload API failed:', error);
-				});
-		} catch (error) {
-			if (TESTING_AI_TUTOR) {
-				toast.warning(
-					'[FAIL][POST]: uploadQuestionSet() posts question set data like (using placeholder).'
-				);
-			}
-			console.error('Question set upload API failed:', error);
+		// MISSING: Frontend intends to upload instructor-authored question set for standardization and storage.
+		// MISSING: Expected future backend endpoint (example): POST /practice/upload
+		// Current fallback: no-op with user notice.
+		if (TESTING_AI_TUTOR) {
+			toast.warning('[MISSING][POST]: uploadQuestionSet() backend endpoint not implemented yet.');
 		}
-
-		// TODO: Wire to API: upload question set (not implemented yet)
 		alert('Upload functionality coming soon');
 	}
 </script>

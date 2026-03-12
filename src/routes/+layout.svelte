@@ -32,6 +32,7 @@
 	import { Toaster, toast } from 'svelte-sonner';
 
 	import { getBackendConfig } from '$lib/apis';
+	import { frontendOnlyMode } from '$lib/featureFlags';
 	import { getSessionUser } from '$lib/apis/auths';
 
 	import '../tailwind.css';
@@ -459,6 +460,32 @@
 			console.log('Backend config:', backendConfig);
 		} catch (error) {
 			console.error('Error loading backend config:', error);
+			if (frontendOnlyMode) {
+				// DEV STUB: backend unreachable — use minimal config so the app doesn't redirect to /error
+				backendConfig = {
+					status: true,
+					name: 'Pilot GenAI',
+					version: '0.0.0',
+					default_locale: 'en-US',
+					default_models: '',
+					default_prompt_suggestions: [],
+					features: {
+						auth: false,
+						auth_trusted_header: false,
+						enable_api_key: false,
+						enable_signup: false,
+						enable_login_form: false,
+						enable_google_drive_integration: false,
+						enable_onedrive_integration: false,
+						enable_image_generation: false,
+						enable_admin_export: false,
+						enable_admin_chat_access: false,
+						enable_community_sharing: false,
+						enable_autocomplete_generation: false
+					},
+					oauth: { providers: {} }
+				};
+			}
 		}
 		// Initialize i18n even if we didn't get a backend config,
 		// so `/error` can show something that's not `undefined`.
@@ -481,34 +508,44 @@
 			await WEBUI_NAME.set(backendConfig.name);
 
 			if ($config) {
-				await setupSocket($config.features?.enable_websocket ?? true);
-
-				if (localStorage.token) {
-					// Get Session User Info
-					const sessionUser = await getSessionUser(localStorage.token).catch((error) => {
-						toast.error(`${error}`);
-						return null;
+				if (frontendOnlyMode) {
+					await user.set({
+						id: 'frontend-only',
+						email: 'frontend@local',
+						name: 'FrontendOnlyMode',
+						role: 'admin',
+						profile_image_url: ''
 					});
-
-					if (sessionUser) {
-						// Save Session User to Store
-						$socket.emit('user-join', { auth: { token: sessionUser.token } });
-
-						$socket?.on('chat-events', chatEventHandler);
-						$socket?.on('channel-events', channelEventHandler);
-
-						await user.set(sessionUser);
-						await config.set(await getBackendConfig());
-					} else {
-						// Redirect Invalid Session User to /auth Page
-						localStorage.removeItem('token');
-						await goto('/auth');
-					}
 				} else {
-					// Don't redirect if we're already on the auth page
-					// Needed because we pass in tokens from OAuth logins via URL fragments
-					if ($page.url.pathname !== '/auth') {
-						await goto('/auth');
+					await setupSocket($config.features?.enable_websocket ?? true);
+
+					if (localStorage.token) {
+						// Get Session User Info
+						const sessionUser = await getSessionUser(localStorage.token).catch((error) => {
+							toast.error(`${error}`);
+							return null;
+						});
+
+						if (sessionUser) {
+							// Save Session User to Store
+							$socket.emit('user-join', { auth: { token: sessionUser.token } });
+
+							$socket?.on('chat-events', chatEventHandler);
+							$socket?.on('channel-events', channelEventHandler);
+
+							await user.set(sessionUser);
+							await config.set(await getBackendConfig());
+						} else {
+							// Redirect Invalid Session User to /auth Page
+							localStorage.removeItem('token');
+							await goto('/auth');
+						}
+					} else {
+						// Don't redirect if we're already on the auth page
+						// Needed because we pass in tokens from OAuth logins via URL fragments
+						if ($page.url.pathname !== '/auth') {
+							await goto('/auth');
+						}
 					}
 				}
 			}

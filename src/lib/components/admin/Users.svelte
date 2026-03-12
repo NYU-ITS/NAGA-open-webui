@@ -17,19 +17,35 @@
 	let selectedTab = 'overview';
 	let loaded = false;
 
+	const normalizeUsers = (value) => {
+		if (Array.isArray(value)) {
+			return value;
+		}
+
+		if (Array.isArray(value?.users)) {
+			return value.users;
+		}
+
+		if (Array.isArray(value?.data)) {
+			return value.data;
+		}
+
+		return [];
+	};
+
 	$: if (selectedTab) {
 		getUsersHandler();
 	}
 
 	const getUsersHandler = async () => {
-		users = await getUsers(localStorage.token);
+		users = normalizeUsers(await getUsers(localStorage.token));
 	};
 
 	onMount(async () => {
 		if ($user?.role !== 'admin') {
 			await goto('/');
 		} else {
-			users = await getUsers(localStorage.token);
+			users = normalizeUsers(await getUsers(localStorage.token));
 		}
 		loaded = true;
 

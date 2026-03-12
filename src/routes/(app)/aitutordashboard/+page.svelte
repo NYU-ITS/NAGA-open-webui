@@ -3,14 +3,19 @@
 	import { toast } from 'svelte-sonner';
 	import { TESTING_AI_TUTOR } from '$lib/constants';
 
+	const AI_TUTOR_API_BASE = 'http://localhost:8000';
+
 	let chartsContainer: HTMLElement;
+	let charts = [
+		{ id: 1, title: 'Average Accuracy Trend' },
+		{ id: 2, title: 'Problem Completion Rate' }
+	];
 
 	onMount(async () => {
 		console.log('AI Tutor Dashboard - Summary loaded');
 
 		try {
-			// TODO: Confirm endpoint contract for dashboard summary data.
-			const response = await fetch('/api/v1/analysis/summary', {
+			const response = await fetch(`${AI_TUTOR_API_BASE}/analysis`, {
 				method: 'GET',
 				headers: {
 					Authorization: `Bearer ${localStorage.token}`
@@ -22,19 +27,52 @@
 			}
 
 			const data = await response.json();
-			if (Array.isArray(data?.homeworkStats)) {
-				homeworkStats = data.homeworkStats;
-			}
-			if (Array.isArray(data?.charts)) {
-				charts = data.charts;
-			}
+			if (Array.isArray(data)) {
+				const grouped = new Map<
+					string,
+					{
+						totalProblems: number;
+						attemptedSum: number;
+						solvedSum: number;
+						errorSum: number;
+						count: number;
+					}
+				>();
 
+				for (const row of data) {
+					const homeworkId = row?.homework_id ?? 'unknown';
+					const prev = grouped.get(homeworkId) ?? {
+						totalProblems: 0,
+						attemptedSum: 0,
+						solvedSum: 0,
+						errorSum: 0,
+						count: 0
+					};
+
+					prev.totalProblems = Math.max(prev.totalProblems, Number(row?.total_question ?? 0));
+					prev.attemptedSum += Number(row?.total_attempted ?? 0);
+					prev.solvedSum += Number(row?.total_solved ?? 0);
+					prev.errorSum += Number(row?.total_errors ?? 0);
+					prev.count += 1;
+					grouped.set(homeworkId, prev);
+				}
+
+				homeworkStats = Array.from(grouped.entries()).map(([homeworkId, v]) => ({
+					homework: homeworkId,
+					totalProblems: v.totalProblems,
+					avgAttempted: Number((v.attemptedSum / Math.max(v.count, 1)).toFixed(1)),
+					avgSolved: Number((v.solvedSum / Math.max(v.count, 1)).toFixed(1)),
+					avgErrors: Number((v.errorSum / Math.max(v.count, 1)).toFixed(1))
+				}));
+
+				homeworkStats.sort((a, b) => a.homework.localeCompare(b.homework));
+			}
 			if (TESTING_AI_TUTOR) {
-				toast.success('[SUCCESS][GET]: getDashboardSummary() fetches summary data like (using placeholder).');
+				toast.success('[SUCCESS][GET]: Dashboard summary loaded from /analysis.');
 			}
 		} catch (error) {
 			if (TESTING_AI_TUTOR) {
-				toast.warning('[FAIL][GET]: getDashboardSummary() fetches summary data like (using placeholder).');
+				toast.warning('[FAIL][GET]: Dashboard summary fallback to placeholder data.');
 			}
 			console.error('Summary dashboard API failed:', error);
 		}
@@ -108,16 +146,6 @@
 		}
 	];
 
-	// TODO: Wire to API: analysis charts endpoint (not implemented yet)
-	// Generate placeholder charts (5 charts, show 3 by default)
-	let charts = [
-		{ id: 1, title: 'Average Accuracy Trend' },
-		{ id: 2, title: 'Problem Completion Rate' },
-		{ id: 3, title: 'Common Error Types' },
-		{ id: 4, title: 'Time Spent per Problem' },
-		{ id: 5, title: 'Topic Mastery Overview' }
-	];
-
 	function scrollCharts(direction: 'left' | 'right') {
 		if (chartsContainer) {
 			const scrollAmount = 400;
@@ -132,7 +160,21 @@
 <div class="flex flex-col space-y-6 py-4">
 	<!-- Charts Summary Section -->
 	<div class="space-y-3">
-		<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Charts Summary</h2>
+		<div class="flex items-center justify-between">
+			<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Charts Summary</h2>
+			<div class="flex gap-2">
+				<button
+					class="px-4 py-2 text-sm font-medium text-gray-900 dark:text-gray-100 hover:text-black dark:hover:text-white transition"
+				>
+					Upload Homeworks
+				</button>
+				<button
+					class="px-4 py-2 text-sm font-medium text-gray-900 dark:text-gray-100 hover:text-black dark:hover:text-white transition"
+				>
+					Set Error Type
+				</button>
+			</div>
+		</div>
 
 		<div class="relative">
 			<!-- Scroll Left Button -->

@@ -3,12 +3,13 @@
 	import { toast } from 'svelte-sonner';
 	import { TESTING_AI_TUTOR } from '$lib/constants';
 
+	const AI_TUTOR_API_BASE = 'http://localhost:8000';
+
 	onMount(async () => {
 		console.log('AI Tutor Dashboard - Student Analysis loaded');
 
 		try {
-			// TODO: Confirm endpoint contract for student analysis summary.
-			const response = await fetch('/api/v1/analysis/students/summary', {
+			const response = await fetch(`${AI_TUTOR_API_BASE}/analysis`, {
 				method: 'GET',
 				headers: {
 					Authorization: `Bearer ${localStorage.token}`
@@ -20,18 +21,36 @@
 			}
 
 			const data = await response.json();
-			if (Array.isArray(data?.items)) {
-				studentData = data.items;
+			if (Array.isArray(data)) {
+				studentData = data.map((row) => {
+					const totalQuestion = Number(row?.total_question ?? 0);
+					const totalSolved = Number(row?.total_solved ?? 0);
+					const avgAccuracy = totalQuestion > 0 ? (totalSolved / totalQuestion) * 100 : 0;
+
+					const weakTopics = Array.isArray(row?.topic_performances)
+						? row.topic_performances
+								.filter((tp) => tp?.status === 'needs_practice')
+								.map((tp) => tp?.topic_name)
+								.filter(Boolean)
+						: [];
+
+					return {
+						name: row?.student_email ?? row?.student_id ?? 'Unknown Student',
+						email: row?.student_email ?? 'unknown@email',
+						homework: row?.homework_id ?? 'Unknown Homework',
+						avgAccuracy: Number(avgAccuracy.toFixed(1)),
+						topicsToImprove: weakTopics.length ? weakTopics.join(', ') : 'None',
+						performanceSummary: `Attempted ${row?.total_attempted ?? 0}/${totalQuestion}, solved ${totalSolved}, errors ${row?.total_errors ?? 0}.`
+					};
+				});
 			}
 
 			if (TESTING_AI_TUTOR) {
-				toast.success(
-					'[SUCCESS][GET]: getStudentAnalysis() fetches student data like (using placeholder).'
-				);
+				toast.success('[SUCCESS][GET]: Student analysis loaded from /analysis.');
 			}
 		} catch (error) {
 			if (TESTING_AI_TUTOR) {
-				toast.warning('[FAIL][GET]: getStudentAnalysis() fetches student data like (using placeholder).');
+				toast.warning('[FAIL][GET]: Student analysis fallback to placeholder data.');
 			}
 			console.error('Student analysis API failed:', error);
 		}
@@ -46,18 +65,7 @@
 	let selectedStudentName = 'All';
 	let selectedStudentEmail = 'All';
 
-	const homeworkOptions = [
-		'All',
-		'Homework 1',
-		'Homework 2',
-		'Homework 3',
-		'Homework 4',
-		'Homework 5',
-		'Homework 6',
-		'Homework 7',
-		'Homework 8',
-		'Homework 9'
-	];
+	$: homeworkOptions = ['All', ...new Set(studentData.map((s) => s.homework))];
 
 	// When student name is selected, reset email filter
 	function handleStudentNameChange(event: Event) {

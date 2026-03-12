@@ -94,6 +94,14 @@
 		}
 		return false;
 	}
+
+	function getDefaultModelLogo() {
+		return `${WEBUI_BASE_URL}/static/${isDarkMode() ? 'favicon-white' : 'favicon-violet'}.png`;
+	}
+
+	function fallbackToFavicon(event) {
+		event.currentTarget.src = `${WEBUI_BASE_URL}/favicon.png`;
+	}
 </script>
 
 <div class="m-auto w-full max-w-6xl px-2 @2xl:px-20 translate-y-6 py-24 text-center">
@@ -133,7 +141,8 @@
 										src={model?.info?.meta?.profile_image_url ??
 											($i18n.language === 'dg-DG'
 												? `/doge.png`
-												: `${WEBUI_BASE_URL}/static/${isDarkMode() ? 'favicon-white' : 'favicon-violet'}.png`)}
+												: getDefaultModelLogo())}
+										on:error={fallbackToFavicon}
 										class=" size-13 @sm:size-14"
 										alt="logo"
 										draggable="false"

@@ -6,3 +6,5 @@ resources:
   - webui-service.yaml
   - webui-ingress.yaml
   - webui-pvc.yaml
+  - frontend-deployment.yaml
+  - frontend-service.yaml

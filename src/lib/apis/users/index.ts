@@ -168,7 +168,19 @@ export const getUsers = async (token: string) => {
 		throw error;
 	}
 
-	return res ? res : [];
+	if (Array.isArray(res)) {
+		return res;
+	}
+
+	if (Array.isArray(res?.users)) {
+		return res.users;
+	}
+
+	if (Array.isArray(res?.data)) {
+		return res.data;
+	}
+
+	return [];
 };
 
 export const getUserSettings = async (token: string) => {

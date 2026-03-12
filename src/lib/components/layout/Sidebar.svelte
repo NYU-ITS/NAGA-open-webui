@@ -69,6 +69,8 @@
 	let selectedChatId = null;
 	let showDropdown = false;
 	let showPinnedChat = true;
+	let newChatLogoSrc = `${WEBUI_BASE_URL}/static/favicon-white.png`;
+	let userAvatarSrc = `${WEBUI_BASE_URL}/static/user_temp.png`;
 
 	let showCreateChannel = false;
 
@@ -155,7 +157,17 @@
 	};
 
 	const initChannels = async () => {
-		await channels.set(await getChannels(localStorage.token));
+		if (!$config?.features?.enable_channels) {
+			channels.set([]);
+			return;
+		}
+
+		const channelList = await getChannels(localStorage.token).catch((error) => {
+			console.error('Failed to load channels:', error);
+			return [];
+		});
+
+		channels.set(channelList ?? []);
 	};
 
 	const initChatList = async () => {
@@ -521,7 +533,10 @@
 					<div class="self-center mx-1.5">
 						<img
 							crossorigin="anonymous"
-							src="{WEBUI_BASE_URL}/static/favicon-white.png"
+							src={newChatLogoSrc}
+							on:error={() => {
+								newChatLogoSrc = `${WEBUI_BASE_URL}/favicon.png`;
+							}}
 							class=" size-7 -translate-x-1.5 rounded-full"
 							alt="logo"
 						/>
@@ -988,7 +1003,10 @@
 							<div class="self-center mx-1.5">
 								<img
 									crossorigin="anonymous"
-									src="{WEBUI_BASE_URL}/static/user_temp.png"
+									src={userAvatarSrc}
+									on:error={() => {
+										userAvatarSrc = `${WEBUI_BASE_URL}/favicon.png`;
+									}}
 									class=" size-7 -translate-x-1.5 rounded-full"
 									alt="logo"
 								/>

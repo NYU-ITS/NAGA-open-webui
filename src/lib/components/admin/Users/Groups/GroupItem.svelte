@@ -103,7 +103,7 @@
 	</div>
 
 	<div class="flex items-center gap-1.5 w-76 font-medium text-left">
-		{group.user_ids.length}
+		{(group.user_ids ?? []).length}
 
 		<div>
 			<User className="size-3.5" />
