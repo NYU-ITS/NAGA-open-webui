@@ -21,8 +21,6 @@ import atexit
 
 from fastapi import Request
 
-from open_webui.utils.models import get_models_for_user
-
 from open_webui.env import RAG_THREAD_POOL_SIZE
 
 # Module-level ThreadPoolExecutor for RAG operations
@@ -774,7 +772,7 @@ async def process_chat_payload(request, form_data, metadata, user, model):
             request.state.model["id"]: request.state.model,
         }
     else:
-        models = await get_models_for_user(request, user)
+        models = request.app.state.MODELS
 
     task_model_id = get_task_model_id(
         form_data["model"],

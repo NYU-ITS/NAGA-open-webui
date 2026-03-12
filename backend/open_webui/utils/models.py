@@ -9,7 +9,6 @@ from collections import OrderedDict
 
 from aiocache import cached
 from fastapi import Request
-from redis import Redis
 
 from open_webui.routers import openai, ollama
 from open_webui.functions import get_function_models
@@ -27,7 +26,7 @@ from open_webui.config import (
     DEFAULT_ARENA_MODEL,
 )
 
-from open_webui.env import SRC_LOG_LEVELS, GLOBAL_LOG_LEVEL, REDIS_URL
+from open_webui.env import SRC_LOG_LEVELS, GLOBAL_LOG_LEVEL
 from open_webui.models.users import UserModel
 from open_webui.socket.utils import get_redis_pool, get_redis_master_connection
 
