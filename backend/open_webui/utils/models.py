@@ -175,8 +175,12 @@ async def get_all_models(request, user: UserModel = None):
     models = await get_all_base_models(request, user=user)
     log.debug("[get_all_models] base_models_count=%s models=%s", len(models), models)
 
-    if len(models) == 0:
-        log.debug("[get_all_models] returning empty list, no base models found")
+    # If there are no base models and we will not add custom presets below, return early.
+    # Note: We still process custom_models even when models is empty, so presets can be
+    # added via the "infer pipe from base_model_id" path (e.g. when only preset is assigned).
+    custom_models = Models.get_all_models(user.id, user.email)
+    if len(models) == 0 and len(custom_models) == 0:
+        log.debug("[get_all_models] returning empty list (no base models, no custom models)")
         return []
 
     if request.app.state.config.ENABLE_EVALUATION_ARENA_MODELS:
@@ -227,7 +231,7 @@ async def get_all_models(request, user: UserModel = None):
         enabled_action_ids,
     )
 
-    custom_models = Models.get_all_models(user.id, user.email)
+    # custom_models already fetched above for early-return check
     log.debug(
         "[get_all_models] custom_models=%s custom_models_count=%s user_email=%s user_id=%s",
         custom_models,
@@ -275,6 +279,18 @@ async def get_all_models(request, user: UserModel = None):
                     if "pipe" in model:
                         pipe = model["pipe"]
                     break
+
+            # If base not in models (e.g. base pipe model hidden from user), infer pipe from
+            # base_model_id format (pipe_id.model_slug) when prefix matches a known pipe.
+            if pipe is None and custom_model.base_model_id:
+                bid = str(custom_model.base_model_id)
+                if "." in bid:
+                    pipe_id_prefix = bid.split(".", 1)[0]
+                    if any(
+                        f.id == pipe_id_prefix
+                        for f in Functions.get_functions_by_type("pipe", active_only=True)
+                    ):
+                        pipe = {"type": "pipe"}
 
             if custom_model.meta:
                 meta = custom_model.meta.model_dump()
