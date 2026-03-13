@@ -585,7 +585,7 @@ class PDFGenerator:
                 print("*"*20)
             t_wp0 = time.perf_counter()
             try:
-                pdf_bytes = self._render_with_timeout(html_full, timeout_sec=20.0)
+                pdf_bytes = self._render_with_timeout(html_full, timeout_sec=40.0)
             except TimeoutError:
                 if self.debug_pdf:
                     print("*"*20, "\nPDF: render timed out; returning error without retry\n", "*"*20)

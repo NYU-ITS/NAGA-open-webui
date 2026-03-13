@@ -1088,6 +1088,7 @@ async def export_chats_as_csv(
         for chat in chats:
             user_info = users_map.get(chat.user_id)
             member_name = user_info.name if user_info else f"User_{chat.user_id}"
+            member_email = user_info.email if user_info else ""
             model_name = chat.meta.get('model_name') or chat.meta.get('base_model_name') or 'Unknown'
 
             # Get messages for this chat
@@ -1095,7 +1096,15 @@ async def export_chats_as_csv(
             if not messages:
                 continue
 
-            # Extract user questions with timestamps
+            # assistant message parentId -> first assistant response
+            assistant_by_parent = {}
+            for msg_id, msg in messages.items():
+                if msg.get("role") == "assistant":
+                    parent_id = msg.get("parentId") or msg.get("parent_id")
+                    if parent_id and parent_id not in assistant_by_parent:
+                        assistant_by_parent[parent_id] = msg.get("content", "") or ""
+
+            # Extract user questions with timestamps and corresponding model response
             for message_id, message in messages.items():
                 if message.get('role') == 'user':
                     timestamp = message.get('timestamp', 0)
@@ -1107,12 +1116,15 @@ async def export_chats_as_csv(
                         human_timestamp = est_dt.strftime('%Y-%m-%d %I:%M:%S %p EST')
                     else:
                         human_timestamp = 'Unknown'
-                    
+                    model_response = assistant_by_parent.get(message_id, "")
+
                     csv_rows.append({
                         'member': member_name,
+                        'Email ID': member_email,
                         'model_name': model_name,
                         'chat_id': chat.id,
                         'question': message.get('content', ''),
+                        'Model Response': model_response,
                         'timestamp': human_timestamp
                     })
 
@@ -1124,7 +1136,7 @@ async def export_chats_as_csv(
 
         # Generate CSV
         output = StringIO()
-        fieldnames = ['member', 'model_name', 'chat_id', 'question', 'timestamp']
+        fieldnames = ['member', 'email_id', 'model_name', 'chat_id', 'question', 'model_response', 'timestamp']
         writer = csv.DictWriter(output, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(csv_rows)
@@ -1133,8 +1145,9 @@ async def export_chats_as_csv(
         output.close()
 
         # Create filename
+        group_name = group.name
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f"group-{form_data.group_id}-conversations-{timestamp}.csv"
+        filename = f"group-{group_name}-conversations-{timestamp}.csv"
 
         return Response(
             content=csv_content,
