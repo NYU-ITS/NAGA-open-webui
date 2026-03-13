@@ -21,6 +21,8 @@ import atexit
 
 from fastapi import Request
 
+from open_webui.utils.models import get_models_for_user
+
 from open_webui.env import RAG_THREAD_POOL_SIZE
 
 # Module-level ThreadPoolExecutor for RAG operations
@@ -737,10 +739,17 @@ def apply_params_to_form_data(form_data, model):
 
 
 async def process_chat_payload(request, form_data, metadata, user, model):
-
+    log.debug(
+        f"[DEBUG] [WS-CHAT 3] [inside process_chat_payload() from middleware.py] entry. user={user.email} (id={user.id}), "
+        f"model_id={model.get('id')}, chat_id={metadata.get('chat_id')}, session_id={metadata.get('session_id')}."
+    )
     form_data = apply_params_to_form_data(form_data, model)
     log.debug(f"form_data: {form_data}")
 
+    log.debug(
+        f"[DEBUG] [WS-CHAT 4] [inside process_chat_payload() from middleware.py] metadata before get_event_emitter: "
+        f"session_id={metadata.get('session_id')!r} chat_id={metadata.get('chat_id')!r} message_id={metadata.get('message_id')!r}."
+    )
     event_emitter = get_event_emitter(metadata)
     event_call = get_event_call(metadata)
 
@@ -765,7 +774,7 @@ async def process_chat_payload(request, form_data, metadata, user, model):
             request.state.model["id"]: request.state.model,
         }
     else:
-        models = request.app.state.MODELS
+        models = await get_models_for_user(request, user)
 
     task_model_id = get_task_model_id(
         form_data["model"],
@@ -825,6 +834,7 @@ async def process_chat_payload(request, form_data, metadata, user, model):
         form_data = await process_pipeline_inlet_filter(
             request, form_data, user, models
         )
+        log.debug("[DEBUG] [inside process_chat_payload() from middleware.py] process_pipeline_inlet_filter() returned.")
     except Exception as e:
         raise e
 
@@ -836,6 +846,7 @@ async def process_chat_payload(request, form_data, metadata, user, model):
             form_data=form_data,
             extra_params=extra_params,
         )
+        log.debug("[DEBUG] [inside process_chat_payload() from middleware.py] process_filter_functions(inlet) returned.")
     except Exception as e:
         raise Exception(f"Error: {e}")
 
@@ -991,6 +1002,12 @@ async def process_chat_payload(request, form_data, metadata, user, model):
 async def process_chat_response(
     request, response, form_data, user, events, metadata, tasks
 ):
+    pod_id = os.environ.get("HOSTNAME", "unknown")
+    is_stream = isinstance(response, StreamingResponse)
+    log.debug(
+        f"[DEBUG] [WS-CHAT 11] [inside process_chat_response() from middleware.py] entry. pod={pod_id}, user={user.email} (id={user.id}), "
+        f"chat_id={metadata.get('chat_id')}, message_id={metadata.get('message_id')}, session_id={metadata.get('session_id')}, is_stream={is_stream}."
+    )
     async def background_tasks_handler():
         message_map = Chats.get_messages_by_chat_id(metadata["chat_id"])
         message = message_map.get(metadata["message_id"]) if message_map else None
@@ -1000,9 +1017,7 @@ async def process_chat_response(
 
             if tasks and messages:
                 # Get available models and find Gemini Flash Lite before running tasks
-                from open_webui.utils.models import get_all_models
-                models_list = await get_all_models(request, user)
-                models = {model["id"]: model for model in models_list}
+                models = await get_models_for_user(request, user)
                 task_model_id = find_gemini_flash_lite_model(models)
                 
                 # If Gemini Flash Lite is not available, skip all background tasks
@@ -1118,6 +1133,16 @@ async def process_chat_response(
     ):
         event_emitter = get_event_emitter(metadata)
         event_caller = get_event_call(metadata)
+        log.debug(
+            f"[DEBUG] [WS-CHAT 12] [inside process_chat_response() from middleware.py] event_emitter/event_caller set for session_id={metadata.get('session_id')} "
+            f"(chat_id={metadata.get('chat_id')}). Responses will be emitted to this session from pod={pod_id}."
+        )
+    else:
+        log.debug(
+            f"[DEBUG] [WS-CHAT 13] [inside process_chat_response() from middleware.py] no valid session_id/chat_id/message_id in metadata; "
+            f"event_emitter will not be used (UI may not update until refresh). "
+            f"Actual values: session_id={metadata.get('session_id')!r} chat_id={metadata.get('chat_id')!r} message_id={metadata.get('message_id')!r}. (BROKE: no emitter.)"
+        )
 
     # Non-streaming response
     if not isinstance(response, StreamingResponse):
@@ -1135,7 +1160,9 @@ async def process_chat_response(
                 content = response["choices"][0]["message"]["content"]
 
                 if content:
-
+                    log.debug(
+                        f"[DEBUG] [WS-CHAT 16] [inside process_chat_response() from middleware.py] non-streaming: about to emit chat:completion to session_id={metadata.get('session_id')}."
+                    )
                     await event_emitter(
                         {
                             "type": "chat:completion",
@@ -1210,10 +1237,17 @@ async def process_chat_response(
     filter_ids = get_sorted_filter_ids(form_data.get("model"))
 
     # Streaming response
+    if not event_emitter:
+        log.debug(
+            "[DEBUG] [WS-CHAT 14] [inside process_chat_response() from middleware.py] streaming path: event_emitter is None; "
+            "will use fallback stream_wrapper without socket emit (UI may not update until refresh)."
+        )
     if event_emitter and event_caller:
         task_id = str(uuid4())  # Create a unique task ID.
         model_id = form_data.get("model", "")
-
+        log.debug(
+            f"[DEBUG] [WS-CHAT 15] [inside process_chat_response() from middleware.py] streaming path: persisting message to DB chat_id={metadata.get('chat_id')} message_id={metadata.get('message_id')} from pod={pod_id}."
+        )
         Chats.upsert_message_to_chat_by_id_and_message_id(
             metadata["chat_id"],
             metadata["message_id"],

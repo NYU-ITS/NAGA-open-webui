@@ -164,6 +164,8 @@ from open_webui.config import (
     AUDIO_TTS_AZURE_SPEECH_OUTPUT_FORMAT,
     AUDIO_STT_PORTKEY_API_BASE_URL,
     AUDIO_STT_PORTKEY_API_KEY,
+    AUDIO_STT_PROMPT,
+    AUDIO_STT_LANGUAGE,
     PLAYWRIGHT_WS_URI,
     FIRECRAWL_API_BASE_URL,
     FIRECRAWL_API_KEY,
@@ -323,6 +325,7 @@ from open_webui.config import (
     reset_config,
 )
 from open_webui.env import (
+    MODELS_CACHE_MAX_USERS,
     AUDIT_EXCLUDED_PATHS,
     AUDIT_LOG_LEVEL,
     CHANGELOG,
@@ -346,9 +349,12 @@ from open_webui.utils.katex_compiler import KaTeXCompiler
 
 
 from open_webui.utils.models import (
+    ModelsLRUCache,
     get_all_models,
     get_all_base_models,
+    get_models_for_user,
     check_model_access,
+    start_models_cache_invalidation_listener,
 )
 from open_webui.utils.chat import (
     generate_chat_completion as chat_completion_handler,
@@ -571,6 +577,8 @@ async def lifespan(app: FastAPI):
     ensure_tool_created_by_column()
     ensure_function_created_by_column()
     ensure_chat_group_id_column()
+    # Cross-pod models cache invalidation via Redis pub/sub
+    start_models_cache_invalidation_listener(app)
     # Cache KaTeX TTF fonts locally once on startup 
     try:
         compiler = KaTeXCompiler()
@@ -959,6 +967,8 @@ app.state.config.STT_ENGINE = AUDIO_STT_ENGINE
 app.state.config.STT_MODEL = AUDIO_STT_MODEL
 app.state.config.STT_PORTKEY_API_BASE_URL = AUDIO_STT_PORTKEY_API_BASE_URL
 app.state.config.STT_PORTKEY_API_KEY = AUDIO_STT_PORTKEY_API_KEY
+app.state.config.STT_PROMPT = AUDIO_STT_PROMPT
+app.state.config.STT_LANGUAGE = AUDIO_STT_LANGUAGE
 
 app.state.config.WHISPER_MODEL = WHISPER_MODEL
 app.state.config.DEEPGRAM_API_KEY = DEEPGRAM_API_KEY
@@ -1027,7 +1037,8 @@ app.state.config.AUTOCOMPLETE_GENERATION_INPUT_MAX_LENGTH = (
 #
 ########################################
 
-app.state.MODELS = {}
+app.state.MODELS_CACHE_MAX_USERS = MODELS_CACHE_MAX_USERS
+app.state.MODELS = ModelsLRUCache(maxsize=MODELS_CACHE_MAX_USERS)
 
 
 class RedirectMiddleware(BaseHTTPMiddleware):
@@ -1161,6 +1172,8 @@ if audit_level != AuditLevel.NONE:
 
 @app.get("/api/models")
 async def get_models(request: Request, user=Depends(get_verified_user)):
+    pod_id = os.environ.get("HOSTNAME", "unknown")
+    log.debug(f"[DEBUG] [inside get_models() from main.py] GET /api/models on pod={pod_id}, user={user.email} (id={user.id}).")
     def get_filtered_models(models, user):
         # Batch fetch all model info first
         model_ids = [model["id"] for model in models if not model.get("arena")]
@@ -1214,7 +1227,9 @@ async def get_models(request: Request, user=Depends(get_verified_user)):
 
         return filtered_models
 
-    models = await get_all_models(request, user=user)
+    models_list = await get_models_for_user(request, user)
+    models = list(models_list.values()) if isinstance(models_list, dict) else models_list
+    log.debug(f"[DEBUG] [inside get_models() from main.py] get_models_for_user() returned {len(models)} models.")
 
     # Filter out filter pipelines
     models = [
@@ -1234,6 +1249,7 @@ async def get_models(request: Request, user=Depends(get_verified_user)):
     # Filter out models that the user does not have access to
     if user.role == "user" and not BYPASS_MODEL_ACCESS_CONTROL:
         models = get_filtered_models(models, user)
+        log.debug(f"[DEBUG] [inside get_models() from main.py] get_filtered_models() applied; returning {len(models)} models to user.")
 
     log.debug(
         f"/api/models returned filtered models accessible to the user: {json.dumps([model['id'] for model in models])}"
@@ -1253,39 +1269,51 @@ async def chat_completion(
     form_data: dict,
     user=Depends(get_verified_user),
 ):
-    if not request.app.state.MODELS:
-        await get_all_models(request, user=user)
+    models = await get_models_for_user(request, user)
 
     model_item = form_data.pop("model_item", {})
     tasks = form_data.pop("background_tasks", None)
 
     try:
+        log.debug("Checking if the model_item is direct...")
         if not model_item.get("direct", False):
+            log.debug("The model_item is not direct!")
             model_id = form_data.get("model", None)
-            if model_id not in request.app.state.MODELS:
+            if model_id not in models:
                 raise Exception("Model not found")
 
-            model = request.app.state.MODELS[model_id]
+            model = models[model_id]
             model_info = Models.get_model_by_id(model_id)
 
             # Check if user has access to the model
             if not BYPASS_MODEL_ACCESS_CONTROL and user.role == "user":
                 try:
+                    log.debug("Checking if the user has access to the model...")
                     check_model_access(user, model)
+                    log.debug("The user has access to the model! So, we can proceed with the chat completion.")
                 except Exception as e:
+                    log.debug(f"The user does not have access to the model! So, we cannot proceed with the chat completion. The error is: {e}")
                     raise e
         else:
+            log.debug("The model_item is direct!")
             model = model_item
             model_info = None
 
             request.state.direct = True
             request.state.model = model
 
+        _session_id = form_data.pop("session_id", None)
+        _chat_id = form_data.pop("chat_id", None)
+        _message_id = form_data.pop("id", None)
+        log.debug(
+            f"[DEBUG] [WS-CHAT 2] [inside chat_completion() from main.py] extracted from form_data: session_id={_session_id!r} chat_id={_chat_id!r} message_id={_message_id!r}. "
+            f"(CRITICAL: if session_id is None, chat-events will not be emitted and UI will not update until refresh.)"
+        )
         metadata = {
             "user_id": user.id,
-            "chat_id": form_data.pop("chat_id", None),
-            "message_id": form_data.pop("id", None),
-            "session_id": form_data.pop("session_id", None),
+            "chat_id": _chat_id,
+            "message_id": _message_id,
+            "session_id": _session_id,
             "tool_ids": form_data.get("tool_ids", None),
             "files": form_data.get("files", None),
             "features": form_data.get("features", None),
@@ -1306,25 +1334,37 @@ async def chat_completion(
 
         request.state.metadata = metadata
         form_data["metadata"] = metadata
+        log.debug(
+            f"[DEBUG] [inside chat_completion() from main.py] The chat payload is processed! The metadata is: {metadata}."
+            f"The form_data is: {form_data}."
+            f"The user is: {user.email} and user_id is: {user.id}."
+            f"The model is: {model}."
+        )
 
+        log.debug("Processing the chat payload...")
         form_data, metadata, events = await process_chat_payload(
             request, form_data, metadata, user, model
         )
 
     except Exception as e:
         log.debug(f"Error processing chat payload: {e}")
+        log.debug(f"[DEBUG] [inside chat_completion() from main.py] The error is: {e}...... This will be returning a 400 bad request.")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
 
     try:
+        log.debug("Calling the chat completion handler...")
         response = await chat_completion_handler(request, form_data, user)
+        log.debug(f"[DEBUG] [inside chat_completion() from main.py] The chat completion handler returned the response: {response}. The inputs for chat_completion_handler() are: {request}, {form_data}, {user}.")
 
+        log.debug("Calling the process_chat_response()... this is defined in middleware.py")
         return await process_chat_response(
             request, response, form_data, user, events, metadata, tasks
         )
     except Exception as e:
+        log.debug(f"[DEBUG] [inside chat_completion() from main.py] The error is: {e}...... This will be returning a 400 bad request.")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),

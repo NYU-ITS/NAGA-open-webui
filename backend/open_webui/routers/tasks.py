@@ -18,6 +18,7 @@ from open_webui.utils.task import (
     get_task_model_id,
 )
 from open_webui.utils.auth import get_admin_user, get_verified_user
+from open_webui.utils.models import get_models_for_user
 from open_webui.constants import TASKS
 
 from open_webui.routers.pipelines import process_pipeline_inlet_filter
@@ -158,12 +159,7 @@ def user_has_access_to_task_model(user, models: dict) -> tuple[bool, Optional[st
 @router.get("/config")
 async def get_task_config(request: Request, user=Depends(get_verified_user)):
     # Get available models for the user
-    from open_webui.utils.models import get_all_models
-    models_list = await get_all_models(request, user)
-    
-    # Convert to dict for fast lookup (get_all_models returns a list)
-    # Also available at request.app.state.MODELS after the call
-    models = {model["id"]: model for model in models_list}
+    models = await get_models_for_user(request, user)
     
     # DEBUG: Log all available models to help identify correct Gemini model ID
     log.info(f"=== AVAILABLE MODELS FOR USER {user.email} ===")
@@ -249,11 +245,7 @@ async def update_task_config(
     request: Request, form_data: TaskConfigForm, user=Depends(get_admin_user)
 ):
     # Get available models for the admin user
-    from open_webui.utils.models import get_all_models
-    models_list = await get_all_models(request, user)
-    
-    # Convert to dict for fast lookup (get_all_models returns a list)
-    models = {model["id"]: model for model in models_list}
+    models = await get_models_for_user(request, user)
     
     # Check if user has access to the required Gemini 2.5 Flash Lite model
     has_task_model_access, found_model_id = user_has_access_to_task_model(user, models)
@@ -340,9 +332,7 @@ async def generate_title(
             request.state.model["id"]: request.state.model,
         }
     else:
-        from open_webui.utils.models import get_all_models
-        models_list = await get_all_models(request, user)
-        models = {model["id"]: model for model in models_list}
+        models = await get_models_for_user(request, user)
     
     # Check if user has access to the required Gemini 2.5 Flash Lite model
     has_access, _ = user_has_access_to_task_model(user, models)
@@ -448,9 +438,7 @@ async def generate_chat_tags(
             request.state.model["id"]: request.state.model,
         }
     else:
-        from open_webui.utils.models import get_all_models
-        models_list = await get_all_models(request, user)
-        models = {model["id"]: model for model in models_list}
+        models = await get_models_for_user(request, user)
     
     # Check if user has access to the required Gemini 2.5 Flash Lite model
     has_access, _ = user_has_access_to_task_model(user, models)
@@ -533,7 +521,7 @@ async def generate_image_prompt(
             request.state.model["id"]: request.state.model,
         }
     else:
-        models = request.app.state.MODELS
+        models = await get_models_for_user(request, user)
 
     model_id = form_data["model"]
     if model_id not in models:
@@ -606,9 +594,7 @@ async def generate_queries(
             request.state.model["id"]: request.state.model,
         }
     else:
-        from open_webui.utils.models import get_all_models
-        models_list = await get_all_models(request, user)
-        models = {model["id"]: model for model in models_list}
+        models = await get_models_for_user(request, user)
     
     # Check if user has access to the required Gemini 2.5 Flash Lite model
     has_access, _ = user_has_access_to_task_model(user, models)
@@ -699,9 +685,7 @@ async def generate_autocompletion(
             request.state.model["id"]: request.state.model,
         }
     else:
-        from open_webui.utils.models import get_all_models
-        models_list = await get_all_models(request, user)
-        models = {model["id"]: model for model in models_list}
+        models = await get_models_for_user(request, user)
     
     # Check if user has access to the required Gemini 2.5 Flash Lite model
     has_access, _ = user_has_access_to_task_model(user, models)
@@ -799,9 +783,7 @@ async def generate_emoji(
             request.state.model["id"]: request.state.model,
         }
     else:
-        from open_webui.utils.models import get_all_models
-        models_list = await get_all_models(request, user)
-        models = {model["id"]: model for model in models_list}
+        models = await get_models_for_user(request, user)
 
     # Find Gemini Flash Lite model directly (ignore chat model from form_data)
     task_model_id = find_gemini_flash_lite_model(models)
@@ -876,9 +858,7 @@ async def generate_moa_response(
             request.state.model["id"]: request.state.model,
         }
     else:
-        from open_webui.utils.models import get_all_models
-        models_list = await get_all_models(request, user)
-        models = {model["id"]: model for model in models_list}
+        models = await get_models_for_user(request, user)
 
     # Find Gemini Flash Lite model directly (ignore chat model from form_data)
     task_model_id = find_gemini_flash_lite_model(models)

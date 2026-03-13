@@ -38,12 +38,75 @@
 	let TTS_AZURE_SPEECH_REGION = '';
 	let TTS_AZURE_SPEECH_OUTPUT_FORMAT = '';
 
-	// German language options for Portkey TTS
-	const germanLanguages = {
-		'de-AT': 'de-AT—German (Austria)',
-		'de-CH': 'de-CH—German (Switzerland)',
-		'de-DE': 'de-DE—German (Germany)'
-	};
+	// Language options for Portkey TTS/STT
+	const languageOptions = [
+		'Afrikaans',
+		'Arabic',
+		'Armenian',
+		'Azerbaijani',
+		'Belarusian',
+		'Bosnian',
+		'Bulgarian',
+		'Catalan',
+		'Chinese',
+		'Croatian',
+		'Czech',
+		'Danish',
+		'Dutch',
+		'English',
+		'Estonian',
+		'Finnish',
+		'French',
+		'Galician',
+		'German',
+		'Greek',
+		'Hebrew',
+		'Hindi',
+		'Hungarian',
+		'Icelandic',
+		'Indonesian',
+		'Italian',
+		'Japanese',
+		'Kannada',
+		'Kazakh',
+		'Korean',
+		'Latvian',
+		'Lithuanian',
+		'Macedonian',
+		'Malay',
+		'Marathi',
+		'Maori',
+		'Nepali',
+		'Norwegian',
+		'Persian',
+		'Polish',
+		'Portuguese',
+		'Romanian',
+		'Russian',
+		'Serbian',
+		'Slovak',
+		'Slovenian',
+		'Spanish',
+		'Swahili',
+		'Swedish',
+		'Tagalog',
+		'Tamil',
+		'Thai',
+		'Turkish',
+		'Ukrainian',
+		'Urdu',
+		'Vietnamese',
+		'Welsh'
+	];
+
+	// TTS Audio Voice options (passed exactly to API)
+	const ttsAudioVoiceOptions = [
+		'alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer', 'coral', 'verse', 'ballad',
+		'ash', 'sage', 'marin', 'cedar', 'amuch', 'aster', 'brook', 'clover', 'dan',
+		'elan', 'marilyn', 'meadow', 'jazz', 'rio', 'breeze', 'cove', 'ember', 'fathom',
+		'glimmer', 'harp', 'juniper', 'maple', 'orbit', 'vale',
+		'megan-wetherall', 'jade-hardy', 'megan-wetherall-2025-03-07', 'jade-hardy-2025-03-07'
+	];
 
 	let STT_OPENAI_API_BASE_URL = '';
 	let STT_OPENAI_API_KEY = '';
@@ -51,6 +114,8 @@
 	let STT_PORTKEY_API_KEY = '';
 	let STT_ENGINE = '';
 	let STT_MODEL = '';
+	let STT_LANGUAGE = '';
+	let STT_PROMPT = '';
 	let STT_WHISPER_MODEL = '';
 	let STT_DEEPGRAM_API_KEY = '';
 
@@ -62,8 +127,9 @@
 		if (target?.value === 'portkey') {
 			STT_PORTKEY_API_BASE_URL = 'https://ai-gateway.apps.cloud.rt.nyu.edu/v1';
 			if (!STT_MODEL) {
-				STT_MODEL = '@openai-4o-mini-audio/gpt-4o-mini-audio-preview';
+				STT_MODEL = '@gpt-4o-mini-transcribe/gpt-4o-mini-transcribe';
 			}
+			if (!STT_LANGUAGE) STT_LANGUAGE = 'German';
 		}
 	};
 
@@ -75,17 +141,12 @@
 		if (target?.value === 'openai') {
 			if (!TTS_VOICE) TTS_VOICE = 'alloy';
 			if (!TTS_MODEL) TTS_MODEL = 'tts-1';
-	} else if (target?.value === 'portkey') {
-		TTS_PORTKEY_API_BASE_URL = 'https://ai-gateway.apps.cloud.rt.nyu.edu/v1';
-		if (!TTS_LANGUAGE) TTS_LANGUAGE = 'de-DE';
-		if (!TTS_AUDIO_VOICE) TTS_AUDIO_VOICE = 'alloy';
-		if (!TTS_MODEL) TTS_MODEL = '@openai-4o-mini-audio/gpt-4o-mini-audio-preview';
-	}
-	};
-
-	// Handler for language change
-	const handleLanguageChange = () => {
-		// Language changed - no action needed as we're not using voice dropdown anymore
+		} else if (target?.value === 'portkey') {
+			TTS_PORTKEY_API_BASE_URL = 'https://ai-gateway.apps.cloud.rt.nyu.edu/v1';
+			if (!TTS_LANGUAGE) TTS_LANGUAGE = 'German';
+			if (!TTS_AUDIO_VOICE) TTS_AUDIO_VOICE = 'alloy';
+			if (!TTS_MODEL) TTS_MODEL = '@gpt-4o-mini-tts/gpt-4o-mini-tts';
+		}
 	};
 
 	// eslint-disable-next-line no-undef
@@ -148,16 +209,18 @@
 			AZURE_SPEECH_REGION: TTS_AZURE_SPEECH_REGION,
 			AZURE_SPEECH_OUTPUT_FORMAT: TTS_AZURE_SPEECH_OUTPUT_FORMAT
 		},
-			stt: {
-				OPENAI_API_BASE_URL: STT_OPENAI_API_BASE_URL,
-				OPENAI_API_KEY: STT_OPENAI_API_KEY,
-				PORTKEY_API_BASE_URL: STT_PORTKEY_API_BASE_URL,
-				PORTKEY_API_KEY: STT_PORTKEY_API_KEY,
-				ENGINE: STT_ENGINE,
-				MODEL: STT_MODEL,
-				WHISPER_MODEL: STT_WHISPER_MODEL,
-				DEEPGRAM_API_KEY: STT_DEEPGRAM_API_KEY
-			}
+		stt: {
+			OPENAI_API_BASE_URL: STT_OPENAI_API_BASE_URL,
+			OPENAI_API_KEY: STT_OPENAI_API_KEY,
+			PORTKEY_API_BASE_URL: STT_PORTKEY_API_BASE_URL,
+			PORTKEY_API_KEY: STT_PORTKEY_API_KEY,
+			ENGINE: STT_ENGINE,
+			MODEL: STT_MODEL,
+			LANGUAGE: STT_LANGUAGE,
+			PROMPT: STT_PROMPT,
+			WHISPER_MODEL: STT_WHISPER_MODEL,
+			DEEPGRAM_API_KEY: STT_DEEPGRAM_API_KEY
+		}
 		});
 
 		if (res) {
@@ -186,7 +249,7 @@
 		TTS_ENGINE = res.tts.ENGINE;
 		TTS_MODEL = res.tts.MODEL;
 		TTS_VOICE = res.tts.VOICE;
-		TTS_LANGUAGE = res.tts.LANGUAGE ?? 'de-DE';
+		TTS_LANGUAGE = res.tts.LANGUAGE ?? 'German';
 		TTS_AUDIO_VOICE = res.tts.AUDIO_VOICE ?? 'alloy';
 
 		TTS_SPLIT_ON = res.tts.SPLIT_ON || TTS_RESPONSE_SPLIT.PUNCTUATION;
@@ -199,10 +262,12 @@
 			STT_PORTKEY_API_BASE_URL = res.stt.PORTKEY_API_BASE_URL ?? 'https://ai-gateway.apps.cloud.rt.nyu.edu/v1';
 			STT_PORTKEY_API_KEY = res.stt.PORTKEY_API_KEY ?? '';
 
-			STT_ENGINE = res.stt.ENGINE;
-			STT_MODEL = res.stt.MODEL;
-			STT_WHISPER_MODEL = res.stt.WHISPER_MODEL;
-			STT_DEEPGRAM_API_KEY = res.stt.DEEPGRAM_API_KEY;
+		STT_ENGINE = res.stt.ENGINE;
+		STT_MODEL = res.stt.MODEL;
+		STT_LANGUAGE = res.stt.LANGUAGE ?? 'German';
+		STT_PROMPT = res.stt.PROMPT ?? '';
+		STT_WHISPER_MODEL = res.stt.WHISPER_MODEL;
+		STT_DEEPGRAM_API_KEY = res.stt.DEEPGRAM_API_KEY;
 		}
 
 		await getVoices();
@@ -319,7 +384,26 @@
 						</div>
 					</div>
 
-					<hr class="border-gray-100 dark:border-gray-850 my-2" />
+			<hr class="border-gray-100 dark:border-gray-850 my-2" />
+
+			<div class="flex flex-col gap-3">
+					<!-- Language Selection -->
+					<div class="w-full">
+						<div class=" mb-1.5 text-sm font-medium">Language</div>
+						<div class="flex w-full">
+							<div class="flex-1">
+								<select
+									class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									bind:value={STT_LANGUAGE}
+									aria-label="STT Language"
+								>
+									{#each languageOptions as lang}
+										<option value={lang}>{lang}</option>
+									{/each}
+								</select>
+							</div>
+						</div>
+					</div>
 
 					<div>
 						<div class=" mb-1.5 text-sm font-medium">{$i18n.t('STT Model')}</div>
@@ -328,15 +412,33 @@
 								<input
 									class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
 									bind:value={STT_MODEL}
-									placeholder="gpt-4o-audio-preview-2025-06-03"
+									placeholder="@gpt-4o-mini-transcribe/gpt-4o-mini-transcribe"
 								/>
 							</div>
 						</div>
-						<div class="mt-2 mb-1 text-xs text-gray-600 dark:text-gray-500">
-							<a class=" hover:underline dark:text-gray-200 text-gray-800" href="https://portkey.ai" target="_blank" rel="noreferrer">Portkey website</a>
+					</div>
+
+					<div>
+						<div class=" mb-1.5 text-sm font-medium">{$i18n.t('Transcription Prompt')} ({$i18n.t('Optional')})</div>
+						<div class="flex w-full">
+							<div class="flex-1">
+								<input
+									class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									bind:value={STT_PROMPT}
+									placeholder="Preserve every word, filler, hesitation, and punctuation exactly as spoken."
+								/>
+							</div>
+						</div>
+						<div class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+							This prompt will be prepended with the selected language. Leave blank to use the language hint only.
 						</div>
 					</div>
-				{:else if STT_ENGINE === ''}
+
+					<div class="text-xs text-gray-600 dark:text-gray-500">
+						<a class=" hover:underline dark:text-gray-200 text-gray-800" href="https://portkey.ai" target="_blank" rel="noreferrer">Portkey website</a>
+					</div>
+				</div>
+			{:else if STT_ENGINE === ''}
 					<div>
 						<div class=" mb-1.5 text-sm font-medium">{$i18n.t('STT Model')}</div>
 
@@ -611,28 +713,27 @@
 							</div>
 						</div>
 					</div>
-				{:else if TTS_ENGINE === 'portkey'}
-					<div class=" flex flex-col gap-3">
-						<!-- Language Selection -->
-						<div class="w-full">
-							<div class=" mb-1.5 text-sm font-medium">Language</div>
-							<div class="flex w-full">
-								<div class="flex-1">
-									<select
-										class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
-										bind:value={TTS_LANGUAGE}
-										on:change={handleLanguageChange}
-										aria-label="TTS Language"
-									>
-										{#each Object.entries(germanLanguages) as [code, name]}
-											<option value={code}>{name}</option>
-										{/each}
-									</select>
-								</div>
+			{:else if TTS_ENGINE === 'portkey'}
+				<div class=" flex flex-col gap-3">
+					<!-- Language Selection -->
+					<div class="w-full">
+						<div class=" mb-1.5 text-sm font-medium">Language</div>
+						<div class="flex w-full">
+							<div class="flex-1">
+								<select
+									class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									bind:value={TTS_LANGUAGE}
+									aria-label="TTS Language"
+								>
+									{#each languageOptions as lang}
+										<option value={lang}>{lang}</option>
+									{/each}
+								</select>
 							</div>
 						</div>
+					</div>
 
-					<!-- Audio Voice (alloy/echo/shimmer) -->
+					<!-- Audio Voice -->
 					<div class="w-full">
 						<div class=" mb-1.5 text-sm font-medium">Audio Voice</div>
 						<div class="flex w-full">
@@ -642,9 +743,9 @@
 									bind:value={TTS_AUDIO_VOICE}
 									aria-label="TTS Audio Voice"
 								>
-									<option value="alloy">Alloy</option>
-									<option value="echo">Echo</option>
-									<option value="shimmer">Shimmer</option>
+									{#each ttsAudioVoiceOptions as voice}
+										<option value={voice}>{voice}</option>
+									{/each}
 								</select>
 							</div>
 						</div>
@@ -652,21 +753,22 @@
 
 					<!-- Model -->
 					<div class="w-full">
-							<div class=" mb-1.5 text-sm font-medium">{$i18n.t('TTS Model')}</div>
-							<div class="flex w-full">
-								<div class="flex-1">
-									<input
-										class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
-										bind:value={TTS_MODEL}
-										placeholder="@openai-4o-mini-audio/gpt-4o-mini-audio-preview"
-									/>
-								</div>
+						<div class=" mb-1.5 text-sm font-medium">{$i18n.t('TTS Model')}</div>
+						<div class="flex w-full">
+							<div class="flex-1">
+								<input
+									class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									bind:value={TTS_MODEL}
+									placeholder="@gpt-4o-mini-tts/gpt-4o-mini-tts"
+								/>
 							</div>
 						</div>
 					</div>
-					<div class="mt-2 mb-1 text-xs text-gray-600 dark:text-gray-500">
+
+					<div class="text-xs text-gray-600 dark:text-gray-500">
 						<a class=" hover:underline dark:text-gray-200 text-gray-800" href="https://portkey.ai" target="_blank" rel="noreferrer">Portkey website</a>
 					</div>
+				</div>
 				{:else if TTS_ENGINE === 'elevenlabs'}
 					<div class=" flex gap-2">
 						<div class="w-full">
