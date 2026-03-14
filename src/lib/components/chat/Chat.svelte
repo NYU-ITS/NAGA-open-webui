@@ -135,6 +135,25 @@
 	let chatFiles = [];
 	let files = [];
 	let params = {};
+	let paneReady = false;
+	let lastPaneOpenState: boolean | null = null;
+
+	$: paneReady = !!controlPane && !!controlPaneComponent && !$mobile;
+
+	$: if (paneReady && $showControls !== lastPaneOpenState) {
+		try {
+			if ($showControls) {
+				console.log('[Chat] reactive open control pane');
+				controlPaneComponent.openPane();
+			} else if (controlPane.isExpanded?.()) {
+				console.log('[Chat] reactive collapse control pane');
+				controlPane.collapse();
+			}
+			lastPaneOpenState = $showControls;
+		} catch (e) {
+			console.error('[Chat] reactive pane toggle failed', e);
+		}
+	}
 
 	$: if (chatIdProp) {
 		(async () => {
@@ -427,17 +446,12 @@
 		}
 
 		showControls.subscribe(async (value) => {
-			if (controlPane && !$mobile) {
-				try {
-					if (value) {
-						controlPaneComponent.openPane();
-					} else {
-						controlPane.collapse();
-					}
-				} catch (e) {
-					// ignore
-				}
-			}
+			console.log('[Chat] showControls changed', {
+				value,
+				hasControlPane: !!controlPane,
+				hasControlPaneComponent: !!controlPaneComponent,
+				mobile: $mobile
+			});
 
 			if (!value) {
 				showCallOverlay.set(false);

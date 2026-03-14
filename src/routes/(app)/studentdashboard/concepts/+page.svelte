@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
+	import { TEMP_HIDE } from '$lib/constants';
 
 	onMount(() => {
 		console.log('Student Dashboard - Concepts loaded');
@@ -8,7 +9,7 @@
 		// Check if there's a topic in URL query params
 		const urlParams = new URLSearchParams(window.location.search);
 		const topicParam = urlParams.get('topic');
-		if (topicParam) {
+		if (topicParam && !TEMP_HIDE) {
 			selectedConcepts.add(topicParam);
 			selectedConcepts = selectedConcepts;
 		}
@@ -16,6 +17,16 @@
 
 	let selectedConcepts: Set<string> = new Set();
 	let selectedHomework = 'All'; // This should sync with parent layout
+	const followUpQuestions = [
+		{ homework: 'Homework 1', status: 'Not Ready' },
+		{ homework: 'Homework 2', status: 'Not Completed' },
+		{ homework: 'Homework 3', status: 'Completed' },
+		{ homework: 'Homework 4', status: 'Not Ready' },
+		{ homework: 'Homework 5', status: 'Not Completed' },
+		{ homework: 'Homework 6', status: 'Completed' },
+		{ homework: 'Homework 7', status: 'Not Ready' },
+		{ homework: 'Homework 8', status: 'Not Completed' }
+	];
 
 	// Sample concepts data - topics from homework
 	const conceptsData = [
@@ -108,6 +119,8 @@
 	);
 
 	function selectConcept(conceptName: string) {
+		if (TEMP_HIDE) return;
+
 		if (selectedConcepts.has(conceptName)) {
 			selectedConcepts.delete(conceptName);
 		} else {
@@ -172,38 +185,89 @@
 </script>
 
 <div class="flex flex-col space-y-6 py-4">
-	<!-- Selection Buttons -->
-	<div class="flex items-center justify-between">
-		<div class="flex items-center gap-1">
-			<button
-				on:click={selectAllUnfinished}
-				class="px-4 py-2 text-sm font-medium text-gray-600 dark:text-gray-400 hover:text-[#57068c] dark:hover:text-white rounded-lg transition"
-			>
-				Select All Unfinished
-			</button>
-			<button
-				on:click={selectAll}
-				class="px-4 py-2 text-sm font-medium text-gray-600 dark:text-gray-400 hover:text-[#57068c] dark:hover:text-white rounded-lg transition"
-			>
-				Select All
-			</button>
-			<button
-				on:click={unselectAll}
-				class="px-4 py-2 text-sm font-medium text-gray-600 dark:text-gray-400 hover:text-[#57068c] dark:hover:text-white rounded-lg transition"
-			>
-				Unselect All
-			</button>
-		</div>
+	{#if !TEMP_HIDE}
+		<div class="space-y-3">
+			<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Follow Up Questions</h2>
 
-		{#if selectedConcepts.size > 0}
-			<button
-				on:click={handleGenerate}
-				class="px-6 py-2 text-sm font-medium text-[#57068c] dark:text-white hover:text-purple-700 dark:hover:text-gray-200 rounded-lg transition"
-			>
-				Generate ({selectedConcepts.size})
-			</button>
-		{/if}
-	</div>
+			<div class="overflow-x-auto rounded-lg border border-gray-200 dark:border-gray-700">
+				<table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+					<thead class="bg-gray-50 dark:bg-gray-800">
+						<tr>
+							<th
+								class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider"
+							>
+								Homework
+							</th>
+							<th
+								class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider"
+							>
+								Status
+							</th>
+						</tr>
+					</thead>
+					<tbody class="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
+						{#each followUpQuestions as item}
+							<tr class="hover:bg-gray-50 dark:hover:bg-gray-800 transition">
+								<td class="px-6 py-4 text-sm font-medium text-gray-900 dark:text-gray-100">
+									{item.homework}
+								</td>
+								<td class="px-6 py-4 text-sm">
+									<span
+										class="inline-flex rounded-full px-2.5 py-1 text-xs font-medium
+										{item.status === 'Completed'
+											? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300'
+											: item.status === 'Not Completed'
+												? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-300'
+												: 'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300'}"
+									>
+										{item.status}
+									</span>
+								</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
+		</div>
+	{/if}
+
+	<div class="space-y-4">
+		<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Practice Questions</h2>
+
+	{#if !TEMP_HIDE}
+		<!-- Selection Buttons -->
+		<div class="flex items-center justify-between">
+			<div class="flex items-center gap-1">
+				<button
+					on:click={selectAllUnfinished}
+					class="px-4 py-2 text-sm font-medium text-gray-600 dark:text-gray-400 hover:text-[#57068c] dark:hover:text-white rounded-lg transition"
+				>
+					Select All Unfinished
+				</button>
+				<button
+					on:click={selectAll}
+					class="px-4 py-2 text-sm font-medium text-gray-600 dark:text-gray-400 hover:text-[#57068c] dark:hover:text-white rounded-lg transition"
+				>
+					Select All
+				</button>
+				<button
+					on:click={unselectAll}
+					class="px-4 py-2 text-sm font-medium text-gray-600 dark:text-gray-400 hover:text-[#57068c] dark:hover:text-white rounded-lg transition"
+				>
+					Unselect All
+				</button>
+			</div>
+
+			{#if selectedConcepts.size > 0}
+				<button
+					on:click={handleGenerate}
+					class="px-6 py-2 text-sm font-medium text-[#57068c] dark:text-white hover:text-purple-700 dark:hover:text-gray-200 rounded-lg transition"
+				>
+					Generate ({selectedConcepts.size})
+				</button>
+			{/if}
+		</div>
+	{/if}
 
 	<!-- Concept Cards Grid -->
 	<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -213,6 +277,7 @@
 				class="text-left p-4 rounded-lg border transition {selectedConcepts.has(concept.name)
 					? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20'
 					: 'border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 hover:border-gray-300 dark:hover:border-gray-600'}"
+				disabled={TEMP_HIDE}
 			>
 				<h3 class="text-base font-semibold text-gray-900 dark:text-gray-100 mb-2">
 					{concept.name}
@@ -268,5 +333,6 @@
 				<path stroke-linecap="round" stroke-linejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
 			</svg>
 		</button>
+	</div>
 	</div>
 </div>

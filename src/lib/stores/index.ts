@@ -72,6 +72,7 @@ export const showOverview = writable(false);
 export const showArtifacts = writable(false);
 export const showCallOverlay = writable(false);
 export const showFacilitiesOverlay = writable(false);
+export const showRightsideQuestions = writable(false);
 
 export const temporaryChatEnabled = writable(false);
 export const scrollPaginationEnabled = writable(false);

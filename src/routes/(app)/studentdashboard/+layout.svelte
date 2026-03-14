@@ -1,8 +1,8 @@
 <script lang="ts">
-	import { onMount, getContext } from 'svelte';
-	import { WEBUI_NAME, showSidebar, user, mobile } from '$lib/stores';
-	import { page } from '$app/stores';
-	import { goto } from '$app/navigation';
+import { onMount, getContext } from 'svelte';
+import { WEBUI_NAME, showSidebar, user, mobile } from '$lib/stores';
+import { page } from '$app/stores';
+import { goto } from '$app/navigation';
 	import { checkIfSuperAdmin } from '$lib/apis/users';
 	import { getGroups } from '$lib/apis/groups';
 
@@ -19,6 +19,7 @@
 	let createdGroups = [];
 	let memberGroups = [];
 	let allUserGroups = [];
+	let searchTopic = '';
 
 	let selectedHomework = 'All';
 	const homeworkOptions = [
@@ -31,6 +32,24 @@
 		'Homework 6',
 		'Homework 7'
 	];
+	const homeworkTopicMap = {
+		'Homework 1': ['Linear Algebra', 'Differentiation', 'Integration', 'Limit Definition'],
+		'Homework 2': ['Quadratic Equations', 'Polynomials', 'Factoring', 'Complex Numbers'],
+		'Homework 3': ['Trigonometry', 'Unit Circle', 'Trigonometric Identities', 'Inverse Functions'],
+		'Homework 4': ['Derivatives', 'Chain Rule', 'Product Rule', 'Quotient Rule'],
+		'Homework 5': ['Integrals', 'Substitution', 'Integration by Parts', 'Partial Fractions'],
+		'Homework 6': ['Matrices', 'Determinants', 'Vectors'],
+		'Homework 7': ['Sequences', 'Series', 'Convergence']
+	};
+
+	$: filteredHomeworkOptions = homeworkOptions.filter((option) => {
+		if (option === 'All' || searchTopic.trim() === '') {
+			return true;
+		}
+
+		const query = searchTopic.trim().toLowerCase();
+		return (homeworkTopicMap[option] ?? []).some((topic) => topic.toLowerCase().includes(query));
+	});
 
 	onMount(async () => {
 		loaded = true;
@@ -62,6 +81,9 @@
 				console.error('Error loading groups:', error);
 			}
 		}
+
+		selectedHomework = $page.url.searchParams.get('homework') || 'All';
+		searchTopic = $page.url.searchParams.get('topic') || '';
 	});
 
 	function toggleIdentityPopover() {
@@ -86,6 +108,29 @@
 
 	function closeHomeworkDropdown() {
 		showHomeworkDropdown = false;
+	}
+
+	async function updateDashboardFilters(nextHomework = selectedHomework, nextTopic = searchTopic) {
+		const params = new URLSearchParams($page.url.searchParams);
+
+		if (!nextHomework || nextHomework === 'All') {
+			params.delete('homework');
+		} else {
+			params.set('homework', nextHomework);
+		}
+
+		if (!nextTopic || nextTopic.trim() === '') {
+			params.delete('topic');
+		} else {
+			params.set('topic', nextTopic.trim());
+		}
+
+		const query = params.toString();
+		await goto(`${$page.url.pathname}${query ? `?${query}` : ''}`, {
+			keepFocus: true,
+			noScroll: true,
+			replaceState: true
+		});
 	}
 </script>
 
@@ -125,19 +170,26 @@
 						<div class="relative">
 							<button
 								on:click={toggleGroupDropdown}
-								class="flex items-center gap-2 text-lg font-semibold text-gray-800 dark:text-gray-200 hover:text-gray-600 dark:hover:text-gray-400 transition"
+								class="flex items-start text-left hover:text-gray-600 dark:hover:text-gray-400 transition"
 							>
-								<span>MATH-I – InstructorName – CourseCode - Section - Course Name Spring 2026</span>
-								<svg
-									xmlns="http://www.w3.org/2000/svg"
-									fill="none"
-									viewBox="0 0 24 24"
-									stroke-width="2"
-									stroke="currentColor"
-									class="w-5 h-5"
-								>
-									<path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
-								</svg>
+								<div class="flex flex-col">
+									<span class="text-lg font-semibold text-gray-800 dark:text-gray-200">
+										{$user?.name || 'Student Name'}
+									</span>
+									<div class="flex items-center gap-1 text-sm font-medium text-gray-500 dark:text-gray-400">
+										<span>MATH-I - InstructorName - CourseCode - Section - Course Name Spring 2026</span>
+										<svg
+											xmlns="http://www.w3.org/2000/svg"
+											fill="none"
+											viewBox="0 0 24 24"
+											stroke-width="2"
+											stroke="currentColor"
+											class="w-4 h-4 shrink-0"
+										>
+											<path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
+										</svg>
+									</div>
+								</div>
 							</button>
 
 							<!-- Group Dropdown -->
@@ -308,44 +360,63 @@
 					</div>
 
 					<!-- Homework Dropdown (on new line) -->
-					<div class="relative px-2 mt-2">
-						<button
-							on:click={toggleHomeworkDropdown}
-							class="flex items-center justify-between w-80 px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition"
-						>
-							<span>{selectedHomework}</span>
-							<svg
-								xmlns="http://www.w3.org/2000/svg"
-								fill="none"
-								viewBox="0 0 24 24"
-								stroke-width="2"
-								stroke="currentColor"
-								class="w-4 h-4"
-							>
-								<path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
-							</svg>
-						</button>
+					<div class="px-2 mt-2 flex flex-col gap-2 sm:flex-row sm:items-center">
+						<div class="relative w-full sm:w-80">
+							<input
+								bind:value={searchTopic}
+								on:input={() => {
+									updateDashboardFilters(selectedHomework, searchTopic);
+								}}
+								class="w-full px-4 py-2 text-sm text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-1 focus:ring-[#57068c]"
+								placeholder="Search topics"
+							/>
+						</div>
 
-						<!-- Homework Dropdown Menu -->
-						{#if showHomeworkDropdown}
-							<div
-								class="absolute left-2 mt-2 w-80 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg py-1"
-								style="z-index: 9999;"
-								on:mouseleave={closeHomeworkDropdown}
+						<div class="relative w-full sm:w-80">
+							<button
+								on:click={toggleHomeworkDropdown}
+								class="flex items-center justify-between w-full px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition"
 							>
-								{#each homeworkOptions as option}
-									<button
-										on:click={() => {
-											selectedHomework = option;
-											closeHomeworkDropdown();
-										}}
-										class="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
-									>
-										{option}
-									</button>
-								{/each}
-							</div>
-						{/if}
+								<span>{selectedHomework}</span>
+								<svg
+									xmlns="http://www.w3.org/2000/svg"
+									fill="none"
+									viewBox="0 0 24 24"
+									stroke-width="2"
+									stroke="currentColor"
+									class="w-4 h-4"
+								>
+									<path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
+								</svg>
+							</button>
+
+							<!-- Homework Dropdown Menu -->
+							{#if showHomeworkDropdown}
+								<div
+									class="absolute left-0 mt-2 w-full bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg py-1"
+									style="z-index: 9999;"
+									on:mouseleave={closeHomeworkDropdown}
+								>
+									{#each filteredHomeworkOptions as option}
+										<button
+											on:click={() => {
+												selectedHomework = option;
+												updateDashboardFilters(option, searchTopic);
+												closeHomeworkDropdown();
+											}}
+											class="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
+										>
+											{option}
+										</button>
+									{/each}
+									{#if filteredHomeworkOptions.length === 0}
+										<div class="px-4 py-2 text-sm text-gray-500 dark:text-gray-400">
+											No homework matches that topic
+										</div>
+									{/if}
+								</div>
+							{/if}
+						</div>
 					</div>
 				</div>
 			</div>

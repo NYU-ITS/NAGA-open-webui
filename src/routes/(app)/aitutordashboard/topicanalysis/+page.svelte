@@ -241,6 +241,18 @@
 		showEditModal = true;
 	}
 
+	function getTopicDisplayErrorTypes(errorTypes) {
+		if (errorTypes?.length) {
+			return errorTypes;
+		}
+
+		if (displayErrorTypes.length) {
+			return displayErrorTypes;
+		}
+
+		return [];
+	}
+
 	function closeModal() {
 		showEditModal = false;
 		editingIndex = null;
@@ -501,12 +513,21 @@
 									</div>
 								</div>
 								<div class="flex-shrink-0 px-4 py-3" style="width: 70%;">
-									{#if displayErrorTypes.length === 0}
-										<span class="text-xs text-gray-400 dark:text-gray-500 italic">No error types defined</span>
+									{#if getTopicDisplayErrorTypes(topic.errorTypes).length === 0}
+										<div class="flex items-center gap-2">
+											<span class="text-xs text-gray-400 dark:text-gray-500 italic">
+												No error types defined, please define error types
+											</span>
+											<button
+												class="flex items-center justify-center w-4 h-4 rounded-full bg-gray-200 hover:bg-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-600 dark:text-gray-300 leading-none text-base"
+												on:click|stopPropagation={addErrorType}
+												title="Add error type"
+											>+</button>
+										</div>
 									{:else}
 										<!-- Stacked Bar Chart -->
 										<div class="flex h-5 rounded overflow-hidden w-full">
-											{#each displayErrorTypes as errorType}
+											{#each getTopicDisplayErrorTypes(topic.errorTypes) as errorType}
 												<div
 													style="width: {errorType.percentage}%; background-color: {errorType.color};"
 													title="{errorType.type}: {errorType.percentage}%"
@@ -515,7 +536,7 @@
 										</div>
 										<!-- Labels below bar -->
 										<div class="flex w-full mt-1">
-											{#each displayErrorTypes as errorType}
+											{#each getTopicDisplayErrorTypes(topic.errorTypes) as errorType}
 												<div class="overflow-hidden" style="width: {errorType.percentage}%;">
 													{#if errorType.percentage >= 8}
 														<span class="text-xs text-gray-600 dark:text-gray-400 block truncate leading-tight">

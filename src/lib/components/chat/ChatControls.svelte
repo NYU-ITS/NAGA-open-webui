@@ -4,12 +4,13 @@
 	import { Pane, PaneResizer } from 'paneforge';
 
 	import { onDestroy, onMount, tick } from 'svelte';
-	import { mobile, showControls, showCallOverlay, showOverview, showArtifacts, showFacilitiesOverlay } from '$lib/stores';
+	import { mobile, showControls, showCallOverlay, showOverview, showArtifacts, showFacilitiesOverlay, showRightsideQuestions } from '$lib/stores';
 
 	import Modal from '../common/Modal.svelte';
 	import Controls from './Controls/Controls.svelte';
 	import CallOverlay from './MessageInput/CallOverlay.svelte';
 	import FacilitiesOverlay from './MessageInput/FacilitiesOverlay.svelte';
+	import RightsideQuestions from './MessageInput/RightsideQuestions.svelte';
 	import Drawer from '../common/Drawer.svelte';
 	import Overview from './Overview.svelte';
 	import EllipsisVertical from '../icons/EllipsisVertical.svelte';
@@ -39,6 +40,7 @@
 	let mediaQuery;
 	let largeScreen = false;
 	let dragged = false;
+	let lastDesktopOpenState: boolean | null = null;
 
 	let minSize = 0;
 
@@ -125,16 +127,41 @@
 	});
 
 	const closeHandler = () => {
+		console.log('[ChatControls] closeHandler');
 		showControls.set(false);
 		showOverview.set(false);
 		showArtifacts.set(false);
+		showRightsideQuestions.set(false);
 
 		if ($showCallOverlay) {
 			showCallOverlay.set(false);
 		}
 	};
 
-	$: if (!chatId) {
+	$: if (largeScreen && pane && $showControls !== lastDesktopOpenState) {
+		try {
+			if ($showControls) {
+				console.log('[ChatControls] reactive desktop open', {
+					minSize,
+					stored: parseInt(localStorage?.chatControlsSize)
+				});
+				openPane();
+			} else if (pane.isExpanded?.()) {
+				console.log('[ChatControls] reactive desktop collapse');
+				pane.collapse();
+			}
+			lastDesktopOpenState = $showControls;
+		} catch (e) {
+			console.error('[ChatControls] reactive desktop pane error', e);
+		}
+	}
+
+	$: if (!chatId && !$showRightsideQuestions && !$showFacilitiesOverlay) {
+		console.log('[ChatControls] closing because no chatId and no overlay needs to stay open', {
+			chatId,
+			showRightsideQuestions: $showRightsideQuestions,
+			showFacilitiesOverlay: $showFacilitiesOverlay
+		});
 		closeHandler();
 	}
 </script>
@@ -149,7 +176,7 @@
 				}}
 			>
 				<div
-					class=" {$showCallOverlay || $showOverview || $showArtifacts || $showFacilitiesOverlay
+					class=" {$showCallOverlay || $showOverview || $showArtifacts || $showFacilitiesOverlay || $showRightsideQuestions
 						? ' h-screen  w-full'
 						: 'px-6 py-4'} h-full"
 				>
@@ -184,6 +211,12 @@
 									showControls.set(false);
 								}}
 							/>
+						</div>
+					{:else if $showRightsideQuestions}
+						<div
+							class=" h-full max-h-[100dvh] bg-white text-gray-700 dark:bg-black dark:text-gray-300 flex justify-center"
+						>
+							<RightsideQuestions />
 						</div>
 					{:else if $showArtifacts}
 						<Artifacts {history} />
@@ -248,7 +281,7 @@
 			{#if $showControls}
 				<div class="pr-4 pb-8 flex max-h-full min-h-full">
 					<div
-						class="w-full {($showOverview || $showArtifacts || $showFacilitiesOverlay) && !$showCallOverlay
+						class="w-full {($showOverview || $showArtifacts || $showFacilitiesOverlay || $showRightsideQuestions) && !$showCallOverlay
 							? ' '
 							: 'px-4 py-4 bg-white dark:shadow-lg dark:bg-gray-850  border border-gray-100 dark:border-gray-850'}  rounded-xl z-40 pointer-events-auto overflow-y-auto scrollbar-hidden"
 					>
@@ -280,6 +313,10 @@
 										showControls.set(false);
 									}}
 								/>
+							</div>
+						{:else if $showRightsideQuestions}
+							<div class="w-full h-full flex justify-center">
+								<RightsideQuestions />
 							</div>
 						{:else if $showArtifacts}
 							<Artifacts {history} overlay={dragged} />

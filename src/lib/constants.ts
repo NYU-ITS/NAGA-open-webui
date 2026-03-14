@@ -3,6 +3,8 @@ import { browser, dev } from '$app/environment';
 
 export const APP_NAME = 'Pilot GenAI';
 export const TESTING_AI_TUTOR = true;
+export const TEMP_HIDE = true;
+export const usePlaceHolder = true;
 
 export const WEBUI_HOSTNAME = browser ? (dev ? `${location.hostname}:8080` : ``) : '';
 export const WEBUI_BASE_URL = browser ? (dev ? `http://${WEBUI_HOSTNAME}` : ``) : ``;

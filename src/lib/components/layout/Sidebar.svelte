@@ -648,7 +648,7 @@
 
 					<div class="flex self-center translate-y-[0.5px]">
 						<div class=" self-center font-medium text-sm font-primary">
-							{$i18n.t('AI Tutor Dashboard')}
+							{$i18n.t('AI Tutor Dashboard - Instructor')}
 						</div>
 					</div>
 				</a>
@@ -689,7 +689,7 @@
 
 					<div class="flex self-center translate-y-[0.5px]">
 						<div class=" self-center font-medium text-sm font-primary">
-							{$i18n.t('Student Dashboard')}
+							{$i18n.t('AI Tutor Dashboard - Student')}
 						</div>
 					</div>
 				</a>
