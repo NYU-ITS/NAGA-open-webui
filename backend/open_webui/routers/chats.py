@@ -1120,11 +1120,11 @@ async def export_chats_as_csv(
 
                     csv_rows.append({
                         'member': member_name,
-                        'Email ID': member_email,
+                        'email_id': member_email,
                         'model_name': model_name,
                         'chat_id': chat.id,
                         'question': message.get('content', ''),
-                        'Model Response': model_response,
+                        'model_response': model_response,
                         'timestamp': human_timestamp
                     })
 
