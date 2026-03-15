@@ -407,6 +407,8 @@
 		'Archive files and uncategorized uploads are grouped here.'
 	);
 
+	const isCountedFile = (file) => file?.status === 'ready';
+
 	const computeFileStats = (files) => {
 		const stats = {
 			totalCount: 0,
@@ -424,6 +426,8 @@
 		};
 
 		for (const file of files ?? []) {
+			if (!isCountedFile(file)) continue;
+
 			stats.totalCount += 1;
 			const size = Number(file?.size ?? file?.meta?.size ?? 0) || 0;
 			stats.totalSize += size;
