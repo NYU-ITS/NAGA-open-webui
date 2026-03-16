@@ -15,6 +15,7 @@
 		models,
 		config,
 		showCallOverlay,
+		activeCallMode,
 		tools,
 		user as _user,
 		showControls,
@@ -29,10 +30,11 @@
 
 	import { WEBUI_BASE_URL, WEBUI_API_BASE_URL, PASTED_TEXT_CHARACTER_LIMIT } from '$lib/constants';
 
-	import InputMenu from './MessageInput/InputMenu.svelte';
-	import VoiceRecording from './MessageInput/VoiceRecording.svelte';
-	import FilesOverlay from './MessageInput/FilesOverlay.svelte';
-	import Commands from './MessageInput/Commands.svelte';
+import InputMenu from './MessageInput/InputMenu.svelte';
+import VoiceRecording from './MessageInput/VoiceRecording.svelte';
+import FilesOverlay from './MessageInput/FilesOverlay.svelte';
+import Commands from './MessageInput/Commands.svelte';
+import CallModeModal from './MessageInput/CallModeModal.svelte';
 
 	import RichTextInput from '../common/RichTextInput.svelte';
 	import Tooltip from '../common/Tooltip.svelte';
@@ -84,6 +86,7 @@
 
 	let loaded = false;
 	let recording = false;
+	let showCallModeModal = false;
 
 	let chatInputContainerElement;
 	let chatInputElement;
@@ -101,6 +104,22 @@
 	$: visionCapableModels = [...(atSelectedModel ? [atSelectedModel] : selectedModels)].filter(
 		(model) => $models.find((m) => m.id === model)?.info?.meta?.capabilities?.vision ?? true
 	);
+
+	const startCallWithMode = async (mode: 'live_text' | 'transcript_at_end') => {
+		if ($settings.audio?.tts?.engine === 'browser-kokoro') {
+			if (!$TTSWorker) {
+				await TTSWorker.set(
+					new KokoroWorker({
+						dtype: $settings.audio?.tts?.engineConfig?.dtype ?? 'fp32'
+					})
+				);
+				await $TTSWorker.init();
+			}
+		}
+		activeCallMode.set(mode);
+		showCallOverlay.set(true);
+		showControls.set(true);
+	};
 
 	const scrollToBottom = () => {
 		const element = document.getElementById('messages-container');
@@ -410,6 +429,13 @@
 </script>
 
 <FilesOverlay show={dragged} />
+
+<CallModeModal
+	bind:show={showCallModeModal}
+	on:start={async (e) => {
+		await startCallWithMode(e.detail.mode);
+	}}
+/>
 
 {#if loaded}
 	<div class="w-full font-primary">
@@ -1355,7 +1381,7 @@
 																	let stream = await navigator.mediaDevices.getUserMedia({
 																		audio: true
 																	});
-																	// If the user grants the permission, proceed to show the call overlay
+																	// If the user grants the permission, proceed to show the call mode modal
 
 																	if (stream) {
 																		const tracks = stream.getTracks();
@@ -1364,21 +1390,11 @@
 
 																	stream = null;
 
-																	if ($settings.audio?.tts?.engine === 'browser-kokoro') {
-																		// If the user has not initialized the TTS worker, initialize it
-																		if (!$TTSWorker) {
-																			await TTSWorker.set(
-																				new KokoroWorker({
-																					dtype: $settings.audio?.tts?.engineConfig?.dtype ?? 'fp32'
-																				})
-																			);
-
-																			await $TTSWorker.init();
-																		}
+																	if ($settings.callMode) {
+																		await startCallWithMode($settings.callMode);
+																	} else {
+																		showCallModeModal = true;
 																	}
-
-																	showCallOverlay.set(true);
-																	showControls.set(true);
 																} catch (err) {
 																	// If the user denies the permission or an error occurs, show an error message
 																	toast.error(

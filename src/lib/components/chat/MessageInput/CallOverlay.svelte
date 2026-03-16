@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { config, models, settings, showCallOverlay, TTSWorker } from '$lib/stores';
+	import { config, models, settings, showCallOverlay, activeCallMode, TTSWorker } from '$lib/stores';
 	import { onMount, tick, getContext, onDestroy, createEventDispatcher } from 'svelte';
 
 	const dispatch = createEventDispatcher();
@@ -31,6 +31,7 @@
 	let confirmed = false;
 	let interrupted = false;
 	let assistantSpeaking = false;
+	let showTranscriptTransition = false;
 
 	let emoji = null;
 	let camera = false;
@@ -685,6 +686,24 @@
 </script>
 
 {#if $showCallOverlay}
+	{#if showTranscriptTransition}
+		<div class="w-full h-full max-h-[100dvh] flex flex-col items-center justify-center gap-4">
+			<svg
+				class="size-8 text-gray-400 dark:text-gray-500 animate-spin"
+				xmlns="http://www.w3.org/2000/svg"
+				fill="none"
+				viewBox="0 0 24 24"
+			>
+				<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+				<path
+					class="opacity-75"
+					fill="currentColor"
+					d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+				></path>
+			</svg>
+			<p class="text-sm text-gray-500 dark:text-gray-400">{$i18n.t('Generating transcript...')}</p>
+		</div>
+	{:else}
 	<div class="max-w-lg w-full h-full max-h-[100dvh] flex flex-col justify-between p-3 md:p-6">
 		{#if camera}
 			<button
@@ -974,6 +993,13 @@
 						console.log(audioStream);
 						console.log(cameraStream);
 
+						if ($activeCallMode === 'transcript_at_end') {
+							showTranscriptTransition = true;
+							await new Promise((resolve) => setTimeout(resolve, 1500));
+							showTranscriptTransition = false;
+						}
+
+						activeCallMode.set('live_text');
 						showCallOverlay.set(false);
 						dispatch('close');
 					}}
@@ -993,4 +1019,5 @@
 			</div>
 		</div>
 	</div>
+	{/if}
 {/if}

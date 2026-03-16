@@ -72,6 +72,7 @@ export const showOverview = writable(false);
 export const showArtifacts = writable(false);
 export const showCallOverlay = writable(false);
 export const showFacilitiesOverlay = writable(false);
+export const activeCallMode = writable<'live_text' | 'transcript_at_end'>('live_text');
 
 export const temporaryChatEnabled = writable(false);
 export const scrollPaginationEnabled = writable(false);
@@ -136,6 +137,7 @@ type OllamaModelDetails = {
 type Settings = {
 	models?: string[];
 	conversationMode?: boolean;
+	callMode?: 'live_text' | 'transcript_at_end';
 	speechAutoSend?: boolean;
 	responseAutoPlayback?: boolean;
 	audio?: AudioSettings;
