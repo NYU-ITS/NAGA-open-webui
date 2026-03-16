@@ -154,16 +154,21 @@
 				</div>
 
 				<!-- Make default checkbox -->
-				<label class="flex items-center gap-2.5 cursor-pointer select-none">
-					<input
-						type="checkbox"
-						bind:checked={makeDefault}
-						class="w-4 h-4 rounded border-gray-300 dark:border-gray-600 accent-gray-900 dark:accent-gray-100 cursor-pointer"
-					/>
-					<span class="text-xs text-gray-600 dark:text-gray-400">
-						{$i18n.t('Make this my default.')} 
-					</span>
-				</label>
+				<div class="flex flex-col gap-1.5">
+					<label class="flex items-center gap-2.5 cursor-pointer select-none">
+						<input
+							type="checkbox"
+							bind:checked={makeDefault}
+							class="w-4 h-4 rounded border-gray-300 dark:border-gray-600 accent-gray-900 dark:accent-gray-100 cursor-pointer"
+						/>
+						<span class="text-xs text-gray-600 dark:text-gray-400">
+							{$i18n.t('Make this my default')}
+						</span>
+					</label>
+					<p class="text-[12px] leading-snug text-gray-500 dark:text-gray-500">
+						{$i18n.t('You can change this later in Settings → Interface → Voice')}
+					</p>
+				</div>
 
 				<!-- Action buttons -->
 				<div class="flex gap-2">
