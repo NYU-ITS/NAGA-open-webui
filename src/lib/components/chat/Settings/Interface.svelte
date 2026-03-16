@@ -51,6 +51,7 @@
 	let showEmojiInCall = false;
 	let voiceInterruption = false;
 	let hapticFeedback = false;
+	let callMode: 'live_text' | 'transcript_at_end' | undefined = undefined;
 
 	let webSearch = null;
 
@@ -102,6 +103,17 @@
 	const toggleEmojiInCall = async () => {
 		showEmojiInCall = !showEmojiInCall;
 		saveSettings({ showEmojiInCall: showEmojiInCall });
+	};
+
+	const toggleCallMode = async () => {
+		if (!callMode) {
+			callMode = 'live_text';
+		} else if (callMode === 'live_text') {
+			callMode = 'transcript_at_end';
+		} else {
+			callMode = undefined;
+		}
+		saveSettings({ callMode });
 	};
 
 	const toggleVoiceInterruption = async () => {
@@ -217,6 +229,7 @@
 
 		showEmojiInCall = $settings.showEmojiInCall ?? false;
 		voiceInterruption = $settings.voiceInterruption ?? false;
+		callMode = $settings.callMode;
 
 		richTextInput = $settings.richTextInput ?? true;
 		largeTextAsFile = $settings.largeTextAsFile ?? false;
@@ -731,6 +744,28 @@
 							<span class="ml-2 self-center">{$i18n.t('On')}</span>
 						{:else}
 							<span class="ml-2 self-center">{$i18n.t('Off')}</span>
+						{/if}
+					</button>
+				</div>
+			</div>
+
+			<div>
+				<div class=" py-0.5 flex w-full justify-between">
+					<div class=" self-center text-xs">{$i18n.t('Default Call Mode')}</div>
+
+					<button
+						class="p-1 px-3 text-xs flex rounded-sm transition"
+						on:click={() => {
+							toggleCallMode();
+						}}
+						type="button"
+					>
+						{#if callMode === 'live_text'}
+							<span class="ml-2 self-center">{$i18n.t('Live Text')}</span>
+						{:else if callMode === 'transcript_at_end'}
+							<span class="ml-2 self-center">{$i18n.t('Transcript at End')}</span>
+						{:else}
+							<span class="ml-2 self-center">{$i18n.t('Ask Every Time')}</span>
 						{/if}
 					</button>
 				</div>
