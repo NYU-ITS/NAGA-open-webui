@@ -36,6 +36,7 @@
 
 	import SyncConfirmDialog from '../../common/ConfirmDialog.svelte';
 	import RichTextInput from '$lib/components/common/RichTextInput.svelte';
+	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import EllipsisVertical from '$lib/components/icons/EllipsisVertical.svelte';
 	import Drawer from '$lib/components/common/Drawer.svelte';
 	import ChevronLeft from '$lib/components/icons/ChevronLeft.svelte';
@@ -89,7 +90,7 @@
 		return {
 			...file,
 			status,
-			error: status === 'error' ? file?.meta?.processing_error ?? '' : ''
+			error: status === 'error' ? (file?.meta?.processing_error ?? '') : ''
 		};
 	};
 
@@ -140,7 +141,7 @@
 			// Store previous states before refresh
 			const previousStates = new Map<string, string>();
 			if (knowledge?.files) {
-				knowledge.files.forEach(file => {
+				knowledge.files.forEach((file) => {
 					if (file.id) {
 						previousStates.set(file.id, file.status);
 					}
@@ -151,17 +152,17 @@
 
 			// Detect status transitions and show appropriate toasts
 			if (knowledge?.files) {
-				knowledge.files.forEach(file => {
+				knowledge.files.forEach((file) => {
 					if (!file.id) return;
-					
+
 					const previousStatus = previousStates.get(file.id);
 					const currentStatus = file.status;
-					
+
 					// Detect transition from 'processing' to 'completed' (ready)
 					if (previousStatus === 'processing' && currentStatus === 'ready') {
 						toast.success($i18n.t('File processing completed'));
 					}
-					
+
 					// Detect transition to 'error' (if not already shown)
 					if (previousStatus !== 'error' && currentStatus === 'error') {
 						toast.error(
@@ -176,7 +177,7 @@
 			// Update previous states for next poll
 			if (knowledge?.files) {
 				previousFileStates.clear();
-				knowledge.files.forEach(file => {
+				knowledge.files.forEach((file) => {
 					if (file.id) {
 						previousFileStates.set(file.id, file.status);
 					}
@@ -208,7 +209,7 @@
 		if ($user?.email && localStorage.token) {
 			try {
 				isSuperAdmin = await checkIfSuperAdmin(localStorage.token, $user.email);
-				
+
 				// Fetch users AFTER confirming super admin status
 				if (isSuperAdmin) {
 					const usersRes = await fetch(`${WEBUI_API_BASE_URL}/users/`, {
@@ -216,7 +217,7 @@
 					});
 					if (usersRes.ok) {
 						allUsers = await usersRes.json();
-						adminUsers = allUsers.filter(u => u.role === 'admin');
+						adminUsers = allUsers.filter((u) => u.role === 'admin');
 					}
 				}
 			} catch (error) {
@@ -227,26 +228,28 @@
 	});
 
 	$: if ($user?.email && localStorage.token && !isSuperAdmin) {
-		checkIfSuperAdmin(localStorage.token, $user.email).then(async (result) => {
-			isSuperAdmin = result;
-			// Fetch users when isSuperAdmin becomes true
-			if (isSuperAdmin && adminUsers.length === 0) {
-				const usersRes = await fetch(`${WEBUI_API_BASE_URL}/users/`, {
-					headers: { authorization: `Bearer ${localStorage.token}` }
-				});
-				if (usersRes.ok) {
-					allUsers = await usersRes.json();
-					adminUsers = allUsers.filter(u => u.role === 'admin');
+		checkIfSuperAdmin(localStorage.token, $user.email)
+			.then(async (result) => {
+				isSuperAdmin = result;
+				// Fetch users when isSuperAdmin becomes true
+				if (isSuperAdmin && adminUsers.length === 0) {
+					const usersRes = await fetch(`${WEBUI_API_BASE_URL}/users/`, {
+						headers: { authorization: `Bearer ${localStorage.token}` }
+					});
+					if (usersRes.ok) {
+						allUsers = await usersRes.json();
+						adminUsers = allUsers.filter((u) => u.role === 'admin');
+					}
 				}
-			}
-		}).catch(err => {
-			console.error('Error checking super admin status:', err);
-		});
+			})
+			.catch((err) => {
+				console.error('Error checking super admin status:', err);
+			});
 	}
 
 	// Set assignToEmail when knowledge loads
 	$: if (isSuperAdmin && knowledge?.user_id && allUsers.length > 0 && !assignToEmail) {
-		const owner = allUsers.find(u => u.id === knowledge.user_id);
+		const owner = allUsers.find((u) => u.id === knowledge.user_id);
 		if (owner) assignToEmail = owner.email;
 	}
 
@@ -346,7 +349,7 @@
 		return lastDot >= 0 ? trimmed.slice(lastDot + 1) : '';
 	};
 
-	const DOC_EXTENSIONS = new Set([
+	const DOC_EXTENSION_LIST = [
 		'pdf',
 		'doc',
 		'docx',
@@ -361,11 +364,50 @@
 		'odt',
 		'ods',
 		'odp'
-	]);
-	const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'gif', 'bmp', 'tiff', 'webp', 'heic', 'svg']);
-	const AUDIO_EXTENSIONS = new Set(['mp3', 'wav', 'aac', 'flac', 'ogg', 'm4a', 'wma']);
-	const VIDEO_EXTENSIONS = new Set(['mp4', 'mov', 'avi', 'mkv', 'webm', 'wmv', 'flv']);
-	const ARCHIVE_EXTENSIONS = new Set(['zip', 'rar', '7z', 'tar', 'gz']);
+	];
+	const IMAGE_EXTENSION_LIST = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'tiff', 'webp', 'heic', 'svg'];
+	const AUDIO_EXTENSION_LIST = ['mp3', 'wav', 'aac', 'flac', 'ogg', 'm4a', 'wma'];
+	const VIDEO_EXTENSION_LIST = ['mp4', 'mov', 'avi', 'mkv', 'webm', 'wmv', 'flv'];
+	const OTHER_EXTENSION_LIST = ['zip', 'rar', '7z', 'tar', 'gz'];
+
+	const DOC_EXTENSIONS = new Set(DOC_EXTENSION_LIST);
+	const IMAGE_EXTENSIONS = new Set(IMAGE_EXTENSION_LIST);
+	const AUDIO_EXTENSIONS = new Set(AUDIO_EXTENSION_LIST);
+	const VIDEO_EXTENSIONS = new Set(VIDEO_EXTENSION_LIST);
+	const ARCHIVE_EXTENSIONS = new Set(OTHER_EXTENSION_LIST);
+
+	const formatExtensionList = (extensions: string[]) =>
+		extensions.map((ext) => `.${ext}`).join(', ');
+
+	const getAllowedTypesTooltip = (label: string, extensions: string[], description = '') => `
+		<div class="max-w-xs text-xs">
+			<div class="font-medium">${label}</div>
+			<div class="mt-1">Allowed: ${formatExtensionList(extensions)}</div>
+			${description ? `<div class="mt-1">${description}</div>` : ''}
+		</div>
+	`;
+
+	const totalFilesTooltipContent = `
+		<div class="max-w-xs text-xs">
+			<div class="font-medium">All uploaded file categories</div>
+			<div class="mt-1"><strong>Docs:</strong> ${formatExtensionList(DOC_EXTENSION_LIST)}</div>
+			<div class="mt-1"><strong>Images:</strong> ${formatExtensionList(IMAGE_EXTENSION_LIST)}</div>
+			<div class="mt-1"><strong>Audio:</strong> ${formatExtensionList(AUDIO_EXTENSION_LIST)}</div>
+			<div class="mt-1"><strong>Video:</strong> ${formatExtensionList(VIDEO_EXTENSION_LIST)}</div>
+			<div class="mt-1"><strong>Other:</strong> ${formatExtensionList(OTHER_EXTENSION_LIST)}</div>
+		</div>
+	`;
+	const docsTooltipContent = getAllowedTypesTooltip('Docs', DOC_EXTENSION_LIST);
+	const imagesTooltipContent = getAllowedTypesTooltip('Images', IMAGE_EXTENSION_LIST);
+	const audioTooltipContent = getAllowedTypesTooltip('Audio', AUDIO_EXTENSION_LIST);
+	const videoTooltipContent = getAllowedTypesTooltip('Video', VIDEO_EXTENSION_LIST);
+	const otherTooltipContent = getAllowedTypesTooltip(
+		'Other',
+		OTHER_EXTENSION_LIST,
+		'Archive files and uncategorized uploads are grouped here.'
+	);
+
+	const isCountedFile = (file) => file?.status === 'ready';
 
 	const computeFileStats = (files) => {
 		const stats = {
@@ -384,6 +426,8 @@
 		};
 
 		for (const file of files ?? []) {
+			if (!isCountedFile(file)) continue;
+
 			stats.totalCount += 1;
 			const size = Number(file?.size ?? file?.meta?.size ?? 0) || 0;
 			stats.totalSize += size;
@@ -470,7 +514,7 @@
 
 				// Initialize previous states for newly uploaded files
 				if (knowledge?.files) {
-					knowledge.files.forEach(file => {
+					knowledge.files.forEach((file) => {
 						if (file.id) {
 							previousFileStates.set(file.id, file.status);
 						}
@@ -479,9 +523,7 @@
 
 				// Determine status of the newly added file to tailor the toast
 				const latestFile =
-					knowledge?.files && knowledge.files.length > 0
-						? knowledge.files[0]
-						: null;
+					knowledge?.files && knowledge.files.length > 0 ? knowledge.files[0] : null;
 				const status = latestFile?.status;
 
 				if (status === 'processing') {
@@ -883,7 +925,7 @@
 
 			// Initialize previous states for existing files
 			if (knowledge?.files) {
-				knowledge.files.forEach(file => {
+				knowledge.files.forEach((file) => {
 					if (file.id) {
 						previousFileStates.set(file.id, file.status);
 					}
@@ -1271,25 +1313,45 @@
 	{:else}
 		<Spinner />
 	{/if}
-
 </div>
 
 <nav class="knowledge-bottom-nav" style:left={bottomNavLeft}>
 	<div class="collection-info">
 		<div class="collection-info-type">
-			<HashLight/>
+			<HashLight />
 			<p class="text-gray-700 dark:text-gray-300 font-medium">Total files</p>
+			<Tooltip content={totalFilesTooltipContent} placement="top">
+				<span
+					class="flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 cursor-pointer"
+				>
+					<Info />
+				</span>
+			</Tooltip>
 		</div>
 		<div class="collection-info-stats">
 			<p class="text-gray-500 dark:text-gray-500">
 				{fileStats.totalCount} files ({formatBytes(fileStats.totalSize)})
 			</p>
 		</div>
+		<div class="flex items-start gap-2">
+			<div class="space-y-0.5">
+				<p class="font-medium text-gray-700 dark:text-gray-200">
+					<b>Note:</b> Currently, NYU PilotGenAI only supports <b>true</b> PDF files.
+				</p>
+			</div>
+		</div>
 	</div>
 	<div class="collection-info collection-info-subsection">
 		<div class="collection-info-type">
-			<FileIconLight/>
+			<FileIconLight />
 			<p class="text-gray-700 dark:text-gray-300 font-medium">Docs</p>
+			<Tooltip content={docsTooltipContent} placement="top">
+				<span
+					class="flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 cursor-pointer"
+				>
+					<Info />
+				</span>
+			</Tooltip>
 		</div>
 		<div class="collection-info-stats">
 			<p class="text-gray-500 dark:text-gray-500">
@@ -1299,8 +1361,15 @@
 	</div>
 	<div class="collection-info">
 		<div class="collection-info-type">
-			<ImageIconLight/>
+			<ImageIconLight />
 			<p class="text-gray-700 dark:text-gray-300 font-medium">Images</p>
+			<Tooltip content={imagesTooltipContent} placement="top">
+				<span
+					class="flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 cursor-pointer"
+				>
+					<Info />
+				</span>
+			</Tooltip>
 		</div>
 		<div class="collection-info-stats">
 			<p class="text-gray-500 dark:text-gray-500">
@@ -1310,8 +1379,15 @@
 	</div>
 	<div class="collection-info">
 		<div class="collection-info-type">
-			<AudioLight/>
+			<AudioLight />
 			<p class="text-gray-700 dark:text-gray-300 font-medium">Audio</p>
+			<Tooltip content={audioTooltipContent} placement="top">
+				<span
+					class="flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 cursor-pointer"
+				>
+					<Info />
+				</span>
+			</Tooltip>
 		</div>
 		<div class="collection-info-stats">
 			<p class="text-gray-500 dark:text-gray-500">
@@ -1321,8 +1397,15 @@
 	</div>
 	<div class="collection-info">
 		<div class="collection-info-type">
-			<VideoLight/>
+			<VideoLight />
 			<p class="text-gray-700 dark:text-gray-300 font-medium">Video</p>
+			<Tooltip content={videoTooltipContent} placement="top">
+				<span
+					class="flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 cursor-pointer"
+				>
+					<Info />
+				</span>
+			</Tooltip>
 		</div>
 		<div class="collection-info-stats">
 			<p class="text-gray-500 dark:text-gray-500">
@@ -1332,8 +1415,15 @@
 	</div>
 	<div class="collection-info">
 		<div class="collection-info-type">
-			<FolderOpen className="size-5" strokeWidth="1"/>
+			<FolderOpen className="size-5" strokeWidth="1" />
 			<p class="text-gray-700 dark:text-gray-300 font-medium">Other</p>
+			<Tooltip content={otherTooltipContent} placement="top">
+				<span
+					class="flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 cursor-pointer"
+				>
+					<Info />
+				</span>
+			</Tooltip>
 		</div>
 		<div class="collection-info-stats">
 			<p class="text-gray-500 dark:text-gray-500">
@@ -1365,7 +1455,7 @@
 		bottom: 0;
 		padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
 		/* background: rgba(255, 255, 255, 0.9); */
-		background: "currentColor";
+		background: 'currentColor';
 		backdrop-filter: blur(6px);
 		border-top: 1px solid rgba(0, 0, 0, 0.08);
 		z-index: 5;
@@ -1389,12 +1479,31 @@
 		margin-left: 50px;
 	}
 
-	.collection-info-stats{
+	.collection-info-stats {
 		display: flex;
 		flex-direction: column;
 	}
-	.collection-info-type{
+	.collection-info-type {
 		display: flex;
 		gap: 3px;
+	}
+
+	.knowledge-bottom-nav-info {
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+		width: 100%;
+	}
+
+	.knowledge-bottom-nav-data {
+		display: flex;
+		width: 100%;
+	}
+
+	.pdf-info-banner {
+		border-radius: 10px;
+		padding: 10px 12px;
+		width: fit-content;
+		max-width: min(100%, 420px);
 	}
 </style>
