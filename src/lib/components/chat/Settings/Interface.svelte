@@ -52,6 +52,7 @@
 	let voiceInterruption = false;
 	let hapticFeedback = false;
 	let callMode: 'live_text' | 'transcript_at_end' | undefined = undefined;
+	let callModeSelect = '';
 
 	let webSearch = null;
 
@@ -105,14 +106,8 @@
 		saveSettings({ showEmojiInCall: showEmojiInCall });
 	};
 
-	const toggleCallMode = async () => {
-		if (!callMode) {
-			callMode = 'live_text';
-		} else if (callMode === 'live_text') {
-			callMode = 'transcript_at_end';
-		} else {
-			callMode = undefined;
-		}
+	const saveCallMode = async () => {
+		callMode = callModeSelect === '' ? undefined : (callModeSelect as 'live_text' | 'transcript_at_end');
 		saveSettings({ callMode });
 	};
 
@@ -225,11 +220,12 @@
 
 		showUsername = $settings.showUsername ?? false;
 		showUpdateToast = $settings.showUpdateToast ?? true;
-		showChangelog = $settings.showChangelog ?? true;
+		showChangelog = $settings.showChangelog ?? false;
 
 		showEmojiInCall = $settings.showEmojiInCall ?? false;
 		voiceInterruption = $settings.voiceInterruption ?? false;
 		callMode = $settings.callMode;
+		callModeSelect = $settings.callMode ?? '';
 
 		richTextInput = $settings.richTextInput ?? true;
 		largeTextAsFile = $settings.largeTextAsFile ?? false;
@@ -296,7 +292,67 @@
 
 	<div class=" space-y-3 overflow-y-scroll max-h-[28rem] lg:max-h-full">
 		<div>
-			<div class=" mb-1.5 text-sm font-medium">{$i18n.t('UI')}</div>
+			<div class=" mb-1.5 text-sm font-medium">{$i18n.t('Voice')}</div>
+
+			<div>
+				<div class=" py-0.5 flex w-full justify-between">
+					<div class=" self-center text-xs">{$i18n.t('Default Call Mode')}</div>
+
+					<div class="flex items-center relative">
+						<select
+							class="dark:bg-gray-900 w-fit pr-8 rounded-sm py-1 px-2 text-xs bg-transparent outline-hidden text-right"
+							bind:value={callModeSelect}
+							on:change={saveCallMode}
+						>
+							<option value="">{$i18n.t('Ask Every Time')}</option>
+							<option value="live_text">{$i18n.t('Live Text')}</option>
+							<option value="transcript_at_end">{$i18n.t('Transcript at End')}</option>
+						</select>
+					</div>
+				</div>
+			</div>
+
+			<div>
+				<div class=" py-0.5 flex w-full justify-between">
+					<div class=" self-center text-xs">{$i18n.t('Allow Voice Interruption in Call')}</div>
+
+					<button
+						class="p-1 px-3 text-xs flex rounded-sm transition"
+						on:click={() => {
+							toggleVoiceInterruption();
+						}}
+						type="button"
+					>
+						{#if voiceInterruption === true}
+							<span class="ml-2 self-center">{$i18n.t('On')}</span>
+						{:else}
+							<span class="ml-2 self-center">{$i18n.t('Off')}</span>
+						{/if}
+					</button>
+				</div>
+			</div>
+
+			<div>
+				<div class=" py-0.5 flex w-full justify-between">
+					<div class=" self-center text-xs">{$i18n.t('Display Emoji in Call')}</div>
+
+					<button
+						class="p-1 px-3 text-xs flex rounded-sm transition"
+						on:click={() => {
+							toggleEmojiInCall();
+						}}
+						type="button"
+					>
+						{#if showEmojiInCall === true}
+							<span class="ml-2 self-center">{$i18n.t('On')}</span>
+						{:else}
+							<span class="ml-2 self-center">{$i18n.t('Off')}</span>
+						{/if}
+					</button>
+				</div>
+			</div>
+
+			<div class=" my-1.5 text-sm font-medium">{$i18n.t('UI')}</div>
 
 			<div>
 				<div class=" py-0.5 flex w-full justify-between">
@@ -702,70 +758,6 @@
 							<span class="ml-2 self-center">{$i18n.t('Always')}</span>
 						{:else}
 							<span class="ml-2 self-center">{$i18n.t('Default')}</span>
-						{/if}
-					</button>
-				</div>
-			</div>
-
-			<div class=" my-1.5 text-sm font-medium">{$i18n.t('Voice')}</div>
-
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div class=" self-center text-xs">{$i18n.t('Allow Voice Interruption in Call')}</div>
-
-					<button
-						class="p-1 px-3 text-xs flex rounded-sm transition"
-						on:click={() => {
-							toggleVoiceInterruption();
-						}}
-						type="button"
-					>
-						{#if voiceInterruption === true}
-							<span class="ml-2 self-center">{$i18n.t('On')}</span>
-						{:else}
-							<span class="ml-2 self-center">{$i18n.t('Off')}</span>
-						{/if}
-					</button>
-				</div>
-			</div>
-
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div class=" self-center text-xs">{$i18n.t('Display Emoji in Call')}</div>
-
-					<button
-						class="p-1 px-3 text-xs flex rounded-sm transition"
-						on:click={() => {
-							toggleEmojiInCall();
-						}}
-						type="button"
-					>
-						{#if showEmojiInCall === true}
-							<span class="ml-2 self-center">{$i18n.t('On')}</span>
-						{:else}
-							<span class="ml-2 self-center">{$i18n.t('Off')}</span>
-						{/if}
-					</button>
-				</div>
-			</div>
-
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div class=" self-center text-xs">{$i18n.t('Default Call Mode')}</div>
-
-					<button
-						class="p-1 px-3 text-xs flex rounded-sm transition"
-						on:click={() => {
-							toggleCallMode();
-						}}
-						type="button"
-					>
-						{#if callMode === 'live_text'}
-							<span class="ml-2 self-center">{$i18n.t('Live Text')}</span>
-						{:else if callMode === 'transcript_at_end'}
-							<span class="ml-2 self-center">{$i18n.t('Transcript at End')}</span>
-						{:else}
-							<span class="ml-2 self-center">{$i18n.t('Ask Every Time')}</span>
 						{/if}
 					</button>
 				</div>
