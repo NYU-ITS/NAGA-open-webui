@@ -1316,128 +1316,119 @@
 </div>
 
 <nav class="knowledge-bottom-nav" style:left={bottomNavLeft}>
-	<div class="knowledge-bottom-nav-info">
-		<div
-			class="pdf-info-banner text-xs text-gray-600 dark:text-gray-300 bg-gray-50 dark:bg-gray-800/80 border border-gray-200 dark:border-gray-700"
-		>
-			<div class="flex items-start gap-2">
-				<Info className="size-4 shrink-0 mt-0.5 text-gray-500 dark:text-gray-400" />
-				<div class="space-y-0.5">
-					<p class="font-medium text-gray-700 dark:text-gray-200">
-						Only true PDF files are allowed
-					</p>
-				</div>
+	<div class="collection-info">
+		<div class="collection-info-type">
+			<HashLight />
+			<p class="text-gray-700 dark:text-gray-300 font-medium">Total files</p>
+			<Tooltip content={totalFilesTooltipContent} placement="top">
+				<span
+					class="flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 cursor-pointer"
+				>
+					<Info />
+				</span>
+			</Tooltip>
+		</div>
+		<div class="collection-info-stats">
+			<p class="text-gray-500 dark:text-gray-500">
+				{fileStats.totalCount} files ({formatBytes(fileStats.totalSize)})
+			</p>
+		</div>
+		<div class="flex items-start gap-2">
+			<div class="space-y-0.5">
+				<p class="font-medium text-gray-700 dark:text-gray-200">
+					<b>Note:</b> Currently, NYU PilotGenAI only supports <b>true</b> PDF files.
+				</p>
 			</div>
 		</div>
-		<div class="knowledge-bottom-nav-data">
-			<div class="collection-info">
-				<div class="collection-info-type">
-					<HashLight />
-					<p class="text-gray-700 dark:text-gray-300 font-medium">Total files</p>
-					<Tooltip content={totalFilesTooltipContent} placement="top">
-						<span
-							class="flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 cursor-pointer"
-						>
-							<Info />
-						</span>
-					</Tooltip>
-				</div>
-				<div class="collection-info-stats">
-					<p class="text-gray-500 dark:text-gray-500">
-						{fileStats.totalCount} files ({formatBytes(fileStats.totalSize)})
-					</p>
-				</div>
-			</div>
-			<div class="collection-info collection-info-subsection">
-				<div class="collection-info-type">
-					<FileIconLight />
-					<p class="text-gray-700 dark:text-gray-300 font-medium">Docs</p>
-					<Tooltip content={docsTooltipContent} placement="top">
-						<span
-							class="flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 cursor-pointer"
-						>
-							<Info />
-						</span>
-					</Tooltip>
-				</div>
-				<div class="collection-info-stats">
-					<p class="text-gray-500 dark:text-gray-500">
-						{fileStats.docsCount} files ({formatBytes(fileStats.docsSize)})
-					</p>
-				</div>
-			</div>
-			<div class="collection-info">
-				<div class="collection-info-type">
-					<ImageIconLight />
-					<p class="text-gray-700 dark:text-gray-300 font-medium">Images</p>
-					<Tooltip content={imagesTooltipContent} placement="top">
-						<span
-							class="flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 cursor-pointer"
-						>
-							<Info />
-						</span>
-					</Tooltip>
-				</div>
-				<div class="collection-info-stats">
-					<p class="text-gray-500 dark:text-gray-500">
-						{fileStats.imagesCount} files ({formatBytes(fileStats.imagesSize)})
-					</p>
-				</div>
-			</div>
-			<div class="collection-info">
-				<div class="collection-info-type">
-					<AudioLight />
-					<p class="text-gray-700 dark:text-gray-300 font-medium">Audio</p>
-					<Tooltip content={audioTooltipContent} placement="top">
-						<span
-							class="flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 cursor-pointer"
-						>
-							<Info />
-						</span>
-					</Tooltip>
-				</div>
-				<div class="collection-info-stats">
-					<p class="text-gray-500 dark:text-gray-500">
-						{fileStats.audioCount} files ({formatBytes(fileStats.audioSize)})
-					</p>
-				</div>
-			</div>
-			<div class="collection-info">
-				<div class="collection-info-type">
-					<VideoLight />
-					<p class="text-gray-700 dark:text-gray-300 font-medium">Video</p>
-					<Tooltip content={videoTooltipContent} placement="top">
-						<span
-							class="flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 cursor-pointer"
-						>
-							<Info />
-						</span>
-					</Tooltip>
-				</div>
-				<div class="collection-info-stats">
-					<p class="text-gray-500 dark:text-gray-500">
-						{fileStats.videoCount} files ({formatBytes(fileStats.videoSize)})
-					</p>
-				</div>
-			</div>
-			<div class="collection-info">
-				<div class="collection-info-type">
-					<FolderOpen className="size-5" strokeWidth="1" />
-					<p class="text-gray-700 dark:text-gray-300 font-medium">Other</p>
-					<Tooltip content={otherTooltipContent} placement="top">
-						<span
-							class="flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 cursor-pointer"
-						>
-							<Info />
-						</span>
-					</Tooltip>
-				</div>
-				<div class="collection-info-stats">
-					<p class="text-gray-500 dark:text-gray-500">
-						{fileStats.otherCount} files ({formatBytes(fileStats.otherSize)})
-					</p>
-				</div>
-			</div>
+	</div>
+	<div class="collection-info collection-info-subsection">
+		<div class="collection-info-type">
+			<FileIconLight />
+			<p class="text-gray-700 dark:text-gray-300 font-medium">Docs</p>
+			<Tooltip content={docsTooltipContent} placement="top">
+				<span
+					class="flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 cursor-pointer"
+				>
+					<Info />
+				</span>
+			</Tooltip>
+		</div>
+		<div class="collection-info-stats">
+			<p class="text-gray-500 dark:text-gray-500">
+				{fileStats.docsCount} files ({formatBytes(fileStats.docsSize)})
+			</p>
+		</div>
+	</div>
+	<div class="collection-info">
+		<div class="collection-info-type">
+			<ImageIconLight />
+			<p class="text-gray-700 dark:text-gray-300 font-medium">Images</p>
+			<Tooltip content={imagesTooltipContent} placement="top">
+				<span
+					class="flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 cursor-pointer"
+				>
+					<Info />
+				</span>
+			</Tooltip>
+		</div>
+		<div class="collection-info-stats">
+			<p class="text-gray-500 dark:text-gray-500">
+				{fileStats.imagesCount} files ({formatBytes(fileStats.imagesSize)})
+			</p>
+		</div>
+	</div>
+	<div class="collection-info">
+		<div class="collection-info-type">
+			<AudioLight />
+			<p class="text-gray-700 dark:text-gray-300 font-medium">Audio</p>
+			<Tooltip content={audioTooltipContent} placement="top">
+				<span
+					class="flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 cursor-pointer"
+				>
+					<Info />
+				</span>
+			</Tooltip>
+		</div>
+		<div class="collection-info-stats">
+			<p class="text-gray-500 dark:text-gray-500">
+				{fileStats.audioCount} files ({formatBytes(fileStats.audioSize)})
+			</p>
+		</div>
+	</div>
+	<div class="collection-info">
+		<div class="collection-info-type">
+			<VideoLight />
+			<p class="text-gray-700 dark:text-gray-300 font-medium">Video</p>
+			<Tooltip content={videoTooltipContent} placement="top">
+				<span
+					class="flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 cursor-pointer"
+				>
+					<Info />
+				</span>
+			</Tooltip>
+		</div>
+		<div class="collection-info-stats">
+			<p class="text-gray-500 dark:text-gray-500">
+				{fileStats.videoCount} files ({formatBytes(fileStats.videoSize)})
+			</p>
+		</div>
+	</div>
+	<div class="collection-info">
+		<div class="collection-info-type">
+			<FolderOpen className="size-5" strokeWidth="1" />
+			<p class="text-gray-700 dark:text-gray-300 font-medium">Other</p>
+			<Tooltip content={otherTooltipContent} placement="top">
+				<span
+					class="flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 cursor-pointer"
+				>
+					<Info />
+				</span>
+			</Tooltip>
+		</div>
+		<div class="collection-info-stats">
+			<p class="text-gray-500 dark:text-gray-500">
+				{fileStats.otherCount} files ({formatBytes(fileStats.otherSize)})
+			</p>
 		</div>
 	</div>
 </nav>
