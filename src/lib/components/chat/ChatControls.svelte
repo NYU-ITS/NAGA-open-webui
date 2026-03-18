@@ -4,7 +4,7 @@
 	import { Pane, PaneResizer } from 'paneforge';
 
 	import { onDestroy, onMount, tick } from 'svelte';
-	import { mobile, showControls, showCallOverlay, showOverview, showArtifacts, showFacilitiesOverlay } from '$lib/stores';
+	import { mobile, showControls, showCallOverlay, showOverview, showArtifacts, showFacilitiesOverlay, activeCallMode } from '$lib/stores';
 
 	import Modal from '../common/Modal.svelte';
 	import Controls from './Controls/Controls.svelte';
@@ -222,6 +222,26 @@
 			</PaneResizer>
 		{/if}
 
+		{#if $showCallOverlay && $activeCallMode === 'transcript_at_end' && largeScreen}
+			<!-- Full-screen overlay for Transcript at End mode on desktop -->
+			<div
+				class="fixed inset-0 z-50 bg-white dark:bg-black flex justify-center items-center"
+				id="transcript-call-overlay"
+			>
+				<CallOverlay
+					bind:files
+					{submitPrompt}
+					{stopResponse}
+					{modelId}
+					{chatId}
+					{eventTarget}
+					on:close={() => {
+						showControls.set(false);
+					}}
+				/>
+			</div>
+		{/if}
+
 		<Pane
 			bind:pane
 			defaultSize={0}
@@ -253,7 +273,7 @@
 							? ' '
 							: 'px-4 py-4 bg-white dark:shadow-lg dark:bg-gray-850  border border-gray-100 dark:border-gray-850'}  rounded-xl z-40 pointer-events-auto overflow-y-auto scrollbar-hidden"
 					>
-						{#if $showCallOverlay}
+						{#if $showCallOverlay && $activeCallMode !== 'transcript_at_end'}
 							<div class="w-full h-full flex justify-center">
 								<CallOverlay
 									bind:files
@@ -267,6 +287,9 @@
 									}}
 								/>
 							</div>
+						{:else if $showCallOverlay && $activeCallMode === 'transcript_at_end'}
+							<!-- CallOverlay rendered in fixed overlay above; show empty placeholder here -->
+							<div class="w-full h-full"></div>
 						{:else if $showFacilitiesOverlay}
 							<div class="w-full h-full flex justify-center">
 								<FacilitiesOverlay
