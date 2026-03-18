@@ -217,11 +217,7 @@ class GroupTable:
             return None
 
     def update_group_by_id(
-        self,
-        id: str,
-        form_data: GroupUpdateForm,
-        overwrite: bool = False,
-        affected_user_ids_out: Optional[list] = None,
+        self, id: str, form_data: GroupUpdateForm, overwrite: bool = False
     ) -> Optional[GroupModel]:
         from open_webui.utils.cache import get_cache_manager
         
@@ -252,12 +248,9 @@ class GroupTable:
                     for user_id in old_user_ids:
                         cache.invalidate_user_permissions(user_id)
                 
-                # If members changed, invalidate cache only for users whose membership changed
-                # not all group members
+                # If members changed, invalidate cache for affected users
                 new_user_ids = new_group.user_ids if new_group else []
-                affected_user_ids = list(set(old_user_ids) ^ set(new_user_ids))
-                if affected_user_ids_out is not None:
-                    affected_user_ids_out.extend(affected_user_ids)
+                affected_user_ids = set(old_user_ids) | set(new_user_ids)
                 for user_id in affected_user_ids:
                     cache.invalidate_user_groups(user_id)
                     cache.invalidate_user_permissions(user_id)
@@ -268,9 +261,7 @@ class GroupTable:
             log.exception(e)
             return None
 
-    def delete_group_by_id(
-        self, id: str, affected_user_ids_out: Optional[list] = None
-    ) -> bool:
+    def delete_group_by_id(self, id: str) -> bool:
         from open_webui.utils.cache import get_cache_manager
         
         cache = get_cache_manager()
@@ -278,9 +269,7 @@ class GroupTable:
         try:
             # Get group members before deletion
             group = self.get_group_by_id(id)
-            user_ids = list(group.user_ids) if group else []
-            if affected_user_ids_out is not None:
-                affected_user_ids_out.extend(user_ids)
+            user_ids = group.user_ids if group else []
             
             with get_db() as db:
                 db.query(Group).filter_by(id=id).delete()

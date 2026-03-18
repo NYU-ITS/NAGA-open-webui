@@ -398,7 +398,10 @@ class UserScopedConfig:
                     if final_value != self.default:
                         is_api_key = "api_key" in self.config_path or "openai_api_key" in self.config_path
                         if is_api_key:
-                            logging.debug("API key: %s | owned by %s | group: %s", (str(final_value)[:8]+"..."+str(final_value)[-6:]) if final_value and len(str(final_value))>=14 else "***", group_creator_email, group.name or "(unnamed)")
+                            logging.debug(
+                                f"[RBAC_CONFIG_GET] User {email} inheriting API key from group admin "
+                                f"{group_creator_email} (group {group.id}) via PostgreSQL direct"
+                            )
                         return final_value
 
         logging.debug(
@@ -430,7 +433,6 @@ class UserScopedConfig:
         cached_value = cache.get_user_settings(user.id, self.config_path)
         if cached_value is not None:
             logging.debug(f"[RBAC_CONFIG_GET] Cache hit for admin {email} config {self.config_path}")
-            if "openai_api_key" in self.config_path and cached_value: logging.debug("API key: %s | owned by %s | (admin, no group)", (str(cached_value)[:8]+"..."+str(cached_value)[-6:]) if len(str(cached_value))>=14 else "***", email)
             return cached_value
 
         with get_db() as db:
@@ -450,7 +452,6 @@ class UserScopedConfig:
                         f"[RBAC_CONFIG_GET] Admin {email}: found config in DB, "
                         f"config_path={self.config_path}, caching and returning"
                     )
-                    if "openai_api_key" in self.config_path and final_value: logging.debug("API key: %s | owned by %s | (admin, no group)", (str(final_value)[:8]+"..."+str(final_value)[-6:]) if len(str(final_value))>=14 else "***", email)
                     cache.set_user_settings(user.id, self.config_path, final_value)
                     return final_value
 

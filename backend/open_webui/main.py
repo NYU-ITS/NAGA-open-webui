@@ -325,7 +325,6 @@ from open_webui.config import (
     reset_config,
 )
 from open_webui.env import (
-    MODELS_CACHE_MAX_USERS,
     AUDIT_EXCLUDED_PATHS,
     AUDIT_LOG_LEVEL,
     CHANGELOG,
@@ -349,12 +348,9 @@ from open_webui.utils.katex_compiler import KaTeXCompiler
 
 
 from open_webui.utils.models import (
-    ModelsLRUCache,
     get_all_models,
     get_all_base_models,
-    get_models_for_user,
     check_model_access,
-    start_models_cache_invalidation_listener,
 )
 from open_webui.utils.chat import (
     generate_chat_completion as chat_completion_handler,
@@ -577,8 +573,6 @@ async def lifespan(app: FastAPI):
     ensure_tool_created_by_column()
     ensure_function_created_by_column()
     ensure_chat_group_id_column()
-    # Cross-pod models cache invalidation via Redis pub/sub
-    start_models_cache_invalidation_listener(app)
     # Cache KaTeX TTF fonts locally once on startup 
     try:
         compiler = KaTeXCompiler()
@@ -1037,8 +1031,7 @@ app.state.config.AUTOCOMPLETE_GENERATION_INPUT_MAX_LENGTH = (
 #
 ########################################
 
-app.state.MODELS_CACHE_MAX_USERS = MODELS_CACHE_MAX_USERS
-app.state.MODELS = ModelsLRUCache(maxsize=MODELS_CACHE_MAX_USERS)
+app.state.MODELS = {}
 
 
 class RedirectMiddleware(BaseHTTPMiddleware):
@@ -1227,9 +1220,8 @@ async def get_models(request: Request, user=Depends(get_verified_user)):
 
         return filtered_models
 
-    models_list = await get_models_for_user(request, user)
-    models = list(models_list.values()) if isinstance(models_list, dict) else models_list
-    log.debug(f"[DEBUG] [inside get_models() from main.py] get_models_for_user() returned {len(models)} models.")
+    models = await get_all_models(request, user=user)
+    log.debug(f"[DEBUG] [inside get_models() from main.py] get_all_models() returned {len(models)} models.")
 
     # Filter out filter pipelines
     models = [
@@ -1269,7 +1261,13 @@ async def chat_completion(
     form_data: dict,
     user=Depends(get_verified_user),
 ):
-    models = await get_models_for_user(request, user)
+    pod_id = os.environ.get("HOSTNAME", "unknown")
+    log.debug(f"[DEBUG] [WS-CHAT 1] [inside chat_completion() from main.py] POST /api/chat/completions handled on pod={pod_id}, user={user.email} (id={user.id}).")
+    models_was_empty = not request.app.state.MODELS
+    if models_was_empty:
+        log.debug(f"[DEBUG] [inside chat_completion() from main.py] request.app.state.MODELS is empty. Calling get_all_models().")
+        await get_all_models(request, user=user)
+        log.debug(f"[DEBUG] [inside chat_completion() from main.py] get_all_models() returned {len(request.app.state.MODELS)} models. The models are: {request.app.state.MODELS}. The length of the models is {len(request.app.state.MODELS)}.")
 
     model_item = form_data.pop("model_item", {})
     tasks = form_data.pop("background_tasks", None)
@@ -1279,10 +1277,20 @@ async def chat_completion(
         if not model_item.get("direct", False):
             log.debug("The model_item is not direct!")
             model_id = form_data.get("model", None)
-            if model_id not in models:
+            log.debug("checking if the model_id is in request.app.state.MODELS...")
+            if model_id not in request.app.state.MODELS:
+                log.info(f"[MODEL NOT FOUND ERROR IS RAISED] inside chat_completion() from main.py - >> model_id: {model_id} not found in request.app.state.MODELS. The models are: {request.app.state.MODELS}. The length of the models is {len(request.app.state.MODELS)}.")
+                log.info(f"[DEBUG] [inside chat_completion() from main.py] The model_id is {model_id} but it is not found in request.app.state.MODELS.")
+                current_keys = list(request.app.state.MODELS.keys())
+                log.info(
+                    f"[MODEL NOT FOUND ERROR IS RAISED] model_id={model_id} not in app.state.MODELS. "
+                    f"user={user.email} (id={user.id}), pod={pod_id}, MODELS_was_empty_before_request={models_was_empty}, "
+                    f"current_MODELS_count={len(current_keys)}, current_MODELS_keys_sample={current_keys[:30]!r}"
+                )
                 raise Exception("Model not found")
 
-            model = models[model_id]
+            log.debug("The model_id is in request.app.state.MODELS! So, we can proceed with the chat completion.")
+            model = request.app.state.MODELS[model_id]
             model_info = Models.get_model_by_id(model_id)
 
             # Check if user has access to the model

@@ -21,8 +21,6 @@ import atexit
 
 from fastapi import Request
 
-from open_webui.utils.models import get_models_for_user
-
 from open_webui.env import RAG_THREAD_POOL_SIZE
 
 # Module-level ThreadPoolExecutor for RAG operations
@@ -774,7 +772,7 @@ async def process_chat_payload(request, form_data, metadata, user, model):
             request.state.model["id"]: request.state.model,
         }
     else:
-        models = await get_models_for_user(request, user)
+        models = request.app.state.MODELS
 
     task_model_id = get_task_model_id(
         form_data["model"],
@@ -1017,7 +1015,9 @@ async def process_chat_response(
 
             if tasks and messages:
                 # Get available models and find Gemini Flash Lite before running tasks
-                models = await get_models_for_user(request, user)
+                from open_webui.utils.models import get_all_models
+                models_list = await get_all_models(request, user)
+                models = {model["id"]: model for model in models_list}
                 task_model_id = find_gemini_flash_lite_model(models)
                 
                 # If Gemini Flash Lite is not available, skip all background tasks
