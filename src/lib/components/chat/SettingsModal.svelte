@@ -366,7 +366,7 @@
 <Modal size="xl" bind:show>
 	<div class="text-gray-700 dark:text-gray-100">
 		<div class=" flex justify-between dark:text-gray-300 px-5 pt-4 pb-1">
-			<div class=" text-lg font-medium self-center">{$i18n.t('Settings')}</div>
+			<div class=" text-lg font-medium self-center">{$i18n.t('User Settings')}</div>
 			<button
 				class="self-center"
 				aria-label="close button"
