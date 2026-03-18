@@ -1333,10 +1333,13 @@
 				{fileStats.totalCount} files ({formatBytes(fileStats.totalSize)})
 			</p>
 		</div>
-		<div class="flex items-start gap-2">
+		<div class="flex items-start gap-2 w-110">
 			<div class="space-y-0.5">
 				<p class="font-medium text-gray-700 dark:text-gray-200">
 					<b>Note:</b> Currently, NYU PilotGenAI only supports <b>true</b> PDF files.
+				</p>
+				<p class="font-medium text-gray-500 dark:text-gray-300">
+					Each file may be up to <b>2 MB</b>, and the total knowledge collection must not exceed <b>30 MB</b>.
 				</p>
 			</div>
 		</div>
