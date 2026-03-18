@@ -36,10 +36,18 @@
 
 	import SyncConfirmDialog from '../../common/ConfirmDialog.svelte';
 	import RichTextInput from '$lib/components/common/RichTextInput.svelte';
+	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import EllipsisVertical from '$lib/components/icons/EllipsisVertical.svelte';
 	import Drawer from '$lib/components/common/Drawer.svelte';
 	import ChevronLeft from '$lib/components/icons/ChevronLeft.svelte';
 	import LockClosed from '$lib/components/icons/LockClosed.svelte';
+	import Info from '$lib/components/icons/Info.svelte';
+	import FileIconLight from '$lib/components/icons/FileIconLight.svelte';
+	import ImageIconLight from '$lib/components/icons/ImageIconLight.svelte';
+	import HashLight from '$lib/components/icons/HashLight.svelte';
+	import AudioLight from '$lib/components/icons/AudioLight.svelte';
+	import VideoLight from '$lib/components/icons/VideoLight.svelte';
+	import FolderOpen from '$lib/components/icons/FolderOpen.svelte';
 	import AccessControlModal from '../common/AccessControlModal.svelte';
 
 	let largeScreen = true;
@@ -82,7 +90,7 @@
 		return {
 			...file,
 			status,
-			error: status === 'error' ? file?.meta?.processing_error ?? '' : ''
+			error: status === 'error' ? (file?.meta?.processing_error ?? '') : ''
 		};
 	};
 
@@ -133,7 +141,7 @@
 			// Store previous states before refresh
 			const previousStates = new Map<string, string>();
 			if (knowledge?.files) {
-				knowledge.files.forEach(file => {
+				knowledge.files.forEach((file) => {
 					if (file.id) {
 						previousStates.set(file.id, file.status);
 					}
@@ -144,17 +152,17 @@
 
 			// Detect status transitions and show appropriate toasts
 			if (knowledge?.files) {
-				knowledge.files.forEach(file => {
+				knowledge.files.forEach((file) => {
 					if (!file.id) return;
-					
+
 					const previousStatus = previousStates.get(file.id);
 					const currentStatus = file.status;
-					
+
 					// Detect transition from 'processing' to 'completed' (ready)
 					if (previousStatus === 'processing' && currentStatus === 'ready') {
 						toast.success($i18n.t('File processing completed'));
 					}
-					
+
 					// Detect transition to 'error' (if not already shown)
 					if (previousStatus !== 'error' && currentStatus === 'error') {
 						toast.error(
@@ -169,7 +177,7 @@
 			// Update previous states for next poll
 			if (knowledge?.files) {
 				previousFileStates.clear();
-				knowledge.files.forEach(file => {
+				knowledge.files.forEach((file) => {
 					if (file.id) {
 						previousFileStates.set(file.id, file.status);
 					}
@@ -201,7 +209,7 @@
 		if ($user?.email && localStorage.token) {
 			try {
 				isSuperAdmin = await checkIfSuperAdmin(localStorage.token, $user.email);
-				
+
 				// Fetch users AFTER confirming super admin status
 				if (isSuperAdmin) {
 					const usersRes = await fetch(`${WEBUI_API_BASE_URL}/users/`, {
@@ -209,7 +217,7 @@
 					});
 					if (usersRes.ok) {
 						allUsers = await usersRes.json();
-						adminUsers = allUsers.filter(u => u.role === 'admin');
+						adminUsers = allUsers.filter((u) => u.role === 'admin');
 					}
 				}
 			} catch (error) {
@@ -220,26 +228,28 @@
 	});
 
 	$: if ($user?.email && localStorage.token && !isSuperAdmin) {
-		checkIfSuperAdmin(localStorage.token, $user.email).then(async (result) => {
-			isSuperAdmin = result;
-			// Fetch users when isSuperAdmin becomes true
-			if (isSuperAdmin && adminUsers.length === 0) {
-				const usersRes = await fetch(`${WEBUI_API_BASE_URL}/users/`, {
-					headers: { authorization: `Bearer ${localStorage.token}` }
-				});
-				if (usersRes.ok) {
-					allUsers = await usersRes.json();
-					adminUsers = allUsers.filter(u => u.role === 'admin');
+		checkIfSuperAdmin(localStorage.token, $user.email)
+			.then(async (result) => {
+				isSuperAdmin = result;
+				// Fetch users when isSuperAdmin becomes true
+				if (isSuperAdmin && adminUsers.length === 0) {
+					const usersRes = await fetch(`${WEBUI_API_BASE_URL}/users/`, {
+						headers: { authorization: `Bearer ${localStorage.token}` }
+					});
+					if (usersRes.ok) {
+						allUsers = await usersRes.json();
+						adminUsers = allUsers.filter((u) => u.role === 'admin');
+					}
 				}
-			}
-		}).catch(err => {
-			console.error('Error checking super admin status:', err);
-		});
+			})
+			.catch((err) => {
+				console.error('Error checking super admin status:', err);
+			});
 	}
 
 	// Set assignToEmail when knowledge loads
 	$: if (isSuperAdmin && knowledge?.user_id && allUsers.length > 0 && !assignToEmail) {
-		const owner = allUsers.find(u => u.id === knowledge.user_id);
+		const owner = allUsers.find((u) => u.id === knowledge.user_id);
 		if (owner) assignToEmail = owner.email;
 	}
 
@@ -279,6 +289,177 @@
 	let debounceTimeout = null;
 	let mediaQuery;
 	let dragged = false;
+
+	let filesPanelWidth = 60;
+	let filesPanelEl: HTMLDivElement | null = null;
+	let isResizingFilesPanel = false;
+	let bottomNavLeft = '0px';
+	let fileStats = {
+		totalCount: 0,
+		totalSize: 0,
+		docsCount: 0,
+		docsSize: 0,
+		imagesCount: 0,
+		imagesSize: 0,
+		audioCount: 0,
+		audioSize: 0,
+		videoCount: 0,
+		videoSize: 0,
+		otherCount: 0,
+		otherSize: 0
+	};
+
+	const startFilesPanelResize = () => {
+		if (!filesPanelEl) return;
+		isResizingFilesPanel = true;
+		document.body.style.userSelect = 'none';
+
+		const handleMouseMove = (moveEvent: MouseEvent) => {
+			if (!filesPanelEl) return;
+			const parentRect = filesPanelEl.parentElement?.getBoundingClientRect();
+			if (!parentRect) return;
+			const nextWidthPx = parentRect.right - moveEvent.clientX;
+			const nextWidthPercent = (nextWidthPx / parentRect.width) * 100;
+			filesPanelWidth = Math.min(80, Math.max(40, nextWidthPercent));
+		};
+
+		const handleMouseUp = () => {
+			isResizingFilesPanel = false;
+			document.body.style.userSelect = '';
+			window.removeEventListener('mousemove', handleMouseMove);
+			window.removeEventListener('mouseup', handleMouseUp);
+		};
+
+		window.addEventListener('mousemove', handleMouseMove);
+		window.addEventListener('mouseup', handleMouseUp);
+	};
+
+	const formatBytes = (bytes: number) => {
+		if (!bytes || bytes <= 0) return '0 B';
+		const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+		const index = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+		const value = bytes / Math.pow(1024, index);
+		return `${value.toFixed(value >= 10 || index === 0 ? 0 : 1)} ${units[index]}`;
+	};
+
+	const getFileExtension = (name: string) => {
+		if (!name) return '';
+		const trimmed = name.trim().toLowerCase();
+		const lastDot = trimmed.lastIndexOf('.');
+		return lastDot >= 0 ? trimmed.slice(lastDot + 1) : '';
+	};
+
+	const DOC_EXTENSION_LIST = [
+		'pdf',
+		'doc',
+		'docx',
+		'xls',
+		'xlsx',
+		'csv',
+		'ppt',
+		'pptx',
+		'txt',
+		'md',
+		'rtf',
+		'odt',
+		'ods',
+		'odp'
+	];
+	const IMAGE_EXTENSION_LIST = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'tiff', 'webp', 'heic', 'svg'];
+	const AUDIO_EXTENSION_LIST = ['mp3', 'wav', 'aac', 'flac', 'ogg', 'm4a', 'wma'];
+	const VIDEO_EXTENSION_LIST = ['mp4', 'mov', 'avi', 'mkv', 'webm', 'wmv', 'flv'];
+	const OTHER_EXTENSION_LIST = ['zip', 'rar', '7z', 'tar', 'gz'];
+
+	const DOC_EXTENSIONS = new Set(DOC_EXTENSION_LIST);
+	const IMAGE_EXTENSIONS = new Set(IMAGE_EXTENSION_LIST);
+	const AUDIO_EXTENSIONS = new Set(AUDIO_EXTENSION_LIST);
+	const VIDEO_EXTENSIONS = new Set(VIDEO_EXTENSION_LIST);
+	const ARCHIVE_EXTENSIONS = new Set(OTHER_EXTENSION_LIST);
+
+	const formatExtensionList = (extensions: string[]) =>
+		extensions.map((ext) => `.${ext}`).join(', ');
+
+	const getAllowedTypesTooltip = (label: string, extensions: string[], description = '') => `
+		<div class="max-w-xs text-xs">
+			<div class="font-medium">${label}</div>
+			<div class="mt-1">Allowed: ${formatExtensionList(extensions)}</div>
+			${description ? `<div class="mt-1">${description}</div>` : ''}
+		</div>
+	`;
+
+	const totalFilesTooltipContent = `
+		<div class="max-w-xs text-xs">
+			<div class="font-medium">All uploaded file categories</div>
+			<div class="mt-1"><strong>Docs:</strong> ${formatExtensionList(DOC_EXTENSION_LIST)}</div>
+			<div class="mt-1"><strong>Images:</strong> ${formatExtensionList(IMAGE_EXTENSION_LIST)}</div>
+			<div class="mt-1"><strong>Audio:</strong> ${formatExtensionList(AUDIO_EXTENSION_LIST)}</div>
+			<div class="mt-1"><strong>Video:</strong> ${formatExtensionList(VIDEO_EXTENSION_LIST)}</div>
+			<div class="mt-1"><strong>Other:</strong> ${formatExtensionList(OTHER_EXTENSION_LIST)}</div>
+		</div>
+	`;
+	const docsTooltipContent = getAllowedTypesTooltip('Docs', DOC_EXTENSION_LIST);
+	const imagesTooltipContent = getAllowedTypesTooltip('Images', IMAGE_EXTENSION_LIST);
+	const audioTooltipContent = getAllowedTypesTooltip('Audio', AUDIO_EXTENSION_LIST);
+	const videoTooltipContent = getAllowedTypesTooltip('Video', VIDEO_EXTENSION_LIST);
+	const otherTooltipContent = getAllowedTypesTooltip(
+		'Other',
+		OTHER_EXTENSION_LIST,
+		'Archive files and uncategorized uploads are grouped here.'
+	);
+
+	const isCountedFile = (file) => file?.status === 'ready';
+
+	const computeFileStats = (files) => {
+		const stats = {
+			totalCount: 0,
+			totalSize: 0,
+			docsCount: 0,
+			docsSize: 0,
+			imagesCount: 0,
+			imagesSize: 0,
+			audioCount: 0,
+			audioSize: 0,
+			videoCount: 0,
+			videoSize: 0,
+			otherCount: 0,
+			otherSize: 0
+		};
+
+		for (const file of files ?? []) {
+			if (!isCountedFile(file)) continue;
+
+			stats.totalCount += 1;
+			const size = Number(file?.size ?? file?.meta?.size ?? 0) || 0;
+			stats.totalSize += size;
+
+			const name = file?.meta?.name ?? file?.name ?? '';
+			const ext = getFileExtension(name);
+			if (DOC_EXTENSIONS.has(ext)) {
+				stats.docsCount += 1;
+				stats.docsSize += size;
+			} else if (IMAGE_EXTENSIONS.has(ext)) {
+				stats.imagesCount += 1;
+				stats.imagesSize += size;
+			} else if (AUDIO_EXTENSIONS.has(ext)) {
+				stats.audioCount += 1;
+				stats.audioSize += size;
+			} else if (VIDEO_EXTENSIONS.has(ext)) {
+				stats.videoCount += 1;
+				stats.videoSize += size;
+			} else if (ARCHIVE_EXTENSIONS.has(ext)) {
+				stats.otherCount += 1;
+				stats.otherSize += size;
+			} else {
+				stats.otherCount += 1;
+				stats.otherSize += size;
+			}
+		}
+
+		return stats;
+	};
+
+	$: bottomNavLeft = !$mobile && $showSidebar ? '260px' : '0px';
+	$: fileStats = computeFileStats(knowledge?.files ?? []);
 
 	const createFileFromText = (name, content) => {
 		const blob = new Blob([content], { type: 'text/plain' });
@@ -333,7 +514,7 @@
 
 				// Initialize previous states for newly uploaded files
 				if (knowledge?.files) {
-					knowledge.files.forEach(file => {
+					knowledge.files.forEach((file) => {
 						if (file.id) {
 							previousFileStates.set(file.id, file.status);
 						}
@@ -342,9 +523,7 @@
 
 				// Determine status of the newly added file to tailor the toast
 				const latestFile =
-					knowledge?.files && knowledge.files.length > 0
-						? knowledge.files[0]
-						: null;
+					knowledge?.files && knowledge.files.length > 0 ? knowledge.files[0] : null;
 				const status = latestFile?.status;
 
 				if (status === 'processing') {
@@ -746,7 +925,7 @@
 
 			// Initialize previous states for existing files
 			if (knowledge?.files) {
-				knowledge.files.forEach(file => {
+				knowledge.files.forEach((file) => {
 					if (file.id) {
 						previousFileStates.set(file.id, file.status);
 					}
@@ -844,7 +1023,7 @@
 	}}
 />
 
-<div class="flex flex-col w-full translate-y-1" id="collection-container">
+<div class="flex flex-col w-full translate-y-1 knowledge-page" id="collection-container">
 	{#if id && knowledge}
 		<AccessControlModal
 			bind:show={showAccessControlModal}
@@ -899,7 +1078,7 @@
 					</div>
 
 					{#if isSuperAdmin}
-						<div class="mt-2 px-1">
+						<div class="mt-2 px-1 w-[30%]">
 							<div class="text-xs font-semibold mb-1">{$i18n.t('Assign To')}</div>
 							<select
 								class="w-full rounded-lg py-1.5 px-2 text-xs bg-gray-50 dark:bg-gray-850"
@@ -1038,15 +1217,25 @@
 			{/if}
 
 			<div
-				class="{largeScreen ? 'shrink-0 w-72 max-w-72' : 'flex-1'}
+				class="{largeScreen ? 'shrink-0' : 'flex-1'}
 			flex
+			relative
 			py-2
 			rounded-2xl
 			border
 			border-gray-50
 			h-full
 			dark:border-gray-850"
+				class:resizable-files-panel={largeScreen}
+				style:width={largeScreen ? `${filesPanelWidth}%` : null}
+				bind:this={filesPanelEl}
 			>
+				{#if largeScreen}
+					<div
+						class="files-panel-resize-handle"
+						on:mousedown|preventDefault={startFilesPanelResize}
+					/>
+				{/if}
 				<div class=" flex flex-col w-full space-x-2 rounded-lg h-full">
 					<div class="w-full h-full flex flex-col">
 						<div class=" px-3">
@@ -1125,3 +1314,199 @@
 		<Spinner />
 	{/if}
 </div>
+
+<nav class="knowledge-bottom-nav" style:left={bottomNavLeft}>
+	<div class="collection-info">
+		<div class="collection-info-type">
+			<HashLight />
+			<p class="text-gray-700 dark:text-gray-300 font-medium">Total files</p>
+			<Tooltip content={totalFilesTooltipContent} placement="top">
+				<span
+					class="flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 cursor-pointer"
+				>
+					<Info />
+				</span>
+			</Tooltip>
+		</div>
+		<div class="collection-info-stats">
+			<p class="text-gray-500 dark:text-gray-500">
+				{fileStats.totalCount} files ({formatBytes(fileStats.totalSize)})
+			</p>
+		</div>
+		<div class="flex items-start gap-2 w-110">
+			<div class="space-y-0.5">
+				<p class="font-medium text-gray-700 dark:text-gray-200">
+					<b>Note:</b> Currently, NYU PilotGenAI only supports <b>true</b> PDF files.
+				</p>
+				<p class="font-medium text-gray-500 dark:text-gray-300">
+					Each file may be up to <b>2 MB</b>, and the total knowledge collection must not exceed <b>30 MB</b>.
+				</p>
+			</div>
+		</div>
+	</div>
+	<div class="collection-info collection-info-subsection">
+		<div class="collection-info-type">
+			<FileIconLight />
+			<p class="text-gray-700 dark:text-gray-300 font-medium">Docs</p>
+			<Tooltip content={docsTooltipContent} placement="top">
+				<span
+					class="flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 cursor-pointer"
+				>
+					<Info />
+				</span>
+			</Tooltip>
+		</div>
+		<div class="collection-info-stats">
+			<p class="text-gray-500 dark:text-gray-500">
+				{fileStats.docsCount} files ({formatBytes(fileStats.docsSize)})
+			</p>
+		</div>
+	</div>
+	<div class="collection-info">
+		<div class="collection-info-type">
+			<ImageIconLight />
+			<p class="text-gray-700 dark:text-gray-300 font-medium">Images</p>
+			<Tooltip content={imagesTooltipContent} placement="top">
+				<span
+					class="flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 cursor-pointer"
+				>
+					<Info />
+				</span>
+			</Tooltip>
+		</div>
+		<div class="collection-info-stats">
+			<p class="text-gray-500 dark:text-gray-500">
+				{fileStats.imagesCount} files ({formatBytes(fileStats.imagesSize)})
+			</p>
+		</div>
+	</div>
+	<div class="collection-info">
+		<div class="collection-info-type">
+			<AudioLight />
+			<p class="text-gray-700 dark:text-gray-300 font-medium">Audio</p>
+			<Tooltip content={audioTooltipContent} placement="top">
+				<span
+					class="flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 cursor-pointer"
+				>
+					<Info />
+				</span>
+			</Tooltip>
+		</div>
+		<div class="collection-info-stats">
+			<p class="text-gray-500 dark:text-gray-500">
+				{fileStats.audioCount} files ({formatBytes(fileStats.audioSize)})
+			</p>
+		</div>
+	</div>
+	<div class="collection-info">
+		<div class="collection-info-type">
+			<VideoLight />
+			<p class="text-gray-700 dark:text-gray-300 font-medium">Video</p>
+			<Tooltip content={videoTooltipContent} placement="top">
+				<span
+					class="flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 cursor-pointer"
+				>
+					<Info />
+				</span>
+			</Tooltip>
+		</div>
+		<div class="collection-info-stats">
+			<p class="text-gray-500 dark:text-gray-500">
+				{fileStats.videoCount} files ({formatBytes(fileStats.videoSize)})
+			</p>
+		</div>
+	</div>
+	<div class="collection-info">
+		<div class="collection-info-type">
+			<FolderOpen className="size-5" strokeWidth="1" />
+			<p class="text-gray-700 dark:text-gray-300 font-medium">Other</p>
+			<Tooltip content={otherTooltipContent} placement="top">
+				<span
+					class="flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 cursor-pointer"
+				>
+					<Info />
+				</span>
+			</Tooltip>
+		</div>
+		<div class="collection-info-stats">
+			<p class="text-gray-500 dark:text-gray-500">
+				{fileStats.otherCount} files ({formatBytes(fileStats.otherSize)})
+			</p>
+		</div>
+	</div>
+</nav>
+
+<style>
+	.resizable-files-panel {
+		overflow: auto;
+	}
+
+	.files-panel-resize-handle {
+		position: absolute;
+		left: -4px;
+		top: 0;
+		bottom: 0;
+		width: 8px;
+		cursor: ew-resize;
+		z-index: 2;
+	}
+
+	.knowledge-bottom-nav {
+		position: fixed;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+		/* background: rgba(255, 255, 255, 0.9); */
+		background: 'currentColor';
+		backdrop-filter: blur(6px);
+		border-top: 1px solid rgba(0, 0, 0, 0.08);
+		z-index: 5;
+		display: flex;
+		gap: 16px;
+		flex-wrap: wrap;
+	}
+
+	.knowledge-page {
+		padding-bottom: calc(56px + env(safe-area-inset-bottom));
+	}
+
+	.collection-info {
+		display: flex;
+		flex-direction: column;
+		font-size: 14px;
+		margin: 0px 10px;
+	}
+
+	.collection-info-subsection {
+		margin-left: 50px;
+	}
+
+	.collection-info-stats {
+		display: flex;
+		flex-direction: column;
+	}
+	.collection-info-type {
+		display: flex;
+		gap: 3px;
+	}
+
+	.knowledge-bottom-nav-info {
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+		width: 100%;
+	}
+
+	.knowledge-bottom-nav-data {
+		display: flex;
+		width: 100%;
+	}
+
+	.pdf-info-banner {
+		border-radius: 10px;
+		padding: 10px 12px;
+		width: fit-content;
+		max-width: min(100%, 420px);
+	}
+</style>
