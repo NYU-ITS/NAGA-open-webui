@@ -92,14 +92,23 @@ async def get_group_by_id(id: str, user=Depends(get_admin_user)):
 
 @router.post("/id/{id}/update", response_model=Optional[GroupResponse])
 async def update_group_by_id(
-    id: str, form_data: GroupUpdateForm, user=Depends(get_admin_user)
+    id: str,
+    form_data: GroupUpdateForm,
+    request: Request,
+    user=Depends(get_admin_user),
 ):
     try:
         if form_data.user_ids:
             form_data.user_ids = Users.get_valid_user_ids(form_data.user_ids)
 
-        group = Groups.update_group_by_id(id, form_data)
+        affected_user_ids = []
+        group = Groups.update_group_by_id(
+            id, form_data, affected_user_ids_out=affected_user_ids
+        )
         if group:
+            if affected_user_ids:
+                from open_webui.utils.models import invalidate_models_cache
+                invalidate_models_cache(request, affected_user_ids=affected_user_ids)
             return group
         else:
             raise HTTPException(
@@ -120,10 +129,16 @@ async def update_group_by_id(
 
 
 @router.delete("/id/{id}/delete", response_model=bool)
-async def delete_group_by_id(id: str, user=Depends(get_admin_user)):
+async def delete_group_by_id(
+    id: str, request: Request, user=Depends(get_admin_user)
+):
     try:
-        result = Groups.delete_group_by_id(id)
+        affected_user_ids = []
+        result = Groups.delete_group_by_id(id, affected_user_ids_out=affected_user_ids)
         if result:
+            if affected_user_ids:
+                from open_webui.utils.models import invalidate_models_cache
+                invalidate_models_cache(request, affected_user_ids=affected_user_ids)
             return result
         else:
             raise HTTPException(
