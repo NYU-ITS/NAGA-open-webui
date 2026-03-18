@@ -69,7 +69,7 @@
 						/>
 					</svg>
 				</div>
-				<div class=" self-center truncate">{$i18n.t('Settings')}</div>
+				<div class=" self-center truncate">{$i18n.t('User Settings')}</div>
 			</button>
 
 			<button

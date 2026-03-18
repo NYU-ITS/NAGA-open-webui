@@ -166,7 +166,7 @@
 						</span>
 					</label>
 					<p class="text-[12px] leading-snug text-gray-500 dark:text-gray-500">
-						{$i18n.t('You can change this later in Settings → Interface → Voice')}
+						{$i18n.t('You can change this later in User Settings → Interface → Voice')}
 					</p>
 				</div>
 
