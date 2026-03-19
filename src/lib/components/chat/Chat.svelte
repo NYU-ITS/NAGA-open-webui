@@ -36,6 +36,7 @@
 		chatTitle,
 		showArtifacts,
 		showFacilitiesOverlay,
+		showRightsideQuestions,
 		tools
 	} from '$lib/stores';
 	import {
@@ -709,7 +710,9 @@
 			}
 		}
 
-		await showControls.set(false);
+		if (!$showRightsideQuestions && !$showFacilitiesOverlay) {
+			await showControls.set(false);
+		}
 		await showCallOverlay.set(false);
 		await showOverview.set(false);
 		await showArtifacts.set(false);

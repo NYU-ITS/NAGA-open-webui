@@ -2,7 +2,6 @@
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
-	import { showControls, showRightsideQuestions } from '$lib/stores';
 
 	onMount(() => {
 		console.log('Student Dashboard - Summary loaded');
@@ -95,13 +94,11 @@
 	async function startPracticeAssignment(item) {
 		// TODO(student-dashboard-backend): Replace this placeholder entry with the real
 		// student assigned-practice / follow-up question workflow once backend support exists.
-		console.log('[PracticeAssignment] opening empty right-side questions panel', {
+		console.log('[PracticeAssignment] navigating to chat with right-side questions trigger', {
 			assignmentId: item.id,
 			topic: item.topic
 		});
-		showControls.set(true);
-		showRightsideQuestions.set(true);
-		await goto('/');
+		await goto(`/?practicing=${item.index}`);
 	}
 
 	async function updateDashboardFilters(nextHomework = selectedHomework, nextTopic = topicQueryRaw) {
@@ -179,11 +176,6 @@
 						<option value={option}>{option}</option>
 					{/each}
 				</select>
-				<div class="pointer-events-none absolute inset-y-0 right-0 flex items-center text-gray-500 dark:text-gray-400">
-					<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3 h-3">
-						<path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
-					</svg>
-				</div>
 			</div>
 		</div>
 	</div>

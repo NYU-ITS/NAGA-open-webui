@@ -119,7 +119,9 @@
 	});
 
 	onDestroy(() => {
-		showControls.set(false);
+		if (!$showRightsideQuestions && !$showFacilitiesOverlay) {
+			showControls.set(false);
+		}
 
 		mediaQuery.removeEventListener('change', handleMediaQuery);
 		document.removeEventListener('mousedown', onMouseDown);
@@ -164,6 +166,15 @@
 		});
 		closeHandler();
 	}
+
+	$: console.log('[ChatControls] overlay state', {
+		showControls: $showControls,
+		showRightsideQuestions: $showRightsideQuestions,
+		showFacilitiesOverlay: $showFacilitiesOverlay,
+		largeScreen,
+		hasPane: !!pane,
+		chatId
+	});
 </script>
 
 <SvelteFlowProvider>

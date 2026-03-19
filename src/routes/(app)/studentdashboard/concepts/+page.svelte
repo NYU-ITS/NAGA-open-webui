@@ -17,6 +17,7 @@
 
 	let selectedConcepts: Set<string> = new Set();
 	let selectedHomework = 'All'; // This should sync with parent layout
+	let hoveredLegendStatus: string | null = null;
 	// TODO(student-dashboard-backend): This table is intended for teacher-distributed practice
 	// question sets. Replace the placeholder rows with student assignment status once the
 	// backend exposes distribution / completion endpoints.
@@ -234,6 +235,20 @@
 			currentPage++;
 		}
 	}
+
+	const statusOrder = ['Mastered', 'Practiced', 'Unmastered'];
+
+	function getStatusClasses(status: string) {
+		if (status === 'Mastered') {
+			return 'bg-green-100 text-green-700 ring-1 ring-green-200 dark:bg-green-900/40 dark:text-green-300 dark:ring-green-800/60';
+		}
+
+		if (status === 'Practiced') {
+			return 'bg-blue-100 text-blue-700 ring-1 ring-blue-200 dark:bg-blue-900/40 dark:text-blue-300 dark:ring-blue-800/60';
+		}
+
+		return 'bg-yellow-100 text-yellow-700 ring-1 ring-yellow-200 dark:bg-yellow-900/40 dark:text-yellow-300 dark:ring-yellow-800/60';
+	}
 </script>
 
 <div class="flex flex-col space-y-6 py-4">
@@ -284,8 +299,23 @@
 	{/if}
 
 	<div class="sticky top-0 z-10 bg-transparent py-2 space-y-4">
-		<div class="flex md:self-center text-lg font-medium px-0.5">
-			By Concepts
+		<div class="flex items-start justify-between gap-4 px-0.5">
+			<div class="flex items-start text-lg font-medium">
+				By Topics
+				<div class="flex self-center w-[1px] h-6 mx-2.5 bg-gray-50 dark:bg-gray-850" />
+				<span class="text-lg font-medium text-gray-500 dark:text-gray-300">{filteredConcepts.length}</span>
+			</div>
+			<div class="flex flex-wrap items-start justify-end gap-1.5">
+				{#each statusOrder as status}
+					<span
+						class="inline-flex rounded-full px-2.5 py-1 text-[11px] font-medium {getStatusClasses(status)}"
+						on:mouseenter={() => (hoveredLegendStatus = status)}
+						on:mouseleave={() => (hoveredLegendStatus = null)}
+					>
+						{status}
+					</span>
+				{/each}
+			</div>
 		</div>
 
 	{#if !TEMP_HIDE}
@@ -343,20 +373,15 @@
 						<div class="text-[11px] font-semibold tracking-wide text-gray-400 dark:text-gray-500">
 							{concept.testedIn.length === 1 ? 'In Homework:' : 'In Homeworks:'}
 						</div>
-						<div class="mt-2 grid grid-cols-1 gap-1.5 sm:grid-cols-2 items-start">
+						<div class="mt-2 flex flex-wrap gap-1.5">
 							{#each concept.testedIn as homework}
 								<div class="flex items-start gap-1.5 min-w-0">
-									<span class="inline-flex justify-center rounded-full bg-gray-100 px-2.5 py-1 text-xs text-gray-700 dark:bg-gray-800 dark:text-gray-300">
-										{homework.replace('Homework ', '')}
-									</span>
 									<span
-										class="inline-flex min-w-0 rounded-full px-2.5 py-1 text-xs font-medium {concept.homeworkStatuses[homework] === 'Mastered'
-											? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300'
-											: concept.homeworkStatuses[homework] === 'Practiced'
-												? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'
-												: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-300'}"
+										class="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full p-0 text-xs transition-transform duration-150 will-change-transform {getStatusClasses(concept.homeworkStatuses[homework])} {hoveredLegendStatus === concept.homeworkStatuses[homework]
+											? 'scale-110'
+											: 'scale-100'}"
 									>
-										{concept.homeworkStatuses[homework]}
+										{homework.replace('Homework ', '')}
 									</span>
 								</div>
 							{/each}
