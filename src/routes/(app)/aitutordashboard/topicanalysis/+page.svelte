@@ -1,9 +1,88 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { page } from '$app/stores';
 	import { toast } from 'svelte-sonner';
 	import { TESTING_AI_TUTOR } from '$lib/constants';
+	import ChevronUp from '$lib/components/icons/ChevronUp.svelte';
+	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
 
 	const AI_TUTOR_API_BASE = 'http://localhost:8000';
+
+	// Group ID (needed for error-types endpoints)
+	let groupId = '';
+	$: groupId = $page.url.searchParams.get('group_id') || '';
+
+	// Helper: load error types from server
+	async function loadErrorTypes() {
+		if (!groupId) return;
+		try {
+			const res = await fetch(
+				`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(groupId)}`,
+				{ headers: { Authorization: `Bearer ${localStorage.token}` } }
+			);
+			if (res.ok) {
+				const data = await res.json();
+				const errorTypes = Array.isArray(data?.error_types)
+					? data.error_types
+					: Array.isArray(data)
+						? data
+						: [];
+				if (errorTypes.length > 0) {
+					errorTypeDefs = errorTypes.slice(0, 4).map((et, i) => ({
+						type: et.name ?? 'Unknown',
+						color: errorTypeColors[i % errorTypeColors.length],
+						description: et.description ?? ''
+					}));
+				} else {
+					errorTypeDefs = [];
+				}
+				if (TESTING_AI_TUTOR) toast.success('[SUCCESS][GET]: Error types loaded.');
+			}
+		} catch (e) {
+			if (TESTING_AI_TUTOR) toast.warning('[FAIL][GET]: Error types fetch failed.');
+			console.error('Error types fetch failed:', e);
+		}
+	}
+
+	// Helper: persist current errorTypeDefs to server
+	async function persistErrorTypes() {
+		if (!groupId) return;
+		try {
+			const res = await fetch(
+				`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(groupId)}`,
+				{
+					method: 'PUT',
+					headers: {
+						'Content-Type': 'application/json',
+						Authorization: `Bearer ${localStorage.token}`
+					},
+					body: JSON.stringify(
+						errorTypeDefs.map((d) => ({ name: d.type, description: d.description }))
+					)
+				}
+			);
+			if (TESTING_AI_TUTOR && res.ok) toast.success('[SUCCESS][PUT]: Error types saved.');
+		} catch (e) {
+			if (TESTING_AI_TUTOR) toast.warning('[FAIL][PUT]: Error types save failed.');
+			console.error('Failed to persist error types:', e);
+		}
+	}
+
+	// Delete all custom error types on server, then reload defaults
+	async function deleteAllErrorTypes() {
+		if (!groupId) return;
+		try {
+			await fetch(
+				`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(groupId)}`,
+				{ method: 'DELETE', headers: { Authorization: `Bearer ${localStorage.token}` } }
+			);
+			if (TESTING_AI_TUTOR) toast.success('[SUCCESS][DELETE]: Error types reset to defaults.');
+			await loadErrorTypes();
+		} catch (e) {
+			if (TESTING_AI_TUTOR) toast.warning('[FAIL][DELETE]: Error types delete failed.');
+			console.error('Failed to delete error types:', e);
+		}
+	}
 
 	onMount(async () => {
 		console.log('AI Tutor Dashboard - Topic Analysis loaded');
@@ -177,16 +256,20 @@
 			}
 			console.error('Practice question set API failed:', error);
 		}
+
+		// Load error types from server (after groupId is set above)
+		await loadErrorTypes();
 	});
 
 	// Global error type definitions — source of truth for names, colors, descriptions
 	let errorTypeDefs: { type: string; color: string; description: string }[] = [];
 
-	// Available colors for new error types (cycle through these)
-	const errorTypeColors = ['#A792D0', '#7CB9E8', '#90EE90', '#EF4444'];
+	// Accessibility-safe colors for error type legend and charts.
+	const errorTypeColors = ['#1D4ED8', '#0F766E', '#B45309', '#B91C1C'];
 
 	// Modal state
 	let showEditModal = false;
+	let showResetDefaultsModal = false;
 	let editingIndex: number | null = null;
 	let editingIsNew = false;
 	let editName = '';
@@ -216,17 +299,19 @@
 		showEditModal = true;
 	}
 
-	function saveEdit() {
+	async function saveEdit() {
 		if (editingIndex === null) return;
 		errorTypeDefs[editingIndex] = { ...errorTypeDefs[editingIndex], type: editName, description: editDescription };
 		errorTypeDefs = [...errorTypeDefs];
 		closeModal();
+		await persistErrorTypes();
 	}
 
-	function deleteType() {
+	async function deleteType() {
 		if (editingIndex === null) return;
 		errorTypeDefs = errorTypeDefs.filter((_, i) => i !== editingIndex);
 		closeModal();
+		await persistErrorTypes();
 	}
 
 	function addErrorType() {
@@ -259,8 +344,13 @@
 		editingIsNew = false;
 	}
 
+	async function confirmResetDefaults() {
+		showResetDefaultsModal = false;
+		await deleteAllErrorTypes();
+	}
+
 	// State for expandable homework sections
-	let expandedHomework = new Set(['homework1']); // Homework 1 expanded by default
+	let expandedHomework = new Set<string>();
 
 	function toggleHomework(id: string) {
 		if (expandedHomework.has(id)) {
@@ -271,139 +361,12 @@
 		expandedHomework = expandedHomework; // Trigger reactivity
 	}
 
-	// Sample data for Topic Analysis by Homework
-	let topicByHomework = [
-		{
-			id: 'homework1',
-			homework: 'Homework 1',
-			topics: [
-				{
-					topic: 'Linear Algebra',
-					questions: 'Q1, Q2, Q3',
-					questionCount: 3,
-					studentsWithError: 58,
-					errorTypes: [
-						{ type: 'Careless Errors', count: 10, percentage: 20.6, color: '#A792D0' },
-						{ type: 'Calculation Errors', count: 20, percentage: 40.0, color: '#7CB9E8' },
-						{ type: 'Notation Errors', count: 15, percentage: 30.0, color: '#90EE90' },
-						{ type: 'Others', count: 5, percentage: 10.0, color: '#FFB84D' }
-					]
-				},
-				{
-					topic: 'Differentiation',
-					questions: 'Q2, Q3, Q4, Q5, Q6, Q7, Q8, Q10',
-					questionCount: 8,
-					studentsWithError: 47,
-					errorTypes: [
-						{ type: 'Careless Errors', count: 10, percentage: 21.3, color: '#A792D0' },
-						{ type: 'Calculation Errors', count: 20, percentage: 42.6, color: '#7CB9E8' },
-						{ type: 'Notation Errors', count: 15, percentage: 31.9, color: '#90EE90' },
-						{ type: 'Others', count: 5, percentage: 10.6, color: '#FFB84D' }
-					]
-				},
-				{
-					topic: 'Limit Definition',
-					questions: 'Q1, Q2, Q3, Q4, Q5',
-					questionCount: 5,
-					studentsWithError: 40,
-					errorTypes: [
-						{ type: 'Careless Errors', count: 10, percentage: 25.0, color: '#A792D0' },
-						{ type: 'Calculation Errors', count: 20, percentage: 50.0, color: '#7CB9E8' },
-						{ type: 'Notation Errors', count: 15, percentage: 37.5, color: '#90EE90' },
-						{ type: 'Others', count: 5, percentage: 12.5, color: '#FFB84D' }
-					]
-				}
-			]
-		},
-		{
-			id: 'homework2',
-			homework: 'Homework 2',
-			topics: [
-				{
-					topic: 'Quadratic Equations',
-					questions: 'Q1, Q3, Q5',
-					questionCount: 3,
-					studentsWithError: 52,
-					errorTypes: [
-						{ type: 'Careless Errors', count: 12, percentage: 23.1, color: '#A792D0' },
-						{ type: 'Calculation Errors', count: 18, percentage: 34.6, color: '#7CB9E8' },
-						{ type: 'Notation Errors', count: 14, percentage: 26.9, color: '#90EE90' },
-						{ type: 'Others', count: 8, percentage: 15.4, color: '#FFB84D' }
-					]
-				}
-			]
-		},
-		{
-			id: 'homework3',
-			homework: 'Homework 3',
-			topics: [
-				{
-					topic: 'Polynomials',
-					questions: 'Q2, Q4, Q6, Q7',
-					questionCount: 4,
-					studentsWithError: 45,
-					errorTypes: [
-						{ type: 'Careless Errors', count: 8, percentage: 17.8, color: '#A792D0' },
-						{ type: 'Calculation Errors', count: 22, percentage: 48.9, color: '#7CB9E8' },
-						{ type: 'Notation Errors', count: 10, percentage: 22.2, color: '#90EE90' },
-						{ type: 'Others', count: 5, percentage: 11.1, color: '#FFB84D' }
-					]
-				}
-			]
-		},
-		{
-			id: 'homework4',
-			homework: 'Homework 4',
-			topics: [
-				{
-					topic: 'Trigonometry',
-					questions: 'Q1, Q2, Q3, Q5, Q8',
-					questionCount: 5,
-					studentsWithError: 50,
-					errorTypes: [
-						{ type: 'Careless Errors', count: 15, percentage: 30.0, color: '#A792D0' },
-						{ type: 'Calculation Errors', count: 18, percentage: 36.0, color: '#7CB9E8' },
-						{ type: 'Notation Errors', count: 12, percentage: 24.0, color: '#90EE90' },
-						{ type: 'Others', count: 5, percentage: 10.0, color: '#FFB84D' }
-					]
-				}
-			]
-		}
-	];
+	let topicByHomework = [];
+	$: if (topicByHomework.length > 0 && expandedHomework.size === 0) {
+		expandedHomework = new Set([topicByHomework[0].id]);
+	}
 
-	// Sample data for Practice Question Set
-	let practiceQuestions = [
-		{
-			homework: 'Homework 1',
-			status: 'approved',
-			date: '2026-01-02 12:23:12'
-		},
-		{
-			homework: 'Homework 2',
-			status: 'ready'
-		},
-		{
-			homework: 'Homework 3',
-			status: 'not_available'
-		},
-		{
-			homework: 'Homework 4',
-			status: 'not_available'
-		},
-		{
-			homework: 'Homework 5',
-			status: 'approved',
-			date: '2026-01-15 09:45:30'
-		},
-		{
-			homework: 'Homework 6',
-			status: 'ready'
-		},
-		{
-			homework: 'Homework 7',
-			status: 'not_available'
-		}
-	];
+	let practiceQuestions = [];
 </script>
 
 <div class="flex flex-col space-y-6 py-4">
@@ -413,148 +376,211 @@
 			Topic Analysis by Homework
 		</h2>
 
-		<div class="rounded border border-[#BDBDBD] dark:border-gray-700 bg-white dark:bg-gray-900 overflow-hidden">
-			<!-- Table Header -->
-			<div class="flex bg-gray-50 dark:bg-gray-800 border-b border-[#BDBDBD] dark:border-gray-700">
-				<div class="flex-shrink-0" style="width: 4%;"></div>
-				<div class="flex-shrink-0 px-4 py-3" style="width: 15%;">
-					<div class="text-sm font-semibold text-gray-700 dark:text-gray-300">Questions in Topic</div>
-					<div class="text-xs text-gray-500 dark:text-gray-400">Count (Numbers)</div>
-				</div>
-				<div class="flex-shrink-0 px-4 py-3" style="width: 11%;">
-					<div class="text-sm font-semibold text-gray-700 dark:text-gray-300">Students with Error</div>
-					<div class="text-xs text-gray-500 dark:text-gray-400 whitespace-normal">Unique students with error</div>
-				</div>
-				<div class="flex-shrink-0 px-4 py-3" style="width: 70%;">
-					<div class="text-sm font-semibold text-gray-700 dark:text-gray-300">Error Type Analysis</div>
-					<div class="flex gap-3 mt-1 text-xs flex-wrap items-center">
-						{#if errorTypeDefs.length === 0}
-							<span class="text-gray-400 dark:text-gray-500 italic">Please add new error types</span>
-						{:else}
-							{#each displayErrorTypes as def, i}
-								<button
-									class="flex items-center gap-1 whitespace-nowrap hover:opacity-75 select-none"
-									on:click={() => i < errorTypeDefs.length && openEdit(i)}
-									title={i < errorTypeDefs.length ? 'Click to edit' : ''}
-									style={i >= errorTypeDefs.length ? 'cursor: default;' : ''}
-								>
-									<span class="w-3 h-3 rounded flex-shrink-0" style="background-color: {def.color};"></span>
-									{def.type}
-								</button>
+		<div class="scrollbar-hidden relative overflow-x-auto max-w-full rounded-sm pt-0.5">
+			<table class="w-full text-sm text-left text-gray-500 dark:text-gray-400 table-auto max-w-full rounded-sm">
+				<thead class="text-xs text-gray-700 uppercase bg-gray-50 dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5">
+					<tr>
+						<th scope="col" colspan="2" class="px-3 py-1.5 whitespace-nowrap">Questions in Topic</th>
+						<th scope="col" class="px-3 py-1.5 whitespace-nowrap">Students with Error</th>
+						<th scope="col" class="px-3 py-1.5 w-full">Error Type Analysis</th>
+					</tr>
+				</thead>
+				<tbody>
+					{#each topicByHomework as homework}
+						<!-- Homework Header Row -->
+						<tr
+							class="bg-white dark:bg-gray-900 border-t border-gray-100 dark:border-gray-850 hover:bg-gray-50 dark:hover:bg-gray-800 transition cursor-pointer"
+							on:click={() => toggleHomework(homework.id)}
+						>
+							<td colspan="4" class="px-3 py-1.5">
+								<div class="flex items-center gap-2">
+									{#if expandedHomework.has(homework.id)}
+										<ChevronDown className="size-3 flex-shrink-0" />
+									{:else}
+										<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="size-3 flex-shrink-0">
+											<path stroke-linecap="round" stroke-linejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
+										</svg>
+									{/if}
+									<span class="font-semibold text-xs text-gray-900 dark:text-gray-100">{homework.homework}</span>
+								</div>
+							</td>
+						</tr>
+
+						<!-- Topics (expanded) -->
+						{#if expandedHomework.has(homework.id)}
+							{#each homework.topics as topic}
+								<tr class="bg-white dark:bg-gray-900 border-t border-gray-100 dark:border-gray-850 hover:bg-gray-50 dark:hover:bg-gray-800 transition text-xs">
+									<td class="px-3 py-1.5 w-8"></td>
+									<td class="px-3 py-1.5">
+										<div class="text-gray-900 dark:text-gray-100 whitespace-nowrap">{topic.topic}</div>
+										<div class="text-gray-500 dark:text-gray-400 mt-0.5 whitespace-nowrap">
+											{topic.questionCount} [{topic.questions}]
+										</div>
+									</td>
+									<td class="px-3 py-1.5">
+										<span class="text-gray-900 dark:text-gray-100">{topic.studentsWithError}</span>
+									</td>
+									<td class="px-3 py-1.5 w-full">
+										{#if getTopicDisplayErrorTypes(topic.errorTypes).length === 0}
+											<div class="flex items-center gap-2">
+												<span class="text-gray-400 dark:text-gray-500 italic">Please add new error types</span>
+												<button
+													class="flex items-center justify-center w-4 h-4 rounded-full bg-gray-200 hover:bg-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-600 dark:text-gray-300 leading-none text-base flex-shrink-0"
+													on:click|stopPropagation={addErrorType}
+													title="Add error type"
+												>+</button>
+											</div>
+										{:else}
+											<!-- Stacked Bar Chart with + at end -->
+											<div class="flex items-center gap-2">
+												<div class="flex h-5 rounded overflow-hidden flex-1 min-w-[200px]">
+													{#each getTopicDisplayErrorTypes(topic.errorTypes) as errorType}
+														<div
+															style="width: {errorType.percentage}%; background-color: {errorType.color};"
+															title="{errorType.type}: {errorType.percentage}%"
+														></div>
+													{/each}
+												</div>
+												{#if errorTypeDefs.length < 4}
+													<button
+														class="flex items-center justify-center w-4 h-4 rounded-full bg-gray-200 hover:bg-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-600 dark:text-gray-300 leading-none text-base flex-shrink-0"
+														on:click|stopPropagation={addErrorType}
+														title="Add error type"
+													>+</button>
+												{/if}
+											</div>
+											<!-- Labels below bar -->
+											<div class="flex w-full mt-1 min-w-[200px]">
+												{#each getTopicDisplayErrorTypes(topic.errorTypes) as errorType}
+													<div class="overflow-hidden" style="width: {errorType.percentage}%;">
+														{#if errorType.percentage >= 8}
+															<span class="text-gray-600 dark:text-gray-400 block truncate leading-tight">
+																{errorType.percentage}%
+															</span>
+														{/if}
+													</div>
+												{/each}
+											</div>
+										{/if}
+									</td>
+								</tr>
 							{/each}
 						{/if}
-						{#if errorTypeDefs.length < 4}
-							<button
-								class="flex items-center justify-center w-4 h-4 rounded-full bg-gray-200 hover:bg-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-600 dark:text-gray-300 leading-none text-base"
-								on:click={addErrorType}
-								title="Add error type"
-							>+</button>
-						{/if}
-					</div>
-				</div>
-			</div>
-
-			<!-- Table Body -->
-			<div>
-				{#each topicByHomework as homework, homeworkIndex}
-					<!-- Homework Header Row -->
-					<div
-						class="flex {expandedHomework.has(homework.id) ? 'border-b border-gray-200 dark:border-gray-800' : homeworkIndex < topicByHomework.length - 1 ? 'border-b border-[#BDBDBD] dark:border-gray-700' : ''} bg-white dark:bg-gray-900 hover:bg-gray-50 dark:hover:bg-gray-800 transition cursor-pointer"
-						on:click={() => toggleHomework(homework.id)}
-					>
-						<div class="w-full px-4 py-3 flex items-center gap-2">
-							{#if expandedHomework.has(homework.id)}
-								<!-- Down chevron when expanded -->
-								<svg
-									xmlns="http://www.w3.org/2000/svg"
-									fill="none"
-									viewBox="0 0 24 24"
-									stroke-width="2"
-									stroke="currentColor"
-									class="w-4 h-4 flex-shrink-0"
-								>
-									<path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
-								</svg>
-							{:else}
-								<!-- Right chevron when collapsed -->
-								<svg
-									xmlns="http://www.w3.org/2000/svg"
-									fill="none"
-									viewBox="0 0 24 24"
-									stroke-width="2"
-									stroke="currentColor"
-									class="w-4 h-4 flex-shrink-0"
-								>
-									<path stroke-linecap="round" stroke-linejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
-								</svg>
-							{/if}
-							<span class="font-semibold text-sm text-gray-900 dark:text-gray-100"
-								>{homework.homework}</span
-							>
-						</div>
-					</div>
-
-					<!-- Topics (expanded) -->
-					{#if expandedHomework.has(homework.id)}
-						{#each homework.topics as topic, topicIndex}
-							<div
-								class="flex {topicIndex === homework.topics.length - 1 && homeworkIndex < topicByHomework.length - 1 ? 'border-b border-[#BDBDBD] dark:border-gray-700' : topicIndex < homework.topics.length - 1 ? 'border-b border-gray-200 dark:border-gray-800' : ''} hover:bg-gray-50 dark:hover:bg-gray-800 transition"
-							>
-								<div class="flex-shrink-0" style="width: 4%;"></div>
-								<div class="flex-shrink-0 px-4 py-3" style="width: 15%;">
-									<div class="text-sm text-gray-900 dark:text-gray-100">{topic.topic}</div>
-									<div class="text-xs text-gray-500 dark:text-gray-400 mt-1">
-										{topic.questionCount} [{topic.questions}]
-									</div>
-								</div>
-								<div class="flex-shrink-0 px-4 py-3 flex items-center" style="width: 11%;">
-									<div class="text-sm font-medium text-gray-900 dark:text-gray-100">
-										{topic.studentsWithError}
-									</div>
-								</div>
-								<div class="flex-shrink-0 px-4 py-3" style="width: 70%;">
-									{#if getTopicDisplayErrorTypes(topic.errorTypes).length === 0}
-										<div class="flex items-center gap-2">
-											<span class="text-xs text-gray-400 dark:text-gray-500 italic">
-												No error types defined, please define error types
-											</span>
-											<button
-												class="flex items-center justify-center w-4 h-4 rounded-full bg-gray-200 hover:bg-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-600 dark:text-gray-300 leading-none text-base"
-												on:click|stopPropagation={addErrorType}
-												title="Add error type"
-											>+</button>
-										</div>
-									{:else}
-										<!-- Stacked Bar Chart -->
-										<div class="flex h-5 rounded overflow-hidden w-full">
-											{#each getTopicDisplayErrorTypes(topic.errorTypes) as errorType}
-												<div
-													style="width: {errorType.percentage}%; background-color: {errorType.color};"
-													title="{errorType.type}: {errorType.percentage}%"
-												></div>
-											{/each}
-										</div>
-										<!-- Labels below bar -->
-										<div class="flex w-full mt-1">
-											{#each getTopicDisplayErrorTypes(topic.errorTypes) as errorType}
-												<div class="overflow-hidden" style="width: {errorType.percentage}%;">
-													{#if errorType.percentage >= 8}
-														<span class="text-xs text-gray-600 dark:text-gray-400 block truncate leading-tight">
-															{errorType.percentage}%
-														</span>
-													{/if}
-												</div>
-											{/each}
-										</div>
-									{/if}
-								</div>
-							</div>
-						{/each}
+					{/each}
+					{#if topicByHomework.length === 0}
+						<tr class="bg-white dark:bg-gray-900 text-xs">
+							<td colspan="4" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">No data available</td>
+						</tr>
 					{/if}
-				{/each}
-			</div>
+				</tbody>
+			</table>
 		</div>
 	</div>
+
+	<div class="space-y-3">
+		<div class="flex items-center justify-between gap-3">
+			<div>
+				<h4 class="text-base font-semibold text-gray-800 dark:text-gray-200">Error Type Configuration</h4>
+				<div class="text-xs text-gray-400 dark:text-gray-500">You can have at most 4 error types</div>
+			</div>
+			<div class="flex items-center gap-3">
+				<button
+					class="text-xs font-medium text-gray-500 transition hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+					on:click={() => {
+						showResetDefaultsModal = true;
+					}}
+				>
+					Use default
+				</button>
+				<div class="flex items-center gap-2">
+				{#if errorTypeDefs.length < 4}
+					<button
+						class="flex items-center gap-1 rounded px-1.5 py-1 text-xs text-gray-500 transition hover:bg-black/5 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-200"
+						on:click={addErrorType}
+						title="Add error type"
+					>
+						<span>Add</span>
+						<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3 h-3">
+							<path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+						</svg>
+					</button>
+				{/if}
+				{#if errorTypeDefs.length > 0}
+					<button
+						class="flex items-center gap-1 rounded px-1.5 py-1 text-xs text-gray-500 transition hover:bg-black/5 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-200"
+						on:click={() => {
+							showResetDefaultsModal = true;
+						}}
+						title="Reset error types to defaults"
+					>
+						<span>Delete</span>
+						<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3 h-3">
+							<path stroke-linecap="round" stroke-linejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" />
+						</svg>
+					</button>
+				{/if}
+				</div>
+			</div>
+		</div>
+
+		{#if errorTypeDefs.length === 0}
+			<div class="rounded-lg border border-gray-200 bg-white px-4 py-6 text-sm text-gray-400 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-500">
+				No error types defined, please define error types
+			</div>
+		{:else}
+			<div class="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+				{#each errorTypeDefs as def, i}
+					<button
+						type="button"
+						class="rounded-lg border border-gray-200 bg-white p-4 text-left transition hover:border-gray-300 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-900 dark:hover:border-gray-600 dark:hover:bg-gray-800"
+						on:click={() => openEdit(i)}
+					>
+						<div class="flex items-center gap-2">
+							<span class="h-3 w-3 rounded-full flex-shrink-0" style="background-color: {def.color};"></span>
+							<div class="text-sm font-medium text-gray-900 dark:text-gray-100">{def.type}</div>
+						</div>
+						<p class="mt-2 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
+							{def.description || 'No description yet.'}
+						</p>
+					</button>
+				{/each}
+			</div>
+		{/if}
+	</div>
+
+	{#if showResetDefaultsModal}
+		<div
+			class="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+			on:click|self={() => {
+				showResetDefaultsModal = false;
+			}}
+			role="dialog"
+			aria-modal="true"
+		>
+			<div class="w-[420px] max-w-[90vw] rounded-xl bg-white p-6 shadow-2xl dark:bg-gray-900">
+				<div class="text-base font-semibold text-gray-900 dark:text-gray-100">Use default error types?</div>
+				<p class="mt-3 text-sm text-gray-500 dark:text-gray-400">
+					This will replace the current error types with the default set.
+				</p>
+				<div class="mt-6 flex justify-end gap-2">
+					<button
+						class="px-3 py-1.5 text-sm text-gray-600 transition hover:text-gray-900 dark:text-gray-300 dark:hover:text-white"
+						on:click={() => {
+							showResetDefaultsModal = false;
+						}}
+					>
+						Cancel
+					</button>
+					<button
+						class="px-3 py-1.5 text-sm font-medium text-gray-900 transition hover:text-black dark:text-gray-100 dark:hover:text-white"
+						on:click={confirmResetDefaults}
+					>
+						Confirm
+					</button>
+				</div>
+			</div>
+		</div>
+	{/if}
 
 	<!-- Practice Question Set -->
 	<div class="space-y-3">
@@ -564,33 +590,26 @@
 			Start with an AI-generated question set based on students' weak topics, or upload your own questions. You can download, edit, and re-upload AI-generated content if needed. All uploaded question sets are automatically standardized by the system, with topics added and answers generated if missing, to ensure a consistent format across the platform.
 		</p>
 
-		<div class="overflow-x-auto rounded-lg border border-gray-200 dark:border-gray-700">
-			<table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-				<thead class="bg-gray-50 dark:bg-gray-800">
+		<div class="scrollbar-hidden relative overflow-x-auto max-w-full rounded-sm pt-0.5">
+			<table class="w-full text-sm text-left text-gray-500 dark:text-gray-400 table-auto max-w-full rounded-sm">
+				<thead class="text-xs text-gray-700 uppercase bg-gray-50 dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5">
 					<tr>
-						<th
-							class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider"
-						>
-							Homework
-						</th>
-						<th
-							class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider"
-						>
-							Status
-						</th>
+						<th scope="col" class="px-3 py-1.5">Homework</th>
+						<th scope="col" class="px-3 py-1.5">Status</th>
+						<th scope="col" class="px-3 py-1.5">Action</th>
 					</tr>
 				</thead>
-				<tbody class="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
-					{#each practiceQuestions as practice}
-						<tr class="hover:bg-gray-50 dark:hover:bg-gray-800 transition">
-							<td
-								class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100"
-							>
-								{practice.homework}
-							</td>
-							<td class="px-6 py-4 text-sm text-gray-700 dark:text-gray-300">
-								<div class="flex items-center justify-between">
-									<div class="flex items-center gap-2">
+				<tbody>
+					{#if practiceQuestions.length === 0}
+						<tr class="bg-white dark:bg-gray-900 text-xs">
+							<td colspan="3" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">No data available</td>
+						</tr>
+					{:else}
+						{#each practiceQuestions as practice}
+							<tr class="bg-white dark:bg-gray-900 dark:border-gray-850 text-xs border-t border-gray-100 dark:border-gray-850">
+								<td class="px-3 py-1.5 font-medium text-gray-900 dark:text-white whitespace-nowrap">{practice.homework}</td>
+								<td class="px-3 py-1.5">
+									<div class="flex items-center gap-2 text-gray-700 dark:text-gray-300 whitespace-nowrap">
 										{#if practice.status === 'approved'}
 											<span class="w-2 h-2 rounded-full bg-green-500 flex-shrink-0"></span>
 											<span>Approved on {practice.date}</span>
@@ -605,18 +624,30 @@
 											<span>Not ready</span>
 										{/if}
 									</div>
-									{#if practice.status === 'approved' || practice.status === 'ready'}
-										<a
-											href="/aitutordashboard/topicanalysis/reviewquestionset?homework_id={practice.homeworkId ?? ''}"
-											class="text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 underline ml-4"
-										>
-											View
-										</a>
-									{/if}
-								</div>
-							</td>
-						</tr>
-					{/each}
+								</td>
+								<td class="px-3 py-1.5">
+									<div class="flex items-center gap-1">
+										{#if practice.status === 'approved' || practice.status === 'ready'}
+											<a
+												href="/aitutordashboard/topicanalysis/reviewquestionset?homework_id={practice.homeworkId ?? ''}"
+												class="self-center w-fit text-xs px-2 py-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-xl text-gray-700 dark:text-gray-300 whitespace-nowrap"
+											>
+												View
+											</a>
+											<button
+												class="self-center w-fit text-xs px-2 py-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-xl text-gray-700 dark:text-gray-300 flex items-center gap-1 whitespace-nowrap"
+											>
+												Send
+												<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="size-3">
+													<path stroke-linecap="round" stroke-linejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
+												</svg>
+											</button>
+										{/if}
+									</div>
+								</td>
+							</tr>
+						{/each}
+					{/if}
 				</tbody>
 			</table>
 		</div>
@@ -696,3 +727,8 @@
 	{/if}
 
 </div>
+
+<style>
+	.scrollbar-hidden::-webkit-scrollbar { display: none; }
+	.scrollbar-hidden { -ms-overflow-style: none; scrollbar-width: none; }
+</style>

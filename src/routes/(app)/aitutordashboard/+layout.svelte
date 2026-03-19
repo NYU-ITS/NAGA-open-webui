@@ -20,6 +20,12 @@
 	let createdGroups = [];
 	let memberGroups = [];
 	let allUserGroups = []; // All groups with identity (Admin/Member)
+	let selectedGroupId = '';
+	let selectedGroup = null;
+
+	$: selectedGroupId = $page.url.searchParams.get('group_id') || '';
+	$: selectedGroup =
+		allUserGroups.find((group) => group.id === selectedGroupId) || allUserGroups[0] || null;
 
 	onMount(async () => {
 		loaded = true;
@@ -50,6 +56,10 @@
 						...createdGroups.map(g => ({ ...g, identity: 'Admin' })),
 						...memberGroups.map(g => ({ ...g, identity: 'Member' }))
 					];
+
+					if (!$page.url.searchParams.get('group_id') && allUserGroups.length > 0) {
+						await selectGroup(allUserGroups[0]);
+					}
 				}
 			} catch (error) {
 				if (TESTING_AI_TUTOR) {
@@ -74,6 +84,17 @@
 
 	function closeGroupDropdown() {
 		showGroupDropdown = false;
+	}
+
+	async function selectGroup(group) {
+		const params = new URLSearchParams($page.url.searchParams);
+		params.set('group_id', group.id);
+		showGroupDropdown = false;
+		await goto(`${$page.url.pathname}?${params.toString()}`, {
+			keepFocus: true,
+			noScroll: true,
+			replaceState: true
+		});
 	}
 </script>
 
@@ -115,7 +136,15 @@
 								on:click={toggleGroupDropdown}
 								class="flex items-center gap-2 text-lg font-semibold text-gray-800 dark:text-gray-200 hover:text-gray-600 dark:hover:text-gray-400 transition"
 							>
-								<span>MATH-I – InstructorName – CourseCode - Section - Course Name Spring 2026</span>
+								<span>
+								{#if selectedGroup}
+									{selectedGroup.name}
+								{:else if loaded}
+									No Group
+								{:else}
+									Loading...
+								{/if}
+							</span>
 								<svg
 									xmlns="http://www.w3.org/2000/svg"
 									fill="none"
@@ -143,7 +172,11 @@
 									{#if allUserGroups.length > 0}
 										<div class="space-y-1 max-h-64 overflow-y-auto">
 											{#each allUserGroups as group}
-												<div class="flex items-center justify-between py-2 px-3 bg-gray-50 dark:bg-gray-800 rounded hover:bg-gray-100 dark:hover:bg-gray-700 transition">
+												<button
+													type="button"
+													class="flex w-full items-center justify-between rounded bg-gray-50 px-3 py-2 text-left transition hover:bg-gray-100 dark:bg-gray-800 dark:hover:bg-gray-700"
+													on:click={() => selectGroup(group)}
+												>
 													<span class="text-sm text-gray-900 dark:text-gray-100 font-medium">
 														{group.name}
 													</span>
@@ -152,7 +185,7 @@
 														: 'bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200'}">
 														{group.identity}
 													</span>
-												</div>
+												</button>
 											{/each}
 										</div>
 									{:else}
@@ -313,7 +346,7 @@
 			</div>
 		</nav>
 
-		<div class="pb-1 px-[18px] flex-1 max-h-full overflow-y-auto" id="aitutordashboard-container">
+		<div class="pb-1 px-[18px] flex-1 max-h-full overflow-y-auto" style="scrollbar-gutter: stable" id="aitutordashboard-container">
 			<slot />
 		</div>
 	</div>

@@ -22,6 +22,8 @@ import { goto } from '$app/navigation';
 	let searchTopic = '';
 
 	let selectedHomework = 'All';
+	// TODO(student-dashboard-backend): Replace the static homework/topic filter model with
+	// student-scoped homework metadata from the AI Tutor backend once the student APIs exist.
 	const homeworkOptions = [
 		'All',
 		'Homework 1',
@@ -359,65 +361,6 @@ import { goto } from '$app/navigation';
 						</a>
 					</div>
 
-					<!-- Homework Dropdown (on new line) -->
-					<div class="px-2 mt-2 flex flex-col gap-2 sm:flex-row sm:items-center">
-						<div class="relative w-full sm:w-80">
-							<input
-								bind:value={searchTopic}
-								on:input={() => {
-									updateDashboardFilters(selectedHomework, searchTopic);
-								}}
-								class="w-full px-4 py-2 text-sm text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-1 focus:ring-[#57068c]"
-								placeholder="Search topics"
-							/>
-						</div>
-
-						<div class="relative w-full sm:w-80">
-							<button
-								on:click={toggleHomeworkDropdown}
-								class="flex items-center justify-between w-full px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition"
-							>
-								<span>{selectedHomework}</span>
-								<svg
-									xmlns="http://www.w3.org/2000/svg"
-									fill="none"
-									viewBox="0 0 24 24"
-									stroke-width="2"
-									stroke="currentColor"
-									class="w-4 h-4"
-								>
-									<path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
-								</svg>
-							</button>
-
-							<!-- Homework Dropdown Menu -->
-							{#if showHomeworkDropdown}
-								<div
-									class="absolute left-0 mt-2 w-full bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg py-1"
-									style="z-index: 9999;"
-									on:mouseleave={closeHomeworkDropdown}
-								>
-									{#each filteredHomeworkOptions as option}
-										<button
-											on:click={() => {
-												selectedHomework = option;
-												updateDashboardFilters(option, searchTopic);
-												closeHomeworkDropdown();
-											}}
-											class="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
-										>
-											{option}
-										</button>
-									{/each}
-									{#if filteredHomeworkOptions.length === 0}
-										<div class="px-4 py-2 text-sm text-gray-500 dark:text-gray-400">
-											No homework matches that topic
-										</div>
-									{/if}
-								</div>
-							{/if}
-						</div>
-					</div>
 				</div>
 			</div>
 		</nav>

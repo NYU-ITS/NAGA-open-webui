@@ -17,6 +17,9 @@
 
 	let selectedConcepts: Set<string> = new Set();
 	let selectedHomework = 'All'; // This should sync with parent layout
+	// TODO(student-dashboard-backend): This table is intended for teacher-distributed practice
+	// question sets. Replace the placeholder rows with student assignment status once the
+	// backend exposes distribution / completion endpoints.
 	const followUpQuestions = [
 		{ homework: 'Homework 1', status: 'Not Ready' },
 		{ homework: 'Homework 2', status: 'Not Completed' },
@@ -28,79 +31,126 @@
 		{ homework: 'Homework 8', status: 'Not Completed' }
 	];
 
-	// Sample concepts data - topics from homework
+	// TODO(student-dashboard-backend): Replace this static concept catalog with student-scoped
+	// concept summaries from the AI Tutor backend. Each concept should eventually include:
+	// - concept/topic name
+	// - tested homeworks
+	// - practice availability / completion status
+	// - question-generation or assigned-practice metadata
 	const conceptsData = [
 		{
 			name: 'Linear Algebra',
 			testedIn: ['Homework 1', 'Homework 2', 'Homework 3', 'Homework 4'],
 			practicedDate: 'Jan 21',
-			isFinished: true
+			homeworkStatuses: {
+				'Homework 1': 'Mastered',
+				'Homework 2': 'Practiced',
+				'Homework 3': 'Mastered',
+				'Homework 4': 'Practiced'
+			}
 		},
 		{
 			name: 'Differentiation',
 			testedIn: ['Homework 1', 'Homework 2', 'Homework 3', 'Homework 4'],
 			practicedDate: 'Jan 21',
-			isFinished: true
+			homeworkStatuses: {
+				'Homework 1': 'Practiced',
+				'Homework 2': 'Mastered',
+				'Homework 3': 'Practiced',
+				'Homework 4': 'Mastered'
+			}
 		},
 		{
 			name: 'Integration',
 			testedIn: ['Homework 1', 'Homework 2', 'Homework 3', 'Homework 4'],
 			practicedDate: 'Jan 21',
-			isFinished: true
+			homeworkStatuses: {
+				'Homework 1': 'Practiced',
+				'Homework 2': 'Mastered',
+				'Homework 3': 'Practiced',
+				'Homework 4': 'Mastered'
+			}
 		},
 		{
 			name: 'Limit Definition',
 			testedIn: ['Homework 1', 'Homework 2', 'Homework 3', 'Homework 4'],
 			practicedDate: 'Jan 21',
-			isFinished: true
+			homeworkStatuses: {
+				'Homework 1': 'Mastered',
+				'Homework 2': 'Mastered',
+				'Homework 3': 'Practiced',
+				'Homework 4': 'Practiced'
+			}
 		},
 		{
 			name: 'Quadratic Equations',
 			testedIn: ['Homework 1', 'Homework 2'],
 			practicedDate: 'Jan 21',
-			isFinished: true
+			homeworkStatuses: {
+				'Homework 1': 'Mastered',
+				'Homework 2': 'Practiced'
+			}
 		},
 		{
 			name: 'Polynomials',
 			testedIn: ['Homework 2', 'Homework 3'],
 			practicedDate: 'Jan 21',
-			isFinished: true
+			homeworkStatuses: {
+				'Homework 2': 'Mastered',
+				'Homework 3': 'Mastered'
+			}
 		},
 		{
 			name: 'Factoring',
 			testedIn: ['Homework 2', 'Homework 4'],
 			practicedDate: null,
-			isFinished: false
+			homeworkStatuses: {
+				'Homework 2': 'Unmastered',
+				'Homework 4': 'Unmastered'
+			}
 		},
 		{
 			name: 'Complex Numbers',
 			testedIn: ['Homework 3', 'Homework 5'],
 			practicedDate: null,
-			isFinished: false
+			homeworkStatuses: {
+				'Homework 3': 'Unmastered',
+				'Homework 5': 'Unmastered'
+			}
 		},
 		{
 			name: 'Trigonometry',
 			testedIn: ['Homework 3', 'Homework 4'],
 			practicedDate: 'Jan 21',
-			isFinished: true
+			homeworkStatuses: {
+				'Homework 3': 'Practiced',
+				'Homework 4': 'Mastered'
+			}
 		},
 		{
 			name: 'Unit Circle',
 			testedIn: ['Homework 4'],
 			practicedDate: 'Jan 21',
-			isFinished: true
+			homeworkStatuses: {
+				'Homework 4': 'Mastered'
+			}
 		},
 		{
 			name: 'Trigonometric Identities',
 			testedIn: ['Homework 4', 'Homework 5'],
 			practicedDate: 'Jan 21',
-			isFinished: true
+			homeworkStatuses: {
+				'Homework 4': 'Practiced',
+				'Homework 5': 'Mastered'
+			}
 		},
 		{
 			name: 'Inverse Functions',
 			testedIn: ['Homework 5'],
 			practicedDate: null,
-			isFinished: false
+			homeworkStatuses: {
+				'Homework 5': 'Unmastered'
+			}
 		}
 	];
 
@@ -131,10 +181,10 @@
 
 	function selectAllUnfinished() {
 		// Clear current selection first
-		selectedConcepts.clear();
+			selectedConcepts.clear();
 		// Then add only unfinished ones
 		filteredConcepts.forEach(concept => {
-			if (!concept.isFinished) {
+			if (Object.values(concept.homeworkStatuses).includes('Unmastered')) {
 				selectedConcepts.add(concept.name);
 			}
 		});
@@ -154,6 +204,8 @@
 	}
 
 	function handleGenerate() {
+		// TODO(student-dashboard-backend): Replace sessionStorage-based placeholder generation
+		// with a real student practice-question workflow backed by the AI Tutor practice APIs.
 		// Create array of selected concept names
 		const selectedConceptsArray = Array.from(selectedConcepts);
 
@@ -231,8 +283,10 @@
 		</div>
 	{/if}
 
-	<div class="space-y-4">
-		<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Practice Questions</h2>
+	<div class="sticky top-0 z-10 bg-transparent py-2 space-y-4">
+		<div class="flex md:self-center text-lg font-medium px-0.5">
+			By Concepts
+		</div>
 
 	{#if !TEMP_HIDE}
 		<!-- Selection Buttons -->
@@ -240,19 +294,19 @@
 			<div class="flex items-center gap-1">
 				<button
 					on:click={selectAllUnfinished}
-					class="px-4 py-2 text-sm font-medium text-gray-600 dark:text-gray-400 hover:text-[#57068c] dark:hover:text-white rounded-lg transition"
+					class="px-4 py-2 text-sm font-medium text-gray-600 transition hover:text-[#57068c] dark:text-gray-400 dark:hover:text-white"
 				>
 					Select All Unfinished
 				</button>
 				<button
 					on:click={selectAll}
-					class="px-4 py-2 text-sm font-medium text-gray-600 dark:text-gray-400 hover:text-[#57068c] dark:hover:text-white rounded-lg transition"
+					class="px-4 py-2 text-sm font-medium text-gray-600 transition hover:text-[#57068c] dark:text-gray-400 dark:hover:text-white"
 				>
 					Select All
 				</button>
 				<button
 					on:click={unselectAll}
-					class="px-4 py-2 text-sm font-medium text-gray-600 dark:text-gray-400 hover:text-[#57068c] dark:hover:text-white rounded-lg transition"
+					class="px-4 py-2 text-sm font-medium text-gray-600 transition hover:text-[#57068c] dark:text-gray-400 dark:hover:text-white"
 				>
 					Unselect All
 				</button>
@@ -261,7 +315,7 @@
 			{#if selectedConcepts.size > 0}
 				<button
 					on:click={handleGenerate}
-					class="px-6 py-2 text-sm font-medium text-[#57068c] dark:text-white hover:text-purple-700 dark:hover:text-gray-200 rounded-lg transition"
+					class="px-6 py-2 text-sm font-medium text-[#57068c] transition hover:text-purple-700 dark:text-white dark:hover:text-gray-200"
 				>
 					Generate ({selectedConcepts.size})
 				</button>
@@ -274,65 +328,87 @@
 		{#each paginatedConcepts as concept}
 			<button
 				on:click={() => selectConcept(concept.name)}
-				class="text-left p-4 rounded-lg border transition {selectedConcepts.has(concept.name)
-					? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20'
-					: 'border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 hover:border-gray-300 dark:hover:border-gray-600'}"
+				class="flex h-full flex-col items-stretch justify-start text-left align-top rounded-xl border p-5 transition {selectedConcepts.has(concept.name)
+					? 'border-[#57068c]/40 bg-[#57068c]/5 dark:bg-[#57068c]/10 dark:border-[#57068c]/50'
+					: 'border-gray-200 bg-white hover:border-gray-300 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-900 dark:hover:border-gray-600 dark:hover:bg-gray-800'}"
 				disabled={TEMP_HIDE}
 			>
-				<h3 class="text-base font-semibold text-gray-900 dark:text-gray-100 mb-2">
-					{concept.name}
-				</h3>
-				<div class="space-y-1">
-					<div class="text-sm text-gray-600 dark:text-gray-400">
-						<span class="font-medium">This concept is tested in:</span>
-						<span class="ml-1">{concept.testedIn.join(', ')}</span>
+				<div class="flex items-start justify-between gap-3">
+					<h3 class="select-text text-base font-semibold text-gray-900 dark:text-gray-100">
+						{concept.name}
+					</h3>
+				</div>
+				<div class="mt-1 flex flex-1 flex-col">
+					<div>
+						<div class="text-[11px] font-semibold tracking-wide text-gray-400 dark:text-gray-500">
+							{concept.testedIn.length === 1 ? 'In Homework:' : 'In Homeworks:'}
+						</div>
+						<div class="mt-2 grid grid-cols-1 gap-1.5 sm:grid-cols-2 items-start">
+							{#each concept.testedIn as homework}
+								<div class="flex items-start gap-1.5 min-w-0">
+									<span class="inline-flex justify-center rounded-full bg-gray-100 px-2.5 py-1 text-xs text-gray-700 dark:bg-gray-800 dark:text-gray-300">
+										{homework.replace('Homework ', '')}
+									</span>
+									<span
+										class="inline-flex min-w-0 rounded-full px-2.5 py-1 text-xs font-medium {concept.homeworkStatuses[homework] === 'Mastered'
+											? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300'
+											: concept.homeworkStatuses[homework] === 'Practiced'
+												? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'
+												: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-300'}"
+									>
+										{concept.homeworkStatuses[homework]}
+									</span>
+								</div>
+							{/each}
+						</div>
 					</div>
-					{#if concept.isFinished && concept.practicedDate}
-						<div class="text-sm mt-2 flex items-center gap-1">
-							<span class="font-medium text-green-600 dark:text-green-400">You have practiced in:</span>
-							<span class="text-green-600 dark:text-green-400">{concept.practicedDate}</span>
-							<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-4 h-4 text-green-600 dark:text-green-400">
+					<div class="mt-auto min-h-[1.5rem] pt-3 flex items-start gap-2 text-sm text-green-600 dark:text-green-400">
+						{#if concept.practicedDate}
+							<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-4 h-4">
 								<path fill-rule="evenodd" d="M16.704 4.153a.75.75 0 0 1 .143 1.052l-8 10.5a.75.75 0 0 1-1.127.075l-4.5-4.5a.75.75 0 0 1 1.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 0 1 1.05-.143Z" clip-rule="evenodd" />
 							</svg>
-						</div>
-					{/if}
+							<span>Practiced on {concept.practicedDate}</span>
+						{/if}
+					</div>
 				</div>
 			</button>
 		{/each}
 	</div>
 
 	<!-- Pagination -->
-	<div class="flex items-center justify-center gap-2 pt-4">
-		<button
-			on:click={previousPage}
-			disabled={currentPage === 1}
-			class="px-3 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition"
-		>
-			<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4">
-				<path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" />
-			</svg>
-		</button>
-
-		{#each Array.from({ length: totalPages }, (_, i) => i + 1) as pageNum}
+	{#if filteredConcepts.length > 18}
+		<div class="flex items-center justify-center gap-2 pt-4">
 			<button
-				on:click={() => goToPage(pageNum)}
-				class="px-3 py-1 text-sm border rounded transition {currentPage === pageNum
-					? 'bg-purple-600 text-white border-purple-600'
-					: 'border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-800'}"
+				on:click={previousPage}
+				disabled={currentPage === 1}
+				class="px-3 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition"
 			>
-				{pageNum}
+				<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4">
+					<path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" />
+				</svg>
 			</button>
-		{/each}
 
-		<button
-			on:click={nextPage}
-			disabled={currentPage === totalPages}
-			class="px-3 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition"
-		>
-			<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4">
-				<path stroke-linecap="round" stroke-linejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
-			</svg>
-		</button>
-	</div>
+			{#each Array.from({ length: totalPages }, (_, i) => i + 1) as pageNum}
+				<button
+					on:click={() => goToPage(pageNum)}
+					class="px-3 py-1 text-sm border rounded transition {currentPage === pageNum
+						? 'bg-purple-600 text-white border-purple-600'
+						: 'border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-800'}"
+				>
+					{pageNum}
+				</button>
+			{/each}
+
+			<button
+				on:click={nextPage}
+				disabled={currentPage === totalPages}
+				class="px-3 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition"
+			>
+				<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4">
+					<path stroke-linecap="round" stroke-linejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
+				</svg>
+			</button>
+		</div>
+	{/if}
 	</div>
 </div>
