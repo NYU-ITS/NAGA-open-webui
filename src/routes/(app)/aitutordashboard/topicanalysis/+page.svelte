@@ -2,18 +2,115 @@
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
 	import { toast } from 'svelte-sonner';
-	import { TESTING_AI_TUTOR } from '$lib/constants';
+	import { AI_TUTOR_DUMMY_ERROR_TYPES, AI_TUTOR_DUMMY_MODE, TESTING_AI_TUTOR } from '$lib/constants';
+	import { aiTutorDummyErrorTypes } from '$lib/stores';
 	import ChevronUp from '$lib/components/icons/ChevronUp.svelte';
 	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
 
 	const AI_TUTOR_API_BASE = 'http://localhost:8000';
+	const useDummyData = AI_TUTOR_DUMMY_MODE;
 
 	// Group ID (needed for error-types endpoints)
 	let groupId = '';
 	$: groupId = $page.url.searchParams.get('group_id') || '';
+	const dummyTopicByHomework = [
+		{
+			id: 'Homework 1',
+			homework: 'Homework 1',
+			topics: [
+				{
+					topic: 'Linear Algebra',
+					questions: 'Q1, Q2',
+					questionCount: 2,
+					studentsWithError: 4,
+					errorTypes: [
+						{ type: 'Conceptual', count: 4, percentage: 50, color: '#1D4ED8' },
+						{ type: 'Procedural', count: 4, percentage: 50, color: '#0F766E' }
+					]
+				},
+				{
+					topic: 'Limit Definition',
+					questions: 'Q3',
+					questionCount: 1,
+					studentsWithError: 3,
+					errorTypes: [
+						{ type: 'Conceptual', count: 2, percentage: 40, color: '#1D4ED8' },
+						{ type: 'Arithmetic', count: 3, percentage: 60, color: '#B45309' }
+					]
+				}
+			]
+		},
+		{
+			id: 'Homework 2',
+			homework: 'Homework 2',
+			topics: [
+				{
+					topic: 'Integration by Parts',
+					questions: 'Q1, Q4',
+					questionCount: 2,
+					studentsWithError: 5,
+					errorTypes: [
+						{ type: 'Procedural', count: 6, percentage: 60, color: '#0F766E' },
+						{ type: 'Communication', count: 4, percentage: 40, color: '#B91C1C' }
+					]
+				},
+				{
+					topic: 'Factoring',
+					questions: 'Q2',
+					questionCount: 1,
+					studentsWithError: 2,
+					errorTypes: [
+						{ type: 'Arithmetic', count: 2, percentage: 100, color: '#B45309' }
+					]
+				}
+			]
+		},
+		{
+			id: 'Homework 3',
+			homework: 'Homework 3',
+			topics: [
+				{
+					topic: 'Trigonometric Identities',
+					questions: 'Q1, Q2',
+					questionCount: 2,
+					studentsWithError: 4,
+					errorTypes: [
+						{ type: 'Conceptual', count: 3, percentage: 37.5, color: '#1D4ED8' },
+						{ type: 'Procedural', count: 5, percentage: 62.5, color: '#0F766E' }
+					]
+				}
+			]
+		},
+		{
+			id: 'Homework 4',
+			homework: 'Homework 4',
+			topics: [
+				{
+					topic: 'Trigonometric Identities',
+					questions: 'Q3',
+					questionCount: 1,
+					studentsWithError: 3,
+					errorTypes: [
+						{ type: 'Communication', count: 1, percentage: 25, color: '#B91C1C' },
+						{ type: 'Procedural', count: 3, percentage: 75, color: '#0F766E' }
+					]
+				}
+			]
+		}
+	];
+	const dummyPracticeQuestions = [
+		{ homework: 'Homework 1', homeworkId: 'Homework 1', status: 'approved', date: 'Mar 12, 2026' },
+		{ homework: 'Homework 2', homeworkId: 'Homework 2', status: 'ready' },
+		{ homework: 'Homework 3', homeworkId: 'Homework 3', status: 'generating' },
+		{ homework: 'Homework 4', homeworkId: 'Homework 4', status: 'not_ready' }
+	];
 
 	// Helper: load error types from server
 	async function loadErrorTypes() {
+		if (useDummyData) {
+			errorTypeDefs = $aiTutorDummyErrorTypes;
+			return;
+		}
 		if (!groupId) return;
 		try {
 			const res = await fetch(
@@ -46,6 +143,11 @@
 
 	// Helper: persist current errorTypeDefs to server
 	async function persistErrorTypes() {
+		if (useDummyData) {
+			aiTutorDummyErrorTypes.set(errorTypeDefs);
+			toast.success('Dummy error types saved.');
+			return;
+		}
 		if (!groupId) return;
 		try {
 			const res = await fetch(
@@ -70,6 +172,12 @@
 
 	// Delete all custom error types on server, then reload defaults
 	async function deleteAllErrorTypes() {
+		if (useDummyData) {
+			errorTypeDefs = AI_TUTOR_DUMMY_ERROR_TYPES;
+			aiTutorDummyErrorTypes.set(AI_TUTOR_DUMMY_ERROR_TYPES);
+			toast.success('Dummy error types reset to defaults.');
+			return;
+		}
 		if (!groupId) return;
 		try {
 			await fetch(
@@ -86,6 +194,13 @@
 
 	onMount(async () => {
 		console.log('AI Tutor Dashboard - Topic Analysis loaded');
+
+		if (useDummyData) {
+			topicByHomework = dummyTopicByHomework;
+			practiceQuestions = dummyPracticeQuestions;
+			errorTypeDefs = $aiTutorDummyErrorTypes;
+			return;
+		}
 
 		try {
 			const topicResponse = await fetch(`${AI_TUTOR_API_BASE}/analysis`, {

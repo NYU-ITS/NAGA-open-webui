@@ -2,14 +2,15 @@
 	import { onMount, tick } from 'svelte';
 	import { page } from '$app/stores';
 	import { toast } from 'svelte-sonner';
-	import { TESTING_AI_TUTOR } from '$lib/constants';
+	import { AI_TUTOR_DUMMY_ERROR_TYPES, AI_TUTOR_DUMMY_MODE, TESTING_AI_TUTOR } from '$lib/constants';
+	import { aiTutorDummyErrorTypes } from '$lib/stores';
 	import ChevronUp from '$lib/components/icons/ChevronUp.svelte';
 	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
 
 	const AI_TUTOR_API_BASE = 'http://localhost:8000';
 
 	// ── Global flag ───────────────────────────────────────────────────────────
-	const useOldData = false;
+	const useOldData = AI_TUTOR_DUMMY_MODE;
 
 	// ── Types ─────────────────────────────────────────────────────────────────
 	type HomeworkStat = {
@@ -28,6 +29,8 @@
 		modelId: string | null;
 		questionUploaded: boolean;
 		answerUploaded: boolean;
+		questionFileName?: string | null;
+		answerFileName?: string | null;
 	};
 
 	let homeworkRows: HomeworkRow[] = [];
@@ -74,6 +77,64 @@
 		{ homework: 'Homework 7', status: false, answerUploaded: false, totalProblems: 17, avgAttempted: 16.2, avgSolved: 14.5, avgErrors: 1.7 },
 		{ homework: 'Homework 8', status: false, answerUploaded: false, totalProblems: 21, avgAttempted: 19.4, avgSolved: 17.2, avgErrors: 2.2 },
 		{ homework: 'Homework 9', status: false, answerUploaded: false, totalProblems: 23, avgAttempted: 21.1, avgSolved: 18.9, avgErrors: 2.2 }
+	];
+	const dummyHomeworkRows: HomeworkRow[] = [
+		{
+			id: 'Homework 1',
+			modelId: 'gpt-4o-mini',
+			questionUploaded: true,
+			answerUploaded: true,
+			questionFileName: 'homework_1_questions.pdf',
+			answerFileName: 'homework_1_answers.pdf'
+		},
+		{
+			id: 'Homework 2',
+			modelId: 'gpt-4o-mini',
+			questionUploaded: true,
+			answerUploaded: false,
+			questionFileName: 'homework_2_questions.pdf',
+			answerFileName: null
+		},
+		{
+			id: 'Homework 3',
+			modelId: 'claude-3-5-sonnet',
+			questionUploaded: true,
+			answerUploaded: true,
+			questionFileName: 'homework_3_questions.pdf',
+			answerFileName: 'homework_3_answers.pdf'
+		},
+		{
+			id: 'Homework 4',
+			modelId: 'claude-3-5-sonnet',
+			questionUploaded: false,
+			answerUploaded: false,
+			questionFileName: null,
+			answerFileName: null
+		}
+	];
+	const dummyModels = [
+		{ id: 'gpt-4o-mini', name: 'GPT-4o mini' },
+		{ id: 'claude-3-5-sonnet', name: 'Claude 3.5 Sonnet' },
+		{ id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash' }
+	];
+	const dummyConversationCounts: Record<string, number> = {
+		'gpt-4o-mini': 42,
+		'claude-3-5-sonnet': 27,
+		'gemini-2.0-flash': 11
+	};
+	const dummyGeneralPrompts = [
+		{ id: 'gp-1', name: 'pdf_to_markdown', prompt: 'Convert the uploaded PDF into clean markdown while preserving numbering and math.', is_active: true },
+		{ id: 'gp-2', name: 'topic_mapping', prompt: 'Map each question to one or more course topics in JSON.', is_active: true },
+		{ id: 'gp-3', name: 'generate_answers', prompt: 'Generate a complete answer key in markdown.', is_active: true },
+		{ id: 'gp-4', name: 'evaluate_question', prompt: 'Evaluate whether the student attempted and solved the question.', is_active: true },
+		{ id: 'gp-5', name: 'generate_practice_problems', prompt: 'Create new practice problems based on weak topics.', is_active: true }
+	];
+	const dummyTutorPrompts = [
+		{ id: 'tp-1', name: 'evaluate_question', group_id: 'dummy-group', prompt: 'Evaluate with a focus on partial credit and process.', is_active: true }
+	];
+	const dummyAnalysisHistory: AnalysisRecord[] = [
+		{ contents: '1,2,3,4,5', startedAt: '10:12:04 AM', completedAt: '10:14:11 AM', failed: false },
+		{ contents: '1,2,3,5', startedAt: '2:05:55 PM', completedAt: null, failed: true }
 	];
 
 	// ── State ─────────────────────────────────────────────────────────────────
@@ -122,6 +183,27 @@
 		}
 	}
 
+	function seedDummyDashboard(groupId: string) {
+		availableModels = dummyModels;
+		homeworkRows = dummyHomeworkRows;
+		convCountByModelId = dummyConversationCounts;
+		errorTypeDefs = $aiTutorDummyErrorTypes;
+		generalPrompts = dummyGeneralPrompts;
+		tutorPrompts = dummyTutorPrompts.map((p) => ({ ...p, group_id: groupId || 'dummy-group' }));
+		homeworkStats = placeholderStats.map((stat, i) => ({
+			...stat,
+			homework: `Homework ${i + 1}`,
+			status: i < 4,
+			answerUploaded: i === 0 || i === 2
+		}));
+		selectedRunHomeworks = new Set(homeworkStats.map((stat) => stat.homework));
+		syncRunSelectionFlags();
+		analysisHistory = dummyAnalysisHistory;
+		if (!selectedHwForRun && homeworkStats.length > 0) {
+			selectedHwForRun = homeworkStats[0].homework;
+		}
+	}
+
 	// ── SVG chart helpers ─────────────────────────────────────────────────────
 	const W = 300, H = 180, padL = 38, padR = 12, padT = 12, padB = 32;
 
@@ -166,6 +248,7 @@
 		await loadModels();
 		await loadErrorTypes(selectedGroupId);
 		if (useOldData) {
+			seedDummyDashboard(selectedGroupId);
 			await tick();
 			updateScrollState();
 			return;
@@ -188,7 +271,13 @@
 		void loadPrompts(selectedGroupId);
 	}
 
-	async function loadHomeworkStats(groupId: string) {
+async function loadHomeworkStats(groupId: string) {
+		if (useOldData) {
+			seedDummyDashboard(groupId);
+			await tick();
+			updateScrollState();
+			return;
+		}
 		if (!groupId) {
 			homeworkStats = [];
 			await tick();
@@ -212,7 +301,9 @@
 					id: hw.id,
 					modelId: hw.model_id ?? null,
 					questionUploaded: hw.question_uploaded ?? false,
-					answerUploaded: hw.answer_uploaded ?? false
+					answerUploaded: hw.answer_uploaded ?? false,
+					questionFileName: hw.question_filename ?? null,
+					answerFileName: hw.answer_filename ?? null
 				}));
 				for (const hw of hwData) {
 					uploadStatusMap.set(hw.id, {
@@ -279,6 +370,10 @@
 		});
 		merged.sort((a, b) => a.homework.localeCompare(b.homework));
 		homeworkStats = merged;
+		if (homeworkStats.length > 0 && selectedRunHomeworks.size === 0) {
+			selectedRunHomeworks = new Set(homeworkStats.map((stat) => stat.homework));
+			syncRunSelectionFlags();
+		}
 
 		await tick();
 		updateScrollState();
@@ -286,6 +381,10 @@
 
 // ── Upload helpers ───────────────────────────────────────────────────
 async function loadModels() {
+	if (useOldData) {
+		availableModels = dummyModels;
+		return;
+	}
 	try {
 		const res = await fetch('/api/models', {
 			headers: { Authorization: `Bearer ${localStorage.token}` }
@@ -303,6 +402,10 @@ async function loadModels() {
 }
 
 async function loadConversationCounts(groupId: string) {
+	if (useOldData) {
+		convCountByModelId = groupId ? dummyConversationCounts : {};
+		return;
+	}
 	if (!groupId) { convCountByModelId = {}; return; }
 	try {
 		const res = await fetch('/api/v1/chats/filter/meta', {
@@ -330,6 +433,10 @@ async function loadConversationCounts(groupId: string) {
 }
 
 async function loadErrorTypes(groupId: string) {
+	if (useOldData) {
+		errorTypeDefs = $aiTutorDummyErrorTypes;
+		return;
+	}
 	if (!groupId) {
 		errorTypeDefs = [];
 		return;
@@ -358,6 +465,11 @@ async function loadErrorTypes(groupId: string) {
 }
 
 async function loadPrompts(groupId: string) {
+	if (useOldData) {
+		generalPrompts = dummyGeneralPrompts;
+		tutorPrompts = groupId ? dummyTutorPrompts.map((p) => ({ ...p, group_id: groupId })) : [];
+		return;
+	}
 	try {
 		const generalRes = await fetch(`${AI_TUTOR_API_BASE}/prompts/general`, {
 			headers: { Authorization: `Bearer ${localStorage.token}` }
@@ -419,6 +531,27 @@ function openPromptModal(def: { name: string; label: string; usedFor: string }) 
 
 async function savePromptOverride() {
 	if (!selectedGroupId || !selectedPromptName) return;
+	if (useOldData) {
+		if (selectedPromptTutorId) {
+			tutorPrompts = tutorPrompts.map((prompt) =>
+				prompt.id === selectedPromptTutorId ? { ...prompt, prompt: selectedPromptText, is_active: true } : prompt
+			);
+		} else {
+			tutorPrompts = [
+				...tutorPrompts,
+				{
+					id: `tp-${Date.now()}`,
+					name: selectedPromptName,
+					group_id: selectedGroupId,
+					prompt: selectedPromptText,
+					is_active: true
+				}
+			];
+		}
+		showPromptModal = false;
+		toast.success('Dummy prompt override saved.');
+		return;
+	}
 	try {
 		if (selectedPromptTutorId) {
 			await fetch(`${AI_TUTOR_API_BASE}/prompts/tutor/${selectedPromptTutorId}`, {
@@ -453,6 +586,16 @@ async function savePromptOverride() {
 }
 
 async function useDefaultPrompt() {
+	if (useOldData) {
+		if (selectedPromptTutorId) {
+			tutorPrompts = tutorPrompts.map((prompt) =>
+				prompt.id === selectedPromptTutorId ? { ...prompt, is_active: false } : prompt
+			);
+		}
+		showPromptModal = false;
+		toast.success('Dummy prompt reset to default.');
+		return;
+	}
 	if (!selectedPromptTutorId) {
 		showPromptModal = false;
 		return;
@@ -477,6 +620,11 @@ async function useDefaultPrompt() {
 
 async function persistErrorTypes() {
 	if (!selectedGroupId) return;
+	if (useOldData) {
+		toast.success('Dummy error types saved.');
+		aiTutorDummyErrorTypes.set(errorTypeDefs);
+		return;
+	}
 	try {
 		const res = await fetch(
 			`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(selectedGroupId)}`,
@@ -498,6 +646,12 @@ async function persistErrorTypes() {
 
 async function resetErrorTypesToDefault() {
 	if (!selectedGroupId) return;
+	if (useOldData) {
+		errorTypeDefs = AI_TUTOR_DUMMY_ERROR_TYPES;
+		aiTutorDummyErrorTypes.set(AI_TUTOR_DUMMY_ERROR_TYPES);
+		toast.success('Dummy error types reset to defaults.');
+		return;
+	}
 	try {
 		await fetch(
 			`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(selectedGroupId)}`,
@@ -564,6 +718,65 @@ async function confirmResetDefaults() {
 async function uploadPdf(hwId: string | null, docType: 'question' | 'answer', modelId: string, file: File, draftUid?: number) {
 	const key = hwId ? `${hwId}-${docType}` : `draft-${draftUid ?? 0}-${docType}`;
 	uploadingMap = { ...uploadingMap, [key]: true };
+	if (useOldData) {
+		await new Promise((resolve) => setTimeout(resolve, 400));
+		if (hwId) {
+			homeworkRows = homeworkRows.map((row) =>
+				row.id === hwId
+					? {
+						...row,
+						questionUploaded: docType === 'question' ? true : row.questionUploaded,
+						answerUploaded: docType === 'answer' ? true : row.answerUploaded,
+						questionFileName: docType === 'question' ? file.name : row.questionFileName,
+						answerFileName: docType === 'answer' ? file.name : row.answerFileName
+					}
+					: row
+			);
+			homeworkStats = homeworkStats.map((stat) =>
+				stat.homework === hwId
+					? {
+						...stat,
+						status: docType === 'question' ? true : stat.status,
+						answerUploaded: docType === 'answer' ? true : stat.answerUploaded
+					}
+					: stat
+			);
+		} else if (draftUid !== undefined) {
+			const draft = draftRows.find((d) => d.uid === draftUid);
+			if (draft?.modelId) {
+				const newHomeworkId = `Homework ${homeworkRows.length + 1}`;
+				homeworkRows = [
+					...homeworkRows,
+						{
+							id: newHomeworkId,
+							modelId: draft.modelId,
+							questionUploaded: docType === 'question',
+							answerUploaded: docType === 'answer',
+							questionFileName: docType === 'question' ? file.name : null,
+							answerFileName: docType === 'answer' ? file.name : null
+						}
+					];
+				homeworkStats = [
+					...homeworkStats,
+					{
+						homework: newHomeworkId,
+						status: docType === 'question',
+						answerUploaded: docType === 'answer',
+						totalProblems: 14,
+						avgAttempted: 11.8,
+						avgSolved: 10.4,
+						avgErrors: 1.4
+					}
+				];
+				draftRows = draftRows.filter((d) => d.uid !== draftUid);
+			}
+		}
+		uploadingMap = { ...uploadingMap, [key]: false };
+		toast.success(`Dummy ${docType === 'question' ? 'homework' : 'answer'} PDF uploaded.`);
+		await tick();
+		updateScrollState();
+		return;
+	}
 	try {
 		const formData = new FormData();
 		formData.append('file', file);
@@ -604,13 +817,91 @@ function makeUploadHandler(hwId: string | null, docType: 'question' | 'answer', 
 
 // ── Run Analysis ─────────────────────────────────────────────────────
 let selectedHwForRun = '';
+let runAllHomeworks = true;
+let runOnlyUpdatedHomeworks = false;
+let showRunHomeworkDropdown = false;
+let selectedRunHomeworks = new Set<string>();
 let runningAnalysis = false;
 let runStep = '';
-type AnalysisRecord = { homework: string; startedAt: string; completedAt: string | null; failed: boolean };
+type AnalysisRecord = { contents: string; startedAt: string; completedAt: string | null; failed: boolean };
 let analysisHistory: AnalysisRecord[] = [];
 
+function getHomeworkNumberLabel(homework: string) {
+	return homework.replace('Homework ', '');
+}
+
+function getUpdatedHomeworkIds() {
+	return homeworkRows
+		.filter((row) => row.questionUploaded || row.answerUploaded)
+		.map((row) => row.id);
+}
+
+function syncRunSelectionFlags() {
+	const selectedSorted = Array.from(selectedRunHomeworks).sort();
+	const allSorted = homeworkStats.map((stat) => stat.homework).sort();
+	const updatedSorted = getUpdatedHomeworkIds().sort();
+	runAllHomeworks =
+		homeworkStats.length > 0 && JSON.stringify(selectedSorted) === JSON.stringify(allSorted);
+	runOnlyUpdatedHomeworks =
+		selectedSorted.length > 0 && JSON.stringify(selectedSorted) === JSON.stringify(updatedSorted);
+}
+
+$: if (homeworkStats.length > 0 && selectedRunHomeworks.size === 0) {
+	selectedRunHomeworks = new Set(homeworkStats.map((stat) => stat.homework));
+	syncRunSelectionFlags();
+}
+
+function toggleRunHomework(homework: string) {
+	if (selectedRunHomeworks.has(homework)) {
+		selectedRunHomeworks.delete(homework);
+	} else {
+		selectedRunHomeworks.add(homework);
+	}
+	selectedRunHomeworks = new Set(selectedRunHomeworks);
+	syncRunSelectionFlags();
+}
+
+function setRunAllHomeworks(checked: boolean) {
+	runAllHomeworks = checked;
+	if (checked) {
+		selectedRunHomeworks = new Set(homeworkStats.map((stat) => stat.homework));
+		syncRunSelectionFlags();
+	} else {
+		syncRunSelectionFlags();
+	}
+}
+
+function setRunOnlyUpdated(checked: boolean) {
+	runOnlyUpdatedHomeworks = checked;
+	if (checked) {
+		selectedRunHomeworks = new Set(getUpdatedHomeworkIds());
+		syncRunSelectionFlags();
+	} else {
+		syncRunSelectionFlags();
+	}
+}
+
+function handleRunAllChange(event: Event) {
+	setRunAllHomeworks((event.currentTarget as HTMLInputElement).checked);
+}
+
+function handleRunOnlyUpdatedChange(event: Event) {
+	setRunOnlyUpdated((event.currentTarget as HTMLInputElement).checked);
+}
+
+function getRunHomeworkSummary() {
+	if (selectedRunHomeworks.size === 0) return 'No homework';
+	return homeworkStats
+		.filter((stat) => selectedRunHomeworks.has(stat.homework))
+		.map((stat) => getHomeworkNumberLabel(stat.homework))
+		.join(',');
+}
+
+$: runHomeworkSummary = getRunHomeworkSummary();
+
 async function runAnalysis() {
-	if (!selectedHwForRun) return;
+	const contents = getRunHomeworkSummary();
+	if (!contents || contents === 'No homework') return;
 	runningAnalysis = true;
 	const startedAt = new Date().toLocaleTimeString();
 	const steps = ['Started', 'Collecting conversation history', 'PDF converting', 'Analysing'];
@@ -620,23 +911,40 @@ async function runAnalysis() {
 		stepIdx = (stepIdx + 1) % steps.length;
 		runStep = steps[stepIdx];
 	}, 1800);
+	if (useOldData) {
+		await new Promise((resolve) => setTimeout(resolve, 900));
+		clearInterval(stepTimer);
+		runStep = '';
+		runningAnalysis = false;
+		analysisHistory = [
+			{
+				contents,
+				startedAt,
+				completedAt: new Date().toLocaleTimeString(),
+				failed: false
+			},
+			...analysisHistory
+		];
+		toast.success('Dummy analysis run completed.');
+		return;
+	}
 	try {
 		const res = await fetch(
-			`${AI_TUTOR_API_BASE}/analysis/run?homework_id=${encodeURIComponent(selectedHwForRun)}`,
+			`${AI_TUTOR_API_BASE}/analysis/run?homework_id=${encodeURIComponent(selectedHwForRun || Array.from(selectedRunHomeworks)[0] || '')}`,
 			{ method: 'POST', headers: { Authorization: `Bearer ${localStorage.token}` } }
 		);
 		if (res.ok) {
 			if (TESTING_AI_TUTOR) toast.success('[SUCCESS][POST]: Analysis run triggered.');
 			else toast.success('Analysis started successfully.');
-			analysisHistory = [{ homework: selectedHwForRun, startedAt, completedAt: new Date().toLocaleTimeString(), failed: false }, ...analysisHistory];
+			analysisHistory = [{ contents, startedAt, completedAt: new Date().toLocaleTimeString(), failed: false }, ...analysisHistory];
 		} else {
 			toast.error(`Analysis failed: ${res.status}`);
-			analysisHistory = [{ homework: selectedHwForRun, startedAt, completedAt: null, failed: true }, ...analysisHistory];
+			analysisHistory = [{ contents, startedAt, completedAt: null, failed: true }, ...analysisHistory];
 		}
 	} catch (e) {
 		toast.error('Analysis request failed.');
 		console.error('Run analysis failed:', e);
-		analysisHistory = [{ homework: selectedHwForRun, startedAt, completedAt: null, failed: true }, ...analysisHistory];
+		analysisHistory = [{ contents, startedAt, completedAt: null, failed: true }, ...analysisHistory];
 	} finally {
 		clearInterval(stepTimer);
 		runStep = '';
@@ -686,7 +994,7 @@ async function runAnalysis() {
 					</tr>
 				</thead>
 				<tbody>
-					{#if !selectedGroupId}
+					{#if !selectedGroupId && !useOldData}
 						<tr class="bg-white dark:bg-gray-900 text-xs">
 							<td colspan="7" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">
 								Select a group to manage homeworks.
@@ -705,7 +1013,11 @@ async function runAnalysis() {
 											on:change={makeUploadHandler(row.id, 'question', row.modelId)}
 										/>
 										<span class="text-xs font-medium px-2 py-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-xl text-gray-700 dark:text-gray-300 transition">
-											{uploadingMap[`${row.id}-question`] ? 'Uploading…' : 'Upload'}
+											{uploadingMap[`${row.id}-question`]
+												? 'Uploading…'
+												: row.questionUploaded
+													? (row.questionFileName ?? `homework_${i + 1}_questions.pdf`)
+													: 'Upload'}
 										</span>
 									</label>
 								</td>
@@ -718,7 +1030,11 @@ async function runAnalysis() {
 											on:change={makeUploadHandler(row.id, 'answer', row.modelId)}
 										/>
 										<span class="text-xs font-medium px-2 py-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-xl text-gray-700 dark:text-gray-300 transition">
-											{uploadingMap[`${row.id}-answer`] ? 'Uploading…' : 'Upload'}
+											{uploadingMap[`${row.id}-answer`]
+												? 'Uploading…'
+												: row.answerUploaded
+													? (row.answerFileName ?? `homework_${i + 1}_answers.pdf`)
+													: 'Upload'}
 										</span>
 									</label>
 								</td>
@@ -926,31 +1242,63 @@ async function runAnalysis() {
 		<!-- Run Analysis subsection -->
 		<div class="space-y-3">
 			<div class="flex items-center justify-between gap-4">
-				<!-- Homework selector -->
 				<div>
 					<h4 class="text-base font-semibold text-gray-800 dark:text-gray-200">Run Analysis</h4>
 					<div class="text-xs text-gray-400 dark:text-gray-500">Select a homework and run the full analysis pipeline</div>
 				</div>
-				<div class="flex items-center gap-3 shrink-0">
-					<!-- Homework picker -->
-					<div class="relative flex items-center">
-						<select
-							bind:value={selectedHwForRun}
-							style="appearance: none; -webkit-appearance: none;"
-							class="mt-3 bg-transparent text-xs text-gray-700 dark:text-gray-300 outline-none pr-4 max-w-[200px]"
+				<div class="flex items-center gap-4 shrink-0">
+					<label class="flex items-center gap-2 text-xs text-gray-700 dark:text-gray-300">
+						<input
+							type="checkbox"
+							checked={runAllHomeworks}
+							on:change={handleRunAllChange}
+							class="h-3 w-3 rounded-sm border-gray-300 text-gray-700 focus:ring-gray-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-300 dark:focus:ring-gray-400"
+						/>
+						<span>All</span>
+					</label>
+					<label class="flex items-center gap-2 text-xs text-gray-700 dark:text-gray-300">
+						<input
+							type="checkbox"
+							checked={runOnlyUpdatedHomeworks}
+							on:change={handleRunOnlyUpdatedChange}
+							class="h-3 w-3 rounded-sm border-gray-300 text-gray-700 focus:ring-gray-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-300 dark:focus:ring-gray-400"
+						/>
+						<span>Only Updated Homeworks</span>
+					</label>
+					<div class="relative">
+						<button
+							type="button"
+							class="flex items-center gap-2 bg-transparent text-xs text-gray-700 dark:text-gray-300"
+							on:click={() => {
+								showRunHomeworkDropdown = !showRunHomeworkDropdown;
+							}}
 						>
-							{#each homeworkStats as stat}
-								<option value={stat.homework}>{stat.homework}</option>
-							{/each}
-							{#if homeworkStats.length === 0}
-								<option value="" disabled>No homework loaded</option>
-							{/if}
-						</select>
+							<span>Selected: {runHomeworkSummary}</span>
+							<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="h-3 w-3">
+								<path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
+							</svg>
+						</button>
+						{#if showRunHomeworkDropdown}
+							<div class="absolute right-0 top-full z-10 mt-2 min-w-[10rem] rounded-lg border border-gray-200 bg-white p-3 shadow-lg dark:border-gray-700 dark:bg-gray-900">
+								<div class="space-y-2">
+									{#each homeworkStats as stat}
+										<label class="flex items-center gap-2 text-xs text-gray-700 dark:text-gray-300">
+											<input
+												type="checkbox"
+												checked={selectedRunHomeworks.has(stat.homework)}
+												on:change={() => toggleRunHomework(stat.homework)}
+												class="h-3 w-3 rounded-sm border-gray-300 text-gray-700 focus:ring-gray-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-300 dark:focus:ring-gray-400"
+											/>
+											<span>{getHomeworkNumberLabel(stat.homework)}</span>
+										</label>
+									{/each}
+								</div>
+							</div>
+						{/if}
 					</div>
-					<!-- Run button with frame -->
 					<button
 						on:click={runAnalysis}
-						disabled={!selectedHwForRun || runningAnalysis}
+						disabled={selectedRunHomeworks.size === 0 || runningAnalysis}
 						class="mt-4 rounded-lg border border-gray-200 dark:border-gray-700 px-4 py-1.5 mt-4 text-left transition hover:border-gray-300 dark:hover:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-800/40 disabled:opacity-40 disabled:cursor-not-allowed"
 					>
 						<div class="flex items-center gap-2">
@@ -971,7 +1319,7 @@ async function runAnalysis() {
 				<table class="w-full text-xs text-left text-gray-500 dark:text-gray-400">
 					<thead>
 						<tr class="text-gray-400 dark:text-gray-500 border-b border-gray-100 dark:border-gray-800">
-							<th class="pr-4 py-1 font-normal">Homework</th>
+							<th class="pr-4 py-1 font-normal">Contents</th>
 							<th class="pr-4 py-1 font-normal">Started</th>
 							<th class="py-1 font-normal">Completed</th>
 						</tr>
@@ -979,7 +1327,7 @@ async function runAnalysis() {
 					<tbody>
 						{#each analysisHistory as rec}
 							<tr class="border-b border-gray-50 dark:border-gray-800/60">
-								<td class="pr-4 py-1 text-gray-700 dark:text-gray-300">{rec.homework}</td>
+								<td class="pr-4 py-1 text-gray-700 dark:text-gray-300">{rec.contents}</td>
 								<td class="pr-4 py-1">{rec.startedAt}</td>
 								<td class="py-1">
 									{#if rec.failed}

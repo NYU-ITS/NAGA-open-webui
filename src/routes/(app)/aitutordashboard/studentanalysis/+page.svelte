@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
 	import { toast } from 'svelte-sonner';
-	import { TESTING_AI_TUTOR } from '$lib/constants';
+	import { AI_TUTOR_DUMMY_MODE, TESTING_AI_TUTOR } from '$lib/constants';
 	import { getUsers } from '$lib/apis/users';
 	import { getGroupById } from '$lib/apis/groups';
 	import ChevronUp from '$lib/components/icons/ChevronUp.svelte';
@@ -10,6 +10,7 @@
 	import Search from '$lib/components/icons/Search.svelte';
 
 	const AI_TUTOR_API_BASE = 'http://localhost:8000';
+	const useDummyData = AI_TUTOR_DUMMY_MODE;
 
 	type SortField = 'name' | 'accuracy' | null;
 	type SortOrder = 'asc' | 'desc' | null;
@@ -42,6 +43,54 @@
 	let studentData: StudentRow[] = [];
 	let availableUsers = [];
 	let selectedGroupUserIds: string[] = [];
+	const dummyHomeworkOptions: HomeworkOption[] = [
+		{ id: 'Homework 1', label: 'Homework 1', group_id: 'dummy-group', model_id: 'gpt-4o-mini' },
+		{ id: 'Homework 2', label: 'Homework 2', group_id: 'dummy-group', model_id: 'gpt-4o-mini' },
+		{ id: 'Homework 3', label: 'Homework 3', group_id: 'dummy-group', model_id: 'claude-3-5-sonnet' },
+		{ id: 'Homework 4', label: 'Homework 4', group_id: 'dummy-group', model_id: 'claude-3-5-sonnet' }
+	];
+	const dummyStudentRows: StudentRow[] = [
+		{
+			id: 'analysis-1',
+			studentId: 'student-1',
+			name: 'Annie Case',
+			email: 'annie@example.edu',
+			homeworkId: 'Homework 1',
+			avgAccuracy: 92.3,
+			topicsToImprove: 'Limit Definition',
+			performanceSummary: 'Attempted 14/15, solved 13, errors 1.'
+		},
+		{
+			id: 'analysis-2',
+			studentId: 'student-2',
+			name: 'John Smith',
+			email: 'john@example.edu',
+			homeworkId: 'Homework 2',
+			avgAccuracy: 76.5,
+			topicsToImprove: 'Integration by Parts, Factoring',
+			performanceSummary: 'Attempted 12/15, solved 10, errors 2.'
+		},
+		{
+			id: 'analysis-3',
+			studentId: 'student-3',
+			name: 'Mia Wong',
+			email: 'mia@example.edu',
+			homeworkId: 'Homework 3',
+			avgAccuracy: 84.6,
+			topicsToImprove: 'Trigonometric Identities',
+			performanceSummary: 'Attempted 13/15, solved 11, errors 2.'
+		},
+		{
+			id: 'analysis-4',
+			studentId: 'student-4',
+			name: 'Leo Patel',
+			email: 'leo@example.edu',
+			homeworkId: 'Homework 4',
+			avgAccuracy: 68.8,
+			topicsToImprove: 'Trigonometric Identities, Limit Definition',
+			performanceSummary: 'Attempted 11/16, solved 9, errors 2.'
+		}
+	];
 
 	$: selectedGroupId = $page.url.searchParams.get('group_id') || '';
 	$: isFilterActive = selectedHomework !== 'All' || search.trim() !== '';
@@ -49,6 +98,12 @@
 	onMount(async () => {
 		initialized = true;
 		console.log('AI Tutor Dashboard - Student Analysis loaded');
+		if (useDummyData) {
+			homeworkOptions = dummyHomeworkOptions;
+			studentData = dummyStudentRows;
+			selectedGroupUserIds = dummyStudentRows.map((row) => row.studentId);
+			return;
+		}
 		await loadUserContext();
 	});
 
@@ -66,6 +121,14 @@
 
 	async function loadHomeworks(groupId: string) {
 		if (!initialized) {
+			return;
+		}
+
+		if (useDummyData) {
+			homeworkOptions = dummyHomeworkOptions;
+			if (selectedHomework !== 'All' && !homeworkOptions.some((option) => option.id === selectedHomework)) {
+				selectedHomework = 'All';
+			}
 			return;
 		}
 
@@ -125,6 +188,10 @@
 	}
 
 	async function loadUserContext() {
+		if (useDummyData) {
+			availableUsers = [];
+			return;
+		}
 		try {
 			availableUsers = await getUsers(localStorage.token);
 		} catch (error) {
@@ -134,6 +201,10 @@
 	}
 
 	async function loadSelectedGroupContext(groupId: string) {
+		if (useDummyData) {
+			selectedGroupUserIds = dummyStudentRows.map((row) => row.studentId);
+			return;
+		}
 		if (!initialized || !groupId) {
 			selectedGroupUserIds = [];
 			return;
@@ -150,6 +221,14 @@
 
 	async function loadAnalyses(homeworkId: string | null) {
 		if (!initialized) {
+			return;
+		}
+
+		if (useDummyData) {
+			studentData = homeworkId
+				? dummyStudentRows.filter((row) => row.homeworkId === homeworkId)
+				: dummyStudentRows;
+			loading = false;
 			return;
 		}
 
@@ -364,19 +443,19 @@
 					</tr>
 				</thead>
 				<tbody>
-					{#if !selectedGroupId}
+					{#if !selectedGroupId && !useDummyData}
 						<tr class="bg-white text-xs dark:bg-gray-900">
 							<td colspan="7" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">
 								Select a group to view student analysis.
 							</td>
 						</tr>
-					{:else if homeworkOptions.length === 0}
+					{:else if homeworkOptions.length === 0 && !useDummyData}
 						<tr class="bg-white text-xs dark:bg-gray-900">
 							<td colspan="7" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">
 								No homework uploaded for this group yet.
 							</td>
 						</tr>
-					{:else if selectedHomework === 'All'}
+					{:else if selectedHomework === 'All' && !useDummyData}
 						<tr class="bg-white text-xs dark:bg-gray-900">
 							<td colspan="7" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">
 								Choose a homework to load student analysis.
