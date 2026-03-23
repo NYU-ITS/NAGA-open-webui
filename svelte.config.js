@@ -19,6 +19,7 @@ const config = {
 	vitePlugin: {
 		inspector: {
 			toggleKeyCombo: 'meta-shift', // Key combination to open the inspector
+			openKey: 'Enter', // Press Enter on the selected element to open its source
 			holdMode: false, // Enable or disable hold mode
 			showToggleButton: 'always', // Show toggle button ('always', 'active', 'never')
 			toggleButtonPos: 'bottom-right' // Position of the toggle button

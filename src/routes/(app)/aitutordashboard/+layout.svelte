@@ -341,6 +341,17 @@
 						>
 							Student Analysis
 						</a>
+
+						<a
+							class="min-w-fit rounded-full p-1.5 {$page.url.pathname.includes(
+								'/aitutordashboard/instructorsetup'
+							)
+								? 'text-[#57068c] dark:text-white'
+								: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
+							href="/aitutordashboard/instructorsetup"
+						>
+							Instructor Setup
+						</a>
 					</div>
 				</div>
 			</div>

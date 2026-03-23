@@ -95,7 +95,7 @@
 					dispatch('update', {
 						raw: token.raw,
 						oldContent: token.text,
-						newContent: value
+						newContent: e.detail
 					});
 				}}
 			/>

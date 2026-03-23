@@ -133,11 +133,10 @@ const errorTypeColors = dashboardPalette.slice(0, 4);
 	const dummyTutorPrompts = [
 		{ id: 'tp-1', name: 'evaluate_question', group_id: 'dummy-group', prompt: 'Evaluate with a focus on partial credit and process.', is_active: true }
 	];
-const dummyAnalysisHistory: AnalysisRecord[] = [
-	{ contents: '1,2,3,4,5', startedAt: '10:12:04 AM', completedAt: '10:14:11 AM', failed: false },
-	{ contents: '1,2,3,5', startedAt: '2:05:55 PM', completedAt: null, failed: true }
-];
-const bannerPlaceholderTime = 'TEST-TIME';
+	const dummyAnalysisHistory: AnalysisRecord[] = [
+		{ contents: '1,2,3,4,5', startedAt: '10:12:04 AM', completedAt: '10:14:11 AM', failed: false },
+		{ contents: '1,2,3,5', startedAt: '2:05:55 PM', completedAt: null, failed: true }
+	];
 
 	// ── State ─────────────────────────────────────────────────────────────────
 	let homeworkStats: HomeworkStat[] = useOldData ? placeholderStats : [];
@@ -828,9 +827,6 @@ let runStep = '';
 type AnalysisRecord = { contents: string; startedAt: string; completedAt: string | null; failed: boolean };
 let analysisHistory: AnalysisRecord[] = [];
 
-$: latestCompletedRun = analysisHistory.find((record) => !!record.completedAt && !record.failed) ?? null;
-$: lastRunStatusClass = latestCompletedRun ? 'bg-green-500' : 'bg-yellow-500';
-
 function getHomeworkNumberLabel(homework: string) {
 	return homework.replace('Homework ', '');
 }
@@ -896,9 +892,13 @@ function handleRunOnlyUpdatedChange(event: Event) {
 
 function getRunHomeworkSummary() {
 	if (selectedRunHomeworks.size === 0) return 'No homework';
-	return homeworkStats
-		.filter((stat) => selectedRunHomeworks.has(stat.homework))
-		.map((stat) => getHomeworkNumberLabel(stat.homework))
+	return Array.from(selectedRunHomeworks)
+		.sort((a, b) => {
+			const aNum = Number((a.match(/\d+/) ?? ['0'])[0]);
+			const bNum = Number((b.match(/\d+/) ?? ['0'])[0]);
+			return aNum - bNum || a.localeCompare(b);
+		})
+		.map((homework) => getHomeworkNumberLabel(homework))
 		.join(',');
 }
 
@@ -959,199 +959,387 @@ async function runAnalysis() {
 </script>
 
 <div class="flex flex-col space-y-6 py-4">
-	<div class="rounded-lg bg-gray-100 px-3 py-2 text-xs text-gray-800 dark:bg-gray-800/80 dark:text-gray-300">
-		<div class="flex flex-wrap items-center gap-x-6 gap-y-2">
-			<div>Students&apos; conversation history are on {bannerPlaceholderTime}</div>
-			<div>Configuration updated on {bannerPlaceholderTime}</div>
-			<div class="flex items-center gap-2">
-				<span>Last Run completed on {bannerPlaceholderTime}</span>
-				<span class="h-2 w-2 rounded-full {lastRunStatusClass}"></span>
-			</div>
-		</div>
-	</div>
+	<!-- Configuration / Before You Start -->
+	<div class="space-y-12">
+		<div class="space-y-2">
 
-	<!-- Charts Summary Section -->
-	<div class="space-y-3">
-		<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Charts Summary</h2>
 
-		<div class="relative">
-			<!-- Scroll Left — only when content overflows and scrolled right -->
-			{#if canScrollLeft}
-				<button
-					class="absolute left-0 top-1/2 -translate-y-1/2 z-10 bg-white dark:bg-gray-800 rounded-full p-2 shadow-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition"
-					on:click={() => scrollCharts('left')}
-					aria-label="Scroll left"
-				>
-					<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-5 h-5">
-						<path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" />
-					</svg>
-				</button>
-			{/if}
-
-			<!-- Charts Container -->
-			<div
-				bind:this={chartsContainer}
-				class="flex gap-4 overflow-x-auto scrollbar-none snap-x snap-mandatory {canScrollLeft ? 'pl-10' : ''} {canScrollRight ? 'pr-10' : ''}"
-				style="scroll-behavior: smooth;"
-				on:scroll={updateScrollState}
-			>
-				<!-- Chart 1: Avg Solved -->
-				<div class="flex-none w-80 h-64 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg snap-start p-3 flex flex-col">
-					<p class="text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Average Problems Solved</p>
-					{#if avgSolvedChart}
-						<svg viewBox="0 0 {W} {H}" class="w-full flex-1" preserveAspectRatio="none">
-							<!-- Grid lines -->
-							{#each avgSolvedChart.yTicks as tick}
-								<line x1={padL} y1={avgSolvedChart.py(tick)} x2={W - padR} y2={avgSolvedChart.py(tick)}
-									stroke="currentColor" stroke-width="0.5" class="text-gray-200 dark:text-gray-600" stroke-dasharray="3,3" />
-								<text x={padL - 4} y={avgSolvedChart.py(tick) + 4} text-anchor="end" font-size="9"
-									class="fill-gray-400 dark:fill-gray-500">{tick}</text>
-							{/each}
-							<!-- X-axis labels (every other one if many) -->
-							{#each avgSolvedChart.xLabels as lbl, i}
-								{#if avgSolvedChart.xLabels.length <= 6 || i % 2 === 0}
-									<text x={lbl.x} y={H - padB + 14} text-anchor="middle" font-size="9"
-										class="fill-gray-400 dark:fill-gray-500">{lbl.label}</text>
-								{/if}
-							{/each}
-							<!-- Axes -->
-							<line x1={padL} y1={padT} x2={padL} y2={H - padB} stroke="currentColor" stroke-width="1" class="text-gray-300 dark:text-gray-600" />
-							<line x1={padL} y1={H - padB} x2={W - padR} y2={H - padB} stroke="currentColor" stroke-width="1" class="text-gray-300 dark:text-gray-600" />
-							<!-- Line -->
-							<path d={avgSolvedChart.pathD} fill="none" stroke="#7CB9E8" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
-							<!-- Dots -->
-							{#each avgSolvedChart.dots as dot}
-								<circle cx={dot.x} cy={dot.y} r="3" fill="#7CB9E8" />
-							{/each}
-						</svg>
-					{:else}
-						<div class="flex-1 flex items-center justify-center">
-							<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-12 h-12 text-gray-300 dark:text-gray-600">
-								<path stroke-linecap="round" stroke-linejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 0 1 3 19.875v-6.75ZM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V8.625ZM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V4.125Z" />
-							</svg>
-						</div>
-					{/if}
+			<div class="flex items-center justify-between gap-3">
+				<div>
+					<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Homework & Answer Files</h2>
+					<div class="text-xs text-gray-400 dark:text-gray-500">Upload the PDF files here before starting the analysis</div>
 				</div>
-
-				<!-- Chart 2: Avg Attempted -->
-				<div class="flex-none w-80 h-64 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg snap-start p-3 flex flex-col">
-					<p class="text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Average Problems Attempted</p>
-					{#if avgAttemptedChart}
-						<svg viewBox="0 0 {W} {H}" class="w-full flex-1" preserveAspectRatio="none">
-							{#each avgAttemptedChart.yTicks as tick}
-								<line x1={padL} y1={avgAttemptedChart.py(tick)} x2={W - padR} y2={avgAttemptedChart.py(tick)}
-									stroke="currentColor" stroke-width="0.5" class="text-gray-200 dark:text-gray-600" stroke-dasharray="3,3" />
-								<text x={padL - 4} y={avgAttemptedChart.py(tick) + 4} text-anchor="end" font-size="9"
-									class="fill-gray-400 dark:fill-gray-500">{tick}</text>
-							{/each}
-							{#each avgAttemptedChart.xLabels as lbl, i}
-								{#if avgAttemptedChart.xLabels.length <= 6 || i % 2 === 0}
-									<text x={lbl.x} y={H - padB + 14} text-anchor="middle" font-size="9"
-										class="fill-gray-400 dark:fill-gray-500">{lbl.label}</text>
-								{/if}
-							{/each}
-							<line x1={padL} y1={padT} x2={padL} y2={H - padB} stroke="currentColor" stroke-width="1" class="text-gray-300 dark:text-gray-600" />
-							<line x1={padL} y1={H - padB} x2={W - padR} y2={H - padB} stroke="currentColor" stroke-width="1" class="text-gray-300 dark:text-gray-600" />
-							<path d={avgAttemptedChart.pathD} fill="none" stroke="#A792D0" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
-							{#each avgAttemptedChart.dots as dot}
-								<circle cx={dot.x} cy={dot.y} r="3" fill="#A792D0" />
-							{/each}
+				<div class="flex items-center gap-2">
+					<button
+						class="flex items-center gap-1 rounded-full border border-gray-300 px-3 py-1.5 text-xs font-semibold text-gray-700 transition hover:border-gray-400 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:border-gray-500 dark:hover:bg-gray-800"
+						on:click={addDraftRow}
+						title="Add homework"
+					>
+						<span>Add</span>
+						<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3 h-3">
+							<path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
 						</svg>
-					{:else}
-						<div class="flex-1 flex items-center justify-center">
-							<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-12 h-12 text-gray-300 dark:text-gray-600">
-								<path stroke-linecap="round" stroke-linejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 0 1 3 19.875v-6.75ZM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V8.625ZM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V4.125Z" />
-							</svg>
-						</div>
-					{/if}
+					</button>
 				</div>
 			</div>
-
-			<!-- Scroll Right — only when content overflows -->
-			{#if canScrollRight}
-				<button
-					class="absolute right-0 top-1/2 -translate-y-1/2 z-10 bg-white dark:bg-gray-800 rounded-full p-2 shadow-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition"
-					on:click={() => scrollCharts('right')}
-					aria-label="Scroll right"
-				>
-					<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-5 h-5">
-						<path stroke-linecap="round" stroke-linejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
-					</svg>
-				</button>
-			{/if}
-		</div>
-	</div>
-
-	<!-- Statistics Section -->
-	<div class="space-y-2">
-		<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Statistics</h2>
-
-		<div class="scrollbar-hidden relative whitespace-nowrap overflow-x-auto max-w-full rounded-sm pt-0.5">
+			<div class="scrollbar-hidden relative whitespace-nowrap overflow-x-auto max-w-full rounded-sm pt-0.5">
 			<table class="w-full text-sm text-left text-gray-500 dark:text-gray-400 table-auto max-w-full rounded-sm">
 				<thead class="text-xs text-gray-700 uppercase bg-gray-50 dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5">
 					<tr>
-						{#each [
-							{ key: 'homework',     label: 'Homework' },
-							{ key: 'status',       label: 'Status' },
-							{ key: 'answerUploaded', label: 'Answer' },
-							{ key: 'totalProblems',  label: 'Total' },
-							{ key: 'avgAttempted',   label: 'Avg Attempted' },
-							{ key: 'avgSolved',      label: 'Avg Solved' },
-							{ key: 'avgErrors',      label: 'Avg Errors' }
-						] as col}
-							<th scope="col" class="px-3 py-1.5 cursor-pointer select-none" on:click={() => setSortKey(col.key)}>
-								<div class="flex gap-1.5 items-center">
-									{col.label}
-									{#if sortKey === col.key}
-										<span class="font-normal">
-											{#if sortOrder === 'asc'}<ChevronUp className="size-2" />{:else}<ChevronDown className="size-2" />{/if}
-										</span>
-									{:else}
-										<span class="invisible"><ChevronUp className="size-2" /></span>
-									{/if}
-								</div>
-							</th>
-						{/each}
+						<th class="px-3 py-1.5 select-none">Homework</th>
+						<th class="px-3 py-1.5 select-none">Homework PDF</th>
+						<th class="px-3 py-1.5 select-none">Answer PDF</th>
+						<th class="px-3 py-1.5 select-none">Q Uploaded</th>
+						<th class="px-3 py-1.5 select-none">A Uploaded</th>
+						<th class="px-3 py-1.5 select-none">Conversations</th>
+						<th class="px-3 py-1.5 select-none">Model</th>
 					</tr>
 				</thead>
 				<tbody>
-					{#if sortedStats.length === 0}
+					{#if !selectedGroupId && !useOldData}
 						<tr class="bg-white dark:bg-gray-900 text-xs">
 							<td colspan="7" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">
-								No data available
+								Select a group to manage homeworks.
 							</td>
 						</tr>
 					{:else}
-						{#each sortedStats as stat}
-							<tr class="bg-white dark:bg-gray-900 dark:border-gray-850 text-xs border-t border-gray-100 dark:border-gray-850">
-								<td class="px-3 py-1 font-medium text-gray-900 dark:text-white">
-									{stat.homework}
+						{#each homeworkRows as row, i}
+							<tr class="bg-white dark:bg-gray-900 text-xs border-t border-gray-100 dark:border-gray-850">
+								<td class="px-3 py-1 text-gray-500 dark:text-gray-400">Homework {i + 1}</td>
+								<td class="px-3 py-1">
+									<label class="cursor-pointer">
+										<input
+											type="file"
+											accept=".pdf"
+											class="hidden"
+											on:change={makeUploadHandler(row.id, 'question', row.modelId)}
+										/>
+										<span class="text-xs font-medium px-2 py-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-xl text-gray-700 dark:text-gray-300 transition">
+											{uploadingMap[`${row.id}-question`]
+												? 'Uploading…'
+												: row.questionUploaded
+													? (row.questionFileName ?? `homework_${i + 1}_questions.pdf`)
+													: 'Upload'}
+										</span>
+									</label>
 								</td>
 								<td class="px-3 py-1">
-									{#if stat.status}
+									<label class="cursor-pointer">
+										<input
+											type="file"
+											accept=".pdf"
+											class="hidden"
+											on:change={makeUploadHandler(row.id, 'answer', row.modelId)}
+										/>
+										<span class="text-xs font-medium px-2 py-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-xl text-gray-700 dark:text-gray-300 transition">
+											{uploadingMap[`${row.id}-answer`]
+												? 'Uploading…'
+												: row.answerUploaded
+													? (row.answerFileName ?? `homework_${i + 1}_answers.pdf`)
+													: 'Upload'}
+										</span>
+									</label>
+								</td>
+								<td class="px-3 py-1">
+									{#if row.questionUploaded}
 										<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-3.5 h-3.5 text-green-600 dark:text-green-400">
 											<path fill-rule="evenodd" d="M16.704 4.153a.75.75 0 0 1 .143 1.052l-8 10.5a.75.75 0 0 1-1.127.075l-4.5-4.5a.75.75 0 0 1 1.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 0 1 1.05-.143Z" clip-rule="evenodd" />
 										</svg>
 									{/if}
 								</td>
 								<td class="px-3 py-1">
-									{#if stat.answerUploaded}
+									{#if row.answerUploaded}
 										<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-3.5 h-3.5 text-green-600 dark:text-green-400">
 											<path fill-rule="evenodd" d="M16.704 4.153a.75.75 0 0 1 .143 1.052l-8 10.5a.75.75 0 0 1-1.127.075l-4.5-4.5a.75.75 0 0 1 1.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 0 1 1.05-.143Z" clip-rule="evenodd" />
 										</svg>
 									{/if}
 								</td>
-								<td class="px-3 py-1">{stat.totalProblems ?? 'N/A'}</td>
-								<td class="px-3 py-1">{stat.avgAttempted != null ? stat.avgAttempted.toFixed(1) : 'N/A'}</td>
-								<td class="px-3 py-1">{stat.avgSolved != null ? stat.avgSolved.toFixed(1) : 'N/A'}</td>
-								<td class="px-3 py-1">{stat.avgErrors != null ? stat.avgErrors.toFixed(1) : 'N/A'}</td>
+								<td class="px-3 py-1 text-gray-700 dark:text-gray-300">
+									{convCountByModelId[row.modelId ?? ''] ?? 0}
+								</td>
+								<td class="px-3 py-1 text-gray-700 dark:text-gray-300 max-w-[200px] truncate" title={row.modelId ?? ''}>
+									{row.modelId ?? 'N/A'}
+								</td>
 							</tr>
 						{/each}
-					{/if}
+				{/if}
+
+				<!-- Draft rows (always rendered, outside group conditional) -->
+				{#each draftRows as draft, di (draft.uid)}
+					<tr class="bg-white dark:bg-gray-900 text-xs border-t border-gray-100 dark:border-gray-850">
+						<td class="px-3 py-1 text-gray-500 dark:text-gray-400">{homeworkRows.length + di + 1}</td>
+						<td class="px-3 py-1">
+							<label class="cursor-pointer">
+								<input type="file" accept=".pdf" class="hidden"
+									on:change={makeUploadHandler(null, 'question', draft.modelId, draft.uid)}
+								/>
+								<span class="text-xs font-medium px-2 py-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-xl text-gray-700 dark:text-gray-300 transition">
+									{uploadingMap[`draft-${draft.uid}-question`] ? 'Uploading…' : 'Upload'}
+								</span>
+							</label>
+						</td>
+						<td class="px-3 py-1">
+							<label class="cursor-pointer">
+								<input type="file" accept=".pdf" class="hidden"
+									on:change={makeUploadHandler(null, 'answer', draft.modelId, draft.uid)}
+								/>
+								<span class="text-xs font-medium px-2 py-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-xl text-gray-700 dark:text-gray-300 transition">
+									{uploadingMap[`draft-${draft.uid}-answer`] ? 'Uploading…' : 'Upload'}
+								</span>
+							</label>
+						</td>
+						<td class="px-3 py-1"></td>
+						<td class="px-3 py-1"></td>
+						<td class="px-3 py-1"></td>
+						<td class="px-3 py-1">
+							<div class="relative inline-flex items-center">
+								<select
+									bind:value={draft.modelId}
+									style="appearance: none; -webkit-appearance: none;"
+									class="bg-transparent text-xs text-gray-700 dark:text-gray-300 outline-none pr-4 max-w-[180px]"
+								>
+									{#each availableModels as m}
+										<option value={m.id}>{m.name}</option>
+									{/each}
+									{#if availableModels.length === 0}
+										<option value="">No models available</option>
+									{/if}
+								</select>
+							</div>
+						</td>
+					</tr>
+				{/each}
 				</tbody>
 			</table>
 		</div>
+		</div>
+
+		<div class="space-y-3">
+			<div class="flex items-center justify-between gap-3">
+				<div>
+					<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Error Type Configuration</h2>
+					<div class="text-xs text-gray-400 dark:text-gray-500">You can have at most 4 error types</div>
+				</div>
+				<div class="flex items-center gap-3">
+					<button
+						class="rounded-full border border-gray-300 px-3 py-1.5 text-xs font-semibold text-gray-700 transition hover:border-gray-400 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:border-gray-500 dark:hover:bg-gray-800"
+						on:click={() => {
+							showResetDefaultsModal = true;
+						}}
+					>
+						Use default
+					</button>
+					<div class="flex items-center gap-2">
+						{#if errorTypeDefs.length < 4}
+							<button
+								class="flex items-center gap-1 rounded-full border border-gray-300 px-3 py-1.5 text-xs font-semibold text-gray-700 transition hover:border-gray-400 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:border-gray-500 dark:hover:bg-gray-800"
+								on:click={addErrorType}
+							>
+								<span>Add</span>
+								<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3 h-3">
+									<path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+								</svg>
+							</button>
+						{/if}
+						{#if errorTypeDefs.length > 0}
+							<button
+								class="flex items-center gap-1 rounded-full border border-red-200 px-3 py-1.5 text-xs font-semibold text-red-600 transition hover:border-red-300 hover:bg-red-50 dark:border-red-900/70 dark:text-red-300 dark:hover:border-red-800 dark:hover:bg-red-950/40"
+								on:click={() => {
+									showResetDefaultsModal = true;
+								}}
+							>
+								<span>Delete All</span>
+								<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3 h-3">
+									<path stroke-linecap="round" stroke-linejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" />
+								</svg>
+							</button>
+						{/if}
+					</div>
+				</div>
+			</div>
+
+			{#if errorTypeDefs.length === 0}
+				<div class="rounded-lg border border-gray-200 bg-white px-4 py-6 text-sm text-gray-400 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-500">
+					No error types defined, please define error types
+				</div>
+			{:else}
+				<div class="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+					{#each errorTypeDefs as def, i}
+						<button
+							type="button"
+							class="rounded-lg border border-gray-200 bg-white p-4 text-left transition hover:border-gray-300 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-900 dark:hover:border-gray-600 dark:hover:bg-gray-800"
+							on:click={() => openEditErrorType(i)}
+						>
+							<div class="flex items-center gap-2">
+								<span class="h-3 w-3 rounded-full flex-shrink-0" style="background-color: {def.color};"></span>
+								<div class="text-sm font-medium text-gray-900 dark:text-gray-100">{def.type}</div>
+							</div>
+							<p class="mt-2 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
+								{def.description || 'No description yet.'}
+							</p>
+						</button>
+					{/each}
+				</div>
+			{/if}
+			<div class="flex justify-end pt-2">
+				<button
+					class="rounded-full bg-black px-3 py-1.5 text-xs font-medium text-white transition hover:bg-gray-800"
+					on:click={persistErrorTypes}
+				>
+					Save
+				</button>
+			</div>
+		</div>
+
+		<div class="space-y-3">
+				<div>
+					<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Prompt Configuration</h2>
+					<div class="text-xs text-gray-400 dark:text-gray-500">
+						These prompts control how AI Tutor converts homework, analyzes students, and generates practice.
+					</div>
+				</div>
+
+
+				<div class="scrollbar-hidden relative whitespace-nowrap overflow-x-auto max-w-full rounded-sm pt-0.5">
+					<table class="w-full text-sm text-left text-gray-500 dark:text-gray-400 table-auto max-w-full rounded-sm">
+						<thead class="text-xs text-gray-700 uppercase bg-gray-50 dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5">
+							<tr>
+								<th class="px-3 py-1.5 select-none">Prompt</th>
+								<th class="px-3 py-1.5 select-none">Used For</th>
+								<th class="px-3 py-1.5 select-none">Scope</th>
+								<th class="px-3 py-1.5 select-none">Action</th>
+							</tr>
+						</thead>
+						<tbody>
+							{#each promptDefinitions as def}
+								{@const promptSummary = getPromptSummary(def.name)}
+								<tr class="bg-white dark:bg-gray-900 text-xs border-t border-gray-100 dark:border-gray-850">
+									<td class="px-3 py-1.5 font-medium text-gray-900 dark:text-white">{def.label}</td>
+									<td class="px-3 py-1.5 text-gray-700 dark:text-gray-300">{def.usedFor}</td>
+									<td class="px-3 py-1.5 text-gray-700 dark:text-gray-300">{promptSummary.scope}</td>
+									<td class="px-3 py-1.5">
+										<button
+											class="text-xs font-medium px-2 py-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-xl text-gray-700 dark:text-gray-300 transition"
+											on:click={() => openPromptModal(def)}
+										>
+											View/Edit
+										</button>
+									</td>
+								</tr>
+							{/each}
+						</tbody>
+					</table>
+				</div>
+
+		</div>
+
+		<!-- Run Analysis subsection -->
+		<div class="space-y-3">
+			<div class="flex items-center justify-between gap-4">
+				<div>
+					<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Run Analysis</h2>
+					<div class="text-xs text-gray-400 dark:text-gray-500">Select a homework and run the full analysis pipeline</div>
+				</div>
+				<div class="flex items-center gap-4 shrink-0">
+					<label class="flex items-center gap-2 text-xs text-gray-700 dark:text-gray-300">
+						<input
+							type="checkbox"
+							checked={runAllHomeworks}
+							on:change={handleRunAllChange}
+							class="h-3 w-3 rounded-sm border-gray-300 text-gray-700 focus:ring-gray-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-300 dark:focus:ring-gray-400"
+						/>
+						<span>All</span>
+					</label>
+					<label class="flex items-center gap-2 text-xs text-gray-700 dark:text-gray-300">
+						<input
+							type="checkbox"
+							checked={runOnlyUpdatedHomeworks}
+							on:change={handleRunOnlyUpdatedChange}
+							class="h-3 w-3 rounded-sm border-gray-300 text-gray-700 focus:ring-gray-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-300 dark:focus:ring-gray-400"
+						/>
+						<span>Only Updated Homeworks</span>
+					</label>
+					<div class="relative">
+						<button
+							type="button"
+							class="flex items-center gap-2 bg-transparent text-xs text-gray-700 dark:text-gray-300"
+							on:click={() => {
+								showRunHomeworkDropdown = !showRunHomeworkDropdown;
+							}}
+						>
+							<span>Selected: {runHomeworkSummary}</span>
+							<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="h-3 w-3">
+								<path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
+							</svg>
+						</button>
+						{#if showRunHomeworkDropdown}
+							<div class="absolute right-0 top-full z-10 mt-2 min-w-[10rem] rounded-lg border border-gray-200 bg-white p-3 shadow-lg dark:border-gray-700 dark:bg-gray-900">
+								<div class="space-y-2">
+									{#each homeworkStats as stat}
+										<label class="flex items-center gap-2 text-xs text-gray-700 dark:text-gray-300">
+											<input
+												type="checkbox"
+												checked={selectedRunHomeworks.has(stat.homework)}
+												on:change={() => toggleRunHomework(stat.homework)}
+												class="h-3 w-3 rounded-sm border-gray-300 text-gray-700 focus:ring-gray-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-300 dark:focus:ring-gray-400"
+											/>
+											<span>{getHomeworkNumberLabel(stat.homework)}</span>
+										</label>
+									{/each}
+								</div>
+							</div>
+						{/if}
+					</div>
+					<button
+						on:click={runAnalysis}
+						disabled={selectedRunHomeworks.size === 0 || runningAnalysis}
+						class="rounded-full border border-gray-300 px-3 py-1.5 text-left text-xs font-semibold text-gray-800 transition hover:border-gray-400 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-gray-600 dark:text-gray-200 dark:hover:border-gray-500 dark:hover:bg-gray-800"
+					>
+						<div class="flex items-center gap-2">
+							<span>{runningAnalysis ? 'Running…' : 'Run'}</span>
+						</div>
+						{#if runStep}
+							<div class="mt-1.5 text-xs text-gray-400 dark:text-gray-500 flex items-center gap-1">
+								<span class="inline-block w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse shrink-0"></span>
+								{runStep}…
+							</div>
+						{/if}
+					</button>
+				</div>
+			</div>
+
+			<!-- Analysis history -->
+			{#if analysisHistory.length > 0}
+				<table class="w-full text-xs text-left text-gray-500 dark:text-gray-400">
+					<thead>
+						<tr class="text-gray-400 dark:text-gray-500 border-b border-gray-100 dark:border-gray-800">
+							<th class="pr-4 py-1 font-normal">Homeworks in this Run</th>
+							<th class="pr-4 py-1 font-normal">Started</th>
+							<th class="py-1 font-normal">Completed</th>
+						</tr>
+					</thead>
+					<tbody>
+						{#each analysisHistory as rec}
+							<tr class="border-b border-gray-50 dark:border-gray-800/60">
+								<td class="pr-4 py-1 text-gray-700 dark:text-gray-300">{rec.contents}</td>
+								<td class="pr-4 py-1">{rec.startedAt}</td>
+								<td class="py-1">
+									{#if rec.failed}
+										<span class="text-red-400 dark:text-red-500">Failed</span>
+									{:else if rec.completedAt}
+										<span class="text-green-600 dark:text-green-400">{rec.completedAt}</span>
+									{:else}
+										<span class="text-gray-400">—</span>
+									{/if}
+								</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			{/if}
+		</div>
 	</div>
+
 </div>
 {#if showResetDefaultsModal}
 	<div
@@ -1252,13 +1440,13 @@ async function runAnalysis() {
 {/if}
 {#if showPromptModal}
 	<div
-		class="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+		class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4 py-6"
 		on:click|self={() => (showPromptModal = false)}
 		role="dialog"
 		aria-modal="true"
 	>
-		<div class="bg-white dark:bg-gray-900 rounded-xl shadow-2xl p-6 w-[760px] max-w-[90vw]">
-			<div class="flex justify-between items-center mb-5">
+		<div class="flex max-h-[85vh] w-full max-w-[680px] flex-col overflow-hidden rounded-xl bg-white p-5 shadow-2xl dark:bg-gray-900 sm:p-6">
+			<div class="mb-4 flex items-start justify-between gap-4">
 				<div>
 					<h3 class="text-base font-semibold text-gray-900 dark:text-gray-100">{selectedPromptLabel}</h3>
 					<div class="text-xs text-gray-400 dark:text-gray-500 mt-1">{selectedPromptUsedFor}</div>
@@ -1274,7 +1462,7 @@ async function runAnalysis() {
 				</button>
 			</div>
 
-			<hr class="border-gray-100 dark:border-gray-700 mb-5" />
+			<hr class="mb-4 border-gray-100 dark:border-gray-700" />
 
 			<div class="mb-4 flex items-center gap-2 text-xs">
 				<span class="text-gray-500 dark:text-gray-400">Scope:</span>
@@ -1283,16 +1471,16 @@ async function runAnalysis() {
 				</span>
 			</div>
 
-			<div class="mb-6">
+			<div class="mb-5 min-h-0 flex-1 overflow-y-auto pr-1">
 				<label class="text-xs font-medium text-gray-600 dark:text-gray-400 block mb-1.5">Prompt</label>
 				<textarea
-					class="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500 resize-none font-mono"
-					rows="18"
+					class="min-h-[280px] w-full rounded-lg border border-gray-300 bg-white px-3 py-2 font-mono text-sm text-gray-900 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
+					rows="12"
 					bind:value={selectedPromptText}
 				></textarea>
 			</div>
 
-			<div class="flex justify-between items-center">
+			<div class="flex flex-wrap items-center justify-between gap-3">
 				<button
 					class="px-3 py-1.5 text-sm text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition"
 					on:click={useDefaultPrompt}

@@ -3,9 +3,9 @@
 	"version": "0.5.18",
 	"private": true,
 	"scripts": {
-		"dev": "npm run pyodide:fetch && vite dev --host",
-		"dev:3000": "npm run pyodide:fetch && vite dev --port 3000",
-		"dev:5050": "npm run pyodide:fetch && vite dev --port 5050",
+		"dev": "npm run pyodide:fetch && LAUNCH_EDITOR=code vite dev --host",
+		"dev:3000": "npm run pyodide:fetch && LAUNCH_EDITOR=code vite dev --port 3000",
+		"dev:5050": "npm run pyodide:fetch && LAUNCH_EDITOR=code vite dev --port 5050",
 		"build": "npm run pyodide:fetch && vite build",
 		"preview": "vite preview",
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",

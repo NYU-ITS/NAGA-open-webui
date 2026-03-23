@@ -370,7 +370,7 @@
 <div class="flex flex-col space-y-6 py-4">
 	<div class="space-y-3">
 		<div class="flex flex-wrap items-center justify-between gap-4">
-			<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Student Analysis RAW</h2>
+			<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Student Analysis</h2>
 
 			<div class="flex flex-wrap items-center gap-6">
 				<div class="relative">
@@ -411,7 +411,7 @@
 			<table class="max-w-full w-full table-auto rounded-sm text-left text-sm text-gray-500 dark:text-gray-400">
 				<thead class="-translate-y-0.5 bg-gray-50 text-xs uppercase text-gray-700 dark:bg-gray-850 dark:text-gray-400">
 					<tr>
-						<th scope="col" class="px-3 py-1.5 select-none">Homework ID</th>
+						<th scope="col" class="px-3 py-1.5 select-none">Homework</th>
 						<th scope="col" class="cursor-pointer select-none px-3 py-1.5" on:click={() => toggleSort('name')}>
 							<div class="flex items-center gap-1.5">
 								Student Name
@@ -428,7 +428,7 @@
 						<th scope="col" class="px-3 py-1.5 select-none">Email</th>
 						<th scope="col" class="cursor-pointer select-none px-3 py-1.5" on:click={() => toggleSort('accuracy')}>
 							<div class="flex items-center gap-1.5">
-								Average Accuracy (%)
+								AVG Accuracy (%)
 								{#if sortField === 'accuracy'}
 									<span class="font-normal">
 										{#if sortOrder === 'asc'}<ChevronUp className="size-2" />{:else}<ChevronDown className="size-2" />{/if}

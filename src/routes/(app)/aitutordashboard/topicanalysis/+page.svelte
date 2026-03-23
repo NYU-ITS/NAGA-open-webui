@@ -9,6 +9,8 @@
 
 	const AI_TUTOR_API_BASE = 'http://localhost:8000';
 	const useDummyData = AI_TUTOR_DUMMY_MODE;
+	const dashboardPalette = ['#EE352E', '#00933C', '#B933AD', '#0039A6', '#FF6319', '#996633'];
+	const errorTypeColors = dashboardPalette.slice(0, 4);
 
 	// Group ID (needed for error-types endpoints)
 	let groupId = '';
@@ -24,8 +26,8 @@
 					questionCount: 2,
 					studentsWithError: 4,
 					errorTypes: [
-						{ type: 'Conceptual', count: 4, percentage: 50, color: '#1D4ED8' },
-						{ type: 'Procedural', count: 4, percentage: 50, color: '#0F766E' }
+						{ type: 'Conceptual', count: 4, percentage: 50, color: errorTypeColors[0] },
+						{ type: 'Procedural', count: 4, percentage: 50, color: errorTypeColors[1] }
 					]
 				},
 				{
@@ -34,8 +36,8 @@
 					questionCount: 1,
 					studentsWithError: 3,
 					errorTypes: [
-						{ type: 'Conceptual', count: 2, percentage: 40, color: '#1D4ED8' },
-						{ type: 'Arithmetic', count: 3, percentage: 60, color: '#B45309' }
+						{ type: 'Conceptual', count: 2, percentage: 40, color: errorTypeColors[0] },
+						{ type: 'Arithmetic', count: 3, percentage: 60, color: errorTypeColors[2] }
 					]
 				}
 			]
@@ -50,8 +52,8 @@
 					questionCount: 2,
 					studentsWithError: 5,
 					errorTypes: [
-						{ type: 'Procedural', count: 6, percentage: 60, color: '#0F766E' },
-						{ type: 'Communication', count: 4, percentage: 40, color: '#B91C1C' }
+						{ type: 'Procedural', count: 6, percentage: 60, color: errorTypeColors[1] },
+						{ type: 'Communication', count: 4, percentage: 40, color: errorTypeColors[3] }
 					]
 				},
 				{
@@ -60,7 +62,7 @@
 					questionCount: 1,
 					studentsWithError: 2,
 					errorTypes: [
-						{ type: 'Arithmetic', count: 2, percentage: 100, color: '#B45309' }
+						{ type: 'Arithmetic', count: 2, percentage: 100, color: errorTypeColors[2] }
 					]
 				}
 			]
@@ -75,8 +77,8 @@
 					questionCount: 2,
 					studentsWithError: 4,
 					errorTypes: [
-						{ type: 'Conceptual', count: 3, percentage: 37.5, color: '#1D4ED8' },
-						{ type: 'Procedural', count: 5, percentage: 62.5, color: '#0F766E' }
+						{ type: 'Conceptual', count: 3, percentage: 37.5, color: errorTypeColors[0] },
+						{ type: 'Procedural', count: 5, percentage: 62.5, color: errorTypeColors[1] }
 					]
 				}
 			]
@@ -91,8 +93,8 @@
 					questionCount: 1,
 					studentsWithError: 3,
 					errorTypes: [
-						{ type: 'Communication', count: 1, percentage: 25, color: '#B91C1C' },
-						{ type: 'Procedural', count: 3, percentage: 75, color: '#0F766E' }
+						{ type: 'Communication', count: 1, percentage: 25, color: errorTypeColors[3] },
+						{ type: 'Procedural', count: 3, percentage: 75, color: errorTypeColors[1] }
 					]
 				}
 			]
@@ -145,7 +147,7 @@
 	async function persistErrorTypes() {
 		if (useDummyData) {
 			aiTutorDummyErrorTypes.set(errorTypeDefs);
-			toast.success('Dummy error types saved.');
+			toast.success('TestData error types saved.');
 			return;
 		}
 		if (!groupId) return;
@@ -175,7 +177,7 @@
 		if (useDummyData) {
 			errorTypeDefs = AI_TUTOR_DUMMY_ERROR_TYPES;
 			aiTutorDummyErrorTypes.set(AI_TUTOR_DUMMY_ERROR_TYPES);
-			toast.success('Dummy error types reset to defaults.');
+			toast.success('TestData error types reset to defaults.');
 			return;
 		}
 		if (!groupId) return;
@@ -378,9 +380,6 @@
 
 	// Global error type definitions — source of truth for names, colors, descriptions
 	let errorTypeDefs: { type: string; color: string; description: string }[] = [];
-
-	// Accessibility-safe colors for error type legend and charts.
-	const errorTypeColors = ['#1D4ED8', '#0F766E', '#B45309', '#B91C1C'];
 
 	// Modal state
 	let showEditModal = false;
@@ -595,12 +594,12 @@
 	<div class="space-y-3">
 		<div class="flex items-center justify-between gap-3">
 			<div>
-				<h4 class="text-base font-semibold text-gray-800 dark:text-gray-200">Error Type Configuration</h4>
+				<h5 class="text-base font-semibold text-gray-800 dark:text-gray-200">Error Type Configuration</h5>
 				<div class="text-xs text-gray-400 dark:text-gray-500">You can have at most 4 error types</div>
 			</div>
 			<div class="flex items-center gap-3">
-				<button
-					class="text-xs font-medium text-gray-500 transition hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+				<!-- <button
+					class="rounded-full border border-gray-300 px-3 py-1.5 text-xs font-semibold text-gray-700 transition hover:border-gray-400 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:border-gray-500 dark:hover:bg-gray-800"
 					on:click={() => {
 						showResetDefaultsModal = true;
 					}}
@@ -610,7 +609,7 @@
 				<div class="flex items-center gap-2">
 				{#if errorTypeDefs.length < 4}
 					<button
-						class="flex items-center gap-1 rounded px-1.5 py-1 text-xs text-gray-500 transition hover:bg-black/5 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-200"
+						class="flex items-center gap-1 rounded-full border border-gray-300 px-3 py-1.5 text-xs font-semibold text-gray-700 transition hover:border-gray-400 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:border-gray-500 dark:hover:bg-gray-800"
 						on:click={addErrorType}
 						title="Add error type"
 					>
@@ -622,19 +621,19 @@
 				{/if}
 				{#if errorTypeDefs.length > 0}
 					<button
-						class="flex items-center gap-1 rounded px-1.5 py-1 text-xs text-gray-500 transition hover:bg-black/5 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-200"
+						class="flex items-center gap-1 rounded-full border border-red-200 px-3 py-1.5 text-xs font-semibold text-red-600 transition hover:border-red-300 hover:bg-red-50 dark:border-red-900/70 dark:text-red-300 dark:hover:border-red-800 dark:hover:bg-red-950/40"
 						on:click={() => {
 							showResetDefaultsModal = true;
 						}}
 						title="Reset error types to defaults"
 					>
-						<span>Delete</span>
+						<span>Delete All</span>
 						<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3 h-3">
 							<path stroke-linecap="round" stroke-linejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" />
 						</svg>
 					</button>
 				{/if}
-				</div>
+				</div> -->
 			</div>
 		</div>
 
@@ -661,6 +660,23 @@
 				{/each}
 			</div>
 		{/if}
+
+	</div>
+	<div class="flex justify-end gap-3">
+				<button
+				class="rounded-full bg-black px-3 py-1.5 text-xs font-medium text-white transition hover:bg-gray-800"
+				on:click={persistErrorTypes}
+			>
+				Save
+			</button>
+
+	<a
+		href="/aitutordashboard/instructorsetup"
+		class="inline-flex w-fit items-center rounded-full border border-gray-300 px-3 py-1.5 text-sm font-semibold text-gray-800 transition hover:border-[#57068c] hover:text-[#57068c] dark:border-gray-600 dark:text-gray-200 dark:hover:border-white dark:hover:text-white"
+	>
+		Configure All Settings &gt;
+	</a>
+
 	</div>
 
 	{#if showResetDefaultsModal}
@@ -699,7 +715,15 @@
 
 	<!-- Practice Question Set -->
 	<div class="space-y-3">
-		<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Practice Question Set</h2>
+		<div class="flex items-center justify-between gap-4">
+			<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Practice Question Set</h2>
+			<a
+				href="/aitutordashboard/topicanalysis/reviewquestionset"
+				class="inline-flex w-fit items-center rounded-full border border-gray-300 px-3 py-1.5 text-sm font-semibold text-gray-800 transition hover:border-[#57068c] hover:text-[#57068c] dark:border-gray-600 dark:text-gray-200 dark:hover:border-white dark:hover:text-white"
+			>
+				See All
+			</a>
+		</div>
 
 		<p class="text-sm text-gray-600 dark:text-gray-400 leading-relaxed">
 			Start with an AI-generated question set based on students' weak topics, or upload your own questions. You can download, edit, and re-upload AI-generated content if needed. All uploaded question sets are automatically standardized by the system, with topics added and answers generated if missing, to ensure a consistent format across the platform.
@@ -742,22 +766,33 @@
 								</td>
 								<td class="px-3 py-1.5">
 									<div class="flex items-center gap-1">
-										{#if practice.status === 'approved' || practice.status === 'ready'}
-											<a
-												href="/aitutordashboard/topicanalysis/reviewquestionset?homework_id={practice.homeworkId ?? ''}"
-												class="self-center w-fit text-xs px-2 py-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-xl text-gray-700 dark:text-gray-300 whitespace-nowrap"
-											>
-												View
-											</a>
-											<button
-												class="self-center w-fit text-xs px-2 py-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-xl text-gray-700 dark:text-gray-300 flex items-center gap-1 whitespace-nowrap"
-											>
-												Send
-												<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="size-3">
-													<path stroke-linecap="round" stroke-linejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
-												</svg>
-											</button>
-										{/if}
+										<a
+											href={practice.status === 'approved' || practice.status === 'ready'
+												? `/aitutordashboard/topicanalysis/reviewquestionset?homework_id=${practice.homeworkId ?? ''}`
+												: undefined}
+											aria-disabled={!(practice.status === 'approved' || practice.status === 'ready')}
+											class={`self-center w-fit whitespace-nowrap rounded-xl px-2 py-1.5 text-xs transition ${
+												practice.status === 'approved' || practice.status === 'ready'
+													? 'font-semibold text-gray-700 hover:bg-black/5 dark:text-gray-300 dark:hover:bg-white/5'
+													: 'pointer-events-none text-gray-300 dark:text-gray-600'
+											}`}
+										>
+											View
+										</a>
+										<button
+											type="button"
+											disabled={!(practice.status === 'approved' || practice.status === 'ready')}
+											class={`self-center flex w-fit items-center gap-1 whitespace-nowrap rounded-xl px-2 py-1.5 text-xs transition ${
+												practice.status === 'approved' || practice.status === 'ready'
+													? 'font-semibold text-gray-700 hover:bg-black/5 dark:text-gray-300 dark:hover:bg-white/5'
+													: 'cursor-not-allowed text-gray-300 dark:text-gray-600'
+											}`}
+										>
+											Send
+											<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="size-3">
+												<path stroke-linecap="round" stroke-linejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
+											</svg>
+										</button>
 									</div>
 								</td>
 							</tr>
