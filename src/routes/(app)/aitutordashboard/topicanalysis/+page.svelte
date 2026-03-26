@@ -1,24 +1,35 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 	import { page } from '$app/stores';
 	import { toast } from 'svelte-sonner';
-	import { AI_TUTOR_DUMMY_ERROR_TYPES, AI_TUTOR_DUMMY_MODE, TESTING_AI_TUTOR } from '$lib/constants';
-	import { aiTutorDummyErrorTypes } from '$lib/stores';
+	import { AI_TUTOR_FRONTEND_TESTING_ERROR_TYPES, AI_TUTOR_FRONTEND_TESTING_MODE, TESTING_AI_TUTOR } from '$lib/constants';
+	import { aiTutorFrontendTestingErrorTypes } from '$lib/stores';
+	import { showAITutorTestToast } from '$lib/utils/aiTutorTesting';
 	import ChevronUp from '$lib/components/icons/ChevronUp.svelte';
 	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
 
 	const AI_TUTOR_API_BASE = 'http://localhost:8000';
-	const useDummyData = AI_TUTOR_DUMMY_MODE;
+	const useFrontendTestingData = AI_TUTOR_FRONTEND_TESTING_MODE;
+	const testToast = showAITutorTestToast;
 	const dashboardPalette = ['#EE352E', '#00933C', '#B933AD', '#0039A6', '#FF6319', '#996633'];
 	const errorTypeColors = dashboardPalette.slice(0, 4);
+	const frontendTestingHomeworkModelNames = [
+		'Homework1-MATH-Code-Section-Semester',
+		'Homework2-MATH-Code-Section-Semester',
+		'Homework3-MATH-Code-Section-Semester',
+		'Homework4-MATH-Code-Section-Semester'
+	];
+	const homeworkModelNameCellClass =
+		'max-w-[12rem] overflow-hidden whitespace-normal break-words leading-4 [display:-webkit-box] [-webkit-line-clamp:3] [-webkit-box-orient:vertical]';
+	const topicTableColumnMinimums = [260, 160, 160, 280];
 
 	// Group ID (needed for error-types endpoints)
 	let groupId = '';
 	$: groupId = $page.url.searchParams.get('group_id') || '';
-	const dummyTopicByHomework = [
+	const frontendTestingTopicByHomework = [
 		{
-			id: 'Homework 1',
-			homework: 'Homework 1',
+			id: frontendTestingHomeworkModelNames[0],
+			homework: frontendTestingHomeworkModelNames[0],
 			topics: [
 				{
 					topic: 'Linear Algebra',
@@ -43,8 +54,8 @@
 			]
 		},
 		{
-			id: 'Homework 2',
-			homework: 'Homework 2',
+			id: frontendTestingHomeworkModelNames[1],
+			homework: frontendTestingHomeworkModelNames[1],
 			topics: [
 				{
 					topic: 'Integration by Parts',
@@ -68,8 +79,8 @@
 			]
 		},
 		{
-			id: 'Homework 3',
-			homework: 'Homework 3',
+			id: frontendTestingHomeworkModelNames[2],
+			homework: frontendTestingHomeworkModelNames[2],
 			topics: [
 				{
 					topic: 'Trigonometric Identities',
@@ -84,8 +95,8 @@
 			]
 		},
 		{
-			id: 'Homework 4',
-			homework: 'Homework 4',
+			id: frontendTestingHomeworkModelNames[3],
+			homework: frontendTestingHomeworkModelNames[3],
 			topics: [
 				{
 					topic: 'Trigonometric Identities',
@@ -100,17 +111,29 @@
 			]
 		}
 	];
-	const dummyPracticeQuestions = [
-		{ homework: 'Homework 1', homeworkId: 'Homework 1', status: 'approved', date: 'Mar 12, 2026' },
-		{ homework: 'Homework 2', homeworkId: 'Homework 2', status: 'ready' },
-		{ homework: 'Homework 3', homeworkId: 'Homework 3', status: 'generating' },
-		{ homework: 'Homework 4', homeworkId: 'Homework 4', status: 'not_ready' }
+	const frontendTestingPracticeQuestions = [
+		{ homework: frontendTestingHomeworkModelNames[0], homeworkId: frontendTestingHomeworkModelNames[0], status: 'approved', date: 'Mar 12, 2026' },
+		{ homework: frontendTestingHomeworkModelNames[1], homeworkId: frontendTestingHomeworkModelNames[1], status: 'ready' },
+		{ homework: frontendTestingHomeworkModelNames[2], homeworkId: frontendTestingHomeworkModelNames[2], status: 'generating' },
+		{ homework: frontendTestingHomeworkModelNames[3], homeworkId: frontendTestingHomeworkModelNames[3], status: 'not_ready' }
 	];
+	type HomeworkPipelineRow = {
+		id: string;
+		modelId: string | null;
+		questionUploaded: boolean;
+		answerUploaded: boolean;
+		topicMapped: boolean;
+	};
+	let homeworkRows: HomeworkPipelineRow[] = [];
+	let topicAnalysisLoading = false;
+	let practiceLoading = false;
+	let initialized = false;
 
 	// Helper: load error types from server
 	async function loadErrorTypes() {
-		if (useDummyData) {
-			errorTypeDefs = $aiTutorDummyErrorTypes;
+		testToast(`Topic Analysis fetch: error types group=${groupId || 'none'}`);
+		if (useFrontendTestingData) {
+			errorTypeDefs = $aiTutorFrontendTestingErrorTypes;
 			return;
 		}
 		if (!groupId) return;
@@ -135,18 +158,19 @@
 				} else {
 					errorTypeDefs = [];
 				}
-				if (TESTING_AI_TUTOR) toast.success('[SUCCESS][GET]: Error types loaded.');
+				testToast('Topic Analysis loaded error types');
 			}
 		} catch (e) {
-			if (TESTING_AI_TUTOR) toast.warning('[FAIL][GET]: Error types fetch failed.');
+			testToast('Topic Analysis failed loading error types');
 			console.error('Error types fetch failed:', e);
 		}
 	}
 
 	// Helper: persist current errorTypeDefs to server
 	async function persistErrorTypes() {
-		if (useDummyData) {
-			aiTutorDummyErrorTypes.set(errorTypeDefs);
+		testToast('Save error types is triggered | page=aitutordashboard - Topic Analysis');
+		if (useFrontendTestingData) {
+			aiTutorFrontendTestingErrorTypes.set(errorTypeDefs);
 			toast.success('TestData error types saved.');
 			return;
 		}
@@ -165,18 +189,19 @@
 					)
 				}
 			);
-			if (TESTING_AI_TUTOR && res.ok) toast.success('[SUCCESS][PUT]: Error types saved.');
+			if (res.ok) testToast('Topic Analysis saved error types');
 		} catch (e) {
-			if (TESTING_AI_TUTOR) toast.warning('[FAIL][PUT]: Error types save failed.');
+			testToast('Topic Analysis failed saving error types');
 			console.error('Failed to persist error types:', e);
 		}
 	}
 
 	// Delete all custom error types on server, then reload defaults
 	async function deleteAllErrorTypes() {
-		if (useDummyData) {
-			errorTypeDefs = AI_TUTOR_DUMMY_ERROR_TYPES;
-			aiTutorDummyErrorTypes.set(AI_TUTOR_DUMMY_ERROR_TYPES);
+		testToast('Use default error types is triggered | page=aitutordashboard - Topic Analysis');
+		if (useFrontendTestingData) {
+			errorTypeDefs = AI_TUTOR_FRONTEND_TESTING_ERROR_TYPES;
+			aiTutorFrontendTestingErrorTypes.set(AI_TUTOR_FRONTEND_TESTING_ERROR_TYPES);
 			toast.success('TestData error types reset to defaults.');
 			return;
 		}
@@ -186,25 +211,48 @@
 				`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(groupId)}`,
 				{ method: 'DELETE', headers: { Authorization: `Bearer ${localStorage.token}` } }
 			);
-			if (TESTING_AI_TUTOR) toast.success('[SUCCESS][DELETE]: Error types reset to defaults.');
+			testToast('Topic Analysis reset error types to default');
 			await loadErrorTypes();
 		} catch (e) {
-			if (TESTING_AI_TUTOR) toast.warning('[FAIL][DELETE]: Error types delete failed.');
+			testToast('Topic Analysis failed resetting error types');
 			console.error('Failed to delete error types:', e);
 		}
 	}
 
-	onMount(async () => {
-		console.log('AI Tutor Dashboard - Topic Analysis loaded');
-
-		if (useDummyData) {
-			topicByHomework = dummyTopicByHomework;
-			practiceQuestions = dummyPracticeQuestions;
-			errorTypeDefs = $aiTutorDummyErrorTypes;
+	async function loadTopicAnalysisData() {
+		testToast(`Topic Analysis fetch: analysis group=${groupId || 'none'}`);
+		if (useFrontendTestingData) {
+			topicGroupsByHomework = frontendTestingTopicByHomework;
 			return;
 		}
-
+		if (!groupId) {
+			topicGroupsByHomework = [];
+			return;
+		}
+		topicAnalysisLoading = true;
 		try {
+			const homeworkResponse = await fetch(`${AI_TUTOR_API_BASE}/homework/?group_id=${encodeURIComponent(groupId)}`, {
+				method: 'GET',
+				headers: {
+					Authorization: `Bearer ${localStorage.token}`
+				}
+			});
+			if (!homeworkResponse.ok) {
+				throw new Error('Homework fetch failed');
+			}
+			const homeworkData = await homeworkResponse.json();
+			const nextHomeworkRows = Array.isArray(homeworkData)
+				? homeworkData.map((hw) => ({
+						id: hw?.id ?? 'unknown',
+						modelId: hw?.model_id ?? null,
+						questionUploaded: hw?.question_uploaded ?? false,
+						answerUploaded: hw?.answer_uploaded ?? false,
+						topicMapped: hw?.topic_mapped ?? false
+					}))
+				: [];
+			homeworkRows = nextHomeworkRows;
+			const homeworkIds = new Set(nextHomeworkRows.map((row) => row.id));
+
 			const topicResponse = await fetch(`${AI_TUTOR_API_BASE}/analysis`, {
 				method: 'GET',
 				headers: {
@@ -232,6 +280,7 @@
 
 				for (const row of topicData) {
 					const homeworkId = row?.homework_id ?? 'unknown';
+					if (!homeworkIds.has(homeworkId)) continue;
 					if (!grouped.has(homeworkId)) grouped.set(homeworkId, new Map());
 					const topicMap = grouped.get(homeworkId)!;
 
@@ -259,7 +308,7 @@
 					}
 				}
 
-				topicByHomework = Array.from(grouped.entries()).map(([homeworkId, topicMap]) => {
+				topicGroupsByHomework = Array.from(grouped.entries()).map(([homeworkId, topicMap]) => {
 					const topics = Array.from(topicMap.entries()).map(([topic, bucket]) => {
 						const totalErrors = Array.from(bucket.errorTypeCount.values()).reduce((a, b) => a + b, 0);
 						const errorTypes = Array.from(bucket.errorTypeCount.entries()).map(([type, count]) => ({
@@ -286,18 +335,29 @@
 				});
 			}
 
-			if (TESTING_AI_TUTOR) {
-				toast.success('[SUCCESS][GET]: Topic analysis loaded from /analysis.');
-			}
+			testToast('Topic Analysis loaded /analysis data');
 		} catch (error) {
-			if (TESTING_AI_TUTOR) {
-				toast.warning('[FAIL][GET]: Topic analysis fallback to placeholder data.');
-			}
+			topicGroupsByHomework = [];
+			testToast('Topic Analysis failed loading /analysis data');
 			console.error('Topic analysis API failed:', error);
+		} finally {
+			topicAnalysisLoading = false;
 		}
+	}
 
+	async function loadPracticeQuestionData() {
+		testToast(`Topic Analysis fetch: practice group=${groupId || 'none'}`);
+		if (useFrontendTestingData) {
+			practiceQuestions = frontendTestingPracticeQuestions;
+			return;
+		}
+		if (!groupId) {
+			practiceQuestions = [];
+			return;
+		}
+		practiceLoading = true;
 		try {
-			const homeworkResponse = await fetch(`${AI_TUTOR_API_BASE}/homework`, {
+			const homeworkResponse = await fetch(`${AI_TUTOR_API_BASE}/homework/?group_id=${encodeURIComponent(groupId)}`, {
 				method: 'GET',
 				headers: {
 					Authorization: `Bearer ${localStorage.token}`
@@ -364,19 +424,55 @@
 				});
 			}
 
-			if (TESTING_AI_TUTOR) {
-				toast.success('[SUCCESS][GET]: Practice question status loaded from /practice.');
-			}
+			testToast('Topic Analysis loaded /practice data');
 		} catch (error) {
-			if (TESTING_AI_TUTOR) {
-				toast.warning('[FAIL][GET]: Practice question status fallback to placeholder data.');
-			}
+			practiceQuestions = [];
+			testToast('Topic Analysis failed loading /practice data');
 			console.error('Practice question set API failed:', error);
+		} finally {
+			practiceLoading = false;
 		}
+	}
 
-		// Load error types from server (after groupId is set above)
+	onMount(async () => {
+		testToast(`loading aitutordashboard - Topic Analysis | group=${groupId || 'none'} | frontend_testing=${String(useFrontendTestingData)}`);
+		console.log('AI Tutor Dashboard - Topic Analysis loaded');
+		initialized = true;
+		if (useFrontendTestingData) {
+			homeworkRows = frontendTestingTopicByHomework.map((item) => ({
+				id: item.id,
+				modelId: item.homework,
+				questionUploaded: true,
+				answerUploaded: true,
+				topicMapped: true
+			}));
+			topicGroupsByHomework = frontendTestingTopicByHomework;
+			practiceQuestions = frontendTestingPracticeQuestions;
+			errorTypeDefs = $aiTutorFrontendTestingErrorTypes;
+			return;
+		}
+		await loadTopicAnalysisData();
+		await loadPracticeQuestionData();
 		await loadErrorTypes();
 	});
+
+	$: if (initialized && !useFrontendTestingData && groupId) {
+		void loadTopicAnalysisData();
+	}
+
+	$: if (initialized && !useFrontendTestingData && groupId) {
+		void loadPracticeQuestionData();
+	}
+
+	$: if (initialized && !useFrontendTestingData && groupId) {
+		void loadErrorTypes();
+	}
+	$: if (initialized && !useFrontendTestingData && !groupId) {
+		homeworkRows = [];
+		topicGroupsByHomework = [];
+		practiceQuestions = [];
+		errorTypeDefs = [];
+	}
 
 	// Global error type definitions — source of truth for names, colors, descriptions
 	let errorTypeDefs: { type: string; color: string; description: string }[] = [];
@@ -442,7 +538,17 @@
 
 	function getTopicDisplayErrorTypes(errorTypes) {
 		if (errorTypes?.length) {
-			return errorTypes;
+			const errorTypeMap = new Map(errorTypes.map((errorType) => [errorType.type, errorType]));
+			return errorTypeDefs
+				.map((definition) => {
+					const matchingErrorType = errorTypeMap.get(definition.type);
+					if (!matchingErrorType) return null;
+					return {
+						...matchingErrorType,
+						color: definition.color
+					};
+				})
+				.filter(Boolean);
 		}
 
 		if (displayErrorTypes.length) {
@@ -465,6 +571,14 @@
 
 	// State for expandable homework sections
 	let expandedHomework = new Set<string>();
+	let selectedTopicAnalysisHomework = 'all';
+	let selectedTopicAnalysisTopic = 'all';
+	let lastTopicAnalysisFilterKey = '';
+
+	function getHomeworkModelName(homework: string) {
+		// homework name is now homework model name
+		return homeworkRows.find((row) => row.id === homework)?.modelId ?? homework;
+	}
 
 	function toggleHomework(id: string) {
 		if (expandedHomework.has(id)) {
@@ -475,66 +589,252 @@
 		expandedHomework = expandedHomework; // Trigger reactivity
 	}
 
-	let topicByHomework = [];
-	$: if (topicByHomework.length > 0 && expandedHomework.size === 0) {
-		expandedHomework = new Set([topicByHomework[0].id]);
+	let topicGroupsByHomework = [];
+	$: topicAnalysisHomeworkOptions = topicGroupsByHomework.map((homework) => ({
+		id: homework.id,
+		label: getHomeworkModelName(homework.homework)
+	}));
+	$: topicAnalysisTopicOptions = Array.from(
+		new Set(topicGroupsByHomework.flatMap((homework) => homework.topics.map((topic) => topic.topic)))
+	).sort();
+	$: filteredTopicGroupsByHomework = topicGroupsByHomework
+		.filter((homework) =>
+			selectedTopicAnalysisHomework === 'all' ? true : homework.id === selectedTopicAnalysisHomework
+		)
+		.map((homework) => ({
+			...homework,
+			topics:
+				selectedTopicAnalysisTopic === 'all'
+					? homework.topics
+					: homework.topics.filter((topic) => topic.topic === selectedTopicAnalysisTopic)
+		}))
+		.filter((homework) => homework.topics.length > 0);
+	$: if (
+		selectedTopicAnalysisHomework !== 'all' &&
+		!topicGroupsByHomework.some((homework) => homework.id === selectedTopicAnalysisHomework)
+	) {
+		selectedTopicAnalysisHomework = 'all';
 	}
+	$: if (
+		selectedTopicAnalysisTopic !== 'all' &&
+		!topicAnalysisTopicOptions.includes(selectedTopicAnalysisTopic)
+	) {
+		selectedTopicAnalysisTopic = 'all';
+	}
+	$: {
+		const nextFilterKey = `${selectedTopicAnalysisHomework}|${selectedTopicAnalysisTopic}|${filteredTopicGroupsByHomework
+			.map((homework) => homework.id)
+			.join(',')}`;
+		if (nextFilterKey !== lastTopicAnalysisFilterKey) {
+			if (filteredTopicGroupsByHomework.length > 0) {
+				const visibleHomeworkIds = new Set(filteredTopicGroupsByHomework.map((homework) => homework.id));
+				const persistedExpandedHomework = new Set(
+					Array.from(expandedHomework).filter((id) => visibleHomeworkIds.has(id))
+				);
+				if (selectedTopicAnalysisHomework !== 'all' || selectedTopicAnalysisTopic !== 'all') {
+					expandedHomework = new Set(filteredTopicGroupsByHomework.map((homework) => homework.id));
+				} else if (persistedExpandedHomework.size > 0) {
+					expandedHomework = persistedExpandedHomework;
+				} else {
+					expandedHomework = new Set([filteredTopicGroupsByHomework[0].id]);
+				}
+			} else if (topicGroupsByHomework.length > 0) {
+				expandedHomework = new Set([topicGroupsByHomework[0].id]);
+			} else {
+				expandedHomework = new Set();
+			}
+			lastTopicAnalysisFilterKey = nextFilterKey;
+		}
+	}
+	let topicTableColumnWidths = [320, 180, 180, 420];
+	let resizingTopicColumnIndex: number | null = null;
+	let resizeStartX = 0;
+	let resizeStartWidth = 0;
+	$: topicTableMinWidth = topicTableColumnWidths.reduce((sum, width) => sum + width, 0);
 
 	let practiceQuestions = [];
+	$: topicAnalysisEmptyMessage = !groupId && !useFrontendTestingData
+		? 'Select a group to view topic analysis.'
+		: homeworkRows.length === 0 && !useFrontendTestingData
+			? 'No homework uploaded for this group yet.'
+			: homeworkRows.length > 0 && homeworkRows.every((row) => !row.questionUploaded) && !useFrontendTestingData
+				? 'Upload homework PDFs before topic analysis can be prepared.'
+				: homeworkRows.length > 0 && homeworkRows.every((row) => !row.topicMapped) && !useFrontendTestingData
+					? 'Homework processing is still preparing topics.'
+					: 'No analysis data is available for the current filters. Run analysis first.';
+	$: practiceQuestionsEmptyMessage = !groupId && !useFrontendTestingData
+		? 'Select a group to view practice question sets.'
+		: homeworkRows.length === 0 && !useFrontendTestingData
+			? 'No homework uploaded for this group yet.'
+			: 'No practice question sets are available yet. Generate practice after analysis is completed.';
+
+	function handleTopicColumnResize(event: MouseEvent) {
+		if (resizingTopicColumnIndex === null) return;
+		const nextWidth = Math.max(
+			topicTableColumnMinimums[resizingTopicColumnIndex],
+			resizeStartWidth + event.clientX - resizeStartX
+		);
+		topicTableColumnWidths = topicTableColumnWidths.map((width, index) =>
+			index === resizingTopicColumnIndex ? nextWidth : width
+		);
+	}
+
+	function stopTopicColumnResize() {
+		resizingTopicColumnIndex = null;
+	}
+
+	function startTopicColumnResize(index: number, event: MouseEvent) {
+		event.preventDefault();
+		event.stopPropagation();
+		resizingTopicColumnIndex = index;
+		resizeStartX = event.clientX;
+		resizeStartWidth = topicTableColumnWidths[index];
+	}
+
+	onMount(() => {
+		if (typeof window !== 'undefined') {
+			window.addEventListener('mousemove', handleTopicColumnResize);
+			window.addEventListener('mouseup', stopTopicColumnResize);
+		}
+	});
+
+	onDestroy(() => {
+		if (typeof window !== 'undefined') {
+			window.removeEventListener('mousemove', handleTopicColumnResize);
+			window.removeEventListener('mouseup', stopTopicColumnResize);
+		}
+	});
 </script>
 
 <div class="flex flex-col space-y-6 py-4">
 	<!-- Topic Analysis by Homework -->
 	<div class="space-y-3">
-		<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">
-			Topic Analysis by Homework
-		</h2>
+		<div class="flex flex-wrap items-center justify-between gap-4">
+			<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">
+				Topic Analysis by Homework
+			</h2>
+			<div class="flex flex-wrap items-center gap-3">
+				<select
+					bind:value={selectedTopicAnalysisHomework}
+					class=" bg-white px-3 py-1.5 text-sm text-gray-800 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-200"
+				>
+					<option value="all">All Homeworks</option>
+					{#each topicAnalysisHomeworkOptions as option}
+						<option value={option.id}>{option.label}</option>
+					{/each}
+				</select>
+				<select
+					bind:value={selectedTopicAnalysisTopic}
+					class="bg-white px-3 py-1.5 text-sm text-gray-800 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-200"
+				>
+					<option value="all">All Topics</option>
+					{#each topicAnalysisTopicOptions as topic}
+						<option value={topic}>{topic}</option>
+					{/each}
+				</select>
+			</div>
+		</div>
 
 		<div class="scrollbar-hidden relative overflow-x-auto max-w-full rounded-sm pt-0.5">
-			<table class="w-full text-sm text-left text-gray-500 dark:text-gray-400 table-auto max-w-full rounded-sm">
+			<table
+				class="text-sm text-left text-gray-500 dark:text-gray-400 table-fixed rounded-sm"
+				style={`min-width: ${topicTableMinWidth}px; width: ${topicTableMinWidth}px;`}
+			>
+				<colgroup>
+					{#each topicTableColumnWidths as width}
+						<col style={`width: ${width}px;`} />
+					{/each}
+				</colgroup>
 				<thead class="text-xs text-gray-700 uppercase bg-gray-50 dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5">
 					<tr>
-						<th scope="col" colspan="2" class="px-3 py-1.5 whitespace-nowrap">Questions in Topic</th>
-						<th scope="col" class="px-3 py-1.5 whitespace-nowrap">Students with Error</th>
-						<th scope="col" class="px-3 py-1.5 w-full">Error Type Analysis</th>
+						<th scope="col" class="relative px-3 py-1.5">
+							<div class="pr-3">Homework</div>
+							<button
+								type="button"
+								class="absolute inset-y-0 right-0 w-2 cursor-col-resize"
+								aria-label="Resize Homework column"
+								on:mousedown={(event) => startTopicColumnResize(0, event)}
+							></button>
+						</th>
+						<th scope="col" class="relative px-3 py-1.5 whitespace-nowrap">
+							<div class="pr-3">Questions in Topic</div>
+							<button
+								type="button"
+								class="absolute inset-y-0 right-0 w-2 cursor-col-resize"
+								aria-label="Resize Questions in Topic column"
+								on:mousedown={(event) => startTopicColumnResize(1, event)}
+							></button>
+						</th>
+						<th scope="col" class="relative px-3 py-1.5 whitespace-nowrap">
+							<div class="pr-3">Students with Error</div>
+							<button
+								type="button"
+								class="absolute inset-y-0 right-0 w-2 cursor-col-resize"
+								aria-label="Resize Students with Error column"
+								on:mousedown={(event) => startTopicColumnResize(2, event)}
+							></button>
+						</th>
+						<th scope="col" class="relative px-3 py-1.5">
+							<div class="pr-3">Error Type Analysis</div>
+							<button
+								type="button"
+								class="absolute inset-y-0 right-0 w-2 cursor-col-resize"
+								aria-label="Resize Error Type Analysis column"
+								on:mousedown={(event) => startTopicColumnResize(3, event)}
+							></button>
+						</th>
 					</tr>
 				</thead>
 				<tbody>
-					{#each topicByHomework as homework}
+					{#each filteredTopicGroupsByHomework as homework}
 						<!-- Homework Header Row -->
 						<tr
 							class="bg-white dark:bg-gray-900 border-t border-gray-100 dark:border-gray-850 hover:bg-gray-50 dark:hover:bg-gray-800 transition cursor-pointer"
 							on:click={() => toggleHomework(homework.id)}
 						>
-							<td colspan="4" class="px-3 py-1.5">
-								<div class="flex items-center gap-2">
-									{#if expandedHomework.has(homework.id)}
-										<ChevronDown className="size-3 flex-shrink-0" />
-									{:else}
-										<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="size-3 flex-shrink-0">
-											<path stroke-linecap="round" stroke-linejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
-										</svg>
-									{/if}
-									<span class="font-semibold text-xs text-gray-900 dark:text-gray-100">{homework.homework}</span>
+							<td class="px-3 py-1.5">
+								<div class="grid grid-cols-[12px_minmax(0,1fr)] items-start gap-2">
+									<div class="pt-0.5">
+										{#if expandedHomework.has(homework.id)}
+											<ChevronDown className="size-3 flex-shrink-0" />
+										{:else}
+											<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="size-3 flex-shrink-0">
+												<path stroke-linecap="round" stroke-linejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
+											</svg>
+										{/if}
+									</div>
+									<div class={`font-semibold text-xs text-gray-900 dark:text-gray-100 ${homeworkModelNameCellClass}`}>
+										{getHomeworkModelName(homework.homework)}
+									</div>
 								</div>
 							</td>
+							<td colspan="3"></td>
 						</tr>
 
 						<!-- Topics (expanded) -->
 						{#if expandedHomework.has(homework.id)}
 							{#each homework.topics as topic}
 								<tr class="bg-white dark:bg-gray-900 border-t border-gray-100 dark:border-gray-850 hover:bg-gray-50 dark:hover:bg-gray-800 transition text-xs">
-									<td class="px-3 py-1.5 w-8"></td>
 									<td class="px-3 py-1.5">
-										<div class="text-gray-900 dark:text-gray-100 whitespace-nowrap">{topic.topic}</div>
-										<div class="text-gray-500 dark:text-gray-400 mt-0.5 whitespace-nowrap">
-											{topic.questionCount} [{topic.questions}]
+										<div class="grid grid-cols-[12px_minmax(0,1fr)] items-start gap-2">
+											<div></div>
+											<div class="min-w-0 text-gray-900 dark:text-gray-100">
+												<div class={homeworkModelNameCellClass}>
+													{topic.topic}
+												</div>
+											</div>
+										</div>
+									</td>
+									<td class="px-3 py-1.5">
+										<div class="text-gray-900 dark:text-gray-100">{topic.questionCount}</div>
+										<div class="mt-0.5 truncate text-gray-500 dark:text-gray-400">
+											[{topic.questions}]
 										</div>
 									</td>
 									<td class="px-3 py-1.5">
 										<span class="text-gray-900 dark:text-gray-100">{topic.studentsWithError}</span>
 									</td>
-									<td class="px-3 py-1.5 w-full">
+									<td class="px-3 py-1.5">
 										{#if getTopicDisplayErrorTypes(topic.errorTypes).length === 0}
 											<div class="flex items-center gap-2">
 												<span class="text-gray-400 dark:text-gray-500 italic">Please add new error types</span>
@@ -547,7 +847,7 @@
 										{:else}
 											<!-- Stacked Bar Chart with + at end -->
 											<div class="flex items-center gap-2">
-												<div class="flex h-5 rounded overflow-hidden flex-1 min-w-[200px]">
+												<div class="flex h-5 min-w-0 flex-1 overflow-hidden rounded">
 													{#each getTopicDisplayErrorTypes(topic.errorTypes) as errorType}
 														<div
 															style="width: {errorType.percentage}%; background-color: {errorType.color};"
@@ -564,7 +864,7 @@
 												{/if}
 											</div>
 											<!-- Labels below bar -->
-											<div class="flex w-full mt-1 min-w-[200px]">
+											<div class="mt-1 flex w-full min-w-0">
 												{#each getTopicDisplayErrorTypes(topic.errorTypes) as errorType}
 													<div class="overflow-hidden" style="width: {errorType.percentage}%;">
 														{#if errorType.percentage >= 8}
@@ -581,9 +881,13 @@
 							{/each}
 						{/if}
 					{/each}
-					{#if topicByHomework.length === 0}
+					{#if topicAnalysisLoading}
 						<tr class="bg-white dark:bg-gray-900 text-xs">
-							<td colspan="4" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">No data available</td>
+							<td colspan="4" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">Loading topic analysis...</td>
+						</tr>
+					{:else if filteredTopicGroupsByHomework.length === 0}
+						<tr class="bg-white dark:bg-gray-900 text-xs">
+							<td colspan="4" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">{topicAnalysisEmptyMessage}</td>
 						</tr>
 					{/if}
 				</tbody>
@@ -597,8 +901,8 @@
 				<h5 class="text-base font-semibold text-gray-800 dark:text-gray-200">Error Type Configuration</h5>
 				<div class="text-xs text-gray-400 dark:text-gray-500">You can have at most 4 error types</div>
 			</div>
-			<div class="flex items-center gap-3">
-				<!-- <button
+			<!-- <div class="flex items-center gap-3">
+				<button
 					class="rounded-full border border-gray-300 px-3 py-1.5 text-xs font-semibold text-gray-700 transition hover:border-gray-400 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:border-gray-500 dark:hover:bg-gray-800"
 					on:click={() => {
 						showResetDefaultsModal = true;
@@ -633,8 +937,8 @@
 						</svg>
 					</button>
 				{/if}
-				</div> -->
-			</div>
+				</div>
+			</div> -->
 		</div>
 
 		{#if errorTypeDefs.length === 0}
@@ -650,7 +954,7 @@
 						on:click={() => openEdit(i)}
 					>
 						<div class="flex items-center gap-2">
-							<span class="h-3 w-3 rounded-full flex-shrink-0" style="background-color: {def.color};"></span>
+							<span class="h-4 w-4 rounded-full flex-shrink-0" style="background-color: {def.color};"></span>
 							<div class="text-sm font-medium text-gray-900 dark:text-gray-100">{def.type}</div>
 						</div>
 						<p class="mt-2 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
@@ -663,18 +967,18 @@
 
 	</div>
 	<div class="flex justify-end gap-3">
-				<button
+				<!-- <button
 				class="rounded-full bg-black px-3 py-1.5 text-xs font-medium text-white transition hover:bg-gray-800"
 				on:click={persistErrorTypes}
 			>
 				Save
-			</button>
+			</button> -->
 
 	<a
 		href="/aitutordashboard/instructorsetup"
 		class="inline-flex w-fit items-center rounded-full border border-gray-300 px-3 py-1.5 text-sm font-semibold text-gray-800 transition hover:border-[#57068c] hover:text-[#57068c] dark:border-gray-600 dark:text-gray-200 dark:hover:border-white dark:hover:text-white"
 	>
-		Configure All Settings &gt;
+		Configure in Setup &gt;
 	</a>
 
 	</div>
@@ -721,7 +1025,7 @@
 				href="/aitutordashboard/topicanalysis/reviewquestionset"
 				class="inline-flex w-fit items-center rounded-full border border-gray-300 px-3 py-1.5 text-sm font-semibold text-gray-800 transition hover:border-[#57068c] hover:text-[#57068c] dark:border-gray-600 dark:text-gray-200 dark:hover:border-white dark:hover:text-white"
 			>
-				See All
+				View All
 			</a>
 		</div>
 
@@ -733,20 +1037,26 @@
 			<table class="w-full text-sm text-left text-gray-500 dark:text-gray-400 table-auto max-w-full rounded-sm">
 				<thead class="text-xs text-gray-700 uppercase bg-gray-50 dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5">
 					<tr>
-						<th scope="col" class="px-3 py-1.5">Homework</th>
+						<th scope="col" class="w-[12rem] px-3 py-1.5">Homework</th>
 						<th scope="col" class="px-3 py-1.5">Status</th>
 						<th scope="col" class="px-3 py-1.5">Action</th>
 					</tr>
 				</thead>
 				<tbody>
-					{#if practiceQuestions.length === 0}
+					{#if practiceLoading}
 						<tr class="bg-white dark:bg-gray-900 text-xs">
-							<td colspan="3" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">No data available</td>
+							<td colspan="3" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">Loading practice question sets...</td>
+						</tr>
+					{:else if practiceQuestions.length === 0}
+						<tr class="bg-white dark:bg-gray-900 text-xs">
+							<td colspan="3" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">{practiceQuestionsEmptyMessage}</td>
 						</tr>
 					{:else}
 						{#each practiceQuestions as practice}
 							<tr class="bg-white dark:bg-gray-900 dark:border-gray-850 text-xs border-t border-gray-100 dark:border-gray-850">
-								<td class="px-3 py-1.5 font-medium text-gray-900 dark:text-white whitespace-nowrap">{practice.homework}</td>
+								<td class="px-3 py-1.5 font-medium text-gray-900 dark:text-white">
+									<div class={homeworkModelNameCellClass}>{getHomeworkModelName(practice.homework)}</div>
+								</td>
 								<td class="px-3 py-1.5">
 									<div class="flex items-center gap-2 text-gray-700 dark:text-gray-300 whitespace-nowrap">
 										{#if practice.status === 'approved'}

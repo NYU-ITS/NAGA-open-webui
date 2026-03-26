@@ -223,7 +223,7 @@
 											}}
 											disabled={started}
 										>
-											<span class="font-semibold {started ? 'text-gray-500 dark:text-gray-400' : 'text-gray-900 dark:text-gray-100'}">{getHomeworkNumber(homework)}</span>
+											<span class="font-semibold {started ? 'text-gray-500 dark:text-gray-400' : 'text-gray-900 dark:text-gray-100'}">Homework {getHomeworkNumber(homework)}</span>
 											<span class="mx-2 text-gray-300 dark:text-gray-600">|</span>
 											<span>{formatTopicList(getTopicsForHomework(homework))}</span>
 										</button>

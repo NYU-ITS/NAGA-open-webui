@@ -1,12 +1,11 @@
 <script lang="ts">
 	import { onMount, getContext } from 'svelte';
-	import { toast } from 'svelte-sonner';
 	import { WEBUI_NAME, showSidebar, user, mobile } from '$lib/stores';
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
 	import { checkIfSuperAdmin } from '$lib/apis/users';
 	import { getGroups } from '$lib/apis/groups';
-	import { TESTING_AI_TUTOR } from '$lib/constants';
+	import { showAITutorTestToast } from '$lib/utils/aiTutorTesting';
 
 	import MenuLines from '$lib/components/icons/MenuLines.svelte';
 
@@ -29,6 +28,7 @@
 
 	onMount(async () => {
 		loaded = true;
+		showAITutorTestToast('loading aitutordashboard - Layout');
 
 		// Load user identity information
 		if ($user && localStorage.token) {
@@ -43,9 +43,7 @@
 			try {
 				// TODO: Wire to API: GET /api/v1/groups
 				groups = await getGroups(localStorage.token);
-				if (TESTING_AI_TUTOR) {
-					toast.success('[SUCCESS][GET]: getGroups() fetches group data like (using placeholder).');
-				}
+				showAITutorTestToast('aitutordashboard layout loaded groups');
 				if (groups && Array.isArray(groups)) {
 					// Separate created vs member groups
 					createdGroups = groups.filter(g => g.user_id === $user.id);
@@ -62,9 +60,7 @@
 					}
 				}
 			} catch (error) {
-				if (TESTING_AI_TUTOR) {
-					toast.warning('[FAIL][GET]: getGroups() fetches group data like (using placeholder).');
-				}
+				showAITutorTestToast('aitutordashboard layout failed loading groups');
 				console.error('Error loading groups:', error);
 			}
 		}
@@ -328,7 +324,9 @@
 								: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
 							href="/aitutordashboard/topicanalysis"
 						>
-							Topic Analysis
+							{$page.url.pathname.includes('/aitutordashboard/topicanalysis/reviewquestionset')
+								? 'Topic Analysis - Reviewing Question Set'
+								: 'Topic Analysis'}
 						</a>
 
 						<a

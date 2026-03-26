@@ -3,7 +3,7 @@ import { type Writable, writable } from 'svelte/store';
 import type { ModelConfig } from '$lib/apis';
 import type { Banner } from '$lib/types';
 import type { Socket } from 'socket.io-client';
-import { AI_TUTOR_DUMMY_ERROR_TYPES } from '$lib/constants';
+import { AI_TUTOR_FRONTEND_TESTING_ERROR_TYPES } from '$lib/constants';
 
 import emojiShortCodes from '$lib/emoji-shortcodes.json';
 
@@ -74,7 +74,7 @@ export const showArtifacts = writable(false);
 export const showCallOverlay = writable(false);
 export const showFacilitiesOverlay = writable(false);
 export const showRightsideQuestions = writable(false);
-export const aiTutorDummyErrorTypes = writable(AI_TUTOR_DUMMY_ERROR_TYPES);
+export const aiTutorFrontendTestingErrorTypes = writable(AI_TUTOR_FRONTEND_TESTING_ERROR_TYPES);
 
 export const temporaryChatEnabled = writable(false);
 export const scrollPaginationEnabled = writable(false);

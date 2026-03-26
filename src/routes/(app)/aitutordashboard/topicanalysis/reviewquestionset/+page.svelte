@@ -4,8 +4,10 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { TESTING_AI_TUTOR } from '$lib/constants';
+	import { showAITutorTestToast } from '$lib/utils/aiTutorTesting';
 
 	const AI_TUTOR_API_BASE = 'http://localhost:8000';
+	const testToast = showAITutorTestToast;
 
 	type QuestionItem = Record<string, unknown>;
 	type StudentAssignment = { name: string; topic: string };
@@ -15,6 +17,14 @@
 		status: 'pending' | 'in_progress' | 'approved';
 		generatedTime: string;
 		questions: QuestionItem[];
+	};
+
+	type ReviewHomework = {
+		homeworkId: string;
+		questionData: QuestionSetData;
+		approvedQuestionIndexes: Set<number>;
+		questionEditors: string[];
+		studentAssignments: StudentAssignment[][];
 	};
 
 	const STANDARD_QUESTION_TEMPLATE = {
@@ -31,7 +41,11 @@
 	const JSON_EXPLANATION_PARAGRAPH =
 		'Id is the question number used for tracking, question is the exact prompt students will see, topic is the skill being practiced, answer is the expected final answer, steps is the solution path, and difficulty is a quick label such as easy, medium, or hard.';
 
-	const fallbackHomeworkOptions = ['Homework 1', 'Homework 2', 'Homework 3'];
+	const fallbackHomeworkOptions = [
+		'Homework1-MATH-Code-Section-Semester',
+		'Homework2-MATH-Code-Section-Semester',
+		'Homework3-MATH-Code-Section-Semester'
+	];
 
 	const fallbackQuestions: QuestionItem[] = [
 		{
@@ -64,21 +78,46 @@
 
 	let groupId = '';
 	let homeworkOptions: string[] = [];
-	let selectedHomeworks = new Set<string>();
-	let selectedHomeworkLabel = 'Homework 1';
-	let approvedQuestionIndexes = new Set<number>();
-	let questionEditors: string[] = [];
-	let studentAssignments: StudentAssignment[][] = [];
-
-	let questionData: QuestionSetData = {
-		id: '',
-		status: 'pending',
-		generatedTime: '2026-03-23 09:00:00',
-		questions: fallbackQuestions
-	};
+	let reviewHomeworks: ReviewHomework[] = [];
+	let currentHomeworkIndex = 0;
 
 	const cloneQuestions = (questions: QuestionItem[]) =>
 		questions.map((item) => structuredClone(item));
+
+	const fallbackReviewHomeworks = [
+		{
+			homeworkId: 'Homework2-MATH-Code-Section-Semester',
+			generatedTime: '2026-03-23 09:00:00',
+			status: 'in_progress' as const,
+			questions: cloneQuestions(fallbackQuestions)
+		},
+		{
+			homeworkId: 'Homework3-MATH-Code-Section-Semester',
+			generatedTime: '2026-03-23 09:12:00',
+			status: 'in_progress' as const,
+			questions: cloneQuestions(
+				fallbackQuestions.map((question, index) => ({
+					...question,
+					id: index + 1,
+					question: `${String(question.question)} (Homework3-MATH-Code-Section-Semester)`,
+					topic: index === 0 ? 'Integration' : index === 1 ? 'Derivatives' : 'Limits'
+				}))
+			)
+		},
+		{
+			homeworkId: 'Homework4-MATH-Code-Section-Semester',
+			generatedTime: '2026-03-23 09:25:00',
+			status: 'in_progress' as const,
+			questions: cloneQuestions(
+				fallbackQuestions.map((question, index) => ({
+					...question,
+					id: index + 1,
+					question: `${String(question.question)} (Homework4-MATH-Code-Section-Semester)`,
+					topic: index === 0 ? 'Sequences' : index === 1 ? 'Optimization' : 'Trigonometry'
+				}))
+			)
+		}
+	];
 
 	const normalizeQuestionPayload = (payload: unknown): QuestionItem[] => {
 		if (Array.isArray(payload)) {
@@ -117,12 +156,11 @@
 		return cloneQuestions(fallbackQuestions);
 	};
 
-	const syncEditorsFromQuestions = () => {
-		questionEditors = questionData.questions.map((question) => JSON.stringify(question, null, 2));
-	};
+	const buildQuestionEditors = (questions: QuestionItem[]) =>
+		questions.map((question) => JSON.stringify(question, null, 2));
 
-	const buildStudentAssignments = () => {
-		studentAssignments = questionData.questions.map((question, index) => {
+	const buildStudentAssignments = (questions: QuestionItem[]) => {
+		return questions.map((question, index) => {
 			const topic = String(question?.topic ?? 'General Practice');
 			return fallbackStudents.slice(0, 3).map((name, studentIndex) => ({
 				name,
@@ -131,23 +169,56 @@
 		});
 	};
 
-	const refreshDerivedStatus = () => {
-		if (
-			questionData.questions.length > 0 &&
-			approvedQuestionIndexes.size === questionData.questions.length
-		) {
-			questionData = { ...questionData, status: 'approved' };
-			return;
-		}
+	const createReviewHomework = (
+		homeworkId: string,
+		questions: QuestionItem[],
+		generatedTime = '2026-03-23 09:00:00',
+		status: QuestionSetData['status'] = 'pending'
+	): ReviewHomework => ({
+		homeworkId,
+		questionData: {
+			id: homeworkId,
+			status,
+			generatedTime,
+			questions
+		},
+		approvedQuestionIndexes: new Set<number>(),
+		questionEditors: buildQuestionEditors(questions),
+		studentAssignments: buildStudentAssignments(questions)
+	});
 
-		if (questionData.status !== 'pending') {
-			questionData = { ...questionData, status: 'in_progress' };
-		}
+	const updateCurrentHomework = (updater: (homework: ReviewHomework) => ReviewHomework) => {
+		const current = reviewHomeworks[currentHomeworkIndex];
+		if (!current) return;
+		const next = [...reviewHomeworks];
+		next[currentHomeworkIndex] = updater(current);
+		reviewHomeworks = next;
 	};
 
-	const parseQuestionEditor = (index: number) => {
+	const refreshDerivedStatus = (homework: ReviewHomework) => {
+		if (
+			homework.questionData.questions.length > 0 &&
+			homework.approvedQuestionIndexes.size === homework.questionData.questions.length
+		) {
+			return {
+				...homework,
+				questionData: { ...homework.questionData, status: 'approved' as const }
+			};
+		}
+
+		if (homework.questionData.status !== 'pending') {
+			return {
+				...homework,
+				questionData: { ...homework.questionData, status: 'in_progress' as const }
+			};
+		}
+
+		return homework;
+	};
+
+	const parseQuestionEditor = (homework: ReviewHomework, index: number) => {
 		try {
-			const parsed = JSON.parse(questionEditors[index]);
+			const parsed = JSON.parse(homework.questionEditors[index]);
 			if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
 				throw new Error(`Question ${index + 1} must be a JSON object`);
 			}
@@ -157,25 +228,11 @@
 		}
 	};
 
-	const applyQuestionSet = (questions: QuestionItem[], generatedTime?: string, status?: string) => {
-		questionData = {
-			...questionData,
-			questions,
-			generatedTime: generatedTime || '2026-03-23 09:00:00',
-			status: (status as QuestionSetData['status']) || 'pending'
-		};
-		approvedQuestionIndexes = new Set<number>();
-		syncEditorsFromQuestions();
-		buildStudentAssignments();
-	};
-
-	async function loadQuestionSet() {
-		const activeHomework = [...selectedHomeworks][0];
-		if (!activeHomework) return;
-
+	async function loadReviewHomework(homeworkId: string) {
+		testToast(`Review Question Set fetch: practice homework=${homeworkId}`);
 		try {
 			const response = await fetch(
-				`${AI_TUTOR_API_BASE}/practice?homework_id=${encodeURIComponent(activeHomework)}`,
+				`${AI_TUTOR_API_BASE}/practice?homework_id=${encodeURIComponent(homeworkId)}`,
 				{
 					method: 'GET',
 					headers: {
@@ -193,42 +250,21 @@
 				const latest = [...data].sort(
 					(a, b) => Number(b?.version_number ?? 0) - Number(a?.version_number ?? 0)
 				)[0];
-
-				questionData = {
-					id: latest.id,
-					status: (latest.status ?? 'pending') as QuestionSetData['status'],
-					generatedTime: latest.generated_time ?? latest.created_at ?? '2026-03-23 09:00:00',
-					questions: normalizeQuestionPayload(latest.problem_data)
-				};
-				syncEditorsFromQuestions();
-				buildStudentAssignments();
-			} else {
-				applyQuestionSet(cloneQuestions(fallbackQuestions));
+				return createReviewHomework(
+					homeworkId,
+					normalizeQuestionPayload(latest.problem_data),
+					latest.generated_time ?? latest.created_at ?? '2026-03-23 09:00:00',
+					(latest.status ?? 'pending') as QuestionSetData['status']
+				);
 			}
 
-			if (TESTING_AI_TUTOR) {
-				toast.success('[SUCCESS][GET]: Loaded practice question set from /practice.');
-			}
+			testToast(`Review Question Set loaded /practice data for homework=${homeworkId}`);
+
+			return null;
 		} catch (error) {
-			applyQuestionSet(cloneQuestions(fallbackQuestions));
 			console.error('Question set detail API failed:', error);
+			return null;
 		}
-	}
-
-	function toggleHomeworkSelection(homework: string) {
-		const next = new Set(selectedHomeworks);
-		if (next.has(homework)) {
-			next.delete(homework);
-		} else {
-			next.add(homework);
-		}
-
-		if (next.size === 0) {
-			next.add(homework);
-		}
-
-		selectedHomeworks = next;
-		selectedHomeworkLabel = [...selectedHomeworks][0];
 	}
 
 	function handleCancel() {
@@ -236,18 +272,32 @@
 	}
 
 	function handleStart() {
-		if (questionData.status === 'pending') {
-			questionData = { ...questionData, status: 'in_progress' };
-			toast.success('Question review started.');
-		}
+		testToast(`Start is triggered | page=aitutordashboard - Review Question Set | homework=${currentReviewHomework?.homeworkId ?? 'none'}`);
+		updateCurrentHomework((homework) => {
+			if (homework.questionData.status === 'pending') {
+				toast.success('Question review started.');
+				return {
+					...homework,
+					questionData: { ...homework.questionData, status: 'in_progress' }
+				};
+			}
+			return homework;
+		});
 	}
 
 	function handleSave() {
+		testToast(`Save is triggered | page=aitutordashboard - Review Question Set | homework=${currentReviewHomework?.homeworkId ?? 'none'}`);
 		try {
-			const parsedQuestions = questionEditors.map((_, index) => parseQuestionEditor(index));
-			questionData = { ...questionData, questions: parsedQuestions };
-			buildStudentAssignments();
-			refreshDerivedStatus();
+			updateCurrentHomework((homework) => {
+				const parsedQuestions = homework.questionEditors.map((_, index) =>
+					parseQuestionEditor(homework, index)
+				);
+				return refreshDerivedStatus({
+					...homework,
+					questionData: { ...homework.questionData, questions: parsedQuestions },
+					studentAssignments: buildStudentAssignments(parsedQuestions)
+				});
+			});
 			toast.success('Question set changes saved locally.');
 		} catch (error) {
 			toast.error(error instanceof Error ? error.message : 'Failed to save question set');
@@ -255,17 +305,25 @@
 	}
 
 	function handleApproveQuestion(index: number) {
+		testToast(`Approve is triggered | page=aitutordashboard - Review Question Set | question=${index + 1} | homework=${currentReviewHomework?.homeworkId ?? 'none'}`);
 		try {
-			const parsedQuestion = parseQuestionEditor(index);
-			const nextQuestions = [...questionData.questions];
-			nextQuestions[index] = parsedQuestion;
-			questionData = { ...questionData, questions: nextQuestions, status: 'in_progress' };
-
-			const nextApproved = new Set(approvedQuestionIndexes);
-			nextApproved.add(index);
-			approvedQuestionIndexes = nextApproved;
-			buildStudentAssignments();
-			refreshDerivedStatus();
+			updateCurrentHomework((homework) => {
+				const parsedQuestion = parseQuestionEditor(homework, index);
+				const nextQuestions = [...homework.questionData.questions];
+				nextQuestions[index] = parsedQuestion;
+				const nextApproved = new Set(homework.approvedQuestionIndexes);
+				nextApproved.add(index);
+				return refreshDerivedStatus({
+					...homework,
+					questionData: {
+						...homework.questionData,
+						questions: nextQuestions,
+						status: 'in_progress'
+					},
+					approvedQuestionIndexes: nextApproved,
+					studentAssignments: buildStudentAssignments(nextQuestions)
+				});
+			});
 			toast.success(`Question ${index + 1} approved.`);
 		} catch (error) {
 			toast.error(error instanceof Error ? error.message : 'Failed to approve question');
@@ -273,27 +331,38 @@
 	}
 
 	function handleRegenerateQuestion(index: number) {
+		testToast(`Regenerate is triggered | page=aitutordashboard - Review Question Set | question=${index + 1} | homework=${currentReviewHomework?.homeworkId ?? 'none'}`);
 		try {
-			const parsedQuestion = parseQuestionEditor(index);
-			const topic = String(parsedQuestion.topic ?? 'General Practice');
-			const nextQuestion = {
-				...parsedQuestion,
-				question: `${String(parsedQuestion.question ?? '')} (Regenerated draft)`,
-				steps: [
-					'Review weak-topic evidence',
-					'Draft a cleaner question',
-					'Check final answer and hints'
-				],
-				difficulty: parsedQuestion.difficulty ?? 'medium',
-				topic
-			};
+			updateCurrentHomework((homework) => {
+				const parsedQuestion = parseQuestionEditor(homework, index);
+				const topic = String(parsedQuestion.topic ?? 'General Practice');
+				const nextQuestion = {
+					...parsedQuestion,
+					question: `${String(parsedQuestion.question ?? '')} (Regenerated draft)`,
+					steps: [
+						'Review weak-topic evidence',
+						'Draft a cleaner question',
+						'Check final answer and hints'
+					],
+					difficulty: parsedQuestion.difficulty ?? 'medium',
+					topic
+				};
 
-			const nextQuestions = [...questionData.questions];
-			nextQuestions[index] = nextQuestion;
-			questionData = { ...questionData, questions: nextQuestions, status: 'in_progress' };
-			questionEditors[index] = JSON.stringify(nextQuestion, null, 2);
-			questionEditors = [...questionEditors];
-			buildStudentAssignments();
+				const nextQuestions = [...homework.questionData.questions];
+				nextQuestions[index] = nextQuestion;
+				const nextEditors = [...homework.questionEditors];
+				nextEditors[index] = JSON.stringify(nextQuestion, null, 2);
+				return {
+					...homework,
+					questionData: {
+						...homework.questionData,
+						questions: nextQuestions,
+						status: 'in_progress'
+					},
+					questionEditors: nextEditors,
+					studentAssignments: buildStudentAssignments(nextQuestions)
+				};
+			});
 
 			toast.success(`Question ${index + 1} regenerated locally.`);
 		} catch (error) {
@@ -306,7 +375,33 @@
 		return match ? match[0] : homework;
 	}
 
+	function goToPreviousHomework() {
+		if (currentHomeworkIndex > 0) currentHomeworkIndex -= 1;
+	}
+
+	function goToNextHomework() {
+		if (currentHomeworkIndex < reviewHomeworks.length - 1) currentHomeworkIndex += 1;
+	}
+
+	function selectHomeworkByIndex(index: number) {
+		currentHomeworkIndex = index;
+	}
+
+	$: currentReviewHomework = reviewHomeworks[currentHomeworkIndex];
+	$: questionData = currentReviewHomework?.questionData ?? {
+		id: '',
+		status: 'pending',
+		generatedTime: '2026-03-23 09:00:00',
+		questions: fallbackQuestions
+	};
+	$: approvedQuestionIndexes = currentReviewHomework?.approvedQuestionIndexes ?? new Set<number>();
+	$: questionEditors =
+		currentReviewHomework?.questionEditors ?? buildQuestionEditors(fallbackQuestions);
+	$: studentAssignments =
+		currentReviewHomework?.studentAssignments ?? buildStudentAssignments(fallbackQuestions);
+
 	onMount(async () => {
+		testToast('loading aitutordashboard - Review Question Set');
 		groupId = $page.url.searchParams.get('group_id') ?? '';
 
 		try {
@@ -330,16 +425,37 @@
 			homeworkOptions = fallbackHomeworkOptions;
 		}
 
-		const queryHomeworkId =
-			$page.url.searchParams.get('homework_id') ?? homeworkOptions[0] ?? 'Homework 1';
-		selectedHomeworks = new Set([queryHomeworkId]);
-		selectedHomeworkLabel = queryHomeworkId;
-		await loadQuestionSet();
-	});
+		const requestedHomeworkId =
+			$page.url.searchParams.get('homework_id') ??
+			homeworkOptions[0] ??
+			'Homework1-MATH-Code-Section-Semester';
+		const loadedReviewHomeworks = (
+			await Promise.all(homeworkOptions.map((homeworkId) => loadReviewHomework(homeworkId)))
+		).filter(
+			(homework): homework is ReviewHomework =>
+				!!homework &&
+				(homework.questionData.status === 'ready' ||
+					homework.questionData.status === 'in_progress' ||
+					homework.questionData.status === 'approved')
+		);
 
-	$: if (selectedHomeworks.size > 0 && selectedHomeworkLabel) {
-		loadQuestionSet();
-	}
+		reviewHomeworks =
+			loadedReviewHomeworks.length > 0
+				? loadedReviewHomeworks
+				: fallbackReviewHomeworks.map((homework) =>
+						createReviewHomework(
+							homework.homeworkId,
+							homework.questions,
+							homework.generatedTime,
+							homework.status
+						)
+					);
+
+		const requestedIndex = reviewHomeworks.findIndex(
+			(homework) => homework.homeworkId === requestedHomeworkId
+		);
+		currentHomeworkIndex = requestedIndex >= 0 ? requestedIndex : 0;
+	});
 </script>
 
 <div class="flex flex-col space-y-6 py-4">
@@ -360,62 +476,49 @@
 
 		<h4 class="text-base font-semibold text-gray-800 dark:text-gray-200">What Each Item Means</h4>
 
-		<p
-			class="text-sm text-gray-600 dark:text-gray-400 leading-relaxed"
-		>
+		<p class="text-sm text-gray-600 dark:text-gray-400 leading-relaxed">
 			{JSON_EXPLANATION_PARAGRAPH}
 		</p>
-	</div>
-
-	<div>
-			<div class="space-y-2">
-				<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Select Homework for Generating Practice Questions</h2>
-				<div class="flex flex-wrap gap-x-6 gap-y-2">
-					{#each homeworkOptions as homework}
-						<label class="flex items-center gap-3 py-1">
-							<input
-								type="checkbox"
-								checked={selectedHomeworks.has(homework)}
-								on:change={() => toggleHomeworkSelection(homework)}
-								class="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-							/>
-							<span class="text-sm text-gray-900 dark:text-gray-100"
-								>{getHomeworkNumber(homework)}</span
-							>
-						</label>
-					{/each}
-				</div>
-			</div>
-
-		<div class="flex flex-wrap items-start justify-end gap-4">
-				{#if questionData.status === 'pending'}
-					<button
-						on:click={handleStart}
-						class="rounded-full bg-black px-4 py-2 text-sm font-medium text-white transition hover:bg-gray-800"
-					>
-						Start
-					</button>
-				{:else if questionData.status === 'in_progress'}
-					<div
-						class="rounded-full bg-amber-100 px-4 py-2 text-sm font-medium text-amber-700 dark:bg-amber-500/10 dark:text-amber-300"
-					>
-						In Progress
-					</div>
-				{:else}
-					<div
-						class="rounded-full bg-green-100 px-4 py-2 text-sm font-medium text-green-700 dark:bg-green-500/10 dark:text-green-300"
-					>
-						Approved
-					</div>
-				{/if}
-			</div>
 	</div>
 
 	<div class="space-y-0">
 		<div class="bg-white py-2 dark:bg-gray-900">
 			<div class="flex items-end justify-between gap-4">
-				<div>
-					<h2 class="text-xl font-semibold text-gray-900 dark:text-gray-100">Questions</h2>
+				<div class="w-full">
+					<div class="flex items-center justify-between gap-3">
+						<h2 class="text-xl font-semibold text-gray-900 dark:text-gray-100">Questions</h2>
+						<div class="flex flex-wrap items-center gap-2">
+							<button
+								type="button"
+								on:click={goToPreviousHomework}
+								disabled={currentHomeworkIndex === 0}
+								class="flex h-8 w-8 items-center justify-center rounded-full text-base font-bold text-gray-700 transition hover:border-gray-400 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-30 dark:border-gray-600 dark:text-gray-200 dark:hover:border-gray-500 dark:hover:bg-gray-800"
+							>
+								&lt;
+							</button>
+							{#each reviewHomeworks as homework, index}
+								<button
+									type="button"
+									on:click={() => selectHomeworkByIndex(index)}
+									class={`rounded-full px-3 py-1.5 text-sm transition ${
+										index === currentHomeworkIndex
+											? 'bg-black text-white'
+											: 'text-gray-600 hover:text-[#57068c] dark:text-gray-400 dark:hover:text-white'
+									}`}
+								>
+									Homework {getHomeworkNumber(homework.homeworkId)}
+								</button>
+							{/each}
+							<button
+								type="button"
+								on:click={goToNextHomework}
+								disabled={currentHomeworkIndex >= reviewHomeworks.length - 1}
+								class="flex h-8 w-8 items-center justify-center rounded-full text-base font-bold text-gray-700 transition hover:border-gray-400 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-30 dark:border-gray-600 dark:text-gray-200 dark:hover:border-gray-500 dark:hover:bg-gray-800"
+							>
+								&gt;
+							</button>
+						</div>
+					</div>
 					<div class="mt-1 text-xs text-gray-500 dark:text-gray-400">
 						Generated on {questionData.generatedTime}
 						<span class="ml-3"
@@ -429,14 +532,14 @@
 			</div>
 		</div>
 
-		<div class="space-y-6 py-2">
+		<div class="space-y-6 py-6 rounded-lg border border-gray-200">
 			{#each questionEditors as editor, index}
-				<div class="bg-white p-4 dark:bg-gray-950">
+				<div class="bg-white pr-4 pl-4 dark:bg-gray-950">
 					<div class="mb-2 flex items-center justify-between gap-3">
-						<div class="text-lg font-semibold text-gray-800 dark:text-gray-200">
+						<div class="text-base font-semibold text-gray-800 dark:text-gray-200">
 							Q{index + 1}
 						</div>
-						<div class="flex items-center gap-2">
+						<!-- <div class="flex items-center">
 							<button
 								on:click={() => handleRegenerateQuestion(index)}
 								class="rounded-full border border-gray-300 px-3 py-1.5 text-sm text-gray-700 transition hover:border-gray-400 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:border-gray-500 dark:hover:bg-gray-800"
@@ -453,7 +556,7 @@
 							>
 								{approvedQuestionIndexes.has(index) ? 'Approved!' : 'Approve'}
 							</button>
-						</div>
+						</div> -->
 					</div>
 
 					<textarea
@@ -461,34 +564,23 @@
 						rows="14"
 						class="w-full rounded-lg border border-gray-200 bg-gray-50 px-4 py-1 font-mono text-sm text-gray-800 focus:outline-none focus:ring-2 focus:ring-purple-500 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200"
 					/>
-
-					<div class="mt-4 px-1 py-1">
-						<p class="text-sm text-gray-600 dark:text-gray-300">
-							<span class="text-m text-gray-800 dark:text-gray-200">To students:</span>
-							{#each studentAssignments[index] ?? [] as assignment, assignmentIndex}
-								<span>
-									{assignment.name}{assignmentIndex < (studentAssignments[index] ?? []).length - 1 ? ', ' : ''}
-								</span>
-							{/each}
-						</p>
-					</div>
 				</div>
 			{/each}
-		</div>
-	</div>
 
-	<div class="flex items-center justify-end gap-3 pt-4">
-		<button
-			on:click={handleCancel}
-			class="px-6 py-2 text-sm font-semibold text-gray-700 transition hover:text-gray-900 dark:text-gray-300 dark:hover:text-white"
-		>
-			Cancel
-		</button>
-		<button
-			on:click={handleSave}
-			class="rounded-full bg-black px-4 py-2 text-sm font-medium text-white transition hover:bg-gray-800"
-		>
-			Save
-		</button>
+			<div class="flex items-center justify-end gap-3 pt-4 pr-4">
+				<button
+					on:click={handleCancel}
+					class="px-6 py-2 text-sm font-semibold text-gray-700 transition hover:text-gray-900 dark:text-gray-300 dark:hover:text-white"
+				>
+					Regenerate
+				</button>
+				<button
+					on:click={handleSave}
+					class="rounded-full bg-black px-4 py-2 text-sm font-medium text-white transition hover:bg-gray-800"
+				>
+					Approve
+				</button>
+			</div>
+		</div>
 	</div>
 </div>

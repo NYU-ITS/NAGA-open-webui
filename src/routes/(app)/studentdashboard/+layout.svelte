@@ -2,9 +2,10 @@
 import { onMount, getContext } from 'svelte';
 import { WEBUI_NAME, showSidebar, user, mobile } from '$lib/stores';
 import { page } from '$app/stores';
-import { goto } from '$app/navigation';
+	import { goto } from '$app/navigation';
 	import { checkIfSuperAdmin } from '$lib/apis/users';
 	import { getGroups } from '$lib/apis/groups';
+	import { showAITutorTestToast } from '$lib/utils/aiTutorTesting';
 
 	import MenuLines from '$lib/components/icons/MenuLines.svelte';
 
@@ -55,6 +56,7 @@ import { goto } from '$app/navigation';
 
 	onMount(async () => {
 		loaded = true;
+		showAITutorTestToast('loading studentdashboard - Layout');
 
 		// Load user identity information
 		if ($user && localStorage.token) {
@@ -334,33 +336,6 @@ import { goto } from '$app/navigation';
 							{/if}
 						</div>
 					</div>
-
-					<!-- Tabs -->
-					<div
-						class="flex gap-1 scrollbar-none overflow-x-auto w-fit text-center text-sm font-medium rounded-full bg-transparent py-1 px-2 touch-auto pointer-events-auto"
-					>
-						<a
-							class="min-w-fit rounded-full p-1.5 {$page.url.pathname === '/studentdashboard' ||
-							$page.url.pathname === '/studentdashboard/'
-								? 'text-[#57068c] dark:text-white'
-								: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
-							href="/studentdashboard"
-						>
-							Summary
-						</a>
-
-						<a
-							class="min-w-fit rounded-full p-1.5 {$page.url.pathname.includes(
-								'/studentdashboard/concepts'
-							)
-								? 'text-[#57068c] dark:text-white'
-								: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
-							href="/studentdashboard/concepts"
-						>
-							Concepts
-						</a>
-					</div>
-
 				</div>
 			</div>
 		</nav>

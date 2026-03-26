@@ -2,15 +2,28 @@
 	import { onMount, tick } from 'svelte';
 	import { page } from '$app/stores';
 	import { toast } from 'svelte-sonner';
-	import { AI_TUTOR_DUMMY_ERROR_TYPES, AI_TUTOR_DUMMY_MODE, TESTING_AI_TUTOR } from '$lib/constants';
-	import { aiTutorDummyErrorTypes } from '$lib/stores';
+	import { AI_TUTOR_FRONTEND_TESTING_ERROR_TYPES, AI_TUTOR_FRONTEND_TESTING_MODE, TESTING_AI_TUTOR } from '$lib/constants';
+	import { aiTutorFrontendTestingErrorTypes } from '$lib/stores';
+	import { showAITutorTestToast } from '$lib/utils/aiTutorTesting';
 	import ChevronUp from '$lib/components/icons/ChevronUp.svelte';
 	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
 
 	const AI_TUTOR_API_BASE = 'http://localhost:8000';
+	const frontendTestingHomeworkModelNames = [
+		'Homework1-MATH-Code-Section-Semester',
+		'Homework2-MATH-Code-Section-Semester',
+		'Homework3-MATH-Code-Section-Semester',
+		'Homework4-MATH-Code-Section-Semester',
+		'Homework5-MATH-Code-Section-Semester',
+		'Homework6-MATH-Code-Section-Semester',
+		'Homework7-MATH-Code-Section-Semester',
+		'Homework8-MATH-Code-Section-Semester',
+		'Homework9-MATH-Code-Section-Semester'
+	];
 
 	// ── Global flag ───────────────────────────────────────────────────────────
-	const useOldData = AI_TUTOR_DUMMY_MODE;
+	const useFrontendTestingData = AI_TUTOR_FRONTEND_TESTING_MODE;
+	const testToast = showAITutorTestToast;
 
 	// ── Types ─────────────────────────────────────────────────────────────────
 	type HomeworkStat = {
@@ -29,6 +42,8 @@
 		modelId: string | null;
 		questionUploaded: boolean;
 		answerUploaded: boolean;
+		topicMapped?: boolean;
+		answerSource?: string | null;
 		questionFileName?: string | null;
 		answerFileName?: string | null;
 	};
@@ -36,13 +51,15 @@
 	let homeworkRows: HomeworkRow[] = [];
 	let availableModels: { id: string; name: string }[] = [];
 	let convCountByModelId: Record<string, number> = {};
-let uploadingMap: Record<string, boolean> = {};
-type DraftRow = { uid: number; modelId: string };
-let draftRows: DraftRow[] = [];
-let _nextDraftUid = 0;
-let errorTypeDefs: { type: string; color: string; description: string }[] = [];
-const dashboardPalette = ['#EE352E', '#00933C', '#B933AD', '#0039A6', '#FF6319', '#996633'];
-const errorTypeColors = dashboardPalette.slice(0, 4);
+	let uploadingMap: Record<string, boolean> = {};
+	let exportingConversationMap: Record<string, boolean> = {};
+	let runningAnalysisByHomeworkId: Record<string, boolean> = {};
+	type DraftRow = { uid: number; modelId: string };
+	let draftRows: DraftRow[] = [];
+	let _nextDraftUid = 0;
+	let errorTypeDefs: { type: string; color: string; description: string }[] = [];
+	const dashboardPalette = ['#EE352E', '#00933C', '#B933AD', '#0039A6', '#FF6319', '#996633'];
+	const errorTypeColors = dashboardPalette.slice(0, 4);
 	let showEditErrorTypeModal = false;
 	let showResetDefaultsModal = false;
 	let showPromptSection = false;
@@ -69,78 +86,83 @@ const errorTypeColors = dashboardPalette.slice(0, 4);
 
 	// ── Placeholder data ──────────────────────────────────────────────────────
 	const placeholderStats: HomeworkStat[] = [
-		{ homework: 'Homework 1', status: false, answerUploaded: false, totalProblems: 15, avgAttempted: 14.2, avgSolved: 12.8, avgErrors: 1.4 },
-		{ homework: 'Homework 2', status: false, answerUploaded: false, totalProblems: 18, avgAttempted: 16.5, avgSolved: 14.9, avgErrors: 1.6 },
-		{ homework: 'Homework 3', status: false, answerUploaded: false, totalProblems: 20, avgAttempted: 18.7, avgSolved: 16.2, avgErrors: 2.5 },
-		{ homework: 'Homework 4', status: false, answerUploaded: false, totalProblems: 16, avgAttempted: 15.1, avgSolved: 13.4, avgErrors: 1.7 },
-		{ homework: 'Homework 5', status: false, answerUploaded: false, totalProblems: 22, avgAttempted: 20.3, avgSolved: 18.1, avgErrors: 2.2 },
-		{ homework: 'Homework 6', status: false, answerUploaded: false, totalProblems: 19, avgAttempted: 17.8, avgSolved: 15.6, avgErrors: 2.2 },
-		{ homework: 'Homework 7', status: false, answerUploaded: false, totalProblems: 17, avgAttempted: 16.2, avgSolved: 14.5, avgErrors: 1.7 },
-		{ homework: 'Homework 8', status: false, answerUploaded: false, totalProblems: 21, avgAttempted: 19.4, avgSolved: 17.2, avgErrors: 2.2 },
-		{ homework: 'Homework 9', status: false, answerUploaded: false, totalProblems: 23, avgAttempted: 21.1, avgSolved: 18.9, avgErrors: 2.2 }
+		{ homework: frontendTestingHomeworkModelNames[0], status: false, answerUploaded: false, totalProblems: 15, avgAttempted: 14.2, avgSolved: 12.8, avgErrors: 1.4 },
+		{ homework: frontendTestingHomeworkModelNames[1], status: false, answerUploaded: false, totalProblems: 18, avgAttempted: 16.5, avgSolved: 14.9, avgErrors: 1.6 },
+		{ homework: frontendTestingHomeworkModelNames[2], status: false, answerUploaded: false, totalProblems: 20, avgAttempted: 18.7, avgSolved: 16.2, avgErrors: 2.5 },
+		{ homework: frontendTestingHomeworkModelNames[3], status: false, answerUploaded: false, totalProblems: 16, avgAttempted: 15.1, avgSolved: 13.4, avgErrors: 1.7 },
+		{ homework: frontendTestingHomeworkModelNames[4], status: false, answerUploaded: false, totalProblems: 22, avgAttempted: 20.3, avgSolved: 18.1, avgErrors: 2.2 },
+		{ homework: frontendTestingHomeworkModelNames[5], status: false, answerUploaded: false, totalProblems: 19, avgAttempted: 17.8, avgSolved: 15.6, avgErrors: 2.2 },
+		{ homework: frontendTestingHomeworkModelNames[6], status: false, answerUploaded: false, totalProblems: 17, avgAttempted: 16.2, avgSolved: 14.5, avgErrors: 1.7 },
+		{ homework: frontendTestingHomeworkModelNames[7], status: false, answerUploaded: false, totalProblems: 21, avgAttempted: 19.4, avgSolved: 17.2, avgErrors: 2.2 },
+		{ homework: frontendTestingHomeworkModelNames[8], status: false, answerUploaded: false, totalProblems: 23, avgAttempted: 21.1, avgSolved: 18.9, avgErrors: 2.2 }
 	];
-	const dummyHomeworkRows: HomeworkRow[] = [
+	const frontendTestingHomeworkRows: HomeworkRow[] = [
 		{
-			id: 'Homework 1',
-			modelId: 'gpt-4o-mini',
+			id: frontendTestingHomeworkModelNames[0],
+			modelId: frontendTestingHomeworkModelNames[0],
 			questionUploaded: true,
 			answerUploaded: true,
+			topicMapped: true,
+			answerSource: 'uploaded',
 			questionFileName: 'homework_1_questions.pdf',
 			answerFileName: 'homework_1_answers.pdf'
 		},
 		{
-			id: 'Homework 2',
-			modelId: 'gpt-4o-mini',
+			id: frontendTestingHomeworkModelNames[1],
+			modelId: frontendTestingHomeworkModelNames[1],
 			questionUploaded: true,
 			answerUploaded: false,
+			topicMapped: true,
+			answerSource: null,
 			questionFileName: 'homework_2_questions.pdf',
 			answerFileName: null
 		},
 		{
-			id: 'Homework 3',
-			modelId: 'claude-3-5-sonnet',
+			id: frontendTestingHomeworkModelNames[2],
+			modelId: frontendTestingHomeworkModelNames[2],
 			questionUploaded: true,
 			answerUploaded: true,
+			topicMapped: true,
+			answerSource: 'uploaded',
 			questionFileName: 'homework_3_questions.pdf',
 			answerFileName: 'homework_3_answers.pdf'
 		},
 		{
-			id: 'Homework 4',
-			modelId: 'claude-3-5-sonnet',
+			id: frontendTestingHomeworkModelNames[3],
+			modelId: frontendTestingHomeworkModelNames[3],
 			questionUploaded: false,
 			answerUploaded: false,
+			topicMapped: false,
+			answerSource: null,
 			questionFileName: null,
 			answerFileName: null
 		}
 	];
-	const dummyModels = [
-		{ id: 'gpt-4o-mini', name: 'GPT-4o mini' },
-		{ id: 'claude-3-5-sonnet', name: 'Claude 3.5 Sonnet' },
-		{ id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash' }
-	];
-	const dummyConversationCounts: Record<string, number> = {
-		'gpt-4o-mini': 42,
-		'claude-3-5-sonnet': 27,
-		'gemini-2.0-flash': 11
+	const frontendTestingModels = frontendTestingHomeworkModelNames.map((name) => ({ id: name, name }));
+	const frontendTestingConversationCounts: Record<string, number> = {
+		[frontendTestingHomeworkModelNames[0]]: 42,
+		[frontendTestingHomeworkModelNames[1]]: 27,
+		[frontendTestingHomeworkModelNames[2]]: 11,
+		[frontendTestingHomeworkModelNames[3]]: 18
 	};
-	const dummyGeneralPrompts = [
+	const frontendTestingGeneralPrompts = [
 		{ id: 'gp-1', name: 'pdf_to_markdown', prompt: 'Convert the uploaded PDF into clean markdown while preserving numbering and math.', is_active: true },
 		{ id: 'gp-2', name: 'topic_mapping', prompt: 'Map each question to one or more course topics in JSON.', is_active: true },
 		{ id: 'gp-3', name: 'generate_answers', prompt: 'Generate a complete answer key in markdown.', is_active: true },
 		{ id: 'gp-4', name: 'evaluate_question', prompt: 'Evaluate whether the student attempted and solved the question.', is_active: true },
 		{ id: 'gp-5', name: 'generate_practice_problems', prompt: 'Create new practice problems based on weak topics.', is_active: true }
 	];
-	const dummyTutorPrompts = [
-		{ id: 'tp-1', name: 'evaluate_question', group_id: 'dummy-group', prompt: 'Evaluate with a focus on partial credit and process.', is_active: true }
+	const frontendTestingTutorPrompts = [
+		{ id: 'tp-1', name: 'evaluate_question', group_id: 'frontend-testing-group', prompt: 'Evaluate with a focus on partial credit and process.', is_active: true }
 	];
-const dummyAnalysisHistory: AnalysisRecord[] = [
+const frontendTestingAnalysisHistory: AnalysisRecord[] = [
 	{ contents: '1,2,3,4,5', startedAt: '10:12:04 AM', completedAt: '10:14:11 AM', failed: false },
 	{ contents: '1,2,3,5', startedAt: '2:05:55 PM', completedAt: null, failed: true }
 ];
 const bannerPlaceholderTime = 'TEST-TIME';
 
 	// ── State ─────────────────────────────────────────────────────────────────
-	let homeworkStats: HomeworkStat[] = useOldData ? placeholderStats : [];
+	let homeworkStats: HomeworkStat[] = useFrontendTestingData ? placeholderStats : [];
 	let selectedGroupId = '';
 
 	// Table sort
@@ -186,21 +208,20 @@ const bannerPlaceholderTime = 'TEST-TIME';
 	}
 
 	function seedDummyDashboard(groupId: string) {
-		availableModels = dummyModels;
-		homeworkRows = dummyHomeworkRows;
-		convCountByModelId = dummyConversationCounts;
-		errorTypeDefs = $aiTutorDummyErrorTypes;
-		generalPrompts = dummyGeneralPrompts;
-		tutorPrompts = dummyTutorPrompts.map((p) => ({ ...p, group_id: groupId || 'dummy-group' }));
+		availableModels = frontendTestingModels;
+		homeworkRows = frontendTestingHomeworkRows;
+		convCountByModelId = frontendTestingConversationCounts;
+		errorTypeDefs = $aiTutorFrontendTestingErrorTypes;
+		generalPrompts = frontendTestingGeneralPrompts;
+		tutorPrompts = frontendTestingTutorPrompts.map((p) => ({ ...p, group_id: groupId || 'frontend-testing-group' }));
 		homeworkStats = placeholderStats.map((stat, i) => ({
 			...stat,
-			homework: `Homework ${i + 1}`,
 			status: i < 4,
 			answerUploaded: i === 0 || i === 2
 		}));
 		selectedRunHomeworks = new Set(homeworkStats.map((stat) => stat.homework));
 		syncRunSelectionFlags();
-		analysisHistory = dummyAnalysisHistory;
+		analysisHistory = frontendTestingAnalysisHistory;
 		if (!selectedHwForRun && homeworkStats.length > 0) {
 			selectedHwForRun = homeworkStats[0].homework;
 		}
@@ -247,9 +268,10 @@ const bannerPlaceholderTime = 'TEST-TIME';
 
 	// ── Data fetching ─────────────────────────────────────────────────────────
 	onMount(async () => {
+		testToast(`loading aitutordashboard - Summary | group=${selectedGroupId || 'none'} | frontend_testing=${String(useFrontendTestingData)}`);
 		await loadModels();
 		await loadErrorTypes(selectedGroupId);
-		if (useOldData) {
+		if (useFrontendTestingData) {
 			seedDummyDashboard(selectedGroupId);
 			await tick();
 			updateScrollState();
@@ -257,24 +279,25 @@ const bannerPlaceholderTime = 'TEST-TIME';
 		}
 	});
 
-	$: if (!useOldData) {
+	$: if (!useFrontendTestingData) {
 		void loadHomeworkStats(selectedGroupId);
 	}
 
-	$: if (!useOldData) {
+	$: if (!useFrontendTestingData) {
 		void loadConversationCounts(selectedGroupId);
 	}
 
-	$: if (!useOldData) {
+	$: if (!useFrontendTestingData) {
 		void loadErrorTypes(selectedGroupId);
 	}
 
-	$: if (!useOldData) {
+	$: if (!useFrontendTestingData) {
 		void loadPrompts(selectedGroupId);
 	}
 
 async function loadHomeworkStats(groupId: string) {
-		if (useOldData) {
+		testToast(`Summary fetch: homework stats group=${groupId || 'none'}`);
+		if (useFrontendTestingData) {
 			seedDummyDashboard(groupId);
 			await tick();
 			updateScrollState();
@@ -288,6 +311,8 @@ async function loadHomeworkStats(groupId: string) {
 		}
 
 		const uploadStatusMap = new Map<string, { status: boolean; answerUploaded: boolean }>();
+		const topicMappedByHomeworkId = new Map<string, boolean>();
+		const modelIdByHomeworkId = new Map<string, string | null>();
 		try {
 			const hwResponse = await fetch(
 				`${AI_TUTOR_API_BASE}/homework/?group_id=${encodeURIComponent(groupId)}`,
@@ -304,25 +329,30 @@ async function loadHomeworkStats(groupId: string) {
 					modelId: hw.model_id ?? null,
 					questionUploaded: hw.question_uploaded ?? false,
 					answerUploaded: hw.answer_uploaded ?? false,
+					topicMapped: hw.topic_mapped ?? false,
+					answerSource: hw.answer_source ?? null,
 					questionFileName: hw.question_filename ?? null,
 					answerFileName: hw.answer_filename ?? null
 				}));
 				for (const hw of hwData) {
+					topicMappedByHomeworkId.set(hw.id, hw.topic_mapped ?? false);
+					modelIdByHomeworkId.set(hw.id, hw.model_id ?? null);
 					uploadStatusMap.set(hw.id, {
 						status: hw.question_uploaded ?? false,
 						answerUploaded: hw.answer_uploaded ?? false
 					});
 				}
 			}
-			if (TESTING_AI_TUTOR) toast.success('[SUCCESS][GET]: Homework list loaded from /homework/.');
+			testToast('Summary loaded /homework data');
 		} catch (error) {
-			if (TESTING_AI_TUTOR) toast.warning('[FAIL][GET]: Homework list fetch failed.');
+			testToast('Summary failed loading /homework data');
 			console.error('Homework fetch failed:', error);
 		}
 
 		const statsMap = new Map<string, {
 			totalProblems: number; attemptedSum: number; solvedSum: number; errorSum: number; count: number;
 		}>();
+		const hasAnalysisByHomeworkId = new Set<string>();
 
 		for (const homeworkId of uploadStatusMap.keys()) {
 			try {
@@ -336,6 +366,9 @@ async function loadHomeworkStats(groupId: string) {
 				if (!analysisResponse.ok) throw new Error(`Analysis fetch failed for ${homeworkId}`);
 				const analysisData = await analysisResponse.json();
 				if (Array.isArray(analysisData)) {
+					if (analysisData.length > 0) {
+						hasAnalysisByHomeworkId.add(homeworkId);
+					}
 					for (const row of analysisData) {
 						const id = row?.homework_id ?? homeworkId;
 						const prev = statsMap.get(id) ?? { totalProblems: 0, attemptedSum: 0, solvedSum: 0, errorSum: 0, count: 0 };
@@ -352,9 +385,7 @@ async function loadHomeworkStats(groupId: string) {
 			}
 		}
 
-		if (TESTING_AI_TUTOR && uploadStatusMap.size > 0) {
-			toast.success('[SUCCESS][GET]: Analysis loaded from /analysis/.');
-		}
+		if (uploadStatusMap.size > 0) testToast('Summary loaded /analysis data');
 
 		const allIds = new Set([...uploadStatusMap.keys(), ...statsMap.keys()]);
 		const merged: HomeworkStat[] = Array.from(allIds).map((id) => {
@@ -362,7 +393,7 @@ async function loadHomeworkStats(groupId: string) {
 			const stats = statsMap.get(id);
 			return {
 				homework: id,
-				status: upload?.status ?? false,
+				status: hasAnalysisByHomeworkId.has(id),
 				answerUploaded: upload?.answerUploaded ?? false,
 				totalProblems: stats ? stats.totalProblems : null,
 				avgAttempted: stats ? Number((stats.attemptedSum / Math.max(stats.count, 1)).toFixed(1)) : null,
@@ -372,6 +403,11 @@ async function loadHomeworkStats(groupId: string) {
 		});
 		merged.sort((a, b) => a.homework.localeCompare(b.homework));
 		homeworkStats = merged;
+		homeworkRows = homeworkRows.map((row) => ({
+			...row,
+			modelId: modelIdByHomeworkId.get(row.id) ?? row.modelId,
+			topicMapped: topicMappedByHomeworkId.get(row.id) ?? row.topicMapped ?? false
+		}));
 		if (homeworkStats.length > 0 && selectedRunHomeworks.size === 0) {
 			selectedRunHomeworks = new Set(homeworkStats.map((stat) => stat.homework));
 			syncRunSelectionFlags();
@@ -383,8 +419,9 @@ async function loadHomeworkStats(groupId: string) {
 
 // ── Upload helpers ───────────────────────────────────────────────────
 async function loadModels() {
-	if (useOldData) {
-		availableModels = dummyModels;
+	testToast('Summary fetch: models');
+	if (useFrontendTestingData) {
+		availableModels = frontendTestingModels;
 		return;
 	}
 	try {
@@ -404,8 +441,9 @@ async function loadModels() {
 }
 
 async function loadConversationCounts(groupId: string) {
-	if (useOldData) {
-		convCountByModelId = groupId ? dummyConversationCounts : {};
+	testToast(`Summary fetch: conversations group=${groupId || 'none'}`);
+	if (useFrontendTestingData) {
+		convCountByModelId = groupId ? frontendTestingConversationCounts : {};
 		return;
 	}
 	if (!groupId) { convCountByModelId = {}; return; }
@@ -435,8 +473,9 @@ async function loadConversationCounts(groupId: string) {
 }
 
 async function loadErrorTypes(groupId: string) {
-	if (useOldData) {
-		errorTypeDefs = $aiTutorDummyErrorTypes;
+	testToast(`Summary fetch: error types group=${groupId || 'none'}`);
+	if (useFrontendTestingData) {
+		errorTypeDefs = $aiTutorFrontendTestingErrorTypes;
 		return;
 	}
 	if (!groupId) {
@@ -467,9 +506,10 @@ async function loadErrorTypes(groupId: string) {
 }
 
 async function loadPrompts(groupId: string) {
-	if (useOldData) {
-		generalPrompts = dummyGeneralPrompts;
-		tutorPrompts = groupId ? dummyTutorPrompts.map((p) => ({ ...p, group_id: groupId })) : [];
+	testToast(`Summary fetch: prompts group=${groupId || 'none'}`);
+	if (useFrontendTestingData) {
+		generalPrompts = frontendTestingGeneralPrompts;
+		tutorPrompts = groupId ? frontendTestingTutorPrompts.map((p) => ({ ...p, group_id: groupId })) : [];
 		return;
 	}
 	try {
@@ -520,7 +560,102 @@ function getPromptSummary(name: string) {
 	};
 }
 
+function sleep(ms: number) {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function parseErrorDetail(response: Response) {
+	try {
+		const data = await response.json();
+		if (typeof data?.detail === 'string') return data.detail;
+		if (typeof data?.message === 'string') return data.message;
+	} catch {}
+	return `Request failed: ${response.status}`;
+}
+
+async function pollPipelineJob(jobId: string, intervalMs: number, label: string) {
+	while (true) {
+		const res = await fetch(`${AI_TUTOR_API_BASE}/pipeline/status/${encodeURIComponent(jobId)}`, {
+			headers: { Authorization: `Bearer ${localStorage.token}` }
+		});
+		if (!res.ok) throw new Error(await parseErrorDetail(res));
+		const data = await res.json();
+		testToast(`${label} check | job=${jobId} | status=${data?.status ?? 'unknown'} | step=${data?.step ?? 'unknown'}`);
+		if (data?.status === 'done') return data;
+		if (data?.status === 'failed') throw new Error(data?.error || `${label} failed.`);
+		await sleep(intervalMs);
+	}
+}
+
+async function ensureConversationsExported(homeworkId: string, modelId: string | null) {
+	if (useFrontendTestingData) return true;
+	if (!modelId) {
+		toast.error('This homework is missing a model ID.');
+		return false;
+	}
+
+	exportingConversationMap = { ...exportingConversationMap, [homeworkId]: true };
+	testToast(`Export conversations is triggered | page=aitutordashboard - Summary | homework=${homeworkId}`);
+	try {
+		const existingRes = await fetch(
+			`${AI_TUTOR_API_BASE}/conversation/?homework_id=${encodeURIComponent(homeworkId)}`,
+			{ headers: { Authorization: `Bearer ${localStorage.token}` } }
+		);
+		if (!existingRes.ok) throw new Error(await parseErrorDetail(existingRes));
+		const existing = await existingRes.json();
+		if (Array.isArray(existing) && existing.length > 0) {
+			testToast(`Conversation export check | homework=${homeworkId} | exported=${existing.length}`);
+			return true;
+		}
+
+		const exportRes = await fetch(
+			`${AI_TUTOR_API_BASE}/conversation/export?homework_id=${encodeURIComponent(homeworkId)}`,
+			{
+				method: 'POST',
+				headers: { Authorization: `Bearer ${localStorage.token}` }
+			}
+		);
+		if (!exportRes.ok) throw new Error(await parseErrorDetail(exportRes));
+		const exportData = await exportRes.json();
+		const exportedStudents = Number(exportData?.total_students ?? 0);
+		testToast(`Conversation export result | homework=${homeworkId} | students=${exportedStudents}`);
+		if (exportedStudents <= 0) {
+			toast.error('No student conversations were exported for this homework.');
+			return false;
+		}
+		toast.success(`Conversation history exported for ${exportedStudents} student${exportedStudents === 1 ? '' : 's'}.`);
+		return true;
+	} catch (error) {
+		toast.error(error instanceof Error ? error.message : 'Conversation export failed.');
+		return false;
+	} finally {
+		exportingConversationMap = { ...exportingConversationMap, [homeworkId]: false };
+	}
+}
+
+async function validateRunPrerequisites(homeworkId: string) {
+	const row = homeworkRows.find((item) => item.id === homeworkId);
+	if (!row) {
+		toast.error('Select a homework before running analysis.');
+		return false;
+	}
+	if (!selectedGroupId) {
+		toast.error('Select a group before running analysis.');
+		return false;
+	}
+	if (!row.questionUploaded) {
+		toast.error('Run requires a homework PDF upload first.');
+		return false;
+	}
+	if (!row.topicMapped) {
+		toast.error('Topic mapping is still missing. Please wait for homework processing to finish.');
+		return false;
+	}
+	return await ensureConversationsExported(row.id, row.modelId);
+}
+
 function openPromptModal(def: { name: string; label: string; usedFor: string }) {
+	testToast(`Edit prompt is triggered | page=aitutordashboard - Summary | prompt=${def.name}`);
 	const summary = getPromptSummary(def.name);
 	selectedPromptName = def.name;
 	selectedPromptLabel = def.label;
@@ -533,7 +668,7 @@ function openPromptModal(def: { name: string; label: string; usedFor: string }) 
 
 async function savePromptOverride() {
 	if (!selectedGroupId || !selectedPromptName) return;
-	if (useOldData) {
+	if (useFrontendTestingData) {
 		if (selectedPromptTutorId) {
 			tutorPrompts = tutorPrompts.map((prompt) =>
 				prompt.id === selectedPromptTutorId ? { ...prompt, prompt: selectedPromptText, is_active: true } : prompt
@@ -580,15 +715,15 @@ async function savePromptOverride() {
 		}
 		await loadPrompts(selectedGroupId);
 		showPromptModal = false;
-		if (TESTING_AI_TUTOR) toast.success('[SUCCESS][PUT]: Prompt override saved.');
+		testToast('Summary saved prompt override');
 	} catch (e) {
-		if (TESTING_AI_TUTOR) toast.warning('[FAIL][PUT]: Prompt override save failed.');
+		testToast('Summary failed saving prompt override');
 		console.error('Prompt override save failed:', e);
 	}
 }
 
 async function useDefaultPrompt() {
-	if (useOldData) {
+	if (useFrontendTestingData) {
 		if (selectedPromptTutorId) {
 			tutorPrompts = tutorPrompts.map((prompt) =>
 				prompt.id === selectedPromptTutorId ? { ...prompt, is_active: false } : prompt
@@ -613,18 +748,18 @@ async function useDefaultPrompt() {
 		});
 		await loadPrompts(selectedGroupId);
 		showPromptModal = false;
-		if (TESTING_AI_TUTOR) toast.success('[SUCCESS][PUT]: Prompt reset to default.');
+		testToast('Summary reset prompt to default');
 	} catch (e) {
-		if (TESTING_AI_TUTOR) toast.warning('[FAIL][PUT]: Prompt reset failed.');
+		testToast('Summary failed resetting prompt to default');
 		console.error('Prompt reset failed:', e);
 	}
 }
 
 async function persistErrorTypes() {
 	if (!selectedGroupId) return;
-	if (useOldData) {
-		toast.success('TestData error types saved.');
-		aiTutorDummyErrorTypes.set(errorTypeDefs);
+	if (useFrontendTestingData) {
+		toast.success('Frontend testing error types saved.');
+		aiTutorFrontendTestingErrorTypes.set(errorTypeDefs);
 		return;
 	}
 	try {
@@ -639,19 +774,19 @@ async function persistErrorTypes() {
 				body: JSON.stringify(errorTypeDefs.map((d) => ({ name: d.type, description: d.description })))
 			}
 		);
-		if (TESTING_AI_TUTOR && res.ok) toast.success('[SUCCESS][PUT]: Error types saved.');
+		if (res.ok) testToast('Summary saved error types');
 	} catch (e) {
-		if (TESTING_AI_TUTOR) toast.warning('[FAIL][PUT]: Error types save failed.');
+		testToast('Summary failed saving error types');
 		console.error('Failed to persist error types:', e);
 	}
 }
 
 async function resetErrorTypesToDefault() {
 	if (!selectedGroupId) return;
-	if (useOldData) {
-		errorTypeDefs = AI_TUTOR_DUMMY_ERROR_TYPES;
-		aiTutorDummyErrorTypes.set(AI_TUTOR_DUMMY_ERROR_TYPES);
-		toast.success('TestData error types reset to defaults.');
+	if (useFrontendTestingData) {
+		errorTypeDefs = AI_TUTOR_FRONTEND_TESTING_ERROR_TYPES;
+		aiTutorFrontendTestingErrorTypes.set(AI_TUTOR_FRONTEND_TESTING_ERROR_TYPES);
+		toast.success('Frontend testing error types reset to defaults.');
 		return;
 	}
 	try {
@@ -660,9 +795,9 @@ async function resetErrorTypesToDefault() {
 			{ method: 'DELETE', headers: { Authorization: `Bearer ${localStorage.token}` } }
 		);
 		await loadErrorTypes(selectedGroupId);
-		if (TESTING_AI_TUTOR) toast.success('[SUCCESS][DELETE]: Error types reset to defaults.');
+		testToast('Summary reset error types to default');
 	} catch (e) {
-		if (TESTING_AI_TUTOR) toast.warning('[FAIL][DELETE]: Error types delete failed.');
+		testToast('Summary failed resetting error types');
 		console.error('Failed to reset error types:', e);
 	}
 }
@@ -718,9 +853,18 @@ async function confirmResetDefaults() {
 }
 
 async function uploadPdf(hwId: string | null, docType: 'question' | 'answer', modelId: string, file: File, draftUid?: number) {
+	testToast(`Upload ${docType} PDF is triggered | page=aitutordashboard - Summary | model=${modelId} | target=${hwId ?? `draft-${draftUid ?? 0}`}`);
+	if (!selectedGroupId && !useFrontendTestingData) {
+		toast.error('Select a group before uploading PDFs.');
+		return;
+	}
+	if (file.type !== 'application/pdf') {
+		toast.error('Please upload a PDF file.');
+		return;
+	}
 	const key = hwId ? `${hwId}-${docType}` : `draft-${draftUid ?? 0}-${docType}`;
 	uploadingMap = { ...uploadingMap, [key]: true };
-	if (useOldData) {
+	if (useFrontendTestingData) {
 		await new Promise((resolve) => setTimeout(resolve, 400));
 		if (hwId) {
 			homeworkRows = homeworkRows.map((row) =>
@@ -746,7 +890,7 @@ async function uploadPdf(hwId: string | null, docType: 'question' | 'answer', mo
 		} else if (draftUid !== undefined) {
 			const draft = draftRows.find((d) => d.uid === draftUid);
 			if (draft?.modelId) {
-				const newHomeworkId = `Homework ${homeworkRows.length + 1}`;
+				const newHomeworkId = `Homework${homeworkRows.length + 1}-MATH-Code-Section-Semester`;
 				homeworkRows = [
 					...homeworkRows,
 						{
@@ -754,6 +898,8 @@ async function uploadPdf(hwId: string | null, docType: 'question' | 'answer', mo
 							modelId: draft.modelId,
 							questionUploaded: docType === 'question',
 							answerUploaded: docType === 'answer',
+							topicMapped: docType === 'question',
+							answerSource: docType === 'answer' ? 'uploaded' : null,
 							questionFileName: docType === 'question' ? file.name : null,
 							answerFileName: docType === 'answer' ? file.name : null
 						}
@@ -792,12 +938,17 @@ async function uploadPdf(hwId: string | null, docType: 'question' | 'answer', mo
 			headers: { Authorization: `Bearer ${localStorage.token}` },
 			body: formData
 		});
-		if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
-		toast.success(`${docType === 'question' ? 'Homework' : 'Answer'} PDF uploaded successfully.`);
+		if (!res.ok) throw new Error(await parseErrorDetail(res));
+		const data = await res.json();
+		const jobId = data?.job_id;
+		if (!jobId) throw new Error('Upload started but no job ID was returned.');
+		toast.success(`${docType === 'question' ? 'Homework' : 'Answer'} upload started.`);
+		await pollPipelineJob(jobId, 3000, `${docType} upload`);
+		toast.success(`${docType === 'question' ? 'Homework' : 'Answer'} upload completed.`);
 		if (hwId === null && draftUid !== undefined) draftRows = draftRows.filter(d => d.uid !== draftUid);
 		await loadHomeworkStats(selectedGroupId);
 	} catch (e) {
-		toast.error('Upload failed.');
+		toast.error(e instanceof Error ? e.message : 'Upload failed.');
 		console.error('PDF upload failed:', e);
 	} finally {
 		uploadingMap = { ...uploadingMap, [key]: false };
@@ -827,12 +978,19 @@ let runningAnalysis = false;
 let runStep = '';
 type AnalysisRecord = { contents: string; startedAt: string; completedAt: string | null; failed: boolean };
 let analysisHistory: AnalysisRecord[] = [];
+const homeworkModelNameCellClass =
+	'max-w-[12rem] overflow-hidden whitespace-normal break-words leading-4 [display:-webkit-box] [-webkit-line-clamp:3] [-webkit-box-orient:vertical]';
 
 $: latestCompletedRun = analysisHistory.find((record) => !!record.completedAt && !record.failed) ?? null;
 $: lastRunStatusClass = latestCompletedRun ? 'bg-green-500' : 'bg-yellow-500';
 
 function getHomeworkNumberLabel(homework: string) {
-	return homework.replace('Homework ', '');
+	return homework.match(/^Homework(\d+)/)?.[1] ?? homework;
+}
+
+function getHomeworkModelName(homework: string) {
+	// homework name is now homework model name
+	return homework;
 }
 
 function getUpdatedHomeworkIds() {
@@ -905,9 +1063,18 @@ function getRunHomeworkSummary() {
 $: runHomeworkSummary = getRunHomeworkSummary();
 
 async function runAnalysis() {
+	testToast(`Run analysis is triggered | page=aitutordashboard - Summary | selected=${getRunHomeworkSummary()}`);
 	const contents = getRunHomeworkSummary();
 	if (!contents || contents === 'No homework') return;
+	const targetHomeworkId = selectedHwForRun || Array.from(selectedRunHomeworks)[0] || '';
+	if (!targetHomeworkId) {
+		toast.error('Select a homework before running analysis.');
+		return;
+	}
+	const ready = await validateRunPrerequisites(targetHomeworkId);
+	if (!ready) return;
 	runningAnalysis = true;
+	runningAnalysisByHomeworkId = { ...runningAnalysisByHomeworkId, [targetHomeworkId]: true };
 	const startedAt = new Date().toLocaleTimeString();
 	const steps = ['Started', 'Collecting conversation history', 'PDF converting', 'Analysing'];
 	let stepIdx = 0;
@@ -916,7 +1083,7 @@ async function runAnalysis() {
 		stepIdx = (stepIdx + 1) % steps.length;
 		runStep = steps[stepIdx];
 	}, 1800);
-	if (useOldData) {
+	if (useFrontendTestingData) {
 		await new Promise((resolve) => setTimeout(resolve, 900));
 		clearInterval(stepTimer);
 		runStep = '';
@@ -935,31 +1102,40 @@ async function runAnalysis() {
 	}
 	try {
 		const res = await fetch(
-			`${AI_TUTOR_API_BASE}/analysis/run?homework_id=${encodeURIComponent(selectedHwForRun || Array.from(selectedRunHomeworks)[0] || '')}`,
+			`${AI_TUTOR_API_BASE}/analysis/run?homework_id=${encodeURIComponent(targetHomeworkId)}`,
 			{ method: 'POST', headers: { Authorization: `Bearer ${localStorage.token}` } }
 		);
 		if (res.ok) {
-			if (TESTING_AI_TUTOR) toast.success('[SUCCESS][POST]: Analysis run triggered.');
-			else toast.success('Analysis started successfully.');
+			const data = await res.json();
+			const jobId = data?.job_id;
+			if (!jobId) throw new Error('Analysis started but no job ID was returned.');
+			testToast('Summary run analysis request submitted');
+			toast.success('Analysis started successfully.');
+			await pollPipelineJob(jobId, 10000, 'analysis run');
+			toast.success('Analysis completed.');
 			analysisHistory = [{ contents, startedAt, completedAt: new Date().toLocaleTimeString(), failed: false }, ...analysisHistory];
+			await loadHomeworkStats(selectedGroupId);
 		} else {
-			toast.error(`Analysis failed: ${res.status}`);
+			toast.error(await parseErrorDetail(res));
 			analysisHistory = [{ contents, startedAt, completedAt: null, failed: true }, ...analysisHistory];
 		}
 	} catch (e) {
-		toast.error('Analysis request failed.');
+		toast.error(e instanceof Error ? e.message : 'Analysis request failed.');
 		console.error('Run analysis failed:', e);
 		analysisHistory = [{ contents, startedAt, completedAt: null, failed: true }, ...analysisHistory];
 	} finally {
 		clearInterval(stepTimer);
 		runStep = '';
 		runningAnalysis = false;
+		runningAnalysisByHomeworkId = { ...runningAnalysisByHomeworkId, [targetHomeworkId]: false };
 	}
 }
 </script>
 
 <div class="flex flex-col space-y-6 py-4">
-	<div class="rounded-lg bg-gray-100 px-3 py-2 text-xs text-gray-800 dark:bg-gray-800/80 dark:text-gray-300">
+
+	<!-- Status Section NOT IN USE -->
+	<!-- <div class="rounded-lg bg-gray-100 px-3 py-2 text-xs text-gray-800 dark:bg-gray-800/80 dark:text-gray-300">
 		<div class="flex flex-wrap items-center gap-x-6 gap-y-2">
 			<div>Students&apos; conversation history are on {bannerPlaceholderTime}</div>
 			<div>Configuration updated on {bannerPlaceholderTime}</div>
@@ -968,7 +1144,7 @@ async function runAnalysis() {
 				<span class="h-2 w-2 rounded-full {lastRunStatusClass}"></span>
 			</div>
 		</div>
-	</div>
+	</div> -->
 
 	<!-- Charts Summary Section -->
 	<div class="space-y-3">
@@ -1099,7 +1275,7 @@ async function runAnalysis() {
 							{ key: 'avgSolved',      label: 'Avg Solved' },
 							{ key: 'avgErrors',      label: 'Avg Errors' }
 						] as col}
-							<th scope="col" class="px-3 py-1.5 cursor-pointer select-none" on:click={() => setSortKey(col.key)}>
+							<th scope="col" class="px-3 py-1.5 cursor-pointer select-none {col.key === 'homework' ? 'w-[12rem]' : ''}" on:click={() => setSortKey(col.key)}>
 								<div class="flex gap-1.5 items-center">
 									{col.label}
 									{#if sortKey === col.key}
@@ -1125,7 +1301,7 @@ async function runAnalysis() {
 						{#each sortedStats as stat}
 							<tr class="bg-white dark:bg-gray-900 dark:border-gray-850 text-xs border-t border-gray-100 dark:border-gray-850">
 								<td class="px-3 py-1 font-medium text-gray-900 dark:text-white">
-									{stat.homework}
+									<div class={homeworkModelNameCellClass}>{getHomeworkModelName(stat.homework)}</div>
 								</td>
 								<td class="px-3 py-1">
 									{#if stat.status}
