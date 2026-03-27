@@ -47,7 +47,8 @@
 		if (parseInt(localStorage?.chatControlsSize)) {
 			pane.resize(parseInt(localStorage?.chatControlsSize));
 		} else {
-			pane.resize(minSize);
+			const defaultSize = $showFacilitiesOverlay ? 45 : minSize;
+			pane.resize(Math.max(minSize, defaultSize));
 		}
 	};
 
@@ -267,11 +268,11 @@
 			class="pt-8"
 		>
 			{#if $showControls}
-				<div class="pr-4 pb-8 flex max-h-full min-h-full">
+				<div class="pr-4 pb-8 flex max-h-full min-h-full h-full">
 					<div
 						class="w-full {($showOverview || $showArtifacts || $showFacilitiesOverlay) && !$showCallOverlay
-							? ' '
-							: 'px-4 py-4 bg-white dark:shadow-lg dark:bg-gray-850  border border-gray-100 dark:border-gray-850'}  rounded-xl z-40 pointer-events-auto overflow-y-auto scrollbar-hidden"
+							? 'h-full min-h-0 flex flex-col overflow-hidden '
+							: 'px-4 py-4 bg-white dark:shadow-lg dark:bg-gray-850  border border-gray-100 dark:border-gray-850'}  rounded-xl z-40 pointer-events-auto scrollbar-hidden {$showFacilitiesOverlay || $showOverview || $showArtifacts ? '' : 'overflow-y-auto'}"
 					>
 						{#if $showCallOverlay && $activeCallMode !== 'transcript_at_end'}
 							<div class="w-full h-full flex justify-center">
@@ -291,7 +292,7 @@
 							<!-- CallOverlay rendered in fixed overlay above; show empty placeholder here -->
 							<div class="w-full h-full"></div>
 						{:else if $showFacilitiesOverlay}
-							<div class="w-full h-full flex justify-center">
+							<div class="w-full flex-1 min-h-0 flex flex-col">
 								<FacilitiesOverlay
 									{submitPrompt}
 									{modelId}
