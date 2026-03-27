@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { config, models, settings, showCallOverlay, TTSWorker } from '$lib/stores';
+	import { config, models, settings, showCallOverlay, activeCallMode, TTSWorker } from '$lib/stores';
 	import { onMount, tick, getContext, onDestroy, createEventDispatcher } from 'svelte';
 
 	const dispatch = createEventDispatcher();
@@ -16,6 +16,15 @@
 
 	const i18n = getContext('i18n');
 
+	function getFaviconSrc(profileImageUrl?: string) {
+	// Default/provider models use favicon marker; show grey flower for those.
+		if (profileImageUrl && profileImageUrl !== '/static/favicon.png') {
+			return profileImageUrl;
+		}
+
+	return '/flower-grey.png';
+	}
+
 	export let eventTarget: EventTarget;
 	export let submitPrompt: Function;
 	export let stopResponse: Function;
@@ -31,6 +40,7 @@
 	let confirmed = false;
 	let interrupted = false;
 	let assistantSpeaking = false;
+	let showTranscriptTransition = false;
 
 	let emoji = null;
 	let camera = false;
@@ -685,6 +695,24 @@
 </script>
 
 {#if $showCallOverlay}
+	{#if showTranscriptTransition}
+		<div class="w-full h-full max-h-[100dvh] flex flex-col items-center justify-center gap-4">
+			<svg
+				class="size-8 text-gray-400 dark:text-gray-500 animate-spin"
+				xmlns="http://www.w3.org/2000/svg"
+				fill="none"
+				viewBox="0 0 24 24"
+			>
+				<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+				<path
+					class="opacity-75"
+					fill="currentColor"
+					d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+				></path>
+			</svg>
+			<p class="text-sm text-gray-500 dark:text-gray-400">{$i18n.t('Generating transcript...')}</p>
+		</div>
+	{:else}
 	<div class="max-w-lg w-full h-full max-h-[100dvh] flex flex-col justify-between p-3 md:p-6">
 		{#if camera}
 			<button
@@ -711,7 +739,7 @@
 					</div>
 				{:else if loading || assistantSpeaking}
 					<svg
-						class="size-12 text-gray-900 dark:text-gray-400"
+						class="size-12 text-[#57068c]"
 						viewBox="0 0 24 24"
 						fill="currentColor"
 						xmlns="http://www.w3.org/2000/svg"
@@ -754,14 +782,8 @@
 								? ' size-16'
 								: rmsLevel * 100 > 1
 									? 'size-14'
-									: 'size-12'}  transition-all rounded-full {(model?.info?.meta
-							?.profile_image_url ?? '/static/favicon.png') !== '/static/favicon.png'
-							? ' bg-cover bg-center bg-no-repeat'
-							: 'bg-black dark:bg-white'}  bg-black dark:bg-white"
-						style={(model?.info?.meta?.profile_image_url ?? '/static/favicon.png') !==
-						'/static/favicon.png'
-							? `background-image: url('${model?.info?.meta?.profile_image_url}');`
-							: ''}
+									: 'size-12'}  transition-all rounded-full bg-cover bg-center bg-no-repeat bg-transparent"
+						style={`background-image: url('${getFaviconSrc(model?.info?.meta?.profile_image_url)}');`}
 					/>
 				{/if}
 				<!-- navbar -->
@@ -793,7 +815,7 @@
 						</div>
 					{:else if loading || assistantSpeaking}
 						<svg
-							class="size-44 text-gray-900 dark:text-gray-400"
+							class="size-44 text-[#57068c]"
 							viewBox="0 0 24 24"
 							fill="currentColor"
 							xmlns="http://www.w3.org/2000/svg"
@@ -836,14 +858,8 @@
 									? 'size-48'
 									: rmsLevel * 100 > 1
 										? 'size-44'
-										: 'size-40'}  transition-all rounded-full {(model?.info?.meta
-								?.profile_image_url ?? '/static/favicon.png') !== '/static/favicon.png'
-								? ' bg-cover bg-center bg-no-repeat'
-								: 'bg-black dark:bg-white'} "
-							style={(model?.info?.meta?.profile_image_url ?? '/static/favicon.png') !==
-							'/static/favicon.png'
-								? `background-image: url('${model?.info?.meta?.profile_image_url}');`
-								: ''}
+										: 'size-40'}  transition-all rounded-full bg-cover bg-center bg-no-repeat bg-transparent"
+							style={`background-image: url('${getFaviconSrc(model?.info?.meta?.profile_image_url)}');`}
 						/>
 					{/if}
 				</button>
@@ -966,7 +982,9 @@
 
 			<div>
 				<button
-					class=" p-3 rounded-full bg-gray-50 dark:bg-gray-900"
+					class="group flex {$activeCallMode === 'live_text'
+						? 'flex-col items-center'
+						: 'flex-row items-center'} gap-2"
 					on:click={async () => {
 						await stopAudioStream();
 						await stopVideoStream();
@@ -974,23 +992,57 @@
 						console.log(audioStream);
 						console.log(cameraStream);
 
+						if ($activeCallMode === 'transcript_at_end') {
+							showTranscriptTransition = true;
+							await new Promise((resolve) => setTimeout(resolve, 1500));
+							showTranscriptTransition = false;
+						}
+
+						activeCallMode.set('live_text');
 						showCallOverlay.set(false);
 						dispatch('close');
 					}}
 					type="button"
 				>
-					<svg
-						xmlns="http://www.w3.org/2000/svg"
-						viewBox="0 0 20 20"
-						fill="currentColor"
-						class="size-5"
-					>
-						<path
-							d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z"
-						/>
-					</svg>
+					{#if $activeCallMode === 'live_text'}
+						<div
+							class="flex items-center justify-center p-2.5 rounded-xl border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800
+								group-hover:border-[#8900e1] group-hover:bg-[#8900e1]/10
+								group-active:border-[#57068c] group-active:bg-[#57068c]
+								transition-all duration-150"
+						>
+							<img
+								src="/call-violet.png"
+								alt="End Call"
+								class="size-5 group-active:brightness-0 group-active:invert transition-all duration-150"
+							/>
+						</div>
+						<div
+							class="px-4 py-2.5 rounded-xl border border-gray-300 dark:border-gray-600 bg-transparent text-sm font-medium text-gray-800 dark:text-gray-200
+								group-hover:border-[#8900e1] group-hover:bg-[#8900e1]/10
+								group-active:border-[#57068c] group-active:bg-[#57068c] group-active:text-white
+								transition-all duration-150"
+						>
+							{$i18n.t('End Call')}
+						</div>
+					{:else}
+						<div
+							class="flex flex-row items-center gap-3 px-4 py-2.5 rounded-xl border border-gray-300 dark:border-gray-600 bg-transparent text-sm font-medium text-gray-800 dark:text-gray-200
+								group-hover:border-[#8900e1] group-hover:bg-[#8900e1]/10
+								group-active:border-[#57068c] group-active:bg-[#57068c] group-active:text-white
+								transition-all duration-150"
+						>
+							{$i18n.t('End Call')}
+							<img
+								src="/call-violet.png"
+								alt="End Call"
+								class="size-5 group-active:brightness-0 group-active:invert transition-all duration-150"
+							/>
+						</div>
+					{/if}
 				</button>
 			</div>
 		</div>
 	</div>
+	{/if}
 {/if}
