@@ -28,10 +28,19 @@
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import Switch from '$lib/components/common/Switch.svelte';
 	import ChatBubbleOval from '$lib/components/icons/ChatBubbleOval.svelte';
-	import { goto } from '$app/navigation';
+import { goto } from '$app/navigation';
 
 	const i18n = getContext('i18n');
 	const dispatch = createEventDispatcher();
+
+	function getFaviconSrc(profileImageUrl?: string) {
+	// Default/provider models use favicon marker; show grey flower for those.
+		if (profileImageUrl && profileImageUrl !== '/static/favicon.png') {
+			return profileImageUrl;
+		}
+
+	return '/flower-grey.png';
+	}
 
 	export let id = '';
 	export let value = '';
@@ -338,7 +347,7 @@
 												placement="top-start"
 											>
 												<img
-													src={item.model?.info?.meta?.profile_image_url ?? '/static/favicon.png'}
+													src={getFaviconSrc(item.model?.info?.meta?.profile_image_url)}
 													alt="Model"
 													class="rounded-full size-5 flex items-center mr-2"
 												/>

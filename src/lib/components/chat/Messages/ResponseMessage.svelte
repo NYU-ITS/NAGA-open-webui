@@ -26,7 +26,6 @@
 		createMessagesList,
 		formatDate
 	} from '$lib/utils';
-	import { WEBUI_BASE_URL } from '$lib/constants';
 
 	import Name from './Name.svelte';
 	import ProfileImage from './ProfileImage.svelte';
@@ -155,11 +154,13 @@
 		}
 	};
 
-	function isDarkMode() {
-		if (typeof window !== 'undefined') {
-			return document.documentElement.classList.contains('dark');
+	function getModelAvatarSrc(profileImageUrl?: string) {
+		// Default/provider models use favicon marker; show grey flower for those.
+		if (profileImageUrl && profileImageUrl !== '/static/favicon.png') {
+			return profileImageUrl;
 		}
-		return false;
+
+		return '/flower-grey.png';
 	}
 
 	const playAudio = (idx: number) => {
@@ -569,10 +570,7 @@
 	>
 		<div class={`shrink-0 ${($settings?.chatDirection ?? 'LTR') === 'LTR' ? 'mr-3' : 'ml-3'}`}>
 			<ProfileImage
-				src={model?.info?.meta?.profile_image_url ??
-					($i18n.language === 'dg-DG'
-						? `/doge.png`
-						: `${WEBUI_BASE_URL}/static/${isDarkMode() ? 'flower-white' : 'flower-violet'}.png`)}
+				src={getModelAvatarSrc(model?.info?.meta?.profile_image_url)}
 				className={'size-8'}
 			/>
 		</div>
