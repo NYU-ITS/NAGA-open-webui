@@ -1286,6 +1286,12 @@ def generate_facilities_pdf(sections: Dict[str, str], filename: str = "facilitie
     
     def convert_markdown_to_html(text):
         """Convert markdown formatting to ReportLab HTML-like tags"""
+        # Use placeholders without angle brackets so HTML escaping
+        # does not corrupt them before restoration.
+        bold_open_token = "__BOLD_OPEN__"
+        bold_close_token = "__BOLD_CLOSE__"
+        italic_open_token = "__ITALIC_OPEN__"
+        italic_close_token = "__ITALIC_CLOSE__"
 
         text = text.replace('&', '&amp;')
         
@@ -1294,17 +1300,17 @@ def generate_facilities_pdf(sections: Dict[str, str], filename: str = "facilitie
         text = re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'<i>\1</i>', text)
         
 
-        text = text.replace('<b>', '<<<BOLD_OPEN>>>')
-        text = text.replace('</b>', '<<<BOLD_CLOSE>>>')
-        text = text.replace('<i>', '<<<ITALIC_OPEN>>>')
-        text = text.replace('</i>', '<<<ITALIC_CLOSE>>>')
+        text = text.replace('<b>', bold_open_token)
+        text = text.replace('</b>', bold_close_token)
+        text = text.replace('<i>', italic_open_token)
+        text = text.replace('</i>', italic_close_token)
         
         text = text.replace('<', '&lt;').replace('>', '&gt;')
         
-        text = text.replace('<<<BOLD_OPEN>>>', '<b>')
-        text = text.replace('<<<BOLD_CLOSE>>>', '</b>')
-        text = text.replace('<<<ITALIC_OPEN>>>', '<i>')
-        text = text.replace('<<<ITALIC_CLOSE>>>', '</i>')
+        text = text.replace(bold_open_token, '<b>')
+        text = text.replace(bold_close_token, '</b>')
+        text = text.replace(italic_open_token, '<i>')
+        text = text.replace(italic_close_token, '</i>')
         
         return text
     
@@ -1370,7 +1376,8 @@ def generate_facilities_pdf(sections: Dict[str, str], filename: str = "facilitie
             if remove_citations:
                 import re
 
-                processed_text = re.sub(r'\[[^\]]*\.pdf[^\]]*\]', '', processed_text)
+                # Remove PDF/DOC citations and web URL citations
+                processed_text = re.sub(r'\[[^\]]*\.(?:pdf|docx?)[^\]]*\]', '', processed_text)
                 processed_text = re.sub(r'\[https?://[^\]]+\]', '', processed_text)
 
                 processed_text = re.sub(r'[ \t]+', ' ', processed_text)  # Replace multiple spaces/tabs with single space
@@ -1517,9 +1524,8 @@ def generate_facilities_doc(sections: Dict[str, str], filename: str = "facilitie
         if not remove_citations:
             return text
         
-        # Remove PDF citations
-        text = re.sub(r'\[[^\]]*\.pdf[^\]]*\]', '', text)
-        # Remove web URL citations
+        # Remove PDF/DOC citations and web URL citations
+        text = re.sub(r'\[[^\]]*\.(?:pdf|docx?)[^\]]*\]', '', text)
         text = re.sub(r'\[https?://[^\]]+\]', '', text)
         # Clean up extra spaces
         text = re.sub(r'[ \t]+', ' ', text)
@@ -1642,8 +1648,7 @@ async def download_facilities_document(
             media_type = "application/pdf"
             filename = f"{download_data.filename}.pdf"
         else:  # doc format
-            # DOC format always removes citations (as per requirement)
-            content = generate_facilities_doc(download_data.sections, download_data.filename, remove_citations=True)
+            content = generate_facilities_doc(download_data.sections, download_data.filename, download_data.remove_citations)
             media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             filename = f"{download_data.filename}.docx"
         
