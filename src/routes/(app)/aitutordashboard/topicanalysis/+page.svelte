@@ -2,13 +2,18 @@
 	import { onDestroy, onMount } from 'svelte';
 	import { page } from '$app/stores';
 	import { toast } from 'svelte-sonner';
-	import { AI_TUTOR_FRONTEND_TESTING_ERROR_TYPES, AI_TUTOR_FRONTEND_TESTING_MODE, TESTING_AI_TUTOR } from '$lib/constants';
+	import {
+		AI_TUTOR_API_BASE_URL,
+		AI_TUTOR_FRONTEND_TESTING_ERROR_TYPES,
+		AI_TUTOR_FRONTEND_TESTING_MODE,
+		TESTING_AI_TUTOR
+	} from '$lib/constants';
 	import { aiTutorFrontendTestingErrorTypes } from '$lib/stores';
 	import { showAITutorTestToast } from '$lib/utils/aiTutorTesting';
 	import ChevronUp from '$lib/components/icons/ChevronUp.svelte';
 	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
 
-	const AI_TUTOR_API_BASE = 'http://localhost:8000';
+	const AI_TUTOR_API_BASE = AI_TUTOR_API_BASE_URL;
 	const useFrontendTestingData = AI_TUTOR_FRONTEND_TESTING_MODE;
 	const testToast = showAITutorTestToast;
 	const dashboardPalette = ['#EE352E', '#00933C', '#B933AD', '#0039A6', '#FF6319', '#996633'];
@@ -231,6 +236,9 @@
 		}
 		topicAnalysisLoading = true;
 		try {
+			// Page: AI Tutor Dashboard > Topic Analysis
+			// Endpoint: GET /homework/?group_id={group_id}
+			// Purpose: scope topic analysis to homework that belongs to the selected group.
 			const homeworkResponse = await fetch(`${AI_TUTOR_API_BASE}/homework/?group_id=${encodeURIComponent(groupId)}`, {
 				method: 'GET',
 				headers: {
@@ -253,6 +261,9 @@
 			homeworkRows = nextHomeworkRows;
 			const homeworkIds = new Set(nextHomeworkRows.map((row) => row.id));
 
+			// Page: AI Tutor Dashboard > Topic Analysis
+			// Endpoint: GET /analysis
+			// Purpose: load raw analysis rows, then keep only rows whose homework_id belongs to the selected group.
 			const topicResponse = await fetch(`${AI_TUTOR_API_BASE}/analysis`, {
 				method: 'GET',
 				headers: {
@@ -357,6 +368,9 @@
 		}
 		practiceLoading = true;
 		try {
+			// Page: AI Tutor Dashboard > Topic Analysis
+			// Endpoint: GET /homework/?group_id={group_id}
+			// Purpose: build the group-scoped homework list used to label practice question sets.
 			const homeworkResponse = await fetch(`${AI_TUTOR_API_BASE}/homework/?group_id=${encodeURIComponent(groupId)}`, {
 				method: 'GET',
 				headers: {
@@ -364,6 +378,9 @@
 				}
 			});
 
+			// Page: AI Tutor Dashboard > Topic Analysis
+			// Endpoint: GET /practice?group_id={group_id}
+			// Purpose: load the latest practice generation/review status for the selected group.
 			const practiceResponse = await fetch(
 				`${AI_TUTOR_API_BASE}/practice?group_id=${encodeURIComponent(groupId)}`,
 				{
@@ -594,6 +611,9 @@
 	}
 
 	let topicGroupsByHomework = [];
+	$: reviewQuestionSetBaseHref = groupId
+		? `/aitutordashboard/topicanalysis/reviewquestionset?group_id=${encodeURIComponent(groupId)}`
+		: '/aitutordashboard/topicanalysis/reviewquestionset';
 	$: topicAnalysisHomeworkOptions = topicGroupsByHomework.map((homework) => ({
 		id: homework.id,
 		label: getHomeworkModelName(homework.homework)
@@ -1026,7 +1046,7 @@
 		<div class="flex items-center justify-between gap-4">
 			<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Practice Question Set</h2>
 			<a
-				href="/aitutordashboard/topicanalysis/reviewquestionset"
+				href={reviewQuestionSetBaseHref}
 				class="inline-flex w-fit items-center rounded-full border border-gray-300 px-3 py-1.5 text-sm font-semibold text-gray-800 transition hover:border-[#57068c] hover:text-[#57068c] dark:border-gray-600 dark:text-gray-200 dark:hover:border-white dark:hover:text-white"
 			>
 				View All
@@ -1082,7 +1102,7 @@
 									<div class="flex items-center gap-1">
 										<a
 											href={practice.status === 'approved' || practice.status === 'ready'
-												? `/aitutordashboard/topicanalysis/reviewquestionset?homework_id=${practice.homeworkId ?? ''}`
+												? `${reviewQuestionSetBaseHref}${reviewQuestionSetBaseHref.includes('?') ? '&' : '?'}homework_id=${encodeURIComponent(practice.homeworkId ?? '')}`
 												: undefined}
 											aria-disabled={!(practice.status === 'approved' || practice.status === 'ready')}
 											class={`self-center w-fit whitespace-nowrap rounded-xl px-2 py-1.5 text-xs transition ${

@@ -2,7 +2,11 @@
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
 	import { toast } from 'svelte-sonner';
-	import { AI_TUTOR_FRONTEND_TESTING_MODE, TESTING_AI_TUTOR } from '$lib/constants';
+	import {
+		AI_TUTOR_API_BASE_URL,
+		AI_TUTOR_FRONTEND_TESTING_MODE,
+		TESTING_AI_TUTOR
+	} from '$lib/constants';
 	import { getUsers } from '$lib/apis/users';
 	import { getGroupById } from '$lib/apis/groups';
 	import { showAITutorTestToast } from '$lib/utils/aiTutorTesting';
@@ -10,7 +14,7 @@
 	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
 	import Search from '$lib/components/icons/Search.svelte';
 
-	const AI_TUTOR_API_BASE = 'http://localhost:8000';
+	const AI_TUTOR_API_BASE = AI_TUTOR_API_BASE_URL;
 	const useFrontendTestingData = AI_TUTOR_FRONTEND_TESTING_MODE;
 	const testToast = showAITutorTestToast;
 	const frontendTestingHomeworkModelNames = [
@@ -167,6 +171,9 @@
 		}
 
 		try {
+			// Page: AI Tutor Dashboard > Student Analysis
+			// Endpoint: GET /homework/?group_id={group_id}
+			// Purpose: load homework options for the selected instructor group.
 			const response = await fetch(
 				`${AI_TUTOR_API_BASE}/homework/?group_id=${encodeURIComponent(groupId)}`,
 				{
@@ -275,6 +282,9 @@
 		loading = true;
 
 		try {
+			// Page: AI Tutor Dashboard > Student Analysis
+			// Endpoint: GET /analysis/?homework_id={homework_id}
+			// Purpose: load analysis rows for one homework, then apply group-member filtering on the frontend.
 			const response = await fetch(
 				`${AI_TUTOR_API_BASE}/analysis/?homework_id=${encodeURIComponent(homeworkId)}`,
 				{

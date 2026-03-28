@@ -2,13 +2,18 @@
 	import { onMount, tick } from 'svelte';
 	import { page } from '$app/stores';
 	import { toast } from 'svelte-sonner';
-	import { AI_TUTOR_FRONTEND_TESTING_ERROR_TYPES, AI_TUTOR_FRONTEND_TESTING_MODE, TESTING_AI_TUTOR } from '$lib/constants';
+	import {
+		AI_TUTOR_API_BASE_URL,
+		AI_TUTOR_FRONTEND_TESTING_ERROR_TYPES,
+		AI_TUTOR_FRONTEND_TESTING_MODE,
+		TESTING_AI_TUTOR
+	} from '$lib/constants';
 	import { aiTutorFrontendTestingErrorTypes } from '$lib/stores';
 	import { showAITutorTestToast } from '$lib/utils/aiTutorTesting';
 	import ChevronUp from '$lib/components/icons/ChevronUp.svelte';
 	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
 
-	const AI_TUTOR_API_BASE = 'http://localhost:8000';
+	const AI_TUTOR_API_BASE = AI_TUTOR_API_BASE_URL;
 	const frontendTestingHomeworkModelNames = [
 		'Homework1-MATH-Code-Section-Semester',
 		'Homework2-MATH-Code-Section-Semester',
@@ -314,6 +319,9 @@ async function loadHomeworkStats(groupId: string) {
 		const topicMappedByHomeworkId = new Map<string, boolean>();
 		const modelIdByHomeworkId = new Map<string, string | null>();
 		try {
+			// Page: AI Tutor Dashboard Summary
+			// Endpoint: GET /homework/?group_id={group_id}
+			// Purpose: load homework pipeline rows for the selected instructor group.
 			const hwResponse = await fetch(
 				`${AI_TUTOR_API_BASE}/homework/?group_id=${encodeURIComponent(groupId)}`,
 				{
@@ -357,6 +365,9 @@ async function loadHomeworkStats(groupId: string) {
 
 		for (const homeworkId of uploadStatusMap.keys()) {
 			try {
+				// Page: AI Tutor Dashboard Summary
+				// Endpoint: GET /analysis/?homework_id={homework_id}
+				// Purpose: aggregate student analysis rows into homework-level summary metrics.
 				const analysisResponse = await fetch(
 					`${AI_TUTOR_API_BASE}/analysis/?homework_id=${encodeURIComponent(homeworkId)}`,
 					{
@@ -449,6 +460,9 @@ async function loadConversationCounts(groupId: string) {
 	}
 	if (!groupId) { convCountByModelId = {}; return; }
 	try {
+		// Page: AI Tutor Dashboard Summary
+		// Endpoint: POST /api/v1/chats/filter/meta
+		// Purpose: count Open WebUI conversations for the selected group, then bucket them by model_id/model_name.
 		const res = await fetch('/api/v1/chats/filter/meta', {
 			method: 'POST',
 			headers: {
@@ -594,6 +608,8 @@ async function parseErrorDetail(response: Response) {
 
 async function pollPipelineJob(jobId: string, intervalMs: number, label: string) {
 	while (true) {
+		// Shared async job polling helper.
+		// Endpoint: GET /pipeline/status/{job_id}
 		const res = await fetch(`${AI_TUTOR_API_BASE}/pipeline/status/${encodeURIComponent(jobId)}`, {
 			headers: { Authorization: `Bearer ${localStorage.token}` }
 		});
@@ -616,6 +632,9 @@ async function ensureConversationsExported(homeworkId: string, modelId: string |
 	exportingConversationMap = { ...exportingConversationMap, [homeworkId]: true };
 	testToast(`Export conversations is triggered | page=aitutordashboard - Summary | homework=${homeworkId}`);
 	try {
+		// Page: AI Tutor Dashboard Summary
+		// Endpoint: GET /conversation/?homework_id={homework_id}
+		// Purpose: check whether Open WebUI conversation history has already been exported into AI Tutor storage.
 		const existingRes = await fetch(
 			`${AI_TUTOR_API_BASE}/conversation/?homework_id=${encodeURIComponent(homeworkId)}`,
 			{ headers: { Authorization: `Bearer ${localStorage.token}` } }
@@ -627,6 +646,9 @@ async function ensureConversationsExported(homeworkId: string, modelId: string |
 			return true;
 		}
 
+		// Page: AI Tutor Dashboard Summary
+		// Endpoint: POST /conversation/export?homework_id={homework_id}
+		// Purpose: export group-member conversation history for the homework's group_id + model_id.
 		const exportRes = await fetch(
 			`${AI_TUTOR_API_BASE}/conversation/export?homework_id=${encodeURIComponent(homeworkId)}`,
 			{
@@ -952,6 +974,9 @@ async function uploadPdf(hwId: string | null, docType: 'question' | 'answer', mo
 			group_id: selectedGroupId,
 			model_id: modelId
 		});
+		// Page: AI Tutor Dashboard Summary
+		// Endpoint: POST /homework/pdf-to-markdown?doc_type={question|answer}&group_id={group_id}&model_id={model_id}
+		// Purpose: create or update the homework row identified by group_id + model_id and start PDF processing.
 		const res = await fetch(`${AI_TUTOR_API_BASE}/homework/pdf-to-markdown?${params.toString()}`, {
 			method: 'POST',
 			headers: { Authorization: `Bearer ${localStorage.token}` },
@@ -1120,6 +1145,9 @@ async function runAnalysis() {
 		return;
 	}
 	try {
+		// Page: AI Tutor Dashboard Summary
+		// Endpoint: POST /analysis/run?homework_id={homework_id}
+		// Purpose: start the analysis pipeline for the selected homework after prerequisite checks pass.
 		const res = await fetch(
 			`${AI_TUTOR_API_BASE}/analysis/run?homework_id=${encodeURIComponent(targetHomeworkId)}`,
 			{ method: 'POST', headers: { Authorization: `Bearer ${localStorage.token}` } }

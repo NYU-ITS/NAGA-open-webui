@@ -468,12 +468,21 @@
 		testToast(`Student dashboard sync started | group=${selectedGroupId} | student=${$user.id}`);
 
 		try {
+			// Student Dashboard summary sync:
+			// - Open WebUI group lookup validates that the current user is a member of the selected group.
+			// - AI Tutor endpoints below are all scoped to the selected group before we derive student rows.
 			const [groupDetail, homeworkRows, practiceRows] = await Promise.all([
 				getGroupById(localStorage.token, selectedGroupId),
+				// Page: Student Dashboard
+				// Endpoint: GET /homework/?group_id={group_id}
+				// Purpose: load the homework records for the selected group; homework label comes from model_id.
 				fetchAITutorJson<any[]>('/homework/', {
 					token: localStorage.token,
 					query: { group_id: selectedGroupId }
 				}),
+				// Page: Student Dashboard
+				// Endpoint: GET /practice?group_id={group_id}
+				// Purpose: load the latest practice generation state for the selected group.
 				fetchAITutorJson<any[]>('/practice', {
 					token: localStorage.token,
 					query: { group_id: selectedGroupId }
@@ -490,6 +499,9 @@
 				return;
 			}
 
+			// Page: Student Dashboard
+			// Endpoint: GET /assignment/?student_id={student_id}
+			// Purpose: load practice assignments for the current student after group membership is confirmed.
 			const assignments = await fetchAITutorJson<any[]>('/assignment/', {
 				token: localStorage.token,
 				query: { student_id: $user.id }
@@ -498,6 +510,9 @@
 			const analysesByHomeworkId = new Map<string, any | null>();
 			await Promise.all(
 				homeworkRows.map(async (homework) => {
+					// Page: Student Dashboard
+					// Endpoint: GET /analysis/?homework_id={homework_id}
+					// Purpose: load per-homework analysis rows, then match only the current student by id/email.
 					const analyses = await fetchAITutorJson<any[]>('/analysis/', {
 						token: localStorage.token,
 						query: { homework_id: homework.id }
