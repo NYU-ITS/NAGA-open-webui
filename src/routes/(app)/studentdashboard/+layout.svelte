@@ -1,7 +1,7 @@
 <script lang="ts">
-import { onMount, getContext } from 'svelte';
-import { WEBUI_NAME, showSidebar, user, mobile } from '$lib/stores';
-import { page } from '$app/stores';
+	import { onMount, getContext } from 'svelte';
+	import { WEBUI_NAME, showSidebar, user, mobile } from '$lib/stores';
+	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
 	import { checkIfSuperAdmin } from '$lib/apis/users';
 	import { getGroups } from '$lib/apis/groups';
@@ -9,17 +9,27 @@ import { page } from '$app/stores';
 
 	import MenuLines from '$lib/components/icons/MenuLines.svelte';
 
-	const i18n = getContext('i18n');
+	type GroupOption = {
+		id: string;
+		name: string;
+		user_id?: string;
+		user_ids?: string[];
+		identity?: 'Admin' | 'Member';
+	};
+
+	const i18n: any = getContext('i18n');
 
 	let loaded = false;
 	let showIdentityPopover = false;
 	let showGroupDropdown = false;
 	let showHomeworkDropdown = false;
 	let isSuperAdmin = false;
-	let groups = [];
-	let createdGroups = [];
-	let memberGroups = [];
-	let allUserGroups = [];
+	let groups: GroupOption[] = [];
+	let createdGroups: GroupOption[] = [];
+	let memberGroups: GroupOption[] = [];
+	let allUserGroups: GroupOption[] = [];
+	let selectedGroupId = '';
+	let selectedGroup: GroupOption | null = null;
 	let searchTopic = '';
 
 	let selectedHomework = 'All';
@@ -35,7 +45,7 @@ import { page } from '$app/stores';
 		'Homework 6',
 		'Homework 7'
 	];
-	const homeworkTopicMap = {
+	const homeworkTopicMap: Record<string, string[]> = {
 		'Homework 1': ['Linear Algebra', 'Differentiation', 'Integration', 'Limit Definition'],
 		'Homework 2': ['Quadratic Equations', 'Polynomials', 'Factoring', 'Complex Numbers'],
 		'Homework 3': ['Trigonometry', 'Unit Circle', 'Trigonometric Identities', 'Inverse Functions'],
@@ -53,6 +63,10 @@ import { page } from '$app/stores';
 		const query = searchTopic.trim().toLowerCase();
 		return (homeworkTopicMap[option] ?? []).some((topic) => topic.toLowerCase().includes(query));
 	});
+
+	$: selectedGroupId = $page.url.searchParams.get('group_id') || '';
+	$: selectedGroup =
+		allUserGroups.find((group) => group.id === selectedGroupId) || allUserGroups[0] || null;
 
 	onMount(async () => {
 		loaded = true;
@@ -77,9 +91,13 @@ import { page } from '$app/stores';
 
 					// Combine all groups with identity
 					allUserGroups = [
-						...createdGroups.map(g => ({ ...g, identity: 'Admin' })),
-						...memberGroups.map(g => ({ ...g, identity: 'Member' }))
+						...createdGroups.map((g) => ({ ...g, identity: 'Admin' as const })),
+						...memberGroups.map((g) => ({ ...g, identity: 'Member' as const }))
 					];
+
+					if (!$page.url.searchParams.get('group_id') && allUserGroups.length > 0) {
+						await selectGroup(allUserGroups[0]);
+					}
 				}
 			} catch (error) {
 				console.error('Error loading groups:', error);
@@ -104,6 +122,17 @@ import { page } from '$app/stores';
 
 	function closeGroupDropdown() {
 		showGroupDropdown = false;
+	}
+
+	async function selectGroup(group: GroupOption) {
+		const params = new URLSearchParams($page.url.searchParams);
+		params.set('group_id', group.id);
+		showGroupDropdown = false;
+		await goto(`${$page.url.pathname}?${params.toString()}`, {
+			keepFocus: true,
+			noScroll: true,
+			replaceState: true
+		});
 	}
 
 	function toggleHomeworkDropdown() {
@@ -181,7 +210,15 @@ import { page } from '$app/stores';
 										{$user?.name || 'Student Name'}
 									</span>
 									<div class="flex items-center gap-1 text-sm font-medium text-gray-500 dark:text-gray-400">
-										<span>MATH-I - InstructorName - CourseCode - Section - Course Name Spring 2026</span>
+										<span>
+											{#if selectedGroup}
+												{selectedGroup.name} - {$user?.role === 'admin' ? 'Instructor View' : 'Student View'}
+											{:else if loaded}
+												No Group Selected
+											{:else}
+												Loading group...
+											{/if}
+										</span>
 										<svg
 											xmlns="http://www.w3.org/2000/svg"
 											fill="none"
@@ -209,7 +246,11 @@ import { page } from '$app/stores';
 									{#if allUserGroups.length > 0}
 										<div class="space-y-1 max-h-64 overflow-y-auto">
 											{#each allUserGroups as group}
-												<div class="flex items-center justify-between py-2 px-3 bg-gray-50 dark:bg-gray-800 rounded hover:bg-gray-100 dark:hover:bg-gray-700 transition">
+												<button
+													type="button"
+													class="flex w-full items-center justify-between py-2 px-3 bg-gray-50 dark:bg-gray-800 rounded hover:bg-gray-100 dark:hover:bg-gray-700 transition"
+													on:click={() => selectGroup(group)}
+												>
 													<span class="text-sm text-gray-900 dark:text-gray-100 font-medium">
 														{group.name}
 													</span>
@@ -218,7 +259,7 @@ import { page } from '$app/stores';
 														: 'bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200'}">
 														{group.identity}
 													</span>
-												</div>
+												</button>
 											{/each}
 										</div>
 									{:else}

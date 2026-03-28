@@ -310,7 +310,7 @@ async function loadHomeworkStats(groupId: string) {
 			return;
 		}
 
-		const uploadStatusMap = new Map<string, { status: boolean; answerUploaded: boolean }>();
+		const uploadStatusMap = new Map<string, { status: boolean; answerUploaded: boolean; totalProblems: number | null }>();
 		const topicMappedByHomeworkId = new Map<string, boolean>();
 		const modelIdByHomeworkId = new Map<string, string | null>();
 		try {
@@ -339,7 +339,8 @@ async function loadHomeworkStats(groupId: string) {
 					modelIdByHomeworkId.set(hw.id, hw.model_id ?? null);
 					uploadStatusMap.set(hw.id, {
 						status: hw.question_uploaded ?? false,
-						answerUploaded: hw.answer_uploaded ?? false
+						answerUploaded: hw.answer_uploaded ?? false,
+						totalProblems: countHomeworkQuestions(hw.question_data, hw.topic_mapping) || null
 					});
 				}
 			}
@@ -395,7 +396,7 @@ async function loadHomeworkStats(groupId: string) {
 				homework: id,
 				status: hasAnalysisByHomeworkId.has(id),
 				answerUploaded: upload?.answerUploaded ?? false,
-				totalProblems: stats ? stats.totalProblems : null,
+				totalProblems: stats?.totalProblems ?? upload?.totalProblems ?? null,
 				avgAttempted: stats ? Number((stats.attemptedSum / Math.max(stats.count, 1)).toFixed(1)) : null,
 				avgSolved: stats ? Number((stats.solvedSum / Math.max(stats.count, 1)).toFixed(1)) : null,
 				avgErrors: stats ? Number((stats.errorSum / Math.max(stats.count, 1)).toFixed(1)) : null
@@ -558,6 +559,24 @@ function getPromptSummary(name: string) {
 		tutorId: '',
 		scopeType: 'default' as const
 	};
+}
+
+function countHomeworkQuestions(questionData: unknown, topicMapping: unknown) {
+	if (topicMapping && typeof topicMapping === 'object' && !Array.isArray(topicMapping)) {
+		return Object.keys(topicMapping as Record<string, unknown>).length;
+	}
+
+	if (typeof questionData === 'string') {
+		const boldMatches = Array.from(questionData.matchAll(/^\*\*(\d+)\.\*\*/gm));
+		if (boldMatches.length > 0) return boldMatches.length;
+		const plainMatches = Array.from(questionData.matchAll(/^(\d+)\.\s+/gm));
+		if (plainMatches.length > 0) return plainMatches.length;
+	}
+
+	if (Array.isArray(questionData)) return questionData.length;
+	if (questionData && typeof questionData === 'object') return 1;
+
+	return 0;
 }
 
 function sleep(ms: number) {
@@ -1268,9 +1287,7 @@ async function runAnalysis() {
 					<tr>
 						{#each [
 							{ key: 'homework',     label: 'Homework' },
-							{ key: 'status',       label: 'Status' },
-							{ key: 'answerUploaded', label: 'Answer' },
-							{ key: 'totalProblems',  label: 'Total' },
+							{ key: 'totalProblems', label: 'Total' },
 							{ key: 'avgAttempted',   label: 'Avg Attempted' },
 							{ key: 'avgSolved',      label: 'Avg Solved' },
 							{ key: 'avgErrors',      label: 'Avg Errors' }
@@ -1293,7 +1310,7 @@ async function runAnalysis() {
 				<tbody>
 					{#if sortedStats.length === 0}
 						<tr class="bg-white dark:bg-gray-900 text-xs">
-							<td colspan="7" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">
+							<td colspan="5" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">
 								No data available
 							</td>
 						</tr>
@@ -1302,20 +1319,6 @@ async function runAnalysis() {
 							<tr class="bg-white dark:bg-gray-900 dark:border-gray-850 text-xs border-t border-gray-100 dark:border-gray-850">
 								<td class="px-3 py-1 font-medium text-gray-900 dark:text-white">
 									<div class={homeworkModelNameCellClass}>{getHomeworkModelName(stat.homework)}</div>
-								</td>
-								<td class="px-3 py-1">
-									{#if stat.status}
-										<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-3.5 h-3.5 text-green-600 dark:text-green-400">
-											<path fill-rule="evenodd" d="M16.704 4.153a.75.75 0 0 1 .143 1.052l-8 10.5a.75.75 0 0 1-1.127.075l-4.5-4.5a.75.75 0 0 1 1.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 0 1 1.05-.143Z" clip-rule="evenodd" />
-										</svg>
-									{/if}
-								</td>
-								<td class="px-3 py-1">
-									{#if stat.answerUploaded}
-										<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-3.5 h-3.5 text-green-600 dark:text-green-400">
-											<path fill-rule="evenodd" d="M16.704 4.153a.75.75 0 0 1 .143 1.052l-8 10.5a.75.75 0 0 1-1.127.075l-4.5-4.5a.75.75 0 0 1 1.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 0 1 1.05-.143Z" clip-rule="evenodd" />
-										</svg>
-									{/if}
 								</td>
 								<td class="px-3 py-1">{stat.totalProblems ?? 'N/A'}</td>
 								<td class="px-3 py-1">{stat.avgAttempted != null ? stat.avgAttempted.toFixed(1) : 'N/A'}</td>

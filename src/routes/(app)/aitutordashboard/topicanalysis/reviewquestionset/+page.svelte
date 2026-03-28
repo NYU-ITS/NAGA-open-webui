@@ -3,10 +3,10 @@
 	import { toast } from 'svelte-sonner';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
-	import { TESTING_AI_TUTOR } from '$lib/constants';
+	import { AI_TUTOR_API_BASE_URL, TESTING_AI_TUTOR } from '$lib/constants';
 	import { showAITutorTestToast } from '$lib/utils/aiTutorTesting';
 
-	const AI_TUTOR_API_BASE = 'http://localhost:8000';
+	const AI_TUTOR_API_BASE = AI_TUTOR_API_BASE_URL;
 	const testToast = showAITutorTestToast;
 
 	type QuestionItem = Record<string, unknown>;
@@ -78,8 +78,19 @@
 
 	let groupId = '';
 	let homeworkOptions: string[] = [];
+	let homeworkLabelById: Record<string, string> = {};
 	let reviewHomeworks: ReviewHomework[] = [];
 	let currentHomeworkIndex = 0;
+
+	function getHomeworkLabel(homeworkId: string) {
+		return homeworkLabelById[homeworkId] ?? homeworkId;
+	}
+
+	function mapPracticeStatus(status: string | null | undefined): QuestionSetData['status'] {
+		if (status === 'approved') return 'approved';
+		if (status === 'pending' || status === 'rejected') return 'in_progress';
+		return 'pending';
+	}
 
 	const cloneQuestions = (questions: QuestionItem[]) =>
 		questions.map((item) => structuredClone(item));
@@ -254,7 +265,7 @@
 					homeworkId,
 					normalizeQuestionPayload(latest.problem_data),
 					latest.generated_time ?? latest.created_at ?? '2026-03-23 09:00:00',
-					(latest.status ?? 'pending') as QuestionSetData['status']
+					mapPracticeStatus(latest.status)
 				);
 			}
 
@@ -370,11 +381,6 @@
 		}
 	}
 
-	function getHomeworkNumber(homework: string) {
-		const match = homework.match(/\d+/);
-		return match ? match[0] : homework;
-	}
-
 	function goToPreviousHomework() {
 		if (currentHomeworkIndex > 0) currentHomeworkIndex -= 1;
 	}
@@ -385,6 +391,10 @@
 
 	function selectHomeworkByIndex(index: number) {
 		currentHomeworkIndex = index;
+	}
+
+	function handleHomeworkSelectChange(event: Event) {
+		selectHomeworkByIndex((event.currentTarget as HTMLSelectElement).selectedIndex);
 	}
 
 	$: currentReviewHomework = reviewHomeworks[currentHomeworkIndex];
@@ -413,8 +423,14 @@
 			});
 			if (response.ok) {
 				const data = await response.json();
-				if (Array.isArray(data) && data.length > 0) {
-					homeworkOptions = data.map((hw) => hw.id);
+				const scopedHomeworks = Array.isArray(data)
+					? data.filter((hw) => !groupId || hw.group_id === groupId)
+					: [];
+				if (scopedHomeworks.length > 0) {
+					homeworkOptions = scopedHomeworks.map((hw) => hw.id);
+					homeworkLabelById = Object.fromEntries(
+						scopedHomeworks.map((hw) => [hw.id, hw.model_id ?? hw.id])
+					);
 				}
 			}
 		} catch (error) {
@@ -423,6 +439,9 @@
 
 		if (homeworkOptions.length === 0) {
 			homeworkOptions = fallbackHomeworkOptions;
+			homeworkLabelById = Object.fromEntries(
+				fallbackHomeworkOptions.map((homeworkId) => [homeworkId, homeworkId])
+			);
 		}
 
 		const requestedHomeworkId =
@@ -434,7 +453,7 @@
 		).filter(
 			(homework): homework is ReviewHomework =>
 				!!homework &&
-				(homework.questionData.status === 'ready' ||
+				(homework.questionData.status === 'pending' ||
 					homework.questionData.status === 'in_progress' ||
 					homework.questionData.status === 'approved')
 		);
@@ -487,35 +506,35 @@
 				<div class="w-full">
 					<div class="flex items-center justify-between gap-3">
 						<h2 class="text-xl font-semibold text-gray-900 dark:text-gray-100">Questions</h2>
-						<div class="flex flex-wrap items-center gap-2">
+						<div class="flex min-w-0 flex-1 items-center justify-end gap-2 text-sm">
+							<div class="relative min-w-0">
+								<select
+									class="block max-w-[20rem] truncate appearance-none bg-transparent pr-5 text-sm text-gray-700 outline-hidden dark:text-gray-300"
+									on:change={handleHomeworkSelectChange}
+									value={currentReviewHomework?.homeworkId ?? ''}
+									title={currentReviewHomework?.homeworkId ?? ''}
+									aria-label="Select review homework"
+								>
+									{#each reviewHomeworks as homework}
+										<option value={homework.homeworkId}>{getHomeworkLabel(homework.homeworkId)}</option>
+									{/each}
+								</select>
+							</div>
 							<button
 								type="button"
 								on:click={goToPreviousHomework}
 								disabled={currentHomeworkIndex === 0}
-								class="flex h-8 w-8 items-center justify-center rounded-full text-base font-bold text-gray-700 transition hover:border-gray-400 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-30 dark:border-gray-600 dark:text-gray-200 dark:hover:border-gray-500 dark:hover:bg-gray-800"
+								class="text-sm font-medium text-gray-900 transition hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-30 dark:text-gray-100 dark:hover:text-gray-300"
 							>
-								&lt;
+								Prev
 							</button>
-							{#each reviewHomeworks as homework, index}
-								<button
-									type="button"
-									on:click={() => selectHomeworkByIndex(index)}
-									class={`rounded-full px-3 py-1.5 text-sm transition ${
-										index === currentHomeworkIndex
-											? 'bg-black text-white'
-											: 'text-gray-600 hover:text-[#57068c] dark:text-gray-400 dark:hover:text-white'
-									}`}
-								>
-									Homework {getHomeworkNumber(homework.homeworkId)}
-								</button>
-							{/each}
 							<button
 								type="button"
 								on:click={goToNextHomework}
 								disabled={currentHomeworkIndex >= reviewHomeworks.length - 1}
-								class="flex h-8 w-8 items-center justify-center rounded-full text-base font-bold text-gray-700 transition hover:border-gray-400 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-30 dark:border-gray-600 dark:text-gray-200 dark:hover:border-gray-500 dark:hover:bg-gray-800"
+								class="text-sm font-medium text-gray-900 transition hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-30 dark:text-gray-100 dark:hover:text-gray-300"
 							>
-								&gt;
+								Next
 							</button>
 						</div>
 					</div>

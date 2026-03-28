@@ -329,7 +329,7 @@
 
 					return {
 						id: homeworkId,
-						homework: homeworkId,
+						homework: getHomeworkModelName(homeworkId),
 						topics
 					};
 				});
@@ -364,12 +364,15 @@
 				}
 			});
 
-			const practiceResponse = await fetch(`${AI_TUTOR_API_BASE}/practice`, {
+			const practiceResponse = await fetch(
+				`${AI_TUTOR_API_BASE}/practice?group_id=${encodeURIComponent(groupId)}`,
+				{
 				method: 'GET',
 				headers: {
 					Authorization: `Bearer ${localStorage.token}`
 				}
-			});
+				}
+			);
 
 			if (!practiceResponse.ok) {
 				throw new Error('Practice question set fetch failed');
@@ -399,13 +402,14 @@
 
 				practiceQuestions = Array.from(homeworkIds).sort().map((homeworkId) => {
 					const latest = latestByHomework.get(homeworkId);
+					const homeworkLabel = getHomeworkModelName(homeworkId);
 					if (!latest) {
-						return { homework: homeworkId, homeworkId, status: 'not_ready' };
+						return { homework: homeworkLabel, homeworkId, status: 'not_ready' };
 					}
 
 					if (latest.status === 'approved') {
 						return {
-							homework: homeworkId,
+							homework: homeworkLabel,
 							homeworkId,
 							status: 'approved',
 							date: latest.created_at
@@ -413,14 +417,14 @@
 					}
 
 					if (latest.status === 'generating') {
-						return { homework: homeworkId, homeworkId, status: 'generating' };
+						return { homework: homeworkLabel, homeworkId, status: 'generating' };
 					}
 
 					if (latest.status === 'pending' || latest.status === 'rejected') {
-						return { homework: homeworkId, homeworkId, status: 'ready' };
+						return { homework: homeworkLabel, homeworkId, status: 'ready' };
 					}
 
-					return { homework: homeworkId, homeworkId, status: 'not_ready' };
+					return { homework: homeworkLabel, homeworkId, status: 'not_ready' };
 				});
 			}
 
@@ -898,7 +902,7 @@
 	<div class="space-y-3">
 		<div class="flex items-center justify-between gap-3">
 			<div>
-				<h5 class="text-base font-semibold text-gray-800 dark:text-gray-200">Error Type Configuration</h5>
+				<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Error Type Configuration</h2>
 				<div class="text-xs text-gray-400 dark:text-gray-500">You can have at most 4 error types</div>
 			</div>
 			<!-- <div class="flex items-center gap-3">

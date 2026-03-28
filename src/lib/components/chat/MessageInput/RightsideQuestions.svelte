@@ -13,7 +13,12 @@
 	};
 
 	const groupName = 'MATH-I - InstructorName - CourseCode - Section';
-	const homeworkOptions = ['Homework 1', 'Homework 2', 'Homework 3', 'Homework 4'];
+	const homeworkOptions = [
+		'Homework1-MATH-Code-Section-Semester',
+		'Homework2-MATH-Code-Section-Semester',
+		'Homework3-MATH-Code-Section-Semester',
+		'Homework4-MATH-Code-Section-Semester'
+	];
 	const topicOptions = [
 		'Linear Algebra',
 		'Differentiation',
@@ -27,7 +32,7 @@
 		{
 			id: 'hq-1',
 			sequence: 1,
-			homework: 'Homework 1',
+			homework: 'Homework1-MATH-Code-Section-Semester',
 			topics: ['Linear Algebra', 'Differentiation'],
 			question: 'Find the eigenvalues of the matrix A and explain how they relate to the transformation.',
 			completed: false
@@ -35,7 +40,7 @@
 		{
 			id: 'hq-2',
 			sequence: 2,
-			homework: 'Homework 2',
+			homework: 'Homework2-MATH-Code-Section-Semester',
 			topics: ['Integration by Parts'],
 			question: 'Compute the integral of x cos(x) dx and justify why integration by parts is the right method.',
 			completed: true
@@ -43,7 +48,7 @@
 		{
 			id: 'hq-3',
 			sequence: 1,
-			homework: 'Homework 3',
+			homework: 'Homework3-MATH-Code-Section-Semester',
 			topics: ['Limit Definition', 'Factoring'],
 			question: 'Use the limit definition to derive the derivative of f(x)=x^2-4x, simplifying carefully at each step.',
 			completed: false
@@ -51,7 +56,7 @@
 		{
 			id: 'hq-4',
 			sequence: 3,
-			homework: 'Homework 4',
+			homework: 'Homework4-MATH-Code-Section-Semester',
 			topics: ['Trigonometric Identities'],
 			question: 'Prove that 1 - cos(2x) = 2sin^2(x) and explain which identity you start from.',
 			completed: true
@@ -60,70 +65,32 @@
 
 	$: practicing = $page.url.searchParams.get('practicing');
 	$: practicingValue = practicing ? String(practicing) : null;
-	$: initialHomework = practicingValue
-		? homeworkOptions.find((homework) => getHomeworkNumber(homework) === practicingValue)
-		: null;
-	$: initialTopics = initialHomework ? getTopicsForHomework(initialHomework) : topicOptions;
+	$: initialHomework =
+		practicingValue && homeworkOptions[Number(practicingValue) - 1]
+			? homeworkOptions[Number(practicingValue) - 1]
+			: homeworkOptions[0];
+	$: initialTopics = getTopicsForHomework(initialHomework);
 
-	let selectedHomeworks = new Set<string>(homeworkOptions);
+	let selectedHomework = initialHomework;
 	let selectedTopics = new Set<string>(topicOptions);
 	let started = false;
 	let lastPracticing: string | null = null;
 
 	$: if (practicingValue !== lastPracticing) {
 		lastPracticing = practicingValue;
-		selectedHomeworks = initialHomework ? new Set([initialHomework]) : new Set(homeworkOptions);
-		selectedTopics = initialHomework ? new Set(initialTopics) : new Set(topicOptions);
+		selectedHomework = initialHomework;
+		selectedTopics = new Set(initialTopics);
 		started = false;
-	}
-
-	function toggleSelection(setterTarget: Set<string>, value: string) {
-		if (setterTarget.has(value)) {
-			setterTarget.delete(value);
-		} else {
-			setterTarget.add(value);
-		}
-
-		if (setterTarget === selectedHomeworks) {
-			selectedHomeworks = new Set(setterTarget);
-		} else {
-			selectedTopics = new Set(setterTarget);
-		}
 	}
 
 	function resetFilters() {
 		started = false;
-		selectedHomeworks = initialHomework ? new Set([initialHomework]) : new Set(homeworkOptions);
-		selectedTopics = initialHomework ? new Set(initialTopics) : new Set(topicOptions);
-	}
-
-	function selectAllFilters() {
-		selectedHomeworks = new Set(homeworkOptions);
-		selectedTopics = new Set(topicOptions);
+		selectedHomework = initialHomework;
+		selectedTopics = new Set(initialTopics);
 	}
 
 	function startSelection() {
 		started = true;
-	}
-
-	function getHomeworkNumber(homework: string) {
-		return homework.replace('Homework ', '');
-	}
-
-	function formatTopicList(topics: string[]) {
-		if (topics.length === 0) {
-			return '';
-		}
-
-		if (topics.length === 1) {
-			return topics[0];
-		}
-
-		if (topics.length === 2) {
-			return `${topics[0]} and ${topics[1]}`;
-		}
-
-		return `${topics.slice(0, -1).join(', ')}, and ${topics.at(-1)}`;
 	}
 
 	function getTopicsForHomework(homework: string) {
@@ -132,16 +99,39 @@
 		);
 	}
 
-	function getTopicsForSelectedHomeworks(homeworks: Set<string>) {
-		return topicOptions.filter((topic) =>
-			Array.from(homeworks).some((homework) =>
-				questions.some((question) => question.homework === homework && question.topics.includes(topic))
-			)
+	function getSelectedHomeworkIndex(homework: string) {
+		return Math.max(
+			0,
+			homeworkOptions.findIndex((option) => option === homework)
 		);
 	}
 
+	function setSelectedHomework(homework: string) {
+		selectedHomework = homework;
+		selectedTopics = new Set(getTopicsForHomework(homework));
+		started = false;
+	}
+
+	function goToPreviousHomework() {
+		const nextIndex = getSelectedHomeworkIndex(selectedHomework) - 1;
+		if (nextIndex >= 0) {
+			setSelectedHomework(homeworkOptions[nextIndex]);
+		}
+	}
+
+	function goToNextHomework() {
+		const nextIndex = getSelectedHomeworkIndex(selectedHomework) + 1;
+		if (nextIndex < homeworkOptions.length) {
+			setSelectedHomework(homeworkOptions[nextIndex]);
+		}
+	}
+
+	function handleHomeworkChange(event: Event) {
+		setSelectedHomework((event.currentTarget as HTMLSelectElement).value);
+	}
+
 	$: filteredQuestions = questions.filter((question) => {
-		const matchesHomework = selectedHomeworks.has(question.homework);
+		const matchesHomework = question.homework === selectedHomework;
 		const matchesTopic =
 			selectedTopics.size === 0 || question.topics.some((topic) => selectedTopics.has(topic));
 
@@ -195,44 +185,43 @@
 	<div class="flex-1 overflow-y-auto px-5 py-4" style:scrollbar-gutter="stable">
 		<div class="space-y-6">
 			<section>
-				<div class="space-y-3 {started ? 'text-gray-400 dark:text-gray-500' : 'text-gray-900 dark:text-gray-100'}">
-					<h4 class="text-base font-semibold">Select Homework Practice Questions</h4>
-					<div class="overflow-x-auto">
-						<table class="min-w-full text-left text-sm">
-							{#each homeworkOptions as homework}
-								<tr class="align-top">
-									<td class="w-7 py-1.5 pr-3 align-middle">
-										<input
-											type="checkbox"
-											checked={selectedHomeworks.has(homework)}
-											on:change={() => {
-												toggleSelection(selectedHomeworks, homework);
-												selectedTopics = new Set(getTopicsForSelectedHomeworks(selectedHomeworks));
-											}}
-											disabled={started}
-											class="h-3 w-3 rounded-sm border-gray-300 text-gray-700 focus:ring-gray-500 disabled:cursor-default dark:border-gray-600 dark:bg-gray-900 dark:text-gray-300 dark:focus:ring-gray-400 {started ? 'accent-gray-700 dark:accent-gray-300' : ''}"
-										/>
-									</td>
-									<td class="py-1.5 align-middle">
-										<button
-											type="button"
-											class="text-left text-sm disabled:cursor-default"
-											on:click={() => {
-												toggleSelection(selectedHomeworks, homework);
-												selectedTopics = new Set(getTopicsForSelectedHomeworks(selectedHomeworks));
-											}}
-											disabled={started}
-										>
-											<span class="font-semibold {started ? 'text-gray-500 dark:text-gray-400' : 'text-gray-900 dark:text-gray-100'}">Homework {getHomeworkNumber(homework)}</span>
-											<span class="mx-2 text-gray-300 dark:text-gray-600">|</span>
-											<span>{formatTopicList(getTopicsForHomework(homework))}</span>
-										</button>
-									</td>
-								</tr>
-							{/each}
-						</table>
+				<!-- {started ? 'text-gray-400 dark:text-gray-500' : 'text-gray-900 dark:text-gray-100'} -->
+				<div class="space-y-3 text-gray-900 dark:text-gray-100">
+					<div class="flex items-center justify-between gap-3 text-sm">
+						<div class="relative min-w-0 flex-1">
+							<select
+								bind:value={selectedHomework}
+								on:change={handleHomeworkChange}
+								disabled={started}
+								class="block w-full truncate appearance-none bg-transparent pr-5 text-sm text-gray-700 outline-hidden disabled:cursor-default dark:text-gray-300"
+								title={selectedHomework}
+								aria-label="Select homework practice question set"
+							>
+								{#each homeworkOptions as homework}
+									<option value={homework}>{homework}</option>
+								{/each}
+							</select>
+						</div>
+						<div class="ml-auto flex shrink-0 items-center gap-2">
+							<button
+								type="button"
+								class="text-sm font-medium text-gray-900 transition hover:text-gray-700 disabled:text-gray-400 dark:text-gray-100 dark:hover:text-gray-300 dark:disabled:text-gray-500"
+								on:click={goToPreviousHomework}
+								disabled={started || getSelectedHomeworkIndex(selectedHomework) === 0}
+							>
+								Prev
+							</button>
+							<button
+								type="button"
+								class="text-sm font-medium text-gray-900 transition hover:text-gray-700 disabled:text-gray-400 dark:text-gray-100 dark:hover:text-gray-300 dark:disabled:text-gray-500"
+								on:click={goToNextHomework}
+								disabled={started || getSelectedHomeworkIndex(selectedHomework) === homeworkOptions.length - 1}
+							>
+								Next
+							</button>
+						</div>
 					</div>
-					<div class="flex items-center justify-between gap-3 pt-1 text-xs">
+					<!-- <div class="flex items-center justify-between gap-3 pt-1 text-xs">
 						<div class="flex items-center gap-3">
 							<button
 								type="button"
@@ -240,13 +229,6 @@
 								on:click={resetFilters}
 							>
 								Reset
-							</button>
-							<button
-								type="button"
-								class="font-medium text-gray-400 transition hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300"
-								on:click={selectAllFilters}
-							>
-								Select All
 							</button>
 						</div>
 						<button
@@ -258,13 +240,11 @@
 						>
 							{started ? 'In Progress' : 'Start'}
 						</button>
-					</div>
+					</div> -->
 				</div>
 			</section>
-
-			<div class="border-t border-gray-200 dark:border-gray-700"></div>
-
-			<div class="flex items-center text-base font-semibold {started ? 'text-gray-900 dark:text-gray-100' : 'text-gray-400 dark:text-gray-500'}">
+			<!-- {started ? 'text-gray-900 dark:text-gray-100' : 'text-gray-400 dark:text-gray-500'} -->
+			<div class="flex items-center text-base font-semibold text-gray-900 dark:text-gray-100">
 				Questions
 				{#if started}
 					<div class="mx-2.5 h-5 w-px bg-gray-200 dark:bg-gray-700"></div>
@@ -272,7 +252,8 @@
 				{/if}
 			</div>
 			<section>
-				<div class="space-y-3 {!started ? 'text-gray-400 dark:text-gray-500' : 'text-gray-900 dark:text-gray-100'}">
+				<!-- {!started ? 'text-gray-400 dark:text-gray-500' : 'text-gray-900 dark:text-gray-100'} -->
+				<div class="space-y-3 text-gray-900 dark:text-gray-100">
 					{#each filteredQuestions as question}
 						<article class="space-y-1">
 							<p class="text-sm leading-6 mt-6 mb-1">{question.question}</p>

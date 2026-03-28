@@ -3,9 +3,10 @@ import { browser, dev } from '$app/environment';
 
 export const APP_NAME = 'Pilot GenAI';
 export const TESTING_AI_TUTOR = true;
-export const AI_TUTOR_FRONTEND_TESTING_MODE = true;
+export const AI_TUTOR_FRONTEND_TESTING_MODE = false;
 export const TEMP_HIDE = true;
 export const usePlaceHolder = true;
+export const AI_TUTOR_API_BASE_URL = 'http://localhost:8000';
 export const AI_TUTOR_FRONTEND_TESTING_ERROR_TYPES = [
 	{ type: 'Conceptual', color: '#1D4ED8', description: 'Student misunderstands the underlying concept.' },
 	{ type: 'Procedural', color: '#0F766E', description: 'Student knows the concept but applies the wrong process.' },

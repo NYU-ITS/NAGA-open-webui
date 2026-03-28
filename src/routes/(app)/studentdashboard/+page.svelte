@@ -1,11 +1,50 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
-	import { TEMP_HIDE } from '$lib/constants';
+	import { toast } from 'svelte-sonner';
+	import { TEMP_HIDE, AI_TUTOR_FRONTEND_TESTING_MODE } from '$lib/constants';
+	import { user } from '$lib/stores';
+	import { fetchAITutorJson } from '$lib/apis/aiTutor';
+	import { getGroupById } from '$lib/apis/groups';
 	import { showAITutorTestToast } from '$lib/utils/aiTutorTesting';
 
 	const testToast = showAITutorTestToast;
+	const useFrontendTestingData = AI_TUTOR_FRONTEND_TESTING_MODE;
+
+	type HomeworkSummaryRow = {
+		homework: string;
+		homeworkId?: string;
+		masteredTopics: string[];
+		needMorePractice: string[];
+		totalCount: number | null;
+		solved: number | null;
+		attempted: number | null;
+		errors: number | null;
+		notStarted: boolean;
+	};
+
+	type PracticeAssignmentRow = {
+		id: string;
+		index: number;
+		homeworkId: string;
+		homeworkLabel: string;
+		topic: string;
+		status: string;
+		practiceProblemId?: string;
+	};
+
+	type ConceptRow = {
+		name: string;
+		testedIn: string[];
+		practicedDate: string | null;
+		homeworkStatuses: Record<string, string>;
+	};
+
+	type TopicPerformance = {
+		topic_name: string;
+		status: string;
+	};
 
 	onMount(() => {
 		testToast('loading studentdashboard - Summary');
@@ -18,7 +57,7 @@
 	// - mastered topics
 	// - needs-practice topics
 	// - total / solved / attempted / error counts
-	const homeworkData = [
+	const placeholderHomeworkData: HomeworkSummaryRow[] = [
 		{
 			homework: 'Homework 1',
 			masteredTopics: ['Linear Algebra', 'Differentiation'],
@@ -71,26 +110,35 @@
 		}
 	];
 
-	const practiceAssignments = [
+	let homeworkData: HomeworkSummaryRow[] = placeholderHomeworkData;
+
+	const placeholderPracticeAssignments: PracticeAssignmentRow[] = [
 		{
 			id: 'practice-1',
 			index: 1,
+			homeworkId: 'Homework 1',
+			homeworkLabel: 'Homework1-MATH-Code-Section-Semester',
 			topic: 'Integration, Limit Definition',
 			status: 'Ready'
 		},
 		{
 			id: 'practice-2',
 			index: 2,
+			homeworkId: 'Homework 2',
+			homeworkLabel: 'Homework2-MATH-Code-Section-Semester',
 			topic: 'Factoring, Complex Numbers',
 			status: 'Not Ready'
 		},
 		{
 			id: 'practice-3',
 			index: 3,
+			homeworkId: 'Homework 3',
+			homeworkLabel: 'Homework3-MATH-Code-Section-Semester',
 			topic: 'Trigonometric Identities, Inverse Functions',
 			status: 'Ready'
 		}
 	];
+	let practiceAssignments: PracticeAssignmentRow[] = placeholderPracticeAssignments;
 
 	function goToConcepts(topic: string) {
 		selectedConcepts.add(topic);
@@ -122,8 +170,12 @@
 		}, 1800);
 	}
 
-	async function startPracticeAssignment(item) {
+	async function startPracticeAssignment(item: PracticeAssignmentRow) {
 		testToast(`Start practice is triggered | page=studentdashboard - Summary | assignment=${item.id} | status=${item.status}`);
+		if (item.status !== 'Ready') {
+			toast.info('This practice set is not assigned to the current student yet.');
+			return;
+		}
 		// TODO(student-dashboard-backend): Replace this placeholder entry with the real
 		// student assigned-practice / follow-up question workflow once backend support exists.
 		console.log('[PracticeAssignment] navigating to chat with right-side questions trigger', {
@@ -184,7 +236,8 @@
 
 	let selectedConcepts: Set<string> = new Set();
 	let hoveredLegendStatus: string | null = null;
-	const followUpQuestions = [
+	let selectedGroupId = '';
+	let followUpQuestions = [
 		{ homework: 'Homework 1', status: 'Not Ready' },
 		{ homework: 'Homework 2', status: 'Not Ready' },
 		{ homework: 'Homework 3', status: 'Ready' },
@@ -194,7 +247,7 @@
 		{ homework: 'Homework 7', status: 'Not Ready' },
 		{ homework: 'Homework 8', status: 'Not Ready' }
 	];
-	const conceptsData = [
+	const placeholderConceptsData: ConceptRow[] = [
 		{
 			name: 'Linear Algebra',
 			testedIn: ['Homework 1', 'Homework 2', 'Homework 3', 'Homework 4'],
@@ -288,6 +341,9 @@
 			homeworkStatuses: { 'Homework 5': 'Unmastered' }
 		}
 	];
+	let conceptsData: ConceptRow[] = placeholderConceptsData;
+
+	$: selectedGroupId = $page.url.searchParams.get('group_id') || '';
 	$: filteredConcepts =
 		selectedHomework === 'All'
 			? conceptsData
@@ -366,6 +422,247 @@
 	}
 
 	$: readyHomeworkCount = followUpQuestions.filter((item) => item.status === 'Ready').length;
+
+	function formatHomeworkLabel(modelId: string | null | undefined, fallbackId: string) {
+		return modelId || fallbackId;
+	}
+
+	function formatPracticeTopicList(items: any[] = []) {
+		const topics = Array.from(
+			new Set(
+				items
+					.flatMap((item) => (Array.isArray(item?.topics) ? item.topics : []))
+					.map((topic) => String(topic).trim())
+					.filter(Boolean)
+			)
+		);
+
+		return topics.join(', ');
+	}
+
+	function summarizeHomeworkStatus(hasMastered: boolean, hasNeedsPractice: boolean) {
+		if (hasMastered && !hasNeedsPractice) return 'Mastered';
+		return 'Practice Available';
+	}
+
+	async function loadStudentDashboardData() {
+		if (useFrontendTestingData) {
+			homeworkData = placeholderHomeworkData;
+			practiceAssignments = placeholderPracticeAssignments;
+			conceptsData = placeholderConceptsData;
+			followUpQuestions = placeholderPracticeAssignments.map((item) => ({
+				homework: item.homeworkLabel,
+				status: item.status
+			}));
+			return;
+		}
+
+		if (!selectedGroupId || !$user || !localStorage.token) {
+			homeworkData = [];
+			practiceAssignments = [];
+			conceptsData = [];
+			followUpQuestions = [];
+			return;
+		}
+
+		testToast(`Student dashboard sync started | group=${selectedGroupId} | student=${$user.id}`);
+
+		try {
+			const [groupDetail, homeworkRows, practiceRows] = await Promise.all([
+				getGroupById(localStorage.token, selectedGroupId),
+				fetchAITutorJson<any[]>('/homework/', {
+					token: localStorage.token,
+					query: { group_id: selectedGroupId }
+				}),
+				fetchAITutorJson<any[]>('/practice', {
+					token: localStorage.token,
+					query: { group_id: selectedGroupId }
+				})
+			]);
+
+			const memberIds = new Set<string>(Array.isArray(groupDetail?.user_ids) ? groupDetail.user_ids : []);
+			if (!memberIds.has($user.id)) {
+				homeworkData = [];
+				practiceAssignments = [];
+				conceptsData = [];
+				followUpQuestions = [];
+				toast.error('Current user is not a member of the selected group.');
+				return;
+			}
+
+			const assignments = await fetchAITutorJson<any[]>('/assignment/', {
+				token: localStorage.token,
+				query: { student_id: $user.id }
+			});
+
+			const analysesByHomeworkId = new Map<string, any | null>();
+			await Promise.all(
+				homeworkRows.map(async (homework) => {
+					const analyses = await fetchAITutorJson<any[]>('/analysis/', {
+						token: localStorage.token,
+						query: { homework_id: homework.id }
+					});
+					const studentAnalysis =
+						analyses.find((analysis) => analysis.student_id === $user.id) ??
+						analyses.find((analysis) => analysis.student_email === $user.email) ??
+						null;
+					analysesByHomeworkId.set(homework.id, studentAnalysis);
+				})
+			);
+
+			const homeworkLabelById = new Map<string, string>();
+			for (const homework of homeworkRows) {
+				homeworkLabelById.set(homework.id, formatHomeworkLabel(homework.model_id, homework.id));
+			}
+
+			homeworkData = homeworkRows.map((homework) => {
+				const label = homeworkLabelById.get(homework.id) ?? homework.id;
+				const analysis = analysesByHomeworkId.get(homework.id);
+				const masteredTopics =
+					(analysis?.topic_performances as TopicPerformance[] | undefined)
+						?.filter((topic: TopicPerformance) => topic.status === 'mastered')
+						.map((topic: TopicPerformance) => topic.topic_name) ?? [];
+				const needMorePractice =
+					(analysis?.topic_performances as TopicPerformance[] | undefined)
+						?.filter((topic: TopicPerformance) => topic.status === 'needs_practice')
+						.map((topic: TopicPerformance) => topic.topic_name) ?? [];
+
+				return {
+					homework: label,
+					homeworkId: homework.id,
+					masteredTopics,
+					needMorePractice,
+					totalCount: analysis?.total_question ?? null,
+					solved: analysis?.total_solved ?? null,
+					attempted: analysis?.total_attempted ?? null,
+					errors: analysis?.total_errors ?? null,
+					notStarted: !analysis
+				};
+			});
+
+			const latestPracticeByHomeworkId = new Map<string, any>();
+			for (const practice of practiceRows) {
+				const previous = latestPracticeByHomeworkId.get(practice.homework_id);
+				if (!previous || Number(practice.version_number ?? 0) >= Number(previous.version_number ?? 0)) {
+					latestPracticeByHomeworkId.set(practice.homework_id, practice);
+				}
+			}
+
+			practiceAssignments = homeworkRows.map((homework, index) => {
+				const assignment = assignments.find((item) => item.homework_id === homework.id);
+				const practice = latestPracticeByHomeworkId.get(homework.id);
+				const topic = formatPracticeTopicList(assignment?.assigned_items ?? practice?.problem_items ?? []);
+				const status =
+					assignment && (assignment.assigned_count ?? 0) > 0
+						? 'Ready'
+						: practice?.status === 'approved'
+							? 'Awaiting Assignment'
+							: 'Not Ready';
+
+				return {
+					id: assignment?.id ?? practice?.id ?? `practice-${homework.id}`,
+					index: index + 1,
+					homeworkId: homework.id,
+					homeworkLabel: homeworkLabelById.get(homework.id) ?? homework.id,
+					topic: topic || 'General Practice',
+					status,
+					practiceProblemId: assignment?.practice_problem_id ?? practice?.id
+				};
+			});
+
+			followUpQuestions = practiceAssignments.map((item) => ({
+				homework: item.homeworkLabel,
+				status: item.status
+			}));
+
+			const conceptMap = new Map<string, ConceptRow>();
+			for (const row of homeworkData) {
+				const trackedTopics = [
+					...row.masteredTopics.map((topic) => ({ topic, mastered: true })),
+					...row.needMorePractice.map((topic) => ({ topic, mastered: false }))
+				];
+
+				for (const entry of trackedTopics) {
+					if (!conceptMap.has(entry.topic)) {
+						conceptMap.set(entry.topic, {
+							name: entry.topic,
+							testedIn: [],
+							practicedDate: null,
+							homeworkStatuses: {}
+						});
+					}
+
+					const concept = conceptMap.get(entry.topic)!;
+					if (!concept.testedIn.includes(row.homework)) {
+						concept.testedIn.push(row.homework);
+					}
+					concept.homeworkStatuses[row.homework] = entry.mastered ? 'Mastered' : 'Practice Available';
+				}
+			}
+
+			for (const item of practiceAssignments) {
+				if (item.status !== 'Ready') continue;
+				for (const topic of getPracticeTopics(item.topic)) {
+					if (!conceptMap.has(topic)) continue;
+					const concept = conceptMap.get(topic)!;
+					concept.practicedDate = new Date().toLocaleDateString(undefined, {
+						month: 'short',
+						day: 'numeric'
+					});
+				}
+			}
+
+			conceptsData = Array.from(conceptMap.values())
+				.map((concept) => {
+					const statuses = Object.values(concept.homeworkStatuses);
+					return {
+						...concept,
+						testedIn: [...concept.testedIn].sort(),
+						practicedDate: concept.practicedDate,
+						homeworkStatuses: Object.fromEntries(
+							Object.entries(concept.homeworkStatuses).map(([homework, status]) => [
+								homework,
+								summarizeHomeworkStatus(status === 'Mastered', status !== 'Mastered')
+							])
+						)
+					};
+				})
+				.sort((a, b) => a.name.localeCompare(b.name));
+
+			testToast(
+				`Student dashboard sync completed | group=${selectedGroupId} | homework=${homeworkData.length} | assignments=${practiceAssignments.length}`
+			);
+			toast.success(
+				`Student dashboard synced ${homeworkData.length} homework record${homeworkData.length === 1 ? '' : 's'} for ${groupDetail?.name ?? 'the selected group'}.`
+			);
+		} catch (error) {
+			console.error('Student dashboard sync failed:', error);
+			toast.error(error instanceof Error ? error.message : 'Failed to sync student dashboard data.');
+			homeworkData = [];
+			practiceAssignments = [];
+			conceptsData = [];
+			followUpQuestions = [];
+		}
+	}
+
+	onDestroy(() => {
+		if (highlightTimeout) clearTimeout(highlightTimeout);
+	});
+
+	$: if (useFrontendTestingData) {
+		void loadStudentDashboardData();
+	}
+
+	$: if (!useFrontendTestingData && selectedGroupId && $user?.id) {
+		void loadStudentDashboardData();
+	}
+
+	$: if (!useFrontendTestingData && !selectedGroupId) {
+		homeworkData = [];
+		practiceAssignments = [];
+		conceptsData = [];
+		followUpQuestions = [];
+	}
 </script>
 
 <div class="flex flex-col space-y-6 py-4 gap-8">
@@ -397,7 +694,7 @@
 							on:click={() => startPracticeAssignment(item)}
 						>
 							<td class="px-4 py-3 font-medium text-gray-900 dark:text-gray-100"
-								>Homework Mastery {item.index}</td
+								>{item.homeworkLabel}</td
 							>
 							<td class="px-4 py-3">
 								<div class="flex flex-wrap gap-2">
@@ -490,7 +787,7 @@
 						class="border-t border-gray-100 bg-white transition hover:bg-gray-50 dark:border-gray-850 dark:bg-gray-900 dark:hover:bg-gray-800"
 					>
 						<td class="min-w-[140px] px-4 py-3 font-medium text-gray-900 dark:text-gray-100">
-							Homework {index + 1}
+							{hw.homework}
 						</td>
 						{#if hw.notStarted}
 							<td
