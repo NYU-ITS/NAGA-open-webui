@@ -42,9 +42,10 @@
 		name: string;
 		email: string;
 		homeworkId: string;
-		avgAccuracy: number;
+		avgAccuracy: number | null;
 		topicsToImprove: string;
 		performanceSummary: string;
+		hasAnalysis: boolean;
 	};
 
 	let initialized = false;
@@ -123,7 +124,12 @@
 	$: isFilterActive = selectedHomework !== 'All' || search.trim() !== '';
 
 	onMount(async () => {
-		testToast(`loading aitutordashboard - Student Analysis | group=${selectedGroupId || 'none'} | frontend_testing=${String(useFrontendTestingData)}`);
+		// Page: AI Tutor Dashboard > Student Analysis
+		// Purpose: load user context immediately, then wait for the layout to select the
+		// default group before issuing group-scoped homework/member requests.
+		testToast(
+			`loading aitutordashboard - Student Analysis | group=${selectedGroupId || 'pending'} | frontend_testing=${String(useFrontendTestingData)}`
+		);
 		initialized = true;
 		console.log('AI Tutor Dashboard - Student Analysis loaded');
 		if (useFrontendTestingData) {
@@ -136,11 +142,11 @@
 		await loadUserContext();
 	});
 
-	$: if (initialized) {
+	$: if (initialized && selectedGroupId) {
 		void loadSelectedGroupContext(selectedGroupId);
 	}
 
-	$: if (initialized) {
+	$: if (initialized && selectedGroupId) {
 		void loadHomeworks(selectedGroupId);
 	}
 
@@ -255,6 +261,26 @@
 		}
 	}
 
+	function buildGroupRosterRows(homeworkId: string) {
+		return selectedGroupUserIds.map((userId) => {
+			const matchedUser =
+				availableUsers.find((user) => user.id === userId) ||
+				availableUsers.find((user) => user.email === userId);
+
+			return {
+				id: `roster-${userId}-${homeworkId}`,
+				studentId: userId,
+				name: matchedUser?.name ?? matchedUser?.email?.split('@')[0] ?? userId,
+				email: matchedUser?.email ?? 'Email Unavailable',
+				homeworkId,
+				avgAccuracy: null,
+				topicsToImprove: 'Analysis Unavailable',
+				performanceSummary: 'Analysis Unavailable',
+				hasAnalysis: false
+			};
+		});
+	}
+
 	async function loadAnalyses(homeworkId: string | null) {
 		testToast(`Student Analysis fetch: analyses homework=${homeworkId || 'none'}`);
 		if (!initialized) {
@@ -282,9 +308,13 @@
 		loading = true;
 
 		try {
+			const rosterRows = buildGroupRosterRows(homeworkId);
+			const rosterByStudentId = new Map(rosterRows.map((row) => [row.studentId, row]));
+
 			// Page: AI Tutor Dashboard > Student Analysis
 			// Endpoint: GET /analysis/?homework_id={homework_id}
-			// Purpose: load analysis rows for one homework, then apply group-member filtering on the frontend.
+			// Purpose: load analysis rows for one homework, then merge them into the selected group's
+			// student roster so group members still appear even when analysis is unavailable.
 			const response = await fetch(
 				`${AI_TUTOR_API_BASE}/analysis/?homework_id=${encodeURIComponent(homeworkId)}`,
 				{
@@ -302,40 +332,49 @@
 			const data = await response.json();
 			// Backend /analysis rows do not currently include group_id, so group scoping is enforced
 			// here by matching the returned student_id against the selected Open WebUI group's user_ids.
-			studentData = Array.isArray(data)
-				? data.map((row) => {
-						const matchedUser =
-							availableUsers.find((user) => user.id === row?.student_id) ||
-							availableUsers.find((user) => user.email === row?.student_email);
-						const totalQuestion = Number(row?.total_question ?? 0);
-						const totalSolved = Number(row?.total_solved ?? 0);
-						const avgAccuracy = totalQuestion > 0 ? (totalSolved / totalQuestion) * 100 : 0;
+			const analysisRows = Array.isArray(data)
+				? data
+						.map((row) => {
+							const matchedUser =
+								availableUsers.find((user) => user.id === row?.student_id) ||
+								availableUsers.find((user) => user.email === row?.student_email);
+							const totalQuestion = Number(row?.total_question ?? 0);
+							const totalSolved = Number(row?.total_solved ?? 0);
+							const avgAccuracy = totalQuestion > 0 ? (totalSolved / totalQuestion) * 100 : 0;
 
-						const weakTopics = Array.isArray(row?.topic_performances)
-							? row.topic_performances
-									.filter((tp) => tp?.status === 'needs_practice')
-									.map((tp) => tp?.topic_name)
-									.filter(Boolean)
-							: [];
+							const weakTopics = Array.isArray(row?.topic_performances)
+								? row.topic_performances
+										.filter((tp) => tp?.status === 'needs_practice')
+										.map((tp) => tp?.topic_name)
+										.filter(Boolean)
+								: [];
 
-						return {
-							id: row?.id ?? `${row?.student_id ?? row?.student_email ?? 'unknown'}-${homeworkId}`,
-							studentId: row?.student_id ?? matchedUser?.id ?? 'N/A',
-							name:
-								matchedUser?.name ??
-								row?.student_email?.split('@')[0] ??
-								row?.student_id ??
-								'Unknown Student',
-							email: row?.student_email ?? 'unknown@email',
-							homeworkId: row?.homework_id ?? homeworkId,
-							avgAccuracy: Number(avgAccuracy.toFixed(1)),
-							topicsToImprove: weakTopics.length ? weakTopics.join(', ') : 'None',
-							performanceSummary: `Attempted ${row?.total_attempted ?? 0}/${totalQuestion}, solved ${totalSolved}, errors ${row?.total_errors ?? 0}.`
-						};
-					}).filter((row) => {
-						return selectedGroupUserIds.length === 0 || selectedGroupUserIds.includes(row.studentId);
-					})
+							return {
+								id: row?.id ?? `${row?.student_id ?? row?.student_email ?? 'unknown'}-${homeworkId}`,
+								studentId: row?.student_id ?? matchedUser?.id ?? 'N/A',
+								name:
+									matchedUser?.name ??
+									row?.student_email?.split('@')[0] ??
+									row?.student_id ??
+									'Unknown Student',
+								email: row?.student_email ?? matchedUser?.email ?? 'Email Unavailable',
+								homeworkId: row?.homework_id ?? homeworkId,
+								avgAccuracy: Number(avgAccuracy.toFixed(1)),
+								topicsToImprove: weakTopics.length ? weakTopics.join(', ') : 'None',
+								performanceSummary: `Attempted ${row?.total_attempted ?? 0}/${totalQuestion}, solved ${totalSolved}, errors ${row?.total_errors ?? 0}.`,
+								hasAnalysis: true
+							};
+						})
+						.filter((row) => {
+							return selectedGroupUserIds.length === 0 || selectedGroupUserIds.includes(row.studentId);
+						})
 				: [];
+
+			for (const row of analysisRows) {
+				rosterByStudentId.set(row.studentId, row);
+			}
+
+			studentData = Array.from(rosterByStudentId.values());
 
 			testToast('Student Analysis loaded /analysis data');
 		} catch (error) {
@@ -404,16 +443,16 @@
 	$: selectedHomeworkMeta =
 		selectedHomework !== 'All' ? homeworkMetaById[selectedHomework] ?? null : null;
 	$: studentAnalysisEmptyMessage = !selectedGroupId && !useFrontendTestingData
-		? 'Select a group to view student analysis.'
+		? 'Loading group selection...'
 		: homeworkOptions.length === 0 && !useFrontendTestingData
 			? 'No homework uploaded for this group yet.'
-			: selectedHomework === 'All' && !useFrontendTestingData
-				? 'Choose a homework to load student analysis.'
+		: selectedHomework === 'All' && !useFrontendTestingData
+			? 'Choose a homework to view the student roster and analysis status.'
 				: selectedHomeworkMeta && !selectedHomeworkMeta.question_uploaded && !useFrontendTestingData
 					? 'Upload the homework PDF before student analysis can run.'
 					: selectedHomeworkMeta && !selectedHomeworkMeta.topic_mapped && !useFrontendTestingData
 						? 'Homework processing is still preparing topics.'
-						: 'No student analysis data is available for the selected homework. Run analysis first.';
+						: 'No group members are available for the selected homework.';
 </script>
 
 <div class="flex flex-col space-y-6 py-4">
@@ -529,13 +568,20 @@
 								<td class="px-3 py-1 text-gray-700 dark:text-gray-300">
 									<div class={homeworkModelNameCellClass}>{getHomeworkModelName(student.homeworkId)}</div>
 								</td>
-								<td class="px-3 py-1 text-gray-700 dark:text-gray-300">{student.avgAccuracy.toFixed(1)}%</td>
+								<td class="px-3 py-1 text-gray-700 dark:text-gray-300">
+									{#if student.avgAccuracy == null}
+										Analysis Unavailable
+									{:else}
+										{student.avgAccuracy.toFixed(1)}%
+									{/if}
+								</td>
 								<td class="max-w-xs whitespace-normal px-3 py-1 text-gray-700 dark:text-gray-300">{student.topicsToImprove}</td>
 								<td class="px-3 py-1 text-gray-700 dark:text-gray-300">
 									<!-- in_button_style -->
 									<button
 										type="button"
-										class="rounded-lg p-1 text-xs font-medium text-black transition hover:bg-gray-100 dark:text-white dark:hover:bg-gray-850"
+										class="rounded-lg p-1 text-xs font-medium text-black transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent dark:text-white dark:hover:bg-gray-850 dark:disabled:hover:bg-transparent"
+										disabled={!student.hasAnalysis}
 										on:click={() => downloadStudentReport(student)}
 									>
 										Download Report

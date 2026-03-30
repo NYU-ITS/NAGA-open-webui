@@ -53,12 +53,33 @@
 		answerFileName?: string | null;
 	};
 
+	type HomeworkFileRow = HomeworkRow & {
+		displayModelName: string;
+		isPlaceholder: boolean;
+	};
+
+	type PersistedInstructorJob = {
+		jobId: string;
+		type: 'question-upload' | 'answer-upload' | 'analysis';
+		groupId: string;
+		modelId: string;
+		homeworkId: string | null;
+	};
+
 	let homeworkRows: HomeworkRow[] = [];
-	let availableModels: { id: string; name: string }[] = [];
+	let availableModels: {
+		id: string;
+		name: string;
+		preset: boolean;
+		base_model_id: string | null;
+	}[] = [];
 	let convCountByModelId: Record<string, number> = {};
 	let uploadingMap: Record<string, boolean> = {};
 	let exportingConversationMap: Record<string, boolean> = {};
 	let runningAnalysisByHomeworkId: Record<string, boolean> = {};
+	let homeworkJobStepByModelId: Record<string, string> = {};
+	const ACTIVE_JOB_STORAGE_KEY = 'ai_tutor_instructor_setup_jobs';
+	const activeJobIds = new Set<string>();
 	type DraftRow = { uid: number; modelId: string };
 	let draftRows: DraftRow[] = [];
 	let _nextDraftUid = 0;
@@ -67,6 +88,7 @@
 	const errorTypeColors = dashboardPalette.slice(0, 4);
 	let showEditErrorTypeModal = false;
 	let showResetDefaultsModal = false;
+	let resetDefaultsModalMode: 'default' | 'delete' = 'default';
 	let showPromptSection = false;
 	let editingErrorTypeIndex: number | null = null;
 	let editingErrorTypeIsNew = false;
@@ -291,6 +313,138 @@
 	let homeworkStats: HomeworkStat[] = useFrontendTestingData ? placeholderStats : [];
 	let selectedGroupId = '';
 
+	function buildHomeworkFileRows(
+		models: { id: string; name: string; preset: boolean; base_model_id: string | null }[],
+		rows: HomeworkRow[]
+	): HomeworkFileRow[] {
+		// Business rule for AI Tutor:
+		// only workspace models should appear in Homework & Answer Files.
+		// This relies on the current Open WebUI hierarchy where a base model does
+		// not have a more-base parent, and derived workspace models are returned
+		// as presets with a non-null base_model_id in their stored model info.
+		const workspaceModels = models.filter(
+			(model) => model.preset === true && model.base_model_id != null
+		);
+
+		const rowsByModelId = new Map<string, HomeworkRow>();
+		const rowsByModelName = new Map<string, HomeworkRow>();
+		const usedRowIds = new Set<string>();
+
+		for (const row of rows) {
+			if (row.modelId && !rowsByModelId.has(row.modelId)) {
+				rowsByModelId.set(row.modelId, row);
+			}
+		}
+
+		for (const model of models) {
+			if (!rowsByModelName.has(model.name)) {
+				const row = rows.find((item) => item.modelId === model.name);
+				if (row) rowsByModelName.set(model.name, row);
+			}
+		}
+
+		const mergedRows: HomeworkFileRow[] = workspaceModels
+			.slice()
+			.sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id))
+			.map((model) => {
+				const matchingRow = rowsByModelId.get(model.id) ?? rowsByModelName.get(model.name);
+				if (matchingRow) {
+					usedRowIds.add(matchingRow.id);
+					return {
+						...matchingRow,
+						displayModelName: model.name ?? model.id,
+						isPlaceholder: false
+					};
+				}
+
+				// Page: AI Tutor Dashboard > Instructor Setup
+				// Purpose: show every accessible workspace model even before AI Tutor
+				// creates a /homework row for the selected group + model_id pair.
+				return {
+					id: `model:${model.id}`,
+					modelId: model.id,
+					questionUploaded: false,
+					answerUploaded: false,
+					topicMapped: false,
+					answerSource: null,
+					questionFileName: null,
+					answerFileName: null,
+					displayModelName: model.name ?? model.id,
+					isPlaceholder: true
+				};
+			});
+
+		for (const row of rows) {
+			if (usedRowIds.has(row.id)) continue;
+			mergedRows.push({
+				...row,
+				displayModelName: row.modelId ?? row.id,
+				isPlaceholder: false
+			});
+		}
+
+		return mergedRows;
+	}
+
+	$: homeworkFileRows = buildHomeworkFileRows(availableModels, homeworkRows);
+
+	function readPersistedJobs(): PersistedInstructorJob[] {
+		if (typeof localStorage === 'undefined') return [];
+		try {
+			const raw = localStorage.getItem(ACTIVE_JOB_STORAGE_KEY);
+			if (!raw) return [];
+			const parsed = JSON.parse(raw);
+			return Array.isArray(parsed) ? parsed : [];
+		} catch {
+			return [];
+		}
+	}
+
+	function writePersistedJobs(jobs: PersistedInstructorJob[]) {
+		if (typeof localStorage === 'undefined') return;
+		localStorage.setItem(ACTIVE_JOB_STORAGE_KEY, JSON.stringify(jobs));
+	}
+
+	function upsertPersistedJob(job: PersistedInstructorJob) {
+		const jobs = readPersistedJobs().filter((item) => item.jobId !== job.jobId);
+		jobs.push(job);
+		writePersistedJobs(jobs);
+	}
+
+	function removePersistedJob(jobId: string) {
+		writePersistedJobs(readPersistedJobs().filter((item) => item.jobId !== jobId));
+	}
+
+	function setUploadIndicator(homeworkId: string | null, docType: 'question' | 'answer', active: boolean) {
+		if (!homeworkId) return;
+		uploadingMap = { ...uploadingMap, [`${homeworkId}-${docType}`]: active };
+	}
+
+	function setJobStep(modelId: string | null, step: string | null) {
+		if (!modelId) return;
+		const next = { ...homeworkJobStepByModelId };
+		if (step) {
+			next[modelId] = step;
+		} else {
+			delete next[modelId];
+		}
+		homeworkJobStepByModelId = next;
+	}
+
+	function markPersistedJobActive(job: PersistedInstructorJob, active: boolean) {
+		if (job.type === 'analysis' && job.homeworkId) {
+			runningAnalysisByHomeworkId = {
+				...runningAnalysisByHomeworkId,
+				[job.homeworkId]: active
+			};
+			return;
+		}
+
+		if (job.type === 'question-upload' || job.type === 'answer-upload') {
+			setUploadIndicator(job.homeworkId, job.type === 'question-upload' ? 'question' : 'answer', active);
+		}
+	}
+
 	// Table sort
 	let sortKey = 'homework';
 	let sortOrder: 'asc' | 'desc' = 'asc';
@@ -402,9 +556,13 @@
 
 	// ── Data fetching ─────────────────────────────────────────────────────────
 	onMount(async () => {
-		testToast(`loading aitutordashboard - Instructor Setup | group=${selectedGroupId || 'none'} | frontend_testing=${String(useFrontendTestingData)}`);
+		// Page: AI Tutor Dashboard > Instructor Setup
+		// Purpose: load non-group-scoped data first, then wait for the layout-selected
+		// group_id before issuing group-scoped setup requests.
+		testToast(
+			`loading aitutordashboard - Instructor Setup | group=${selectedGroupId || 'pending'} | frontend_testing=${String(useFrontendTestingData)}`
+		);
 		await loadModels();
-		await loadErrorTypes(selectedGroupId);
 		if (useFrontendTestingData) {
 			seedDummyDashboard(selectedGroupId);
 			await tick();
@@ -413,20 +571,24 @@
 		}
 	});
 
-	$: if (!useFrontendTestingData) {
+	$: if (!useFrontendTestingData && selectedGroupId) {
 		void loadHomeworkStats(selectedGroupId);
 	}
 
-	$: if (!useFrontendTestingData) {
+	$: if (!useFrontendTestingData && selectedGroupId) {
 		void loadConversationCounts(selectedGroupId);
 	}
 
-	$: if (!useFrontendTestingData) {
+	$: if (!useFrontendTestingData && selectedGroupId) {
 		void loadErrorTypes(selectedGroupId);
 	}
 
-	$: if (!useFrontendTestingData) {
+	$: if (!useFrontendTestingData && selectedGroupId) {
 		void loadPrompts(selectedGroupId);
+	}
+
+	$: if (!useFrontendTestingData && selectedGroupId) {
+		void resumePersistedJobs(selectedGroupId);
 	}
 
 	async function loadHomeworkStats(groupId: string) {
@@ -576,7 +738,11 @@
 	async function loadModels() {
 		testToast('Instructor Setup fetch: models');
 		if (useFrontendTestingData) {
-			availableModels = frontendTestingModels;
+			availableModels = frontendTestingModels.map((model) => ({
+				...model,
+				preset: true,
+				base_model_id: 'frontend-testing-base-model'
+			}));
 			return;
 		}
 		try {
@@ -586,7 +752,12 @@
 			if (!res.ok) throw new Error('Models fetch failed');
 			const data = await res.json();
 			availableModels = Array.isArray(data?.data)
-				? data.data.map((m: any) => ({ id: m.id, name: m.name ?? m.id }))
+				? data.data.map((m: any) => ({
+						id: m.id,
+						name: m.name ?? m.id,
+						preset: m.preset === true,
+						base_model_id: m.info?.base_model_id ?? m.base_model_id ?? null
+					}))
 				: [];
 		} catch (e) {
 			availableModels = [];
@@ -621,8 +792,14 @@
 			const counts: Record<string, number> = {};
 			if (Array.isArray(data)) {
 				for (const chat of data) {
-					const modelId = chat?.meta?.model_name ?? chat?.meta?.model_id ?? '';
-					if (modelId) counts[modelId] = (counts[modelId] ?? 0) + 1;
+					const modelKeys = [
+						chat?.meta?.model_id,
+						chat?.meta?.model_name,
+						chat?.meta?.base_model_name
+					].filter((value) => typeof value === 'string' && value.length > 0);
+					for (const modelKey of new Set(modelKeys)) {
+						counts[modelKey] = (counts[modelKey] ?? 0) + 1;
+					}
 				}
 			}
 			convCountByModelId = counts;
@@ -736,7 +913,12 @@
 		return `Request failed: ${response.status}`;
 	}
 
-	async function pollPipelineJob(jobId: string, intervalMs: number, label: string) {
+	async function pollPipelineJob(
+		jobId: string,
+		intervalMs: number,
+		label: string,
+		onProgress?: (data: any) => void
+	) {
 		while (true) {
 			// Shared async job polling helper.
 			// Endpoint: GET /pipeline/status/{job_id}
@@ -747,12 +929,58 @@
 				throw new Error(await parseErrorDetail(res));
 			}
 			const data = await res.json();
+			onProgress?.(data);
 			testToast(`${label} check | job=${jobId} | status=${data?.status ?? 'unknown'} | step=${data?.step ?? 'unknown'}`);
 			if (data?.status === 'done') return data;
 			if (data?.status === 'failed') {
 				throw new Error(data?.error || `${label} failed.`);
 			}
 			await sleep(intervalMs);
+		}
+	}
+
+	async function monitorPersistedJob(job: PersistedInstructorJob) {
+		if (activeJobIds.has(job.jobId)) return;
+		activeJobIds.add(job.jobId);
+		markPersistedJobActive(job, true);
+		try {
+			await pollPipelineJob(
+				job.jobId,
+				job.type === 'analysis' ? 10000 : 3000,
+				job.type === 'analysis'
+					? 'analysis run'
+					: job.type === 'question-upload'
+						? 'question upload'
+						: 'answer upload',
+				(data) => {
+					// Keep a refresh-safe step message per model so the status column
+					// shows which backend step is currently running.
+					setJobStep(job.modelId, data?.step ? `Step: ${data.step}` : null);
+				}
+			);
+
+			if (job.type === 'analysis') {
+				toast.success('Analysis completed.');
+			} else {
+				toast.success(`${job.type === 'question-upload' ? 'Homework' : 'Answer'} upload completed.`);
+			}
+
+			if (selectedGroupId === job.groupId) {
+				await loadHomeworkStats(job.groupId);
+			}
+		} catch (error) {
+			toast.error(error instanceof Error ? error.message : 'Background job failed.');
+		} finally {
+			setJobStep(job.modelId, null);
+			markPersistedJobActive(job, false);
+			removePersistedJob(job.jobId);
+			activeJobIds.delete(job.jobId);
+		}
+	}
+
+	async function resumePersistedJobs(groupId: string) {
+		for (const job of readPersistedJobs().filter((item) => item.groupId === groupId)) {
+			void monitorPersistedJob(job);
 		}
 	}
 
@@ -980,6 +1208,27 @@
 		}
 	}
 
+	async function deleteAllErrorTypes() {
+		if (!selectedGroupId) return;
+		if (useFrontendTestingData) {
+			errorTypeDefs = [];
+			aiTutorFrontendTestingErrorTypes.set([]);
+			toast.success('Frontend testing error types deleted.');
+			return;
+		}
+		try {
+			await fetch(
+				`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(selectedGroupId)}`,
+				{ method: 'DELETE', headers: { Authorization: `Bearer ${localStorage.token}` } }
+			);
+			errorTypeDefs = [];
+			testToast('Instructor Setup deleted all custom error types');
+		} catch (e) {
+			testToast('Instructor Setup failed deleting custom error types');
+			console.error('Failed to delete all error types:', e);
+		}
+	}
+
 	function openEditErrorType(index: number) {
 		editingErrorTypeIndex = index;
 		editingErrorTypeIsNew = false;
@@ -1027,6 +1276,10 @@
 
 	async function confirmResetDefaults() {
 		showResetDefaultsModal = false;
+		if (resetDefaultsModalMode === 'delete') {
+			await deleteAllErrorTypes();
+			return;
+		}
 		await resetErrorTypesToDefault();
 	}
 
@@ -1132,12 +1385,18 @@
 			const data = await res.json();
 			const jobId = data?.job_id;
 			if (!jobId) throw new Error('Upload started but no job ID was returned.');
+			const persistedJob: PersistedInstructorJob = {
+				jobId,
+				type: docType === 'question' ? 'question-upload' : 'answer-upload',
+				groupId: selectedGroupId,
+				modelId,
+				homeworkId: hwId
+			};
+			upsertPersistedJob(persistedJob);
 			toast.success(`${docType === 'question' ? 'Homework' : 'Answer'} upload started.`);
-			await pollPipelineJob(jobId, 3000, `${docType} upload`);
-			toast.success(`${docType === 'question' ? 'Homework' : 'Answer'} upload completed.`);
+			await monitorPersistedJob(persistedJob);
 			if (hwId === null && draftUid !== undefined)
 				draftRows = draftRows.filter((d) => d.uid !== draftUid);
-			await loadHomeworkStats(selectedGroupId);
 		} catch (e) {
 			toast.error(e instanceof Error ? e.message : 'Upload failed.');
 			console.error('PDF upload failed:', e);
@@ -1217,13 +1476,57 @@
 		if (!row.topicMapped) {
 			return 'Preparing Topics';
 		}
-		if ((convCountByModelId[row.modelId ?? ''] ?? 0) === 0) {
+		if (getConversationCountForRow(row) === 0) {
 			return 'No Conversations Found';
 		}
 		if (row.questionUploaded) {
 			return 'Ready for Analysis';
 		}
 		return '';
+	}
+
+	function getHomeworkAnalysisStep(row: HomeworkRow) {
+		return homeworkJobStepByModelId[row.modelId ?? ''] ?? '';
+	}
+
+	function getHomeworkActionRequirements(row: HomeworkRow) {
+		const missing: string[] = [];
+		if (!row.questionUploaded) missing.push('Upload homework PDF');
+		if (!row.topicMapped) missing.push('Wait for topic mapping');
+		if (getConversationCountForRow(row) === 0) missing.push('Need student conversations');
+		return missing;
+	}
+
+	function getHomeworkActionHint(row: HomeworkRow) {
+		if (
+			uploadingMap[`${row.id}-question`] ||
+			uploadingMap[`${row.id}-answer`] ||
+			exportingConversationMap[row.id] ||
+			runningAnalysisByHomeworkId[row.id]
+		) {
+			return '';
+		}
+
+		const actionLabel = getHomeworkPrimaryActionLabel(row);
+		if (actionLabel) return '';
+
+		const missing = getHomeworkActionRequirements(row);
+		if (missing.length === 0) return '';
+		return missing.length === 1 ? missing[0] : `${missing[0]}...`;
+	}
+
+	function getConversationCountForRow(row: HomeworkRow) {
+		const keys = new Set<string>();
+		if (row.modelId) keys.add(row.modelId);
+
+		const matchedModel = availableModels.find((model) => model.id === row.modelId);
+		if (matchedModel?.name) keys.add(matchedModel.name);
+
+		let maxCount = 0;
+		for (const key of keys) {
+			maxCount = Math.max(maxCount, convCountByModelId[key] ?? 0);
+		}
+		return maxCount;
 	}
 
 	function getHomeworkPrimaryActionLabel(row: HomeworkRow) {
@@ -1378,15 +1681,21 @@
 				const data = await res.json();
 				const jobId = data?.job_id;
 				if (!jobId) throw new Error('Analysis started but no job ID was returned.');
+				const persistedJob: PersistedInstructorJob = {
+					jobId,
+					type: 'analysis',
+					groupId: selectedGroupId,
+					modelId: row?.modelId ?? targetHomeworkId,
+					homeworkId: targetHomeworkId
+				};
+				upsertPersistedJob(persistedJob);
 				testToast('Instructor Setup run analysis request submitted');
 				toast.success('Analysis started successfully.');
-				await pollPipelineJob(jobId, 10000, 'analysis run');
-				toast.success('Analysis completed.');
+				await monitorPersistedJob(persistedJob);
 				analysisHistory = [
 					{ contents, startedAt, completedAt: new Date().toLocaleTimeString(), failed: false },
 					...analysisHistory
 				];
-				await loadHomeworkStats(selectedGroupId);
 			} else {
 				toast.error(await parseErrorDetail(res));
 				analysisHistory = [
@@ -1412,75 +1721,7 @@
 
 <div class="flex flex-col space-y-6 py-4">
 	<div class="space-y-12">
-		<div class="space-y-3">
-			<button
-				type="button"
-				class="flex w-full items-start justify-between gap-3 text-left"
-				on:click={() => {
-					showPromptConfiguration = !showPromptConfiguration;
-				}}
-			>
-				<div>
-					<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">
-						Prompt Configuration
-					</h2>
-					<div class="text-xs text-gray-400 dark:text-gray-500">
-						These prompts control how AI Tutor converts homework, analyzes students, and generates
-						practice.
-					</div>
-				</div>
-				<span class="pt-1 text-gray-500 dark:text-gray-400">
-					{#if showPromptConfiguration}
-						<ChevronUp className="size-4" />
-					{:else}
-						<ChevronDown className="size-4" />
-					{/if}
-				</span>
-			</button>
 
-			{#if showPromptConfiguration}
-				<div
-					class="scrollbar-hidden relative max-w-full overflow-x-auto whitespace-nowrap rounded-sm pt-0.5"
-				>
-					<table
-						class="max-w-full w-full table-auto rounded-sm text-left text-sm text-gray-500 dark:text-gray-400"
-					>
-						<thead
-							class="-translate-y-0.5 bg-gray-50 text-xs uppercase text-gray-700 dark:bg-gray-850 dark:text-gray-400"
-						>
-							<tr>
-								<th class="px-3 py-1.5 select-none">Prompt</th>
-								<th class="px-3 py-1.5 select-none">Used For</th>
-								<th class="px-3 py-1.5 select-none">Scope</th>
-								<th class="px-3 py-1.5 select-none">Action</th>
-							</tr>
-						</thead>
-						<tbody>
-							{#each promptDefinitions as def}
-								{@const promptSummary = getPromptSummary(def.name)}
-								<tr
-									class="border-t border-gray-100 bg-white text-xs dark:border-gray-850 dark:bg-gray-900"
-								>
-									<td class="px-3 py-1.5 font-medium text-gray-900 dark:text-white">{def.label}</td>
-									<td class="px-3 py-1.5 text-gray-700 dark:text-gray-300">{def.usedFor}</td>
-									<td class="px-3 py-1.5 text-gray-700 dark:text-gray-300">{promptSummary.scope}</td
-									>
-									<td class="px-3 py-1.5">
-										<!-- in_button_style -->
-										<button
-											class="rounded-lg p-1 text-xs font-medium text-black transition hover:bg-gray-100 dark:text-white dark:hover:bg-gray-850"
-											on:click={() => openPromptModal(def)}
-										>
-											Edit
-										</button>
-									</td>
-								</tr>
-							{/each}
-						</tbody>
-					</table>
-				</div>
-			{/if}
-		</div>
 
 		<div class="space-y-3">
 			<button
@@ -1514,7 +1755,7 @@
 									? 'border-gray-300 text-gray-700 hover:border-gray-400 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:border-gray-500 dark:hover:bg-gray-800'
 									: 'cursor-not-allowed border-gray-200 text-gray-400 dark:border-gray-700 dark:text-gray-500'
 							}`}
-							on:click={addErrorType}
+							on:click|stopPropagation={addErrorType}
 							disabled={errorTypeDefs.length >= 4}
 						>
 							<span>Add</span>
@@ -1529,18 +1770,22 @@
 								<path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
 							</svg>
 						</button>
-						 <button
+						<button
+							type="button"
 							class="rounded-full border border-gray-300 px-3 py-1.5 text-xs font-semibold text-gray-700 transition hover:border-gray-400 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:border-gray-500 dark:hover:bg-gray-800"
-							on:click={() => {
-								showResetDefaultsModal = true;
+							on:click|stopPropagation={() => {
+								resetDefaultsModalMode = 'default';
+								void confirmResetDefaults();
 							}}
 						>
 							Use default
 						</button>
 						{#if errorTypeDefs.length > 0}
 							<button
+								type="button"
 								class="flex items-center gap-1 rounded-full border border-red-200 px-3 py-1.5 text-xs font-semibold text-red-600 transition hover:border-red-300 hover:bg-red-50 dark:border-red-900/70 dark:text-red-300 dark:hover:border-red-800 dark:hover:bg-red-950/40"
-								on:click={() => {
+								on:click|stopPropagation={() => {
+									resetDefaultsModalMode = 'delete';
 									showResetDefaultsModal = true;
 								}}
 							>
@@ -1653,11 +1898,11 @@
 							{#if !selectedGroupId && !useFrontendTestingData}
 								<tr class="bg-white dark:bg-gray-900 text-xs">
 									<td colspan="6" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">
-										Select a group to manage homeworks.
+										Loading group selection...
 									</td>
 								</tr>
 							{:else}
-								{#each homeworkRows as row, i}
+								{#each homeworkFileRows as row, i (row.id)}
 									<tr
 										class="bg-white dark:bg-gray-900 text-xs border-t border-gray-100 dark:border-gray-850"
 									>
@@ -1666,9 +1911,9 @@
 								</td> -->
 										<td
 											class="px-3 py-1 text-gray-700 dark:text-gray-300"
-											title={row.modelId ?? ''}
+											title={row.displayModelName}
 										>
-											<div class={homeworkModelNameCellClass}>{row.modelId ?? 'N/A'}</div>
+											<div class={homeworkModelNameCellClass}>{row.displayModelName}</div>
 										</td>
 										<td class="px-3 py-1">
 											<label class="cursor-pointer">
@@ -1737,10 +1982,17 @@
 											</label>
 										</td>
 										<td class="px-3 py-1 text-gray-700 dark:text-gray-300">
-											{convCountByModelId[row.modelId ?? ''] ?? 0}
+											{getConversationCountForRow(row)}
 										</td>
 										<td class="px-3 py-1 text-gray-700 dark:text-gray-300">
-											{getHomeworkAnalysisState(row)}
+											<div class="max-w-[12rem] whitespace-normal break-words leading-4">
+												<div>{getHomeworkAnalysisState(row)}</div>
+												{#if getHomeworkAnalysisStep(row)}
+													<div class="mt-0.5 text-[11px] text-gray-500 dark:text-gray-400">
+														{getHomeworkAnalysisStep(row)}
+													</div>
+												{/if}
+											</div>
 										</td>
 										<td class="px-3 py-1">
 											{#if getHomeworkPrimaryActionLabel(row)}
@@ -1752,6 +2004,10 @@
 												>
 													{getHomeworkPrimaryActionLabel(row)}
 												</button>
+											{:else if getHomeworkActionHint(row)}
+												<div class="text-xs font-normal text-gray-400 dark:text-gray-500">
+													{getHomeworkActionHint(row)}
+												</div>
 											{/if}
 										</td>
 									</tr>
@@ -1829,6 +2085,76 @@
 										Please Upload Homework & Answer
 									</td>
 									<td class="px-3 py-1"></td>
+								</tr>
+							{/each}
+						</tbody>
+					</table>
+				</div>
+			{/if}
+		</div>
+
+				<div class="space-y-3">
+			<button
+				type="button"
+				class="flex w-full items-start justify-between gap-3 text-left"
+				on:click={() => {
+					showPromptConfiguration = !showPromptConfiguration;
+				}}
+			>
+				<div>
+					<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">
+						Prompt Configuration
+					</h2>
+					<div class="text-xs text-gray-400 dark:text-gray-500">
+						These prompts control how AI Tutor converts homework, analyzes students, and generates
+						practice.
+					</div>
+				</div>
+				<span class="pt-1 text-gray-500 dark:text-gray-400">
+					{#if showPromptConfiguration}
+						<ChevronUp className="size-4" />
+					{:else}
+						<ChevronDown className="size-4" />
+					{/if}
+				</span>
+			</button>
+
+			{#if showPromptConfiguration}
+				<div
+					class="scrollbar-hidden relative max-w-full overflow-x-auto whitespace-nowrap rounded-sm pt-0.5"
+				>
+					<table
+						class="max-w-full w-full table-auto rounded-sm text-left text-sm text-gray-500 dark:text-gray-400"
+					>
+						<thead
+							class="-translate-y-0.5 bg-gray-50 text-xs uppercase text-gray-700 dark:bg-gray-850 dark:text-gray-400"
+						>
+							<tr>
+								<th class="px-3 py-1.5 select-none">Prompt</th>
+								<th class="px-3 py-1.5 select-none">Used For</th>
+								<th class="px-3 py-1.5 select-none">Scope</th>
+								<th class="px-3 py-1.5 select-none">Action</th>
+							</tr>
+						</thead>
+						<tbody>
+							{#each promptDefinitions as def}
+								{@const promptSummary = getPromptSummary(def.name)}
+								<tr
+									class="border-t border-gray-100 bg-white text-xs dark:border-gray-850 dark:bg-gray-900"
+								>
+									<td class="px-3 py-1.5 font-medium text-gray-900 dark:text-white">{def.label}</td>
+									<td class="px-3 py-1.5 text-gray-700 dark:text-gray-300">{def.usedFor}</td>
+									<td class="px-3 py-1.5 text-gray-700 dark:text-gray-300">{promptSummary.scope}</td
+									>
+									<td class="px-3 py-1.5">
+										<!-- in_button_style -->
+										<button
+											class="rounded-lg p-1 text-xs font-medium text-black transition hover:bg-gray-100 dark:text-white dark:hover:bg-gray-850"
+											on:click={() => openPromptModal(def)}
+										>
+											Edit
+										</button>
+									</td>
 								</tr>
 							{/each}
 						</tbody>
@@ -1952,10 +2278,12 @@
 	>
 		<div class="w-[420px] max-w-[90vw] rounded-xl bg-white p-6 shadow-2xl dark:bg-gray-900">
 			<div class="text-base font-semibold text-gray-900 dark:text-gray-100">
-				Use default error types?
+				{resetDefaultsModalMode === 'delete' ? 'Delete all custom error types?' : 'Use default error types?'}
 			</div>
 			<p class="mt-3 text-sm text-gray-500 dark:text-gray-400">
-				This will replace the current error types with the default set.
+				{resetDefaultsModalMode === 'delete'
+					? 'This will remove all current custom error types from the class configuration. Default error types will be used after refresh.'
+					: 'This will replace the current error types with the default set.'}
 			</p>
 			<div class="mt-6 flex justify-end gap-2">
 				<button

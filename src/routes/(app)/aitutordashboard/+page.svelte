@@ -273,9 +273,13 @@ const bannerPlaceholderTime = 'TEST-TIME';
 
 	// ── Data fetching ─────────────────────────────────────────────────────────
 	onMount(async () => {
-		testToast(`loading aitutordashboard - Summary | group=${selectedGroupId || 'none'} | frontend_testing=${String(useFrontendTestingData)}`);
+		// Page: AI Tutor Dashboard Summary
+		// Purpose: load non-group-scoped data immediately, then wait for the layout to
+		// write the default group_id into the URL before issuing group-scoped requests.
+		testToast(
+			`loading aitutordashboard - Summary | group=${selectedGroupId || 'pending'} | frontend_testing=${String(useFrontendTestingData)}`
+		);
 		await loadModels();
-		await loadErrorTypes(selectedGroupId);
 		if (useFrontendTestingData) {
 			seedDummyDashboard(selectedGroupId);
 			await tick();
@@ -284,19 +288,19 @@ const bannerPlaceholderTime = 'TEST-TIME';
 		}
 	});
 
-	$: if (!useFrontendTestingData) {
+	$: if (!useFrontendTestingData && selectedGroupId) {
 		void loadHomeworkStats(selectedGroupId);
 	}
 
-	$: if (!useFrontendTestingData) {
+	$: if (!useFrontendTestingData && selectedGroupId) {
 		void loadConversationCounts(selectedGroupId);
 	}
 
-	$: if (!useFrontendTestingData) {
+	$: if (!useFrontendTestingData && selectedGroupId) {
 		void loadErrorTypes(selectedGroupId);
 	}
 
-	$: if (!useFrontendTestingData) {
+	$: if (!useFrontendTestingData && selectedGroupId) {
 		void loadPrompts(selectedGroupId);
 	}
 

@@ -456,7 +456,9 @@
 	}
 
 	onMount(async () => {
-		testToast(`loading aitutordashboard - Topic Analysis | group=${groupId || 'none'} | frontend_testing=${String(useFrontendTestingData)}`);
+		testToast(
+			`loading aitutordashboard - Topic Analysis | group=${groupId || 'pending'} | frontend_testing=${String(useFrontendTestingData)}`
+		);
 		console.log('AI Tutor Dashboard - Topic Analysis loaded');
 		initialized = true;
 		if (useFrontendTestingData) {
@@ -472,9 +474,6 @@
 			errorTypeDefs = $aiTutorFrontendTestingErrorTypes;
 			return;
 		}
-		await loadTopicAnalysisData();
-		await loadPracticeQuestionData();
-		await loadErrorTypes();
 	});
 
 	$: if (initialized && !useFrontendTestingData && groupId) {
@@ -927,10 +926,9 @@
 			</div>
 			<!-- <div class="flex items-center gap-3">
 				<button
+					type="button"
 					class="rounded-full border border-gray-300 px-3 py-1.5 text-xs font-semibold text-gray-700 transition hover:border-gray-400 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:border-gray-500 dark:hover:bg-gray-800"
-					on:click={() => {
-						showResetDefaultsModal = true;
-					}}
+					on:click={confirmResetDefaults}
 				>
 					Use default
 				</button>
