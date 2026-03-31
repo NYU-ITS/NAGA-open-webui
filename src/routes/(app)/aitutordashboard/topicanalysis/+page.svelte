@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onDestroy, onMount } from 'svelte';
+	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
 	import { toast } from 'svelte-sonner';
 	import {
@@ -26,7 +26,6 @@
 	];
 	const homeworkModelNameCellClass =
 		'max-w-[12rem] overflow-hidden whitespace-normal break-words leading-4 [display:-webkit-box] [-webkit-line-clamp:3] [-webkit-box-orient:vertical]';
-	const topicTableColumnMinimums = [260, 160, 160, 280];
 
 	// Group ID (needed for error-types endpoints)
 	let groupId = '';
@@ -133,6 +132,9 @@
 	let topicAnalysisLoading = false;
 	let practiceLoading = false;
 	let initialized = false;
+	let generatingPracticeByHomeworkId: Record<string, boolean> = {};
+	let sendingPracticeById: Record<string, boolean> = {};
+	let homeworkIdsWithAnalysis = new Set<string>();
 
 	// Helper: load error types from server
 	async function loadErrorTypes() {
@@ -232,6 +234,7 @@
 		}
 		if (!groupId) {
 			topicGroupsByHomework = [];
+			homeworkIdsWithAnalysis = new Set();
 			return;
 		}
 		topicAnalysisLoading = true;
@@ -277,6 +280,7 @@
 
 			const topicData = await topicResponse.json();
 			if (Array.isArray(topicData)) {
+				const nextHomeworkIdsWithAnalysis = new Set<string>();
 				const grouped = new Map<
 					string,
 					Map<
@@ -292,6 +296,7 @@
 				for (const row of topicData) {
 					const homeworkId = row?.homework_id ?? 'unknown';
 					if (!homeworkIds.has(homeworkId)) continue;
+					nextHomeworkIdsWithAnalysis.add(homeworkId);
 					if (!grouped.has(homeworkId)) grouped.set(homeworkId, new Map());
 					const topicMap = grouped.get(homeworkId)!;
 
@@ -344,11 +349,15 @@
 						topics
 					};
 				});
+				homeworkIdsWithAnalysis = nextHomeworkIdsWithAnalysis;
+			} else {
+				homeworkIdsWithAnalysis = new Set();
 			}
 
 			testToast('Topic Analysis loaded /analysis data');
 		} catch (error) {
 			topicGroupsByHomework = [];
+			homeworkIdsWithAnalysis = new Set();
 			testToast('Topic Analysis failed loading /analysis data');
 			console.error('Topic analysis API failed:', error);
 		} finally {
@@ -421,11 +430,12 @@
 					const latest = latestByHomework.get(homeworkId);
 					const homeworkLabel = getHomeworkModelName(homeworkId);
 					if (!latest) {
-						return { homework: homeworkLabel, homeworkId, status: 'not_ready' };
+						return { practiceId: null, homework: homeworkLabel, homeworkId, status: 'not_ready' };
 					}
 
 					if (latest.status === 'approved') {
 						return {
+							practiceId: latest.id ?? null,
 							homework: homeworkLabel,
 							homeworkId,
 							status: 'approved',
@@ -434,14 +444,14 @@
 					}
 
 					if (latest.status === 'generating') {
-						return { homework: homeworkLabel, homeworkId, status: 'generating' };
+						return { practiceId: latest.id ?? null, homework: homeworkLabel, homeworkId, status: 'generating' };
 					}
 
 					if (latest.status === 'pending' || latest.status === 'rejected') {
-						return { homework: homeworkLabel, homeworkId, status: 'ready' };
+						return { practiceId: latest.id ?? null, homework: homeworkLabel, homeworkId, status: 'ready' };
 					}
 
-					return { homework: homeworkLabel, homeworkId, status: 'not_ready' };
+					return { practiceId: latest.id ?? null, homework: homeworkLabel, homeworkId, status: 'not_ready' };
 				});
 			}
 
@@ -452,6 +462,132 @@
 			console.error('Practice question set API failed:', error);
 		} finally {
 			practiceLoading = false;
+		}
+	}
+
+	function canGeneratePractice(homeworkId: string) {
+		const homeworkRow = homeworkRows.find((row) => row.id === homeworkId);
+		return Boolean(
+			homeworkRow?.questionUploaded &&
+			homeworkRow?.topicMapped &&
+			homeworkIdsWithAnalysis.has(homeworkId)
+		);
+	}
+
+	function getPracticeActionHint(practice: any) {
+		if (practice.status === 'not_ready') {
+			const homeworkRow = homeworkRows.find((row) => row.id === practice.homeworkId);
+			if (!homeworkRow?.questionUploaded) return 'Upload homework PDF';
+			if (!homeworkRow?.topicMapped) return 'Wait for topic mapping';
+			if (!canGeneratePractice(practice.homeworkId)) return 'Run analysis first';
+			return '';
+		}
+		if (practice.status === 'generating') return 'Generating...';
+		return '';
+	}
+
+	async function pollPipelineJob(jobId: string, intervalMs = 4000) {
+		while (true) {
+			const response = await fetch(
+				`${AI_TUTOR_API_BASE}/pipeline/status/${encodeURIComponent(jobId)}`,
+				{
+					headers: { Authorization: `Bearer ${localStorage.token}` }
+				}
+			);
+			if (!response.ok) {
+				throw new Error(`Pipeline status check failed: ${response.status}`);
+			}
+			const data = await response.json();
+			if (data?.status === 'done') return data;
+			if (data?.status === 'failed') {
+				throw new Error(data?.error || 'Practice generation failed.');
+			}
+			await new Promise((resolve) => setTimeout(resolve, intervalMs));
+		}
+	}
+
+	async function generatePractice(homeworkId: string) {
+		if (!canGeneratePractice(homeworkId)) {
+			toast.error('Practice generation requires completed analysis data for this homework.');
+			return;
+		}
+
+		generatingPracticeByHomeworkId = {
+			...generatingPracticeByHomeworkId,
+			[homeworkId]: true
+		};
+		testToast(`Generate practice is triggered | page=aitutordashboard - Topic Analysis | homework=${homeworkId}`);
+
+		try {
+			const response = await fetch(
+				`${AI_TUTOR_API_BASE}/practice/generate?homework_id=${encodeURIComponent(homeworkId)}`,
+				{
+					method: 'POST',
+					headers: { Authorization: `Bearer ${localStorage.token}` }
+				}
+			);
+			if (!response.ok) {
+				const detail = await response.text();
+				throw new Error(detail || 'Practice generation request failed.');
+			}
+			const data = await response.json();
+			const jobId = data?.job_id;
+			if (!jobId) throw new Error('Practice generation started but no job ID was returned.');
+			toast.success('Practice generation started.');
+			await pollPipelineJob(jobId);
+			await loadPracticeQuestionData();
+			toast.success('Practice question set generated.');
+		} catch (error) {
+			toast.error(error instanceof Error ? error.message : 'Practice generation failed.');
+			console.error('Practice generation failed:', error);
+		} finally {
+			generatingPracticeByHomeworkId = {
+				...generatingPracticeByHomeworkId,
+				[homeworkId]: false
+			};
+		}
+	}
+
+	async function sendPracticeToStudents(practice: any) {
+		if (!practice?.practiceId) {
+			toast.error('This practice set is missing a practice ID.');
+			return;
+		}
+
+		sendingPracticeById = {
+			...sendingPracticeById,
+			[practice.practiceId]: true
+		};
+		testToast(
+			`Send is triggered | page=aitutordashboard - Topic Analysis | practice=${practice.practiceId} | homework=${practice.homeworkId}`
+		);
+
+		try {
+			// Page: AI Tutor Dashboard > Topic Analysis
+			// Endpoint: POST /assignment?practice_id={practice_id}
+			// Purpose: distribute an approved practice set to students based on their weak topics.
+			const response = await fetch(
+				`${AI_TUTOR_API_BASE}/assignment?practice_id=${encodeURIComponent(practice.practiceId)}`,
+				{
+					method: 'POST',
+					headers: {
+						Authorization: `Bearer ${localStorage.token}`
+					}
+				}
+			);
+			if (!response.ok) {
+				const detail = await response.text();
+				throw new Error(detail || 'Failed to send practice to students.');
+			}
+			toast.success('Practice question set sent to students.');
+		} catch (error) {
+			toast.error(error instanceof Error ? error.message : 'Failed to send practice to students.');
+			console.error('Practice assignment failed:', error);
+		} finally {
+			sendingPracticeById = {
+				...sendingPracticeById,
+				[practice.practiceId]: false
+			};
 		}
 	}
 
@@ -491,6 +627,7 @@
 		homeworkRows = [];
 		topicGroupsByHomework = [];
 		practiceQuestions = [];
+		homeworkIdsWithAnalysis = new Set();
 		errorTypeDefs = [];
 	}
 
@@ -559,7 +696,7 @@
 	function getTopicDisplayErrorTypes(errorTypes) {
 		if (errorTypes?.length) {
 			const errorTypeMap = new Map(errorTypes.map((errorType) => [errorType.type, errorType]));
-			return errorTypeDefs
+			const orderedDefinedErrorTypes = errorTypeDefs
 				.map((definition) => {
 					const matchingErrorType = errorTypeMap.get(definition.type);
 					if (!matchingErrorType) return null;
@@ -569,6 +706,13 @@
 					};
 				})
 				.filter(Boolean);
+			const fallbackErrorTypes = errorTypes
+				.filter((errorType) => !errorTypeDefs.some((definition) => definition.type === errorType.type))
+				.map((errorType) => ({
+					...errorType,
+					color: errorType.color ?? '#FFB84D'
+				}));
+			return [...orderedDefinedErrorTypes, ...fallbackErrorTypes];
 		}
 
 		if (displayErrorTypes.length) {
@@ -669,12 +813,6 @@
 			lastTopicAnalysisFilterKey = nextFilterKey;
 		}
 	}
-	let topicTableColumnWidths = [320, 180, 180, 420];
-	let resizingTopicColumnIndex: number | null = null;
-	let resizeStartX = 0;
-	let resizeStartWidth = 0;
-	$: topicTableMinWidth = topicTableColumnWidths.reduce((sum, width) => sum + width, 0);
-
 	let practiceQuestions = [];
 	$: topicAnalysisEmptyMessage = !groupId && !useFrontendTestingData
 		? 'Select a group to view topic analysis.'
@@ -691,42 +829,6 @@
 			? 'No homework uploaded for this group yet.'
 			: 'No practice question sets are available yet. Generate practice after analysis is completed.';
 
-	function handleTopicColumnResize(event: MouseEvent) {
-		if (resizingTopicColumnIndex === null) return;
-		const nextWidth = Math.max(
-			topicTableColumnMinimums[resizingTopicColumnIndex],
-			resizeStartWidth + event.clientX - resizeStartX
-		);
-		topicTableColumnWidths = topicTableColumnWidths.map((width, index) =>
-			index === resizingTopicColumnIndex ? nextWidth : width
-		);
-	}
-
-	function stopTopicColumnResize() {
-		resizingTopicColumnIndex = null;
-	}
-
-	function startTopicColumnResize(index: number, event: MouseEvent) {
-		event.preventDefault();
-		event.stopPropagation();
-		resizingTopicColumnIndex = index;
-		resizeStartX = event.clientX;
-		resizeStartWidth = topicTableColumnWidths[index];
-	}
-
-	onMount(() => {
-		if (typeof window !== 'undefined') {
-			window.addEventListener('mousemove', handleTopicColumnResize);
-			window.addEventListener('mouseup', stopTopicColumnResize);
-		}
-	});
-
-	onDestroy(() => {
-		if (typeof window !== 'undefined') {
-			window.removeEventListener('mousemove', handleTopicColumnResize);
-			window.removeEventListener('mouseup', stopTopicColumnResize);
-		}
-	});
 </script>
 
 <div class="flex flex-col space-y-6 py-4">
@@ -759,53 +861,13 @@
 		</div>
 
 		<div class="scrollbar-hidden relative overflow-x-auto max-w-full rounded-sm pt-0.5">
-			<table
-				class="text-sm text-left text-gray-500 dark:text-gray-400 table-fixed rounded-sm"
-				style={`min-width: ${topicTableMinWidth}px; width: ${topicTableMinWidth}px;`}
-			>
-				<colgroup>
-					{#each topicTableColumnWidths as width}
-						<col style={`width: ${width}px;`} />
-					{/each}
-				</colgroup>
+			<table class="w-full table-fixed rounded-sm text-left text-sm text-gray-500 dark:text-gray-400">
 				<thead class="text-xs text-gray-700 uppercase bg-gray-50 dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5">
 					<tr>
-						<th scope="col" class="relative px-3 py-1.5">
-							<div class="pr-3">Homework</div>
-							<button
-								type="button"
-								class="absolute inset-y-0 right-0 w-2 cursor-col-resize"
-								aria-label="Resize Homework column"
-								on:mousedown={(event) => startTopicColumnResize(0, event)}
-							></button>
-						</th>
-						<th scope="col" class="relative px-3 py-1.5 whitespace-nowrap">
-							<div class="pr-3">Questions in Topic</div>
-							<button
-								type="button"
-								class="absolute inset-y-0 right-0 w-2 cursor-col-resize"
-								aria-label="Resize Questions in Topic column"
-								on:mousedown={(event) => startTopicColumnResize(1, event)}
-							></button>
-						</th>
-						<th scope="col" class="relative px-3 py-1.5 whitespace-nowrap">
-							<div class="pr-3">Students with Error</div>
-							<button
-								type="button"
-								class="absolute inset-y-0 right-0 w-2 cursor-col-resize"
-								aria-label="Resize Students with Error column"
-								on:mousedown={(event) => startTopicColumnResize(2, event)}
-							></button>
-						</th>
-						<th scope="col" class="relative px-3 py-1.5">
-							<div class="pr-3">Error Type Analysis</div>
-							<button
-								type="button"
-								class="absolute inset-y-0 right-0 w-2 cursor-col-resize"
-								aria-label="Resize Error Type Analysis column"
-								on:mousedown={(event) => startTopicColumnResize(3, event)}
-							></button>
-						</th>
+						<th scope="col" class="w-[28%] px-3 py-1.5">Homework</th>
+						<th scope="col" class="w-[14%] whitespace-nowrap px-3 py-1.5">Questions in Topic</th>
+						<th scope="col" class="w-[14%] whitespace-nowrap px-3 py-1.5">Students with Error</th>
+						<th scope="col" class="w-[44%] px-3 py-1.5">Error Type Analysis</th>
 					</tr>
 				</thead>
 				<tbody>
@@ -868,7 +930,7 @@
 												>+</button>
 											</div>
 										{:else}
-											<!-- Stacked Bar Chart with + at end -->
+											<!-- Display the full-width color bar plus a readable percentage legend. -->
 											<div class="flex items-center gap-2">
 												<div class="flex h-5 min-w-0 flex-1 overflow-hidden rounded">
 													{#each getTopicDisplayErrorTypes(topic.errorTypes) as errorType}
@@ -886,15 +948,16 @@
 													>+</button>
 												{/if}
 											</div>
-											<!-- Labels below bar -->
-											<div class="mt-1 flex w-full min-w-0">
+											<div class="mt-2 flex flex-wrap gap-x-4 gap-y-1">
 												{#each getTopicDisplayErrorTypes(topic.errorTypes) as errorType}
-													<div class="overflow-hidden" style="width: {errorType.percentage}%;">
-														{#if errorType.percentage >= 8}
-															<span class="text-gray-600 dark:text-gray-400 block truncate leading-tight">
-																{errorType.percentage}%
-															</span>
-														{/if}
+													<div class="flex min-w-0 items-center gap-1.5 text-[11px] leading-4 text-gray-600 dark:text-gray-400">
+														<span
+															class="h-2.5 w-2.5 flex-shrink-0 rounded-full"
+															style="background-color: {errorType.color};"
+														></span>
+														<span class="truncate">
+															{errorType.type}: {errorType.percentage}%
+														</span>
 													</div>
 												{/each}
 											</div>
@@ -1087,7 +1150,7 @@
 										{:else if practice.status === 'ready'}
 											<span class="w-2 h-2 rounded-full bg-yellow-500 flex-shrink-0"></span>
 											<span>Ready for review</span>
-										{:else if practice.status === 'generating'}
+										{:else if practice.status === 'generating' || generatingPracticeByHomeworkId[practice.homeworkId]}
 											<span class="w-2 h-2 rounded-full bg-blue-500 flex-shrink-0"></span>
 											<span>Generating</span>
 										{:else}
@@ -1098,33 +1161,40 @@
 								</td>
 								<td class="px-3 py-1.5">
 									<div class="flex items-center gap-1">
-										<a
-											href={practice.status === 'approved' || practice.status === 'ready'
-												? `${reviewQuestionSetBaseHref}${reviewQuestionSetBaseHref.includes('?') ? '&' : '?'}homework_id=${encodeURIComponent(practice.homeworkId ?? '')}`
-												: undefined}
-											aria-disabled={!(practice.status === 'approved' || practice.status === 'ready')}
-											class={`self-center w-fit whitespace-nowrap rounded-xl px-2 py-1.5 text-xs transition ${
-												practice.status === 'approved' || practice.status === 'ready'
-													? 'font-semibold text-gray-700 hover:bg-black/5 dark:text-gray-300 dark:hover:bg-white/5'
-													: 'pointer-events-none text-gray-300 dark:text-gray-600'
-											}`}
-										>
-											View
-										</a>
-										<button
-											type="button"
-											disabled={!(practice.status === 'approved' || practice.status === 'ready')}
-											class={`self-center flex w-fit items-center gap-1 whitespace-nowrap rounded-xl px-2 py-1.5 text-xs transition ${
-												practice.status === 'approved' || practice.status === 'ready'
-													? 'font-semibold text-gray-700 hover:bg-black/5 dark:text-gray-300 dark:hover:bg-white/5'
-													: 'cursor-not-allowed text-gray-300 dark:text-gray-600'
-											}`}
-										>
-											Send
-											<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="size-3">
-												<path stroke-linecap="round" stroke-linejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
-											</svg>
-										</button>
+										{#if practice.status === 'approved' || practice.status === 'ready'}
+											<a
+												href={`${reviewQuestionSetBaseHref}${reviewQuestionSetBaseHref.includes('?') ? '&' : '?'}homework_id=${encodeURIComponent(practice.homeworkId ?? '')}`}
+												class="self-center w-fit whitespace-nowrap rounded-xl px-2 py-1.5 text-xs font-semibold text-gray-700 transition hover:bg-black/5 dark:text-gray-300 dark:hover:bg-white/5"
+											>
+												View
+											</a>
+											{#if practice.status === 'approved'}
+												<button
+													type="button"
+													class="self-center flex w-fit items-center gap-1 whitespace-nowrap rounded-xl px-2 py-1.5 text-xs font-semibold text-gray-700 transition hover:bg-black/5 disabled:cursor-not-allowed disabled:opacity-50 dark:text-gray-300 dark:hover:bg-white/5"
+													on:click={() => sendPracticeToStudents(practice)}
+													disabled={!practice.practiceId || sendingPracticeById[practice.practiceId]}
+												>
+													{sendingPracticeById[practice.practiceId] ? 'Sending…' : 'Send'}
+													<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="size-3">
+														<path stroke-linecap="round" stroke-linejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
+													</svg>
+												</button>
+											{/if}
+										{:else if practice.status === 'not_ready' && canGeneratePractice(practice.homeworkId)}
+											<button
+												type="button"
+												class="self-center w-fit whitespace-nowrap rounded-xl px-2 py-1.5 text-xs font-semibold text-gray-700 transition hover:bg-black/5 dark:text-gray-300 dark:hover:bg-white/5"
+												on:click={() => generatePractice(practice.homeworkId)}
+												disabled={generatingPracticeByHomeworkId[practice.homeworkId]}
+											>
+												{generatingPracticeByHomeworkId[practice.homeworkId] ? 'Generating…' : 'Generate'}
+											</button>
+										{:else}
+											<div class="self-center text-xs font-normal text-gray-300 dark:text-gray-600">
+												{getPracticeActionHint(practice)}
+											</div>
+										{/if}
 									</div>
 								</td>
 							</tr>

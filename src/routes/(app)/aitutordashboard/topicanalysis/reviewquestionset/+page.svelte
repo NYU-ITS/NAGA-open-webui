@@ -21,6 +21,7 @@
 
 	type ReviewHomework = {
 		homeworkId: string;
+		practiceId: string | null;
 		questionData: QuestionSetData;
 		approvedQuestionIndexes: Set<number>;
 		questionEditors: string[];
@@ -184,9 +185,11 @@
 		homeworkId: string,
 		questions: QuestionItem[],
 		generatedTime = '2026-03-23 09:00:00',
-		status: QuestionSetData['status'] = 'pending'
+		status: QuestionSetData['status'] = 'pending',
+		practiceId: string | null = null
 	): ReviewHomework => ({
 		homeworkId,
+		practiceId,
 		questionData: {
 			id: homeworkId,
 			status,
@@ -265,7 +268,8 @@
 					homeworkId,
 					normalizeQuestionPayload(latest.problem_data),
 					latest.generated_time ?? latest.created_at ?? '2026-03-23 09:00:00',
-					mapPracticeStatus(latest.status)
+					mapPracticeStatus(latest.status),
+					latest.id ?? null
 				);
 			}
 
@@ -296,9 +300,10 @@
 		});
 	}
 
-	function handleSave() {
+	async function handleSave() {
 		testToast(`Save is triggered | page=aitutordashboard - Review Question Set | homework=${currentReviewHomework?.homeworkId ?? 'none'}`);
 		try {
+			const currentHomework = currentReviewHomework;
 			updateCurrentHomework((homework) => {
 				const parsedQuestions = homework.questionEditors.map((_, index) =>
 					parseQuestionEditor(homework, index)
@@ -309,9 +314,26 @@
 					studentAssignments: buildStudentAssignments(parsedQuestions)
 				});
 			});
+			if (currentHomework?.practiceId) {
+				const response = await fetch(
+					`${AI_TUTOR_API_BASE}/practice/${encodeURIComponent(currentHomework.practiceId)}/status?status=approved`,
+					{
+						method: 'PATCH',
+						headers: {
+							Authorization: `Bearer ${localStorage.token}`
+						}
+					}
+				);
+				if (!response.ok) {
+					const detail = await response.text();
+					throw new Error(detail || 'Failed to approve practice question set.');
+				}
+				toast.success('Practice question set approved.');
+				return;
+			}
 			toast.success('Question set changes saved locally.');
 		} catch (error) {
-			toast.error(error instanceof Error ? error.message : 'Failed to save question set');
+			toast.error(error instanceof Error ? error.message : 'Failed to approve question set');
 		}
 	}
 

@@ -22,6 +22,15 @@
 	let selectedGroupId = '';
 	let selectedGroup = null;
 
+	function buildDashboardHref(pathname: string) {
+		const params = new URLSearchParams();
+		if (selectedGroupId) {
+			params.set('group_id', selectedGroupId);
+		}
+		const query = params.toString();
+		return query ? `${pathname}?${query}` : pathname;
+	}
+
 	$: selectedGroupId = $page.url.searchParams.get('group_id') || '';
 	$: selectedGroup =
 		allUserGroups.find((group) => group.id === selectedGroupId) || allUserGroups[0] || null;
@@ -311,7 +320,7 @@
 							$page.url.pathname === '/aitutordashboard/'
 								? 'text-[#57068c] dark:text-white'
 								: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
-							href="/aitutordashboard"
+							href={buildDashboardHref('/aitutordashboard')}
 						>
 							Summary
 						</a>
@@ -322,7 +331,7 @@
 							)
 								? 'text-[#57068c] dark:text-white'
 								: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
-							href="/aitutordashboard/topicanalysis"
+							href={buildDashboardHref('/aitutordashboard/topicanalysis')}
 						>
 							{$page.url.pathname.includes('/aitutordashboard/topicanalysis/reviewquestionset')
 								? 'Topic Analysis - Reviewing Question Set'
@@ -335,7 +344,7 @@
 							)
 								? 'text-[#57068c] dark:text-white'
 								: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
-							href="/aitutordashboard/studentanalysis"
+							href={buildDashboardHref('/aitutordashboard/studentanalysis')}
 						>
 							Student Analysis
 						</a>
@@ -346,7 +355,7 @@
 							)
 								? 'text-[#57068c] dark:text-white'
 								: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
-							href="/aitutordashboard/instructorsetup"
+							href={buildDashboardHref('/aitutordashboard/instructorsetup')}
 						>
 							Instructor Setup
 						</a>

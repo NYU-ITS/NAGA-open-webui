@@ -10,6 +10,11 @@
 	} from '$lib/constants';
 	import { aiTutorFrontendTestingErrorTypes } from '$lib/stores';
 	import { showAITutorTestToast } from '$lib/utils/aiTutorTesting';
+	import {
+		clearAITutorSessionCacheByPrefix,
+		loadWithAITutorSessionCache,
+		writeAITutorSessionCache
+	} from '$lib/utils/aiTutorSessionCache';
 	import ChevronUp from '$lib/components/icons/ChevronUp.svelte';
 	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
 
@@ -29,6 +34,7 @@
 	// ── Global flag ───────────────────────────────────────────────────────────
 	const useFrontendTestingData = AI_TUTOR_FRONTEND_TESTING_MODE;
 	const testToast = showAITutorTestToast;
+	const CACHE_TTL_MS = 5 * 60 * 1000;
 
 	// ── Types ─────────────────────────────────────────────────────────────────
 	type HomeworkStat = {
@@ -312,6 +318,14 @@
 	// ── State ─────────────────────────────────────────────────────────────────
 	let homeworkStats: HomeworkStat[] = useFrontendTestingData ? placeholderStats : [];
 	let selectedGroupId = '';
+
+	function getInstructorSetupCacheKey(resource: string, groupId?: string) {
+		return ['instructor-setup', groupId || 'global', resource].join(':');
+	}
+
+	function invalidateInstructorSetupCache(groupId?: string) {
+		clearAITutorSessionCacheByPrefix(getInstructorSetupCacheKey('', groupId));
+	}
 
 	function buildHomeworkFileRows(
 		models: { id: string; name: string; preset: boolean; base_model_id: string | null }[],
@@ -606,125 +620,143 @@
 			return;
 		}
 
-		const uploadStatusMap = new Map<string, { status: boolean; answerUploaded: boolean }>();
-		const topicMappedByHomeworkId = new Map<string, boolean>();
-		const modelIdByHomeworkId = new Map<string, string | null>();
+		type CachedHomeworkStatsPayload = {
+			homeworkRows: HomeworkRow[];
+			homeworkStats: HomeworkStat[];
+		};
+
 		try {
-			// Page: AI Tutor Dashboard > Instructor Setup
-			// Endpoint: GET /homework/?group_id={group_id}
-			// Purpose: load homework pipeline rows for the selected instructor group.
-			const hwResponse = await fetch(
-				`${AI_TUTOR_API_BASE}/homework/?group_id=${encodeURIComponent(groupId)}`,
-				{
-					method: 'GET',
-					headers: { Authorization: `Bearer ${localStorage.token}` }
-				}
-			);
-			if (!hwResponse.ok) throw new Error('Homework fetch failed');
-			const hwData = await hwResponse.json();
-			if (Array.isArray(hwData)) {
-				homeworkRows = hwData.map((hw: any) => ({
-					id: hw.id,
-					modelId: hw.model_id ?? null,
-					questionUploaded: hw.question_uploaded ?? false,
-					answerUploaded: hw.answer_uploaded ?? false,
-					topicMapped: hw.topic_mapped ?? false,
-					answerSource: hw.answer_source ?? null,
-					questionFileName: hw.question_filename ?? null,
-					answerFileName: hw.answer_filename ?? null
-				}));
-				for (const hw of hwData) {
-					topicMappedByHomeworkId.set(hw.id, hw.topic_mapped ?? false);
-					modelIdByHomeworkId.set(hw.id, hw.model_id ?? null);
-					uploadStatusMap.set(hw.id, {
-						status: hw.question_uploaded ?? false,
-						answerUploaded: hw.answer_uploaded ?? false
+			const cached = await loadWithAITutorSessionCache<CachedHomeworkStatsPayload>({
+				key: getInstructorSetupCacheKey('homework-stats', groupId),
+				ttlMs: CACHE_TTL_MS,
+				loader: async () => {
+					const uploadStatusMap = new Map<string, { status: boolean; answerUploaded: boolean }>();
+					const topicMappedByHomeworkId = new Map<string, boolean>();
+					const modelIdByHomeworkId = new Map<string, string | null>();
+					let fetchedHomeworkRows: HomeworkRow[] = [];
+
+					// Page: AI Tutor Dashboard > Instructor Setup
+					// Endpoint: GET /homework/?group_id={group_id}
+					// Purpose: load homework pipeline rows for the selected instructor group.
+					const hwResponse = await fetch(
+						`${AI_TUTOR_API_BASE}/homework/?group_id=${encodeURIComponent(groupId)}`,
+						{
+							method: 'GET',
+							headers: { Authorization: `Bearer ${localStorage.token}` }
+						}
+					);
+					if (!hwResponse.ok) throw new Error('Homework fetch failed');
+					const hwData = await hwResponse.json();
+					if (Array.isArray(hwData)) {
+						fetchedHomeworkRows = hwData.map((hw: any) => ({
+							id: hw.id,
+							modelId: hw.model_id ?? null,
+							questionUploaded: hw.question_uploaded ?? false,
+							answerUploaded: hw.answer_uploaded ?? false,
+							topicMapped: hw.topic_mapped ?? false,
+							answerSource: hw.answer_source ?? null,
+							questionFileName: hw.question_filename ?? null,
+							answerFileName: hw.answer_filename ?? null
+						}));
+						for (const hw of hwData) {
+							topicMappedByHomeworkId.set(hw.id, hw.topic_mapped ?? false);
+							modelIdByHomeworkId.set(hw.id, hw.model_id ?? null);
+							uploadStatusMap.set(hw.id, {
+								status: hw.question_uploaded ?? false,
+								answerUploaded: hw.answer_uploaded ?? false
+							});
+						}
+					}
+					testToast('Instructor Setup loaded /homework data');
+
+					const statsMap = new Map<
+						string,
+						{
+							totalProblems: number;
+							attemptedSum: number;
+							solvedSum: number;
+							errorSum: number;
+							count: number;
+						}
+					>();
+					const hasAnalysisByHomeworkId = new Set<string>();
+
+					for (const homeworkId of uploadStatusMap.keys()) {
+						// Page: AI Tutor Dashboard > Instructor Setup
+						// Endpoint: GET /analysis/?homework_id={homework_id}
+						// Purpose: aggregate student analysis rows into homework-level setup metrics.
+						const analysisResponse = await fetch(
+							`${AI_TUTOR_API_BASE}/analysis/?homework_id=${encodeURIComponent(homeworkId)}`,
+							{
+								method: 'GET',
+								headers: { Authorization: `Bearer ${localStorage.token}` }
+							}
+						);
+						if (!analysisResponse.ok) throw new Error(`Analysis fetch failed for ${homeworkId}`);
+						const analysisData = await analysisResponse.json();
+						if (Array.isArray(analysisData)) {
+							if (analysisData.length > 0) {
+								hasAnalysisByHomeworkId.add(homeworkId);
+							}
+							for (const row of analysisData) {
+								const id = row?.homework_id ?? homeworkId;
+								const prev = statsMap.get(id) ?? {
+									totalProblems: 0,
+									attemptedSum: 0,
+									solvedSum: 0,
+									errorSum: 0,
+									count: 0
+								};
+								prev.totalProblems = Math.max(prev.totalProblems, Number(row?.total_question ?? 0));
+								prev.attemptedSum += Number(row?.total_attempted ?? 0);
+								prev.solvedSum += Number(row?.total_solved ?? 0);
+								prev.errorSum += Number(row?.total_errors ?? 0);
+								prev.count += 1;
+								statsMap.set(id, prev);
+							}
+						}
+					}
+
+					if (uploadStatusMap.size > 0) testToast('Instructor Setup loaded /analysis data');
+
+					const allIds = new Set([...uploadStatusMap.keys(), ...statsMap.keys()]);
+					const mergedStats: HomeworkStat[] = Array.from(allIds).map((id) => {
+						const upload = uploadStatusMap.get(id);
+						const stats = statsMap.get(id);
+						return {
+							homework: id,
+							status: hasAnalysisByHomeworkId.has(id),
+							answerUploaded: upload?.answerUploaded ?? false,
+							totalProblems: stats ? stats.totalProblems : null,
+							avgAttempted: stats
+								? Number((stats.attemptedSum / Math.max(stats.count, 1)).toFixed(1))
+								: null,
+							avgSolved: stats ? Number((stats.solvedSum / Math.max(stats.count, 1)).toFixed(1)) : null,
+							avgErrors: stats ? Number((stats.errorSum / Math.max(stats.count, 1)).toFixed(1)) : null
+						};
 					});
+					mergedStats.sort((a, b) => a.homework.localeCompare(b.homework));
+
+					fetchedHomeworkRows = fetchedHomeworkRows.map((row) => ({
+						...row,
+						modelId: modelIdByHomeworkId.get(row.id) ?? row.modelId,
+						topicMapped: topicMappedByHomeworkId.get(row.id) ?? row.topicMapped ?? false
+					}));
+
+					return {
+						homeworkRows: fetchedHomeworkRows,
+						homeworkStats: mergedStats
+					};
 				}
-			}
-			testToast('Instructor Setup loaded /homework data');
+			});
+
+			homeworkRows = cached.homeworkRows;
+			homeworkStats = cached.homeworkStats;
 		} catch (error) {
 			testToast('Instructor Setup failed loading /homework data');
 			console.error('Homework fetch failed:', error);
 		}
 
-		const statsMap = new Map<
-			string,
-			{
-				totalProblems: number;
-				attemptedSum: number;
-				solvedSum: number;
-				errorSum: number;
-				count: number;
-			}
-		>();
-		const hasAnalysisByHomeworkId = new Set<string>();
-
-		for (const homeworkId of uploadStatusMap.keys()) {
-			try {
-				// Page: AI Tutor Dashboard > Instructor Setup
-				// Endpoint: GET /analysis/?homework_id={homework_id}
-				// Purpose: aggregate student analysis rows into homework-level setup metrics.
-				const analysisResponse = await fetch(
-					`${AI_TUTOR_API_BASE}/analysis/?homework_id=${encodeURIComponent(homeworkId)}`,
-					{
-						method: 'GET',
-						headers: { Authorization: `Bearer ${localStorage.token}` }
-					}
-				);
-				if (!analysisResponse.ok) throw new Error(`Analysis fetch failed for ${homeworkId}`);
-				const analysisData = await analysisResponse.json();
-				if (Array.isArray(analysisData)) {
-					if (analysisData.length > 0) {
-						hasAnalysisByHomeworkId.add(homeworkId);
-					}
-					for (const row of analysisData) {
-						const id = row?.homework_id ?? homeworkId;
-						const prev = statsMap.get(id) ?? {
-							totalProblems: 0,
-							attemptedSum: 0,
-							solvedSum: 0,
-							errorSum: 0,
-							count: 0
-						};
-						prev.totalProblems = Math.max(prev.totalProblems, Number(row?.total_question ?? 0));
-						prev.attemptedSum += Number(row?.total_attempted ?? 0);
-						prev.solvedSum += Number(row?.total_solved ?? 0);
-						prev.errorSum += Number(row?.total_errors ?? 0);
-						prev.count += 1;
-						statsMap.set(id, prev);
-					}
-				}
-			} catch (error) {
-				console.error('Analysis fetch failed:', error);
-			}
-		}
-
-		if (uploadStatusMap.size > 0) testToast('Instructor Setup loaded /analysis data');
-
-		const allIds = new Set([...uploadStatusMap.keys(), ...statsMap.keys()]);
-		const merged: HomeworkStat[] = Array.from(allIds).map((id) => {
-			const upload = uploadStatusMap.get(id);
-			const stats = statsMap.get(id);
-			return {
-				homework: id,
-				status: hasAnalysisByHomeworkId.has(id),
-				answerUploaded: upload?.answerUploaded ?? false,
-				totalProblems: stats ? stats.totalProblems : null,
-				avgAttempted: stats
-					? Number((stats.attemptedSum / Math.max(stats.count, 1)).toFixed(1))
-					: null,
-				avgSolved: stats ? Number((stats.solvedSum / Math.max(stats.count, 1)).toFixed(1)) : null,
-				avgErrors: stats ? Number((stats.errorSum / Math.max(stats.count, 1)).toFixed(1)) : null
-			};
-		});
-		merged.sort((a, b) => a.homework.localeCompare(b.homework));
-		homeworkStats = merged;
-		homeworkRows = homeworkRows.map((row) => ({
-			...row,
-			modelId: modelIdByHomeworkId.get(row.id) ?? row.modelId,
-			topicMapped: topicMappedByHomeworkId.get(row.id) ?? row.topicMapped ?? false
-		}));
 		if (homeworkStats.length > 0 && selectedRunHomeworks.size === 0) {
 			selectedRunHomeworks = new Set(homeworkStats.map((stat) => stat.homework));
 			syncRunSelectionFlags();
@@ -746,19 +778,26 @@
 			return;
 		}
 		try {
-			const res = await fetch('/api/models', {
-				headers: { Authorization: `Bearer ${localStorage.token}` }
+			const models = await loadWithAITutorSessionCache<typeof availableModels>({
+				key: getInstructorSetupCacheKey('models'),
+				ttlMs: CACHE_TTL_MS,
+				loader: async () => {
+					const res = await fetch('/api/models', {
+						headers: { Authorization: `Bearer ${localStorage.token}` }
+					});
+					if (!res.ok) throw new Error('Models fetch failed');
+					const data = await res.json();
+					return Array.isArray(data?.data)
+						? data.data.map((m: any) => ({
+								id: m.id,
+								name: m.name ?? m.id,
+								preset: m.preset === true,
+								base_model_id: m.info?.base_model_id ?? m.base_model_id ?? null
+							}))
+						: [];
+				}
 			});
-			if (!res.ok) throw new Error('Models fetch failed');
-			const data = await res.json();
-			availableModels = Array.isArray(data?.data)
-				? data.data.map((m: any) => ({
-						id: m.id,
-						name: m.name ?? m.id,
-						preset: m.preset === true,
-						base_model_id: m.info?.base_model_id ?? m.base_model_id ?? null
-					}))
-				: [];
+			availableModels = models;
 		} catch (e) {
 			availableModels = [];
 			console.error('Models fetch failed:', e);
@@ -776,32 +815,39 @@
 			return;
 		}
 		try {
-			// Page: AI Tutor Dashboard > Instructor Setup
-			// Endpoint: POST /api/v1/chats/filter/meta
-			// Purpose: count Open WebUI conversations for the selected group and bucket them by model_id/model_name.
-			const res = await fetch('/api/v1/chats/filter/meta', {
-				method: 'POST',
-				headers: {
-					Authorization: `Bearer ${localStorage.token}`,
-					'Content-Type': 'application/json'
-				},
-				body: JSON.stringify({ group_id: groupId, skip: 0, limit: 1000 })
-			});
-			if (!res.ok) throw new Error('Conv count fetch failed');
-			const data = await res.json();
-			const counts: Record<string, number> = {};
-			if (Array.isArray(data)) {
-				for (const chat of data) {
-					const modelKeys = [
-						chat?.meta?.model_id,
-						chat?.meta?.model_name,
-						chat?.meta?.base_model_name
-					].filter((value) => typeof value === 'string' && value.length > 0);
-					for (const modelKey of new Set(modelKeys)) {
-						counts[modelKey] = (counts[modelKey] ?? 0) + 1;
+			const counts = await loadWithAITutorSessionCache<Record<string, number>>({
+				key: getInstructorSetupCacheKey('conversation-counts', groupId),
+				ttlMs: CACHE_TTL_MS,
+				loader: async () => {
+					// Page: AI Tutor Dashboard > Instructor Setup
+					// Endpoint: POST /api/v1/chats/filter/meta
+					// Purpose: count Open WebUI conversations for the selected group and bucket them by model_id/model_name.
+					const res = await fetch('/api/v1/chats/filter/meta', {
+						method: 'POST',
+						headers: {
+							Authorization: `Bearer ${localStorage.token}`,
+							'Content-Type': 'application/json'
+						},
+						body: JSON.stringify({ group_id: groupId, skip: 0, limit: 1000 })
+					});
+					if (!res.ok) throw new Error('Conv count fetch failed');
+					const data = await res.json();
+					const nextCounts: Record<string, number> = {};
+					if (Array.isArray(data)) {
+						for (const chat of data) {
+							const modelKeys = [
+								chat?.meta?.model_id,
+								chat?.meta?.model_name,
+								chat?.meta?.base_model_name
+							].filter((value) => typeof value === 'string' && value.length > 0);
+							for (const modelKey of new Set(modelKeys)) {
+								nextCounts[modelKey] = (nextCounts[modelKey] ?? 0) + 1;
+							}
+						}
 					}
+					return nextCounts;
 				}
-			}
+			});
 			convCountByModelId = counts;
 		} catch (e) {
 			convCountByModelId = {};
@@ -820,22 +866,29 @@
 			return;
 		}
 		try {
-			const res = await fetch(
-				`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(groupId)}`,
-				{ headers: { Authorization: `Bearer ${localStorage.token}` } }
-			);
-			if (!res.ok) throw new Error('Error types fetch failed');
-			const data = await res.json();
-			const errorTypes = Array.isArray(data?.error_types)
-				? data.error_types
-				: Array.isArray(data)
-					? data
-					: [];
-			errorTypeDefs = errorTypes.slice(0, 4).map((et: any, i: number) => ({
-				type: et.name ?? 'Unknown',
-				color: errorTypeColors[i % errorTypeColors.length],
-				description: et.description ?? ''
-			}));
+			const cachedErrorTypes = await loadWithAITutorSessionCache<typeof errorTypeDefs>({
+				key: getInstructorSetupCacheKey('error-types', groupId),
+				ttlMs: CACHE_TTL_MS,
+				loader: async () => {
+					const res = await fetch(
+						`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(groupId)}`,
+						{ headers: { Authorization: `Bearer ${localStorage.token}` } }
+					);
+					if (!res.ok) throw new Error('Error types fetch failed');
+					const data = await res.json();
+					const errorTypes = Array.isArray(data?.error_types)
+						? data.error_types
+						: Array.isArray(data)
+							? data
+							: [];
+					return errorTypes.slice(0, 4).map((et: any, i: number) => ({
+						type: et.name ?? 'Unknown',
+						color: errorTypeColors[i % errorTypeColors.length],
+						description: et.description ?? ''
+					}));
+				}
+			});
+			errorTypeDefs = cachedErrorTypes;
 		} catch (e) {
 			errorTypeDefs = [];
 			console.error('Error types fetch failed:', e);
@@ -850,34 +903,44 @@
 			return;
 		}
 		try {
-			const generalRes = await fetch(`${AI_TUTOR_API_BASE}/prompts/general`, {
-				headers: { Authorization: `Bearer ${localStorage.token}` }
+			const prompts = await loadWithAITutorSessionCache<{
+				generalPrompts: any[];
+				tutorPrompts: any[];
+			}>({
+				key: getInstructorSetupCacheKey('prompts', groupId),
+				ttlMs: CACHE_TTL_MS,
+				loader: async () => {
+					const generalRes = await fetch(`${AI_TUTOR_API_BASE}/prompts/general`, {
+						headers: { Authorization: `Bearer ${localStorage.token}` }
+					});
+					if (!generalRes.ok) throw new Error('General prompts fetch failed');
+					const nextGeneralPrompts = await generalRes.json();
+
+					if (!groupId) {
+						return { generalPrompts: nextGeneralPrompts, tutorPrompts: [] };
+					}
+
+					// Page: AI Tutor Dashboard > Instructor Setup
+					// Endpoint: GET /prompts/tutor?group_id={group_id}
+					// Purpose: load class-level tutor prompt overrides for the selected group.
+					const tutorRes = await fetch(
+						`${AI_TUTOR_API_BASE}/prompts/tutor?group_id=${encodeURIComponent(groupId)}`,
+						{ headers: { Authorization: `Bearer ${localStorage.token}` } }
+					);
+					if (!tutorRes.ok) throw new Error('Tutor prompts fetch failed');
+					const nextTutorPrompts = await tutorRes.json();
+					return {
+						generalPrompts: nextGeneralPrompts,
+						tutorPrompts: nextTutorPrompts
+					};
+				}
 			});
-			if (!generalRes.ok) throw new Error('General prompts fetch failed');
-			generalPrompts = await generalRes.json();
+			generalPrompts = prompts.generalPrompts;
+			tutorPrompts = prompts.tutorPrompts;
 		} catch (e) {
 			generalPrompts = [];
-			console.error('General prompts fetch failed:', e);
-		}
-
-		if (!groupId) {
 			tutorPrompts = [];
-			return;
-		}
-
-		try {
-			// Page: AI Tutor Dashboard > Instructor Setup
-			// Endpoint: GET /prompts/tutor?group_id={group_id}
-			// Purpose: load class-level tutor prompt overrides for the selected group.
-			const tutorRes = await fetch(
-				`${AI_TUTOR_API_BASE}/prompts/tutor?group_id=${encodeURIComponent(groupId)}`,
-				{ headers: { Authorization: `Bearer ${localStorage.token}` } }
-			);
-			if (!tutorRes.ok) throw new Error('Tutor prompts fetch failed');
-			tutorPrompts = await tutorRes.json();
-		} catch (e) {
-			tutorPrompts = [];
-			console.error('Tutor prompts fetch failed:', e);
+			console.error('Prompts fetch failed:', e);
 		}
 	}
 
@@ -1117,6 +1180,7 @@
 					})
 				});
 			}
+			clearAITutorSessionCacheByPrefix(getInstructorSetupCacheKey('prompts', selectedGroupId));
 			await loadPrompts(selectedGroupId);
 			showPromptModal = false;
 			testToast('Instructor Setup saved prompt override');
@@ -1150,6 +1214,7 @@
 				},
 				body: JSON.stringify({ is_active: false })
 			});
+			clearAITutorSessionCacheByPrefix(getInstructorSetupCacheKey('prompts', selectedGroupId));
 			await loadPrompts(selectedGroupId);
 			showPromptModal = false;
 			testToast('Instructor Setup reset prompt to default');
@@ -1180,7 +1245,10 @@
 					)
 				}
 			);
-			if (res.ok) testToast('Instructor Setup saved error types');
+			if (res.ok) {
+				writeAITutorSessionCache(getInstructorSetupCacheKey('error-types', selectedGroupId), errorTypeDefs);
+				testToast('Instructor Setup saved error types');
+			}
 		} catch (e) {
 			testToast('Instructor Setup failed saving error types');
 			console.error('Failed to persist error types:', e);
@@ -1200,6 +1268,7 @@
 				`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(selectedGroupId)}`,
 				{ method: 'DELETE', headers: { Authorization: `Bearer ${localStorage.token}` } }
 			);
+			clearAITutorSessionCacheByPrefix(getInstructorSetupCacheKey('error-types', selectedGroupId));
 			await loadErrorTypes(selectedGroupId);
 			testToast('Instructor Setup reset error types to default');
 		} catch (e) {
@@ -1221,6 +1290,7 @@
 				`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(selectedGroupId)}`,
 				{ method: 'DELETE', headers: { Authorization: `Bearer ${localStorage.token}` } }
 			);
+			clearAITutorSessionCacheByPrefix(getInstructorSetupCacheKey('error-types', selectedGroupId));
 			errorTypeDefs = [];
 			testToast('Instructor Setup deleted all custom error types');
 		} catch (e) {
@@ -1392,6 +1462,7 @@
 				modelId,
 				homeworkId: hwId
 			};
+			clearAITutorSessionCacheByPrefix(getInstructorSetupCacheKey('homework-stats', selectedGroupId));
 			upsertPersistedJob(persistedJob);
 			toast.success(`${docType === 'question' ? 'Homework' : 'Answer'} upload started.`);
 			await monitorPersistedJob(persistedJob);
@@ -1688,6 +1759,7 @@
 					modelId: row?.modelId ?? targetHomeworkId,
 					homeworkId: targetHomeworkId
 				};
+				clearAITutorSessionCacheByPrefix(getInstructorSetupCacheKey('homework-stats', selectedGroupId));
 				upsertPersistedJob(persistedJob);
 				testToast('Instructor Setup run analysis request submitted');
 				toast.success('Analysis started successfully.');
