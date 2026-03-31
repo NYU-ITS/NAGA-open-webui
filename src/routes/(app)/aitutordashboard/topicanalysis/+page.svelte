@@ -2,6 +2,12 @@
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
 	import { toast } from 'svelte-sonner';
+	import { createNewModel, getModelById, updateModelById } from '$lib/apis/models';
+	import {
+		addFileToKnowledgeById,
+		createNewKnowledge,
+		updateKnowledgeById
+	} from '$lib/apis/knowledge';
 	import {
 		AI_TUTOR_API_BASE_URL,
 		AI_TUTOR_FRONTEND_TESTING_ERROR_TYPES,
@@ -10,12 +16,18 @@
 	} from '$lib/constants';
 	import { aiTutorFrontendTestingErrorTypes } from '$lib/stores';
 	import { showAITutorTestToast } from '$lib/utils/aiTutorTesting';
+	import {
+		clearAITutorSessionCacheByPrefix,
+		loadWithAITutorSessionCache
+	} from '$lib/utils/aiTutorSessionCache';
 	import ChevronUp from '$lib/components/icons/ChevronUp.svelte';
 	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
 
 	const AI_TUTOR_API_BASE = AI_TUTOR_API_BASE_URL;
 	const useFrontendTestingData = AI_TUTOR_FRONTEND_TESTING_MODE;
 	const testToast = showAITutorTestToast;
+	const TOPIC_ANALYSIS_SESSION_TTL_MS = 5 * 60 * 1000;
+	const LAST_AI_TUTOR_GROUP_STORAGE_KEY = 'ai_tutor_last_selected_group_id';
 	const dashboardPalette = ['#EE352E', '#00933C', '#B933AD', '#0039A6', '#FF6319', '#996633'];
 	const errorTypeColors = dashboardPalette.slice(0, 4);
 	const frontendTestingHomeworkModelNames = [
@@ -29,7 +41,20 @@
 
 	// Group ID (needed for error-types endpoints)
 	let groupId = '';
-	$: groupId = $page.url.searchParams.get('group_id') || '';
+	function getPersistedGroupId() {
+		if (typeof sessionStorage === 'undefined') return '';
+		return sessionStorage.getItem(LAST_AI_TUTOR_GROUP_STORAGE_KEY) || '';
+	}
+
+	$: groupId = $page.url.searchParams.get('group_id') || getPersistedGroupId();
+	$: if ($page.url.searchParams.get('group_id')) {
+		if (typeof sessionStorage !== 'undefined') {
+			sessionStorage.setItem(
+				LAST_AI_TUTOR_GROUP_STORAGE_KEY,
+				$page.url.searchParams.get('group_id') || ''
+			);
+		}
+	}
 	const frontendTestingTopicByHomework = [
 		{
 			id: frontendTestingHomeworkModelNames[0],
@@ -134,7 +159,223 @@
 	let initialized = false;
 	let generatingPracticeByHomeworkId: Record<string, boolean> = {};
 	let sendingPracticeById: Record<string, boolean> = {};
+	let generatingPracticeJobsByHomeworkId: Record<
+		string,
+		{ jobId: string; step: string; status: string; startedAt: string }
+	> = {};
+	let failedPracticeGenerationByHomeworkId: Record<
+		string,
+		{ message: string; failedAt: string }
+	> = {};
+	let resumedPracticeJobIds = new Set<string>();
 	let homeworkIdsWithAnalysis = new Set<string>();
+	let assignmentSentAtByPracticeId: Record<string, string> = {};
+	const PRACTICE_JOB_STORAGE_PREFIX = 'ai_tutor_active_practice_job';
+
+	function getPracticeJobStorageKey(groupId: string, homeworkId: string) {
+		return `${PRACTICE_JOB_STORAGE_PREFIX}:${groupId}:${homeworkId}`;
+	}
+
+	function persistPracticeJobState(
+		homeworkId: string,
+		payload: { jobId: string; step: string; status: string; startedAt: string }
+	) {
+		if (typeof localStorage === 'undefined' || !groupId) return;
+		localStorage.setItem(getPracticeJobStorageKey(groupId, homeworkId), JSON.stringify(payload));
+	}
+
+	function clearPracticeJobState(homeworkId: string) {
+		if (typeof localStorage === 'undefined' || !groupId) return;
+		localStorage.removeItem(getPracticeJobStorageKey(groupId, homeworkId));
+	}
+
+	function restorePersistedPracticeJobs() {
+		if (typeof localStorage === 'undefined' || !groupId) return;
+		const nextJobs: Record<string, { jobId: string; step: string; status: string; startedAt: string }> = {};
+		const nextGeneratingFlags: Record<string, boolean> = { ...generatingPracticeByHomeworkId };
+
+		for (let i = 0; i < localStorage.length; i += 1) {
+			const key = localStorage.key(i);
+			if (!key || !key.startsWith(`${PRACTICE_JOB_STORAGE_PREFIX}:${groupId}:`)) continue;
+			const homeworkId = key.split(':').at(-1);
+			if (!homeworkId) continue;
+			try {
+				const parsed = JSON.parse(localStorage.getItem(key) ?? '');
+				if (parsed?.jobId) {
+					nextJobs[homeworkId] = {
+						jobId: parsed.jobId,
+						step: parsed.step ?? 'queued',
+						status: parsed.status ?? 'queued',
+						startedAt: parsed.startedAt ?? ''
+					};
+					nextGeneratingFlags[homeworkId] = true;
+				}
+			} catch {
+				localStorage.removeItem(key);
+			}
+		}
+
+		generatingPracticeJobsByHomeworkId = nextJobs;
+		generatingPracticeByHomeworkId = nextGeneratingFlags;
+	}
+
+	function buildMasteryModelId(sourceModelId: string) {
+		return `mastery-${sourceModelId}`;
+	}
+
+	function buildMasteryModelName(sourceModelName: string) {
+		return sourceModelName.startsWith('Mastery ') ? sourceModelName : `Mastery ${sourceModelName}`;
+	}
+
+	function getKnowledgeReferenceId(reference: any) {
+		return reference?.id ?? reference?.collection_name ?? null;
+	}
+
+	function buildPracticeKnowledgeMarkdown(homeworkLabel: string, practiceItems: any[]) {
+		const lines = [`# ${homeworkLabel} Mastery Practice Set`, ''];
+
+		for (const [index, item] of practiceItems.entries()) {
+			const number = item?.number ?? index + 1;
+			const text = item?.text ?? item?.question ?? item?.prompt ?? 'Practice question';
+			const topics = Array.isArray(item?.topics)
+				? item.topics.filter(Boolean).join(', ')
+				: item?.topic ?? '';
+			const answer = item?.answer ?? item?.expected_answer ?? '';
+
+			lines.push(`## Question ${number}`);
+			if (topics) lines.push(`Topics: ${topics}`);
+			lines.push('');
+			lines.push(String(text));
+			lines.push('');
+			if (answer) {
+				lines.push('Answer:');
+				lines.push(String(answer));
+				lines.push('');
+			}
+		}
+
+		return lines.join('\n');
+	}
+
+	function buildPracticeKnowledgeMarkdownFromText(homeworkLabel: string, practiceMarkdown: string) {
+		const trimmed = (practiceMarkdown ?? '').trim();
+		if (!trimmed) {
+			return `# ${homeworkLabel} Mastery Practice Set\n\nPractice content is currently unavailable.`;
+		}
+
+		return `# ${homeworkLabel} Mastery Practice Set\n\n${trimmed}`;
+	}
+
+	async function syncMasteryWorkspaceModel(homeworkId: string) {
+		const homeworkRow = homeworkRows.find((row) => row.id === homeworkId);
+		const sourceModelId = homeworkRow?.modelId;
+		if (!sourceModelId) return;
+
+		const sourceModel = await getModelById(localStorage.token, sourceModelId);
+		const practiceResponse = await fetch(
+			`${AI_TUTOR_API_BASE}/practice?homework_id=${encodeURIComponent(homeworkId)}`,
+			{
+				method: 'GET',
+				headers: {
+					Authorization: `Bearer ${localStorage.token}`
+				}
+			}
+		);
+		if (!practiceResponse.ok) {
+			throw new Error('Failed to load generated practice content for Mastery model sync.');
+		}
+
+		const practiceData = await practiceResponse.json();
+		const latestPractice =
+			Array.isArray(practiceData) && practiceData.length > 0
+				? [...practiceData].sort(
+						(a, b) => Number(b?.version_number ?? 0) - Number(a?.version_number ?? 0)
+					)[0]
+				: null;
+
+		const practiceItems = Array.isArray(latestPractice?.problem_items)
+			? latestPractice.problem_items
+			: [];
+		const practiceMarkdown = typeof latestPractice?.problem_data === 'string'
+			? latestPractice.problem_data
+			: '';
+		if (practiceItems.length === 0 && !practiceMarkdown.trim()) {
+			throw new Error('Generated practice content is missing question data.');
+		}
+
+		const masteryModelId = buildMasteryModelId(sourceModel.id);
+		const masteryModelName = buildMasteryModelName(sourceModel.name ?? getHomeworkModelName(homeworkId));
+		const knowledgeName = `${masteryModelName} Practice KB`;
+		let existingMasteryModel = null;
+
+		try {
+			existingMasteryModel = await getModelById(localStorage.token, masteryModelId);
+		} catch {
+			existingMasteryModel = null;
+		}
+
+		// Mastery model sync is always overwrite-in-place: if a Mastery clone already exists,
+		// replace its knowledge contents with the newly generated class-level practice set.
+		let knowledgeId = getKnowledgeReferenceId(existingMasteryModel?.meta?.knowledge?.[0]);
+		if (knowledgeId) {
+			await fetch(`/api/v1/knowledge/${encodeURIComponent(knowledgeId)}/reset`, {
+				method: 'POST',
+				headers: {
+					Authorization: `Bearer ${localStorage.token}`
+				}
+			});
+			await updateKnowledgeById(localStorage.token, knowledgeId, {
+				name: knowledgeName,
+				description: `Generated mastery practice knowledge for ${getHomeworkModelName(homeworkId)}.`,
+				access_control: sourceModel.access_control ?? null
+			});
+		} else {
+			const createdKnowledge = await createNewKnowledge(
+				localStorage.token,
+				knowledgeName,
+				`Generated mastery practice knowledge for ${getHomeworkModelName(homeworkId)}.`,
+				sourceModel.access_control ?? null
+			);
+			knowledgeId = createdKnowledge?.id ?? null;
+		}
+
+		if (!knowledgeId) {
+			throw new Error('Failed to create or load the Mastery knowledge base.');
+		}
+
+		const practiceFile = new File(
+			[
+				practiceItems.length > 0
+					? buildPracticeKnowledgeMarkdown(getHomeworkModelName(homeworkId), practiceItems)
+					: buildPracticeKnowledgeMarkdownFromText(
+							getHomeworkModelName(homeworkId),
+							practiceMarkdown
+						)
+			],
+			`${masteryModelId}-practice.md`,
+			{ type: 'text/markdown' }
+		);
+		await addFileToKnowledgeById(localStorage.token, knowledgeId, practiceFile);
+
+		const nextModelPayload = {
+			id: masteryModelId,
+			base_model_id: sourceModel.base_model_id ?? null,
+			name: masteryModelName,
+			meta: {
+				...sourceModel.meta,
+				knowledge: [{ id: knowledgeId, name: knowledgeName }]
+			},
+			params: sourceModel.params,
+			access_control: sourceModel.access_control ?? null,
+			is_active: sourceModel.is_active ?? true
+		};
+
+		if (existingMasteryModel) {
+			await updateModelById(localStorage.token, masteryModelId, nextModelPayload);
+		} else {
+			await createNewModel(localStorage.token, nextModelPayload);
+		}
+	}
 
 	// Helper: load error types from server
 	async function loadErrorTypes() {
@@ -145,28 +386,36 @@
 		}
 		if (!groupId) return;
 		try {
-			const res = await fetch(
-				`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(groupId)}`,
-				{ headers: { Authorization: `Bearer ${localStorage.token}` } }
-			);
-			if (res.ok) {
-				const data = await res.json();
-				const errorTypes = Array.isArray(data?.error_types)
-					? data.error_types
-					: Array.isArray(data)
-						? data
-						: [];
-				if (errorTypes.length > 0) {
-					errorTypeDefs = errorTypes.slice(0, 4).map((et, i) => ({
-						type: et.name ?? 'Unknown',
-						color: errorTypeColors[i % errorTypeColors.length],
-						description: et.description ?? ''
-					}));
-				} else {
-					errorTypeDefs = [];
+			errorTypeDefs = await loadWithAITutorSessionCache({
+				key: `topic-analysis:${groupId}:error-types`,
+				ttlMs: TOPIC_ANALYSIS_SESSION_TTL_MS,
+				onCached: (cached) => {
+					errorTypeDefs = cached;
+				},
+				loader: async () => {
+					const res = await fetch(
+						`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(groupId)}`,
+						{ headers: { Authorization: `Bearer ${localStorage.token}` } }
+					);
+					if (!res.ok) throw new Error('Error types fetch failed');
+					const data = await res.json();
+					const errorTypes = Array.isArray(data?.error_types)
+						? data.error_types
+						: Array.isArray(data)
+							? data
+							: [];
+					const nextErrorTypes =
+						errorTypes.length > 0
+							? errorTypes.slice(0, 4).map((et, i) => ({
+									type: et.name ?? 'Unknown',
+									color: errorTypeColors[i % errorTypeColors.length],
+									description: et.description ?? ''
+								}))
+							: [];
+					testToast('Topic Analysis loaded error types');
+					return nextErrorTypes;
 				}
-				testToast('Topic Analysis loaded error types');
-			}
+			});
 		} catch (e) {
 			testToast('Topic Analysis failed loading error types');
 			console.error('Error types fetch failed:', e);
@@ -196,7 +445,10 @@
 					)
 				}
 			);
-			if (res.ok) testToast('Topic Analysis saved error types');
+			if (res.ok) {
+				clearAITutorSessionCacheByPrefix(`topic-analysis:${groupId}:error-types`);
+				testToast('Topic Analysis saved error types');
+			}
 		} catch (e) {
 			testToast('Topic Analysis failed saving error types');
 			console.error('Failed to persist error types:', e);
@@ -219,6 +471,7 @@
 				{ method: 'DELETE', headers: { Authorization: `Bearer ${localStorage.token}` } }
 			);
 			testToast('Topic Analysis reset error types to default');
+			clearAITutorSessionCacheByPrefix(`topic-analysis:${groupId}:error-types`);
 			await loadErrorTypes();
 		} catch (e) {
 			testToast('Topic Analysis failed resetting error types');
@@ -233,12 +486,24 @@
 			return;
 		}
 		if (!groupId) {
-			topicGroupsByHomework = [];
-			homeworkIdsWithAnalysis = new Set();
 			return;
 		}
 		topicAnalysisLoading = true;
 		try {
+			const applyTopicAnalysisSnapshot = (snapshot: {
+				homeworkRows: HomeworkPipelineRow[];
+				topicGroupsByHomework: any[];
+				homeworkIdsWithAnalysis: string[];
+			}) => {
+				homeworkRows = snapshot.homeworkRows;
+				topicGroupsByHomework = snapshot.topicGroupsByHomework;
+				homeworkIdsWithAnalysis = new Set(snapshot.homeworkIdsWithAnalysis);
+			};
+			const snapshot = await loadWithAITutorSessionCache({
+				key: `topic-analysis:${groupId}:analysis`,
+				ttlMs: TOPIC_ANALYSIS_SESSION_TTL_MS,
+				onCached: applyTopicAnalysisSnapshot,
+				loader: async () => {
 			// Page: AI Tutor Dashboard > Topic Analysis
 			// Endpoint: GET /homework/?group_id={group_id}
 			// Purpose: scope topic analysis to homework that belongs to the selected group.
@@ -251,8 +516,8 @@
 			if (!homeworkResponse.ok) {
 				throw new Error('Homework fetch failed');
 			}
-			const homeworkData = await homeworkResponse.json();
-			const nextHomeworkRows = Array.isArray(homeworkData)
+					const homeworkData = await homeworkResponse.json();
+					const nextHomeworkRows = Array.isArray(homeworkData)
 				? homeworkData.map((hw) => ({
 						id: hw?.id ?? 'unknown',
 						modelId: hw?.model_id ?? null,
@@ -261,8 +526,7 @@
 						topicMapped: hw?.topic_mapped ?? false
 					}))
 				: [];
-			homeworkRows = nextHomeworkRows;
-			const homeworkIds = new Set(nextHomeworkRows.map((row) => row.id));
+					const homeworkIds = new Set(nextHomeworkRows.map((row) => row.id));
 
 			// Page: AI Tutor Dashboard > Topic Analysis
 			// Endpoint: GET /analysis
@@ -278,8 +542,8 @@
 				throw new Error('Topic analysis fetch failed');
 			}
 
-			const topicData = await topicResponse.json();
-			if (Array.isArray(topicData)) {
+					const topicData = await topicResponse.json();
+					if (Array.isArray(topicData)) {
 				const nextHomeworkIdsWithAnalysis = new Set<string>();
 				const grouped = new Map<
 					string,
@@ -324,7 +588,7 @@
 					}
 				}
 
-				topicGroupsByHomework = Array.from(grouped.entries()).map(([homeworkId, topicMap]) => {
+						const nextTopicGroupsByHomework = Array.from(grouped.entries()).map(([homeworkId, topicMap]) => {
 					const topics = Array.from(topicMap.entries()).map(([topic, bucket]) => {
 						const totalErrors = Array.from(bucket.errorTypeCount.values()).reduce((a, b) => a + b, 0);
 						const errorTypes = Array.from(bucket.errorTypeCount.entries()).map(([type, count]) => ({
@@ -348,16 +612,24 @@
 						homework: getHomeworkModelName(homeworkId),
 						topics
 					};
-				});
-				homeworkIdsWithAnalysis = nextHomeworkIdsWithAnalysis;
-			} else {
-				homeworkIdsWithAnalysis = new Set();
-			}
+						});
+						testToast('Topic Analysis loaded /analysis data');
+						return {
+							homeworkRows: nextHomeworkRows,
+							topicGroupsByHomework: nextTopicGroupsByHomework,
+							homeworkIdsWithAnalysis: Array.from(nextHomeworkIdsWithAnalysis)
+						};
+					}
 
-			testToast('Topic Analysis loaded /analysis data');
+					return {
+						homeworkRows: nextHomeworkRows,
+						topicGroupsByHomework: [],
+						homeworkIdsWithAnalysis: []
+					};
+				}
+			});
+			applyTopicAnalysisSnapshot(snapshot);
 		} catch (error) {
-			topicGroupsByHomework = [];
-			homeworkIdsWithAnalysis = new Set();
 			testToast('Topic Analysis failed loading /analysis data');
 			console.error('Topic analysis API failed:', error);
 		} finally {
@@ -372,11 +644,22 @@
 			return;
 		}
 		if (!groupId) {
-			practiceQuestions = [];
 			return;
 		}
 		practiceLoading = true;
 		try {
+			const applyPracticeSnapshot = (snapshot: {
+				practiceQuestions: any[];
+				assignmentSentAtByPracticeId: Record<string, string>;
+			}) => {
+				practiceQuestions = snapshot.practiceQuestions;
+				assignmentSentAtByPracticeId = snapshot.assignmentSentAtByPracticeId;
+			};
+			const snapshot = await loadWithAITutorSessionCache({
+				key: `topic-analysis:${groupId}:practice`,
+				ttlMs: TOPIC_ANALYSIS_SESSION_TTL_MS,
+				onCached: applyPracticeSnapshot,
+				loader: async () => {
 			// Page: AI Tutor Dashboard > Topic Analysis
 			// Endpoint: GET /homework/?group_id={group_id}
 			// Purpose: build the group-scoped homework list used to label practice question sets.
@@ -404,9 +687,9 @@
 				throw new Error('Practice question set fetch failed');
 			}
 
-			const homeworkData = homeworkResponse.ok ? await homeworkResponse.json() : [];
-			const practiceData = await practiceResponse.json();
-			if (Array.isArray(practiceData)) {
+					const homeworkData = homeworkResponse.ok ? await homeworkResponse.json() : [];
+					const practiceData = await practiceResponse.json();
+					if (Array.isArray(practiceData)) {
 				const latestByHomework = new Map<string, any>();
 				for (const row of practiceData) {
 					const homeworkId = row?.homework_id ?? 'unknown';
@@ -426,7 +709,42 @@
 					if (row?.homework_id) homeworkIds.add(row.homework_id);
 				}
 
-				practiceQuestions = Array.from(homeworkIds).sort().map((homeworkId) => {
+				const latestPracticeIds = Array.from(latestByHomework.values())
+					.map((row) => row?.id)
+					.filter(Boolean);
+				const nextAssignmentSentAtByPracticeId: Record<string, string> = {};
+
+				await Promise.all(
+					latestPracticeIds.map(async (practiceId) => {
+						try {
+							// Page: AI Tutor Dashboard > Topic Analysis
+							// Endpoint: GET /assignment?practice_problem_id={practice_id}
+							// Purpose: detect whether this approved practice set has already been sent to students.
+							const assignmentResponse = await fetch(
+								`${AI_TUTOR_API_BASE}/assignment?practice_problem_id=${encodeURIComponent(practiceId)}`,
+								{
+									method: 'GET',
+									headers: {
+										Authorization: `Bearer ${localStorage.token}`
+									}
+								}
+							);
+							if (!assignmentResponse.ok) return;
+							const assignments = await assignmentResponse.json();
+							if (Array.isArray(assignments) && assignments.length > 0) {
+								const latestAssignment = [...assignments].sort((a, b) =>
+									String(b?.created_at ?? '').localeCompare(String(a?.created_at ?? ''))
+								)[0];
+								if (latestAssignment?.created_at) {
+									nextAssignmentSentAtByPracticeId[practiceId] = latestAssignment.created_at;
+								}
+							}
+						} catch (error) {
+							console.error('Assignment status fetch failed:', error);
+						}
+					})
+				);
+						const nextPracticeQuestions = Array.from(homeworkIds).sort().map((homeworkId) => {
 					const latest = latestByHomework.get(homeworkId);
 					const homeworkLabel = getHomeworkModelName(homeworkId);
 					if (!latest) {
@@ -439,7 +757,8 @@
 							homework: homeworkLabel,
 							homeworkId,
 							status: 'approved',
-							date: latest.created_at
+							date: latest.created_at,
+							sentAt: latest.id ? nextAssignmentSentAtByPracticeId[latest.id] ?? null : null
 						};
 					}
 
@@ -452,12 +771,23 @@
 					}
 
 					return { practiceId: latest.id ?? null, homework: homeworkLabel, homeworkId, status: 'not_ready' };
-				});
-			}
+						});
 
-			testToast('Topic Analysis loaded /practice data');
+						testToast('Topic Analysis loaded /practice data');
+						return {
+							practiceQuestions: nextPracticeQuestions,
+							assignmentSentAtByPracticeId: nextAssignmentSentAtByPracticeId
+						};
+					}
+
+					return {
+						practiceQuestions: [],
+						assignmentSentAtByPracticeId: {}
+					};
+				}
+			});
+			applyPracticeSnapshot(snapshot);
 		} catch (error) {
-			practiceQuestions = [];
 			testToast('Topic Analysis failed loading /practice data');
 			console.error('Practice question set API failed:', error);
 		} finally {
@@ -486,7 +816,11 @@
 		return '';
 	}
 
-	async function pollPipelineJob(jobId: string, intervalMs = 4000) {
+	async function pollPipelineJob(
+		jobId: string,
+		intervalMs = 4000,
+		onUpdate?: (data: any) => void
+	) {
 		while (true) {
 			const response = await fetch(
 				`${AI_TUTOR_API_BASE}/pipeline/status/${encodeURIComponent(jobId)}`,
@@ -498,6 +832,7 @@
 				throw new Error(`Pipeline status check failed: ${response.status}`);
 			}
 			const data = await response.json();
+			onUpdate?.(data);
 			if (data?.status === 'done') return data;
 			if (data?.status === 'failed') {
 				throw new Error(data?.error || 'Practice generation failed.');
@@ -516,9 +851,16 @@
 			...generatingPracticeByHomeworkId,
 			[homeworkId]: true
 		};
+		failedPracticeGenerationByHomeworkId = Object.fromEntries(
+			Object.entries(failedPracticeGenerationByHomeworkId).filter(([id]) => id !== homeworkId)
+		);
 		testToast(`Generate practice is triggered | page=aitutordashboard - Topic Analysis | homework=${homeworkId}`);
 
 		try {
+			// Planned Mastery-model flow:
+			// after class-level practice generation succeeds, the instructor flow should clone
+			// the source workspace model into a new "Mastery*" workspace model and replace that
+			// clone's knowledge base with the generated class practice set.
 			const response = await fetch(
 				`${AI_TUTOR_API_BASE}/practice/generate?homework_id=${encodeURIComponent(homeworkId)}`,
 				{
@@ -533,14 +875,60 @@
 			const data = await response.json();
 			const jobId = data?.job_id;
 			if (!jobId) throw new Error('Practice generation started but no job ID was returned.');
+			const startedAt = new Date().toISOString();
+			generatingPracticeJobsByHomeworkId = {
+				...generatingPracticeJobsByHomeworkId,
+				[homeworkId]: {
+					jobId,
+					step: 'queued',
+					status: 'queued',
+					startedAt
+				}
+			};
+			persistPracticeJobState(homeworkId, {
+				jobId,
+				step: 'queued',
+				status: 'queued',
+				startedAt
+			});
 			toast.success('Practice generation started.');
-			await pollPipelineJob(jobId);
+			await pollPipelineJob(jobId, 4000, (jobData) => {
+				const nextJobState = {
+					jobId,
+					step: jobData?.step ?? 'unknown',
+					status: jobData?.status ?? 'running',
+					startedAt
+				};
+				generatingPracticeJobsByHomeworkId = {
+					...generatingPracticeJobsByHomeworkId,
+					[homeworkId]: nextJobState
+				};
+				persistPracticeJobState(homeworkId, nextJobState);
+			});
+			clearAITutorSessionCacheByPrefix(`topic-analysis:${groupId}:analysis`);
+			clearAITutorSessionCacheByPrefix(`topic-analysis:${groupId}:practice`);
 			await loadPracticeQuestionData();
+			await syncMasteryWorkspaceModel(homeworkId);
+			clearPracticeJobState(homeworkId);
+			generatingPracticeJobsByHomeworkId = Object.fromEntries(
+				Object.entries(generatingPracticeJobsByHomeworkId).filter(([id]) => id !== homeworkId)
+			);
 			toast.success('Practice question set generated.');
 		} catch (error) {
+			failedPracticeGenerationByHomeworkId = {
+				...failedPracticeGenerationByHomeworkId,
+				[homeworkId]: {
+					message: error instanceof Error ? error.message : 'Practice generation failed.',
+					failedAt: new Date().toISOString()
+				}
+			};
 			toast.error(error instanceof Error ? error.message : 'Practice generation failed.');
 			console.error('Practice generation failed:', error);
 		} finally {
+			clearPracticeJobState(homeworkId);
+			generatingPracticeJobsByHomeworkId = Object.fromEntries(
+				Object.entries(generatingPracticeJobsByHomeworkId).filter(([id]) => id !== homeworkId)
+			);
 			generatingPracticeByHomeworkId = {
 				...generatingPracticeByHomeworkId,
 				[homeworkId]: false
@@ -564,10 +952,11 @@
 
 		try {
 			// Page: AI Tutor Dashboard > Topic Analysis
-			// Endpoint: POST /assignment?practice_id={practice_id}
+			// Endpoint: POST /assignment/assign?practice_id={practice_id}
 			// Purpose: distribute an approved practice set to students based on their weak topics.
+			// Each student assignment is expected to remain a subset of the class-level practice set.
 			const response = await fetch(
-				`${AI_TUTOR_API_BASE}/assignment?practice_id=${encodeURIComponent(practice.practiceId)}`,
+				`${AI_TUTOR_API_BASE}/assignment/assign?practice_id=${encodeURIComponent(practice.practiceId)}`,
 				{
 					method: 'POST',
 					headers: {
@@ -579,6 +968,8 @@
 				const detail = await response.text();
 				throw new Error(detail || 'Failed to send practice to students.');
 			}
+			clearAITutorSessionCacheByPrefix(`topic-analysis:${groupId}:practice`);
+			await loadPracticeQuestionData();
 			toast.success('Practice question set sent to students.');
 		} catch (error) {
 			toast.error(error instanceof Error ? error.message : 'Failed to send practice to students.');
@@ -610,7 +1001,67 @@
 			errorTypeDefs = $aiTutorFrontendTestingErrorTypes;
 			return;
 		}
+		restorePersistedPracticeJobs();
 	});
+
+	$: if (initialized && !useFrontendTestingData && groupId) {
+		restorePersistedPracticeJobs();
+	}
+
+	$: if (initialized && !useFrontendTestingData && groupId) {
+		for (const [homeworkId, job] of Object.entries(generatingPracticeJobsByHomeworkId)) {
+			if (!job?.jobId || !generatingPracticeByHomeworkId[homeworkId]) continue;
+			if (resumedPracticeJobIds.has(job.jobId)) continue;
+			resumedPracticeJobIds = new Set([...resumedPracticeJobIds, job.jobId]);
+			generatingPracticeByHomeworkId = {
+				...generatingPracticeByHomeworkId,
+				[homeworkId]: false
+			};
+			generatingPracticeByHomeworkId = {
+				...generatingPracticeByHomeworkId,
+				[homeworkId]: true
+			};
+			void (async () => {
+				try {
+					await pollPipelineJob(job.jobId, 4000, (jobData) => {
+						const nextJobState = {
+							jobId: job.jobId,
+							step: jobData?.step ?? 'unknown',
+							status: jobData?.status ?? 'running',
+							startedAt: job.startedAt
+						};
+						generatingPracticeJobsByHomeworkId = {
+							...generatingPracticeJobsByHomeworkId,
+							[homeworkId]: nextJobState
+						};
+						persistPracticeJobState(homeworkId, nextJobState);
+					});
+					clearAITutorSessionCacheByPrefix(`topic-analysis:${groupId}:analysis`);
+					clearAITutorSessionCacheByPrefix(`topic-analysis:${groupId}:practice`);
+					await loadPracticeQuestionData();
+					await syncMasteryWorkspaceModel(homeworkId);
+					clearPracticeJobState(homeworkId);
+					resumedPracticeJobIds.delete(job.jobId);
+					generatingPracticeJobsByHomeworkId = Object.fromEntries(
+						Object.entries(generatingPracticeJobsByHomeworkId).filter(([id]) => id !== homeworkId)
+					);
+					toast.success('Practice question set generation finished after refresh.');
+				} catch (error) {
+					clearPracticeJobState(homeworkId);
+					resumedPracticeJobIds.delete(job.jobId);
+					generatingPracticeJobsByHomeworkId = Object.fromEntries(
+						Object.entries(generatingPracticeJobsByHomeworkId).filter(([id]) => id !== homeworkId)
+					);
+					toast.error(error instanceof Error ? error.message : 'Practice generation failed after refresh.');
+				} finally {
+					generatingPracticeByHomeworkId = {
+						...generatingPracticeByHomeworkId,
+						[homeworkId]: false
+					};
+				}
+			})();
+		}
+	}
 
 	$: if (initialized && !useFrontendTestingData && groupId) {
 		void loadTopicAnalysisData();
@@ -623,13 +1074,9 @@
 	$: if (initialized && !useFrontendTestingData && groupId) {
 		void loadErrorTypes();
 	}
-	$: if (initialized && !useFrontendTestingData && !groupId) {
-		homeworkRows = [];
-		topicGroupsByHomework = [];
-		practiceQuestions = [];
-		homeworkIdsWithAnalysis = new Set();
-		errorTypeDefs = [];
-	}
+	// Keep the last successful instructor snapshot on screen while the layout is
+	// still restoring group_id during tab switches. This avoids brief empty states
+	// that would otherwise overwrite valid data until the next fetch completes.
 
 	// Global error type definitions — source of truth for names, colors, descriptions
 	let errorTypeDefs: { type: string; color: string; description: string }[] = [];
@@ -1143,16 +1590,43 @@
 									<div class={homeworkModelNameCellClass}>{getHomeworkModelName(practice.homework)}</div>
 								</td>
 								<td class="px-3 py-1.5">
-									<div class="flex items-center gap-2 text-gray-700 dark:text-gray-300 whitespace-nowrap">
+									<div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-gray-700 dark:text-gray-300">
 										{#if practice.status === 'approved'}
-											<span class="w-2 h-2 rounded-full bg-green-500 flex-shrink-0"></span>
-											<span>Approved on {practice.date}</span>
+											<div class="flex items-center gap-2 whitespace-nowrap">
+												<span class="w-2 h-2 rounded-full bg-green-500 flex-shrink-0"></span>
+												<span>Approved on {practice.date}</span>
+											</div>
+											{#if practice.sentAt}
+												<div class="flex items-center gap-2 whitespace-nowrap">
+													<span class="w-2 h-2 rounded-full bg-green-500 flex-shrink-0"></span>
+													<span>Sent on {practice.sentAt}</span>
+												</div>
+											{/if}
 										{:else if practice.status === 'ready'}
 											<span class="w-2 h-2 rounded-full bg-yellow-500 flex-shrink-0"></span>
 											<span>Ready for review</span>
 										{:else if practice.status === 'generating' || generatingPracticeByHomeworkId[practice.homeworkId]}
-											<span class="w-2 h-2 rounded-full bg-blue-500 flex-shrink-0"></span>
-											<span>Generating</span>
+											<div class="flex flex-col gap-1">
+												<div class="flex items-center gap-2 whitespace-nowrap">
+													<span class="w-2 h-2 rounded-full bg-blue-500 flex-shrink-0"></span>
+													<span>Generating</span>
+												</div>
+												{#if generatingPracticeJobsByHomeworkId[practice.homeworkId]?.step}
+													<div class="text-xs text-gray-500 dark:text-gray-400">
+														Step: {generatingPracticeJobsByHomeworkId[practice.homeworkId].step}
+													</div>
+												{/if}
+											</div>
+										{:else if failedPracticeGenerationByHomeworkId[practice.homeworkId]}
+											<div class="flex flex-col gap-1">
+												<div class="flex items-center gap-2 whitespace-nowrap">
+													<span class="w-2 h-2 rounded-full bg-red-500 flex-shrink-0"></span>
+													<span>Last re-generate failed</span>
+												</div>
+												<div class="max-w-[28rem] whitespace-normal break-words text-xs text-gray-500 dark:text-gray-400">
+													{failedPracticeGenerationByHomeworkId[practice.homeworkId].message}
+												</div>
+											</div>
 										{:else}
 											<span class="w-2 h-2 rounded-full bg-gray-400 flex-shrink-0"></span>
 											<span>Not ready</span>
@@ -1176,9 +1650,19 @@
 													disabled={!practice.practiceId || sendingPracticeById[practice.practiceId]}
 												>
 													{sendingPracticeById[practice.practiceId] ? 'Sending…' : 'Send'}
-													<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="size-3">
+													<!-- <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="size-3">
 														<path stroke-linecap="round" stroke-linejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
-													</svg>
+													</svg> -->
+												</button>
+											{/if}
+											{#if canGeneratePractice(practice.homeworkId)}
+												<button
+													type="button"
+													class="self-center w-fit whitespace-nowrap rounded-xl px-2 py-1.5 text-xs font-semibold text-gray-700 transition hover:bg-black/5 dark:text-gray-300 dark:hover:bg-white/5"
+													on:click={() => generatePractice(practice.homeworkId)}
+													disabled={generatingPracticeByHomeworkId[practice.homeworkId]}
+												>
+													{generatingPracticeByHomeworkId[practice.homeworkId] ? 'Generating…' : 'Re-generate'}
 												</button>
 											{/if}
 										{:else if practice.status === 'not_ready' && canGeneratePractice(practice.homeworkId)}

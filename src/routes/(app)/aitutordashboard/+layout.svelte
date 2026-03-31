@@ -10,6 +10,7 @@
 	import MenuLines from '$lib/components/icons/MenuLines.svelte';
 
 	const i18n = getContext('i18n');
+	const LAST_AI_TUTOR_GROUP_STORAGE_KEY = 'ai_tutor_last_selected_group_id';
 
 	let loaded = false;
 	let showIdentityPopover = false;
@@ -31,7 +32,20 @@
 		return query ? `${pathname}?${query}` : pathname;
 	}
 
-	$: selectedGroupId = $page.url.searchParams.get('group_id') || '';
+	function getPersistedGroupId() {
+		if (typeof sessionStorage === 'undefined') return '';
+		return sessionStorage.getItem(LAST_AI_TUTOR_GROUP_STORAGE_KEY) || '';
+	}
+
+	$: selectedGroupId = $page.url.searchParams.get('group_id') || getPersistedGroupId();
+	$: if ($page.url.searchParams.get('group_id')) {
+		if (typeof sessionStorage !== 'undefined') {
+			sessionStorage.setItem(
+				LAST_AI_TUTOR_GROUP_STORAGE_KEY,
+				$page.url.searchParams.get('group_id') || ''
+			);
+		}
+	}
 	$: selectedGroup =
 		allUserGroups.find((group) => group.id === selectedGroupId) || allUserGroups[0] || null;
 

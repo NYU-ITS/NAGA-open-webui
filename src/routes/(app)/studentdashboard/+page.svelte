@@ -6,7 +6,6 @@
 	import { TEMP_HIDE, AI_TUTOR_FRONTEND_TESTING_MODE } from '$lib/constants';
 	import { user } from '$lib/stores';
 	import { fetchAITutorJson } from '$lib/apis/aiTutor';
-	import { getGroupById } from '$lib/apis/groups';
 	import { showAITutorTestToast } from '$lib/utils/aiTutorTesting';
 
 	const testToast = showAITutorTestToast;
@@ -28,10 +27,13 @@
 		id: string;
 		index: number;
 		homeworkId: string;
+		modelId?: string;
 		homeworkLabel: string;
 		topic: string;
 		status: string;
+		assignmentId?: string;
 		practiceProblemId?: string;
+		assignedItems?: any[];
 	};
 
 	type ConceptRow = {
@@ -170,19 +172,47 @@
 		}, 1800);
 	}
 
+	function buildMasteryModelId(sourceModelId: string) {
+		return `mastery-${sourceModelId}`;
+	}
+
 	async function startPracticeAssignment(item: PracticeAssignmentRow) {
 		testToast(`Start practice is triggered | page=studentdashboard - Summary | assignment=${item.id} | status=${item.status}`);
 		if (item.status !== 'Ready') {
 			toast.info('This practice set is not assigned to the current student yet.');
 			return;
 		}
-		// TODO(student-dashboard-backend): Replace this placeholder entry with the real
-		// student assigned-practice / follow-up question workflow once backend support exists.
+
+		if (typeof sessionStorage !== 'undefined') {
+			sessionStorage.setItem(
+				'aiTutorActivePracticeAssignment',
+				JSON.stringify({
+					assignmentId: item.assignmentId ?? item.id,
+					practiceProblemId: item.practiceProblemId ?? null,
+					homeworkId: item.homeworkId,
+					homeworkLabel: item.homeworkLabel,
+					assignedItems: item.assignedItems ?? [],
+					topic: item.topic,
+					startedAt: new Date().toISOString()
+				})
+			);
+		}
+
+		// Planned Mastery-model flow:
+		// once a "Mastery*" workspace model exists for this homework, starting practice
+		// should switch the student chat onto that cloned model so the practice session
+		// keeps the original homework model behavior while using the generated practice KB.
+		if (typeof sessionStorage !== 'undefined' && item.modelId) {
+			sessionStorage.selectedModels = JSON.stringify([buildMasteryModelId(item.modelId)]);
+		}
+
 		console.log('[PracticeAssignment] navigating to chat with right-side questions trigger', {
 			assignmentId: item.id,
 			topic: item.topic
 		});
-		await goto(`/?practicing=${item.index}`);
+		await goto(
+			`/?practicing=1&assignment_id=${encodeURIComponent(item.assignmentId ?? item.id)}&practice_problem_id=${encodeURIComponent(item.practiceProblemId ?? '')}`
+		);
 	}
 
 	async function updateDashboardFilters(
@@ -469,10 +499,9 @@
 
 		try {
 			// Student Dashboard summary sync:
-			// - Open WebUI group lookup validates that the current user is a member of the selected group.
-			// - AI Tutor endpoints below are all scoped to the selected group before we derive student rows.
-			const [groupDetail, homeworkRows, practiceRows] = await Promise.all([
-				getGroupById(localStorage.token, selectedGroupId),
+			// - Student access should not depend on the admin-only group detail endpoint.
+			// - AI Tutor endpoints below are scoped to the selected group, and assignment/analysis rows are filtered by the current student.
+			const [homeworkRows, practiceRows] = await Promise.all([
 				// Page: Student Dashboard
 				// Endpoint: GET /homework/?group_id={group_id}
 				// Purpose: load the homework records for the selected group; homework label comes from model_id.
@@ -488,16 +517,6 @@
 					query: { group_id: selectedGroupId }
 				})
 			]);
-
-			const memberIds = new Set<string>(Array.isArray(groupDetail?.user_ids) ? groupDetail.user_ids : []);
-			if (!memberIds.has($user.id)) {
-				homeworkData = [];
-				practiceAssignments = [];
-				conceptsData = [];
-				followUpQuestions = [];
-				toast.error('Current user is not a member of the selected group.');
-				return;
-			}
 
 			// Page: Student Dashboard
 			// Endpoint: GET /assignment/?student_id={student_id}
@@ -578,10 +597,13 @@
 					id: assignment?.id ?? practice?.id ?? `practice-${homework.id}`,
 					index: index + 1,
 					homeworkId: homework.id,
+					modelId: homework.model_id ?? undefined,
 					homeworkLabel: homeworkLabelById.get(homework.id) ?? homework.id,
 					topic: topic || 'General Practice',
 					status,
-					practiceProblemId: assignment?.practice_problem_id ?? practice?.id
+					assignmentId: assignment?.id,
+					practiceProblemId: assignment?.practice_problem_id ?? practice?.id,
+					assignedItems: assignment?.assigned_items ?? []
 				};
 			});
 
@@ -648,7 +670,7 @@
 				`Student dashboard sync completed | group=${selectedGroupId} | homework=${homeworkData.length} | assignments=${practiceAssignments.length}`
 			);
 			toast.success(
-				`Student dashboard synced ${homeworkData.length} homework record${homeworkData.length === 1 ? '' : 's'} for ${groupDetail?.name ?? 'the selected group'}.`
+				`Student dashboard synced ${homeworkData.length} homework record${homeworkData.length === 1 ? '' : 's'} for the selected group.`
 			);
 		} catch (error) {
 			console.error('Student dashboard sync failed:', error);

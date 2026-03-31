@@ -35,6 +35,7 @@
 	const useFrontendTestingData = AI_TUTOR_FRONTEND_TESTING_MODE;
 	const testToast = showAITutorTestToast;
 	const CACHE_TTL_MS = 5 * 60 * 1000;
+	const LAST_AI_TUTOR_GROUP_STORAGE_KEY = 'ai_tutor_last_selected_group_id';
 
 	// ── Types ─────────────────────────────────────────────────────────────────
 	type HomeworkStat = {
@@ -337,7 +338,12 @@
 		// not have a more-base parent, and derived workspace models are returned
 		// as presets with a non-null base_model_id in their stored model info.
 		const workspaceModels = models.filter(
-			(model) => model.preset === true && model.base_model_id != null
+			(model) =>
+				model.preset === true &&
+				model.base_model_id != null &&
+				// Mastery-prefixed workspace models are reserved for student practice chat
+				// and should not reappear as instructor homework upload candidates.
+				!(model.name ?? model.id).startsWith('Mastery')
 		);
 
 		const rowsByModelId = new Map<string, HomeworkRow>();
@@ -566,7 +572,20 @@
 
 	$: avgSolvedChart = chartPoints(homeworkStats.map((s) => s.avgSolved));
 	$: avgAttemptedChart = chartPoints(homeworkStats.map((s) => s.avgAttempted));
-	$: selectedGroupId = $page.url.searchParams.get('group_id') || '';
+	function getPersistedGroupId() {
+		if (typeof sessionStorage === 'undefined') return '';
+		return sessionStorage.getItem(LAST_AI_TUTOR_GROUP_STORAGE_KEY) || '';
+	}
+
+	$: selectedGroupId = $page.url.searchParams.get('group_id') || getPersistedGroupId();
+	$: if ($page.url.searchParams.get('group_id')) {
+		if (typeof sessionStorage !== 'undefined') {
+			sessionStorage.setItem(
+				LAST_AI_TUTOR_GROUP_STORAGE_KEY,
+				$page.url.searchParams.get('group_id') || ''
+			);
+		}
+	}
 
 	// ── Data fetching ─────────────────────────────────────────────────────────
 	onMount(async () => {
@@ -614,7 +633,6 @@
 			return;
 		}
 		if (!groupId) {
-			homeworkStats = [];
 			await tick();
 			updateScrollState();
 			return;
@@ -788,18 +806,23 @@
 					if (!res.ok) throw new Error('Models fetch failed');
 					const data = await res.json();
 					return Array.isArray(data?.data)
-						? data.data.map((m: any) => ({
-								id: m.id,
-								name: m.name ?? m.id,
-								preset: m.preset === true,
-								base_model_id: m.info?.base_model_id ?? m.base_model_id ?? null
-							}))
+						? data.data
+								.map((m: any) => ({
+									id: m.id,
+									name: m.name ?? m.id,
+									preset: m.preset === true,
+									base_model_id: m.info?.base_model_id ?? m.base_model_id ?? null
+								}))
+								.filter((model: { id: string; name: string }) => {
+									// Mastery workspace models are generated practice-chat clones and
+									// should not be offered back as instructor homework candidates.
+									return !(model.name ?? model.id).startsWith('Mastery');
+								})
 						: [];
 				}
 			});
 			availableModels = models;
 		} catch (e) {
-			availableModels = [];
 			console.error('Models fetch failed:', e);
 		}
 	}
@@ -810,10 +833,7 @@
 			convCountByModelId = groupId ? frontendTestingConversationCounts : {};
 			return;
 		}
-		if (!groupId) {
-			convCountByModelId = {};
-			return;
-		}
+		if (!groupId) return;
 		try {
 			const counts = await loadWithAITutorSessionCache<Record<string, number>>({
 				key: getInstructorSetupCacheKey('conversation-counts', groupId),
@@ -850,7 +870,6 @@
 			});
 			convCountByModelId = counts;
 		} catch (e) {
-			convCountByModelId = {};
 			console.error('Conversation count fetch failed:', e);
 		}
 	}
@@ -861,10 +880,7 @@
 			errorTypeDefs = $aiTutorFrontendTestingErrorTypes;
 			return;
 		}
-		if (!groupId) {
-			errorTypeDefs = [];
-			return;
-		}
+		if (!groupId) return;
 		try {
 			const cachedErrorTypes = await loadWithAITutorSessionCache<typeof errorTypeDefs>({
 				key: getInstructorSetupCacheKey('error-types', groupId),
@@ -890,7 +906,6 @@
 			});
 			errorTypeDefs = cachedErrorTypes;
 		} catch (e) {
-			errorTypeDefs = [];
 			console.error('Error types fetch failed:', e);
 		}
 	}
@@ -938,8 +953,6 @@
 			generalPrompts = prompts.generalPrompts;
 			tutorPrompts = prompts.tutorPrompts;
 		} catch (e) {
-			generalPrompts = [];
-			tutorPrompts = [];
 			console.error('Prompts fetch failed:', e);
 		}
 	}

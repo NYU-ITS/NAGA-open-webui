@@ -10,6 +10,7 @@
 	import { getUsers } from '$lib/apis/users';
 	import { getGroupById } from '$lib/apis/groups';
 	import { showAITutorTestToast } from '$lib/utils/aiTutorTesting';
+	import { loadWithAITutorSessionCache } from '$lib/utils/aiTutorSessionCache';
 	import ChevronUp from '$lib/components/icons/ChevronUp.svelte';
 	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
 	import Search from '$lib/components/icons/Search.svelte';
@@ -17,6 +18,8 @@
 	const AI_TUTOR_API_BASE = AI_TUTOR_API_BASE_URL;
 	const useFrontendTestingData = AI_TUTOR_FRONTEND_TESTING_MODE;
 	const testToast = showAITutorTestToast;
+	const STUDENT_ANALYSIS_SESSION_TTL_MS = 5 * 60 * 1000;
+	const LAST_AI_TUTOR_GROUP_STORAGE_KEY = 'ai_tutor_last_selected_group_id';
 	const frontendTestingHomeworkModelNames = [
 		'Homework1-MATH-Code-Section-Semester',
 		'Homework2-MATH-Code-Section-Semester',
@@ -61,6 +64,7 @@
 		'max-w-[12rem] overflow-hidden whitespace-normal break-words leading-4 [display:-webkit-box] [-webkit-line-clamp:3] [-webkit-box-orient:vertical]';
 	let availableUsers = [];
 	let selectedGroupUserIds: string[] = [];
+	let syncRequestId = 0;
 
 	function getHomeworkModelName(homework: string) {
 		// homework name is now homework model name
@@ -120,7 +124,17 @@
 		}
 	];
 
-	$: selectedGroupId = $page.url.searchParams.get('group_id') || '';
+	function getPersistedGroupId() {
+		if (typeof sessionStorage === 'undefined') return '';
+		return sessionStorage.getItem(LAST_AI_TUTOR_GROUP_STORAGE_KEY) || '';
+	}
+
+	$: selectedGroupId = $page.url.searchParams.get('group_id') || getPersistedGroupId();
+	$: if ($page.url.searchParams.get('group_id')) {
+		if (typeof sessionStorage !== 'undefined') {
+			sessionStorage.setItem(LAST_AI_TUTOR_GROUP_STORAGE_KEY, $page.url.searchParams.get('group_id') || '');
+		}
+	}
 	$: isFilterActive = selectedHomework !== 'All' || search.trim() !== '';
 
 	onMount(async () => {
@@ -139,126 +153,160 @@
 			selectedGroupUserIds = frontendTestingStudentRows.map((row) => row.studentId);
 			return;
 		}
-		await loadUserContext();
 	});
 
 	$: if (initialized && selectedGroupId) {
-		void loadSelectedGroupContext(selectedGroupId);
+		void syncStudentAnalysisData(selectedGroupId);
 	}
 
-	$: if (initialized && selectedGroupId) {
-		void loadHomeworks(selectedGroupId);
+	function getStudentAnalysisSessionKey(groupId: string, resource: string) {
+		return `student-analysis:${groupId || 'global'}:${resource}`;
 	}
 
-	$: if (initialized) {
-		void loadAnalyses(selectedHomework === 'All' ? null : selectedHomework);
-	}
-
-	async function loadHomeworks(groupId: string) {
-		testToast(`Student Analysis fetch: homework list group=${groupId || 'none'}`);
-		if (!initialized) {
-			return;
-		}
-
-		if (useFrontendTestingData) {
-			homeworkOptions = frontendTestingHomeworkOptions;
-			homeworkMetaById = Object.fromEntries(frontendTestingHomeworkOptions.map((option) => [option.id, option]));
-			if (selectedHomework !== 'All' && !homeworkOptions.some((option) => option.id === selectedHomework)) {
-				selectedHomework = 'All';
-			}
+	async function syncStudentAnalysisData(groupId: string) {
+		if (!initialized || useFrontendTestingData) {
 			return;
 		}
 
 		if (!groupId) {
-			homeworkOptions = [];
-			selectedHomework = 'All';
-			studentData = [];
 			return;
 		}
 
-		try {
-			// Page: AI Tutor Dashboard > Student Analysis
-			// Endpoint: GET /homework/?group_id={group_id}
-			// Purpose: load homework options for the selected instructor group.
-			const response = await fetch(
-				`${AI_TUTOR_API_BASE}/homework/?group_id=${encodeURIComponent(groupId)}`,
-				{
-					method: 'GET',
-					headers: {
-						Authorization: `Bearer ${localStorage.token}`
-					}
-				}
-			);
+		const requestId = ++syncRequestId;
+		loading = true;
 
-			if (!response.ok) {
-				throw new Error('Homework fetch failed');
+		try {
+			const [users, groupUserIds, nextHomeworks] = await Promise.all([
+				loadUserContext(),
+				loadSelectedGroupContext(groupId),
+				loadHomeworks(groupId)
+			]);
+
+			if (requestId !== syncRequestId) {
+				return;
 			}
 
-			const data = await response.json();
-			const nextOptions = Array.isArray(data)
-				? data.map((row, index) => ({
-						id: row?.id,
-						label: row?.model_id ? row.model_id : `Homework${index + 1}-MATH-Code-Section-Semester`,
-						group_id: row?.group_id,
-						model_id: row?.model_id,
-						question_uploaded: row?.question_uploaded ?? false,
-						topic_mapped: row?.topic_mapped ?? false
-					}))
-				: [];
-
-			homeworkOptions = nextOptions;
-			homeworkMetaById = Object.fromEntries(nextOptions.map((option) => [option.id, option]));
+			availableUsers = users;
+			selectedGroupUserIds = groupUserIds;
+			homeworkOptions = nextHomeworks;
+			homeworkMetaById = Object.fromEntries(nextHomeworks.map((option) => [option.id, option]));
 
 			if (
 				selectedHomework !== 'All' &&
-				!nextOptions.some((option) => option.id === selectedHomework)
+				!nextHomeworks.some((option) => option.id === selectedHomework)
 			) {
 				selectedHomework = 'All';
 			}
 
-			testToast('Student Analysis loaded homework list');
+			const analysesByHomeworkId = await loadAllHomeworkAnalyses(groupId, nextHomeworks);
+			if (requestId !== syncRequestId) {
+				return;
+			}
+
+			studentData = buildStudentRowsForHomeworks(nextHomeworks, analysesByHomeworkId, users, groupUserIds);
+			testToast('Student Analysis loaded all homework analyses');
 		} catch (error) {
-			homeworkOptions = [];
-			homeworkMetaById = {};
-			selectedHomework = 'All';
-			studentData = [];
-			testToast('Student Analysis failed loading homework list');
-			console.error('Homework fetch failed:', error);
+			testToast('Student Analysis failed loading group data');
+			console.error('Student Analysis sync failed:', error);
+		} finally {
+			if (requestId === syncRequestId) {
+				loading = false;
+			}
 		}
+	}
+
+	async function loadHomeworks(groupId: string): Promise<HomeworkOption[]> {
+		testToast(`Student Analysis fetch: homework list group=${groupId || 'none'}`);
+		if (!initialized) {
+			return [];
+		}
+
+		if (useFrontendTestingData) {
+			return frontendTestingHomeworkOptions;
+		}
+
+		if (!groupId) {
+			return [];
+		}
+
+		return loadWithAITutorSessionCache({
+			key: getStudentAnalysisSessionKey(groupId, 'homeworks'),
+			ttlMs: STUDENT_ANALYSIS_SESSION_TTL_MS,
+			loader: async () => {
+			// Page: AI Tutor Dashboard > Student Analysis
+			// Endpoint: GET /homework/?group_id={group_id}
+			// Purpose: fetch every homework for the selected group once, then let the page
+			// filter per-homework on the client without re-requesting on every tab switch.
+				const response = await fetch(
+					`${AI_TUTOR_API_BASE}/homework/?group_id=${encodeURIComponent(groupId)}`,
+					{
+						method: 'GET',
+						headers: {
+							Authorization: `Bearer ${localStorage.token}`
+						}
+					}
+				);
+
+				if (!response.ok) {
+					throw new Error('Homework fetch failed');
+				}
+
+				const data = await response.json();
+				const nextOptions = Array.isArray(data)
+					? data.map((row, index) => ({
+							id: row?.id,
+							label: row?.model_id ? row.model_id : `Homework${index + 1}-MATH-Code-Section-Semester`,
+							group_id: row?.group_id,
+							model_id: row?.model_id,
+							question_uploaded: row?.question_uploaded ?? false,
+							topic_mapped: row?.topic_mapped ?? false
+						}))
+					: [];
+
+				testToast('Student Analysis loaded homework list');
+				return nextOptions;
+			}
+		});
 	}
 
 	async function loadUserContext() {
 		testToast('Student Analysis fetch: users');
 		if (useFrontendTestingData) {
-			availableUsers = [];
-			return;
+			return [];
 		}
-		try {
-			availableUsers = await getUsers(localStorage.token);
-		} catch (error) {
-			availableUsers = [];
+		return loadWithAITutorSessionCache({
+			key: getStudentAnalysisSessionKey('global', 'users'),
+			ttlMs: STUDENT_ANALYSIS_SESSION_TTL_MS,
+			loader: async () => {
+				const users = await getUsers(localStorage.token);
+				return Array.isArray(users) ? users : [];
+			}
+		}).catch((error) => {
 			console.error('User lookup failed:', error);
-		}
+			return availableUsers;
+		});
 	}
 
-	async function loadSelectedGroupContext(groupId: string) {
+	async function loadSelectedGroupContext(groupId: string): Promise<string[]> {
 		testToast(`Student Analysis fetch: group members group=${groupId || 'none'}`);
 		if (useFrontendTestingData) {
-			selectedGroupUserIds = frontendTestingStudentRows.map((row) => row.studentId);
-			return;
+			return frontendTestingStudentRows.map((row) => row.studentId);
 		}
 		if (!initialized || !groupId) {
-			selectedGroupUserIds = [];
-			return;
+			return [];
 		}
 
-		try {
-			const group = await getGroupById(localStorage.token, groupId);
-			selectedGroupUserIds = Array.isArray(group?.user_ids) ? group.user_ids : [];
-		} catch (error) {
-			selectedGroupUserIds = [];
+		return loadWithAITutorSessionCache({
+			key: getStudentAnalysisSessionKey(groupId, 'group-members'),
+			ttlMs: STUDENT_ANALYSIS_SESSION_TTL_MS,
+			loader: async () => {
+				const group = await getGroupById(localStorage.token, groupId);
+				return Array.isArray(group?.user_ids) ? group.user_ids : [];
+			}
+		}).catch((error) => {
 			console.error('Group lookup failed:', error);
-		}
+			return selectedGroupUserIds;
+		});
 	}
 
 	function buildGroupRosterRows(homeworkId: string) {
@@ -281,109 +329,124 @@
 		});
 	}
 
-	async function loadAnalyses(homeworkId: string | null) {
-		testToast(`Student Analysis fetch: analyses homework=${homeworkId || 'none'}`);
-		if (!initialized) {
-			return;
+	async function loadAllHomeworkAnalyses(groupId: string, homeworks: HomeworkOption[]) {
+		if (!groupId || homeworks.length === 0) {
+			return {} as Record<string, any[]>;
 		}
 
-		if (useFrontendTestingData) {
-			studentData = homeworkId
-				? frontendTestingStudentRows.filter((row) => row.homeworkId === homeworkId)
-				: frontendTestingStudentRows;
-			loading = false;
-			return;
-		}
+		const analysisCacheKey = getStudentAnalysisSessionKey(
+			groupId,
+			`analyses:${homeworks
+				.map((homework) => homework.id)
+				.sort()
+				.join(',')}`
+		);
 
-		if (!selectedGroupId) {
-			studentData = [];
-			return;
-		}
-
-		if (!homeworkId) {
-			studentData = [];
-			return;
-		}
-
-		loading = true;
-
-		try {
-			const rosterRows = buildGroupRosterRows(homeworkId);
-			const rosterByStudentId = new Map(rosterRows.map((row) => [row.studentId, row]));
-
+		return loadWithAITutorSessionCache({
+			key: analysisCacheKey,
+			ttlMs: STUDENT_ANALYSIS_SESSION_TTL_MS,
+			loader: async () => {
+				const analysisEntries = await Promise.all(
+					homeworks.map(async (homework) => {
 			// Page: AI Tutor Dashboard > Student Analysis
 			// Endpoint: GET /analysis/?homework_id={homework_id}
-			// Purpose: load analysis rows for one homework, then merge them into the selected group's
-			// student roster so group members still appear even when analysis is unavailable.
-			const response = await fetch(
-				`${AI_TUTOR_API_BASE}/analysis/?homework_id=${encodeURIComponent(homeworkId)}`,
-				{
-					method: 'GET',
-					headers: {
-						Authorization: `Bearer ${localStorage.token}`
-					}
-				}
-			);
+			// Purpose: fetch every homework's analysis once for the current group so
+			// switching homework filters or dashboard tabs does not trigger a fresh network call.
+						const response = await fetch(
+							`${AI_TUTOR_API_BASE}/analysis/?homework_id=${encodeURIComponent(homework.id)}`,
+							{
+								method: 'GET',
+								headers: {
+									Authorization: `Bearer ${localStorage.token}`
+								}
+							}
+						);
 
-			if (!response.ok) {
-				throw new Error('Student analysis fetch failed');
+						if (!response.ok) {
+							throw new Error(`Student analysis fetch failed for homework ${homework.id}`);
+						}
+
+						const data = await response.json();
+						return [homework.id, Array.isArray(data) ? data : []] as const;
+					})
+				);
+
+				testToast('Student Analysis loaded /analysis data');
+				return Object.fromEntries(analysisEntries);
 			}
+		});
+	}
 
-			const data = await response.json();
-			// Backend /analysis rows do not currently include group_id, so group scoping is enforced
-			// here by matching the returned student_id against the selected Open WebUI group's user_ids.
-			const analysisRows = Array.isArray(data)
-				? data
-						.map((row) => {
-							const matchedUser =
-								availableUsers.find((user) => user.id === row?.student_id) ||
-								availableUsers.find((user) => user.email === row?.student_email);
-							const totalQuestion = Number(row?.total_question ?? 0);
-							const totalSolved = Number(row?.total_solved ?? 0);
-							const avgAccuracy = totalQuestion > 0 ? (totalSolved / totalQuestion) * 100 : 0;
+	function buildStudentRowsForHomeworks(
+		homeworks: HomeworkOption[],
+		analysesByHomeworkId: Record<string, any[]>,
+		users: any[],
+		groupUserIds: string[]
+	) {
+		return homeworks.flatMap((homework) => {
+			const rosterRows = groupUserIds.map((userId) => {
+				const matchedUser =
+					users.find((user) => user.id === userId) ||
+					users.find((user) => user.email === userId);
 
-							const weakTopics = Array.isArray(row?.topic_performances)
-								? row.topic_performances
-										.filter((tp) => tp?.status === 'needs_practice')
-										.map((tp) => tp?.topic_name)
-										.filter(Boolean)
-								: [];
+				return {
+					id: `roster-${userId}-${homework.id}`,
+					studentId: userId,
+					name: matchedUser?.name ?? matchedUser?.email?.split('@')[0] ?? userId,
+					email: matchedUser?.email ?? 'Email Unavailable',
+					homeworkId: homework.id,
+					avgAccuracy: null,
+					topicsToImprove: 'Analysis Unavailable',
+					performanceSummary: 'Analysis Unavailable',
+					hasAnalysis: false
+				};
+			});
 
-							return {
-								id: row?.id ?? `${row?.student_id ?? row?.student_email ?? 'unknown'}-${homeworkId}`,
-								studentId: row?.student_id ?? matchedUser?.id ?? 'N/A',
-								name:
-									matchedUser?.name ??
-									row?.student_email?.split('@')[0] ??
-									row?.student_id ??
-									'Unknown Student',
-								email: row?.student_email ?? matchedUser?.email ?? 'Email Unavailable',
-								homeworkId: row?.homework_id ?? homeworkId,
-								avgAccuracy: Number(avgAccuracy.toFixed(1)),
-								topicsToImprove: weakTopics.length ? weakTopics.join(', ') : 'None',
-								performanceSummary: `Attempted ${row?.total_attempted ?? 0}/${totalQuestion}, solved ${totalSolved}, errors ${row?.total_errors ?? 0}.`,
-								hasAnalysis: true
-							};
-						})
-						.filter((row) => {
-							return selectedGroupUserIds.length === 0 || selectedGroupUserIds.includes(row.studentId);
-						})
+			const rosterByStudentId = new Map(rosterRows.map((row) => [row.studentId, row]));
+			const rawAnalyses = Array.isArray(analysesByHomeworkId[homework.id])
+				? analysesByHomeworkId[homework.id]
 				: [];
 
-			for (const row of analysisRows) {
-				rosterByStudentId.set(row.studentId, row);
+			// Backend /analysis rows do not currently include group_id, so group scoping is enforced
+			// here by matching the returned student_id against the selected Open WebUI group's user_ids.
+			for (const row of rawAnalyses) {
+				const matchedUser =
+					users.find((user) => user.id === row?.student_id) ||
+					users.find((user) => user.email === row?.student_email);
+				const totalQuestion = Number(row?.total_question ?? 0);
+				const totalSolved = Number(row?.total_solved ?? 0);
+				const avgAccuracy = totalQuestion > 0 ? (totalSolved / totalQuestion) * 100 : 0;
+				const weakTopics = Array.isArray(row?.topic_performances)
+					? row.topic_performances
+							.filter((tp) => tp?.status === 'needs_practice')
+							.map((tp) => tp?.topic_name)
+							.filter(Boolean)
+					: [];
+				const studentId = row?.student_id ?? matchedUser?.id ?? 'N/A';
+
+				if (groupUserIds.length > 0 && !groupUserIds.includes(studentId)) {
+					continue;
+				}
+
+				rosterByStudentId.set(studentId, {
+					id: row?.id ?? `${studentId}-${homework.id}`,
+					studentId,
+					name:
+						matchedUser?.name ??
+						row?.student_email?.split('@')[0] ??
+						row?.student_id ??
+						'Unknown Student',
+					email: row?.student_email ?? matchedUser?.email ?? 'Email Unavailable',
+					homeworkId: row?.homework_id ?? homework.id,
+					avgAccuracy: Number(avgAccuracy.toFixed(1)),
+					topicsToImprove: weakTopics.length ? weakTopics.join(', ') : 'None',
+					performanceSummary: `Attempted ${row?.total_attempted ?? 0}/${totalQuestion}, solved ${totalSolved}, errors ${row?.total_errors ?? 0}.`,
+					hasAnalysis: true
+				});
 			}
 
-			studentData = Array.from(rosterByStudentId.values());
-
-			testToast('Student Analysis loaded /analysis data');
-		} catch (error) {
-			studentData = [];
-			testToast('Student Analysis failed loading /analysis data');
-			console.error('Student analysis API failed:', error);
-		} finally {
-			loading = false;
-		}
+			return Array.from(rosterByStudentId.values());
+		});
 	}
 
 	function removeAllFilters() {
@@ -407,6 +470,10 @@
 
 	$: filteredAndSortedData = (() => {
 		let data = [...studentData];
+
+		if (selectedHomework !== 'All') {
+			data = data.filter((student) => student.homeworkId === selectedHomework);
+		}
 
 		const query = search.trim().toLowerCase();
 		if (query) {
@@ -446,12 +513,12 @@
 		? 'Loading group selection...'
 		: homeworkOptions.length === 0 && !useFrontendTestingData
 			? 'No homework uploaded for this group yet.'
-		: selectedHomework === 'All' && !useFrontendTestingData
-			? 'Choose a homework to view the student roster and analysis status.'
-				: selectedHomeworkMeta && !selectedHomeworkMeta.question_uploaded && !useFrontendTestingData
-					? 'Upload the homework PDF before student analysis can run.'
-					: selectedHomeworkMeta && !selectedHomeworkMeta.topic_mapped && !useFrontendTestingData
-						? 'Homework processing is still preparing topics.'
+			: selectedHomeworkMeta && !selectedHomeworkMeta.question_uploaded && !useFrontendTestingData
+				? 'Upload the homework PDF before student analysis can run.'
+				: selectedHomeworkMeta && !selectedHomeworkMeta.topic_mapped && !useFrontendTestingData
+					? 'Homework processing is still preparing topics.'
+					: selectedHomework === 'All' && !useFrontendTestingData
+						? 'No student analysis is available for this group yet.'
 						: 'No group members are available for the selected homework.';
 </script>
 
@@ -533,7 +600,7 @@
 					{#if !selectedGroupId && !useFrontendTestingData}
 						<tr class="bg-white text-xs dark:bg-gray-900">
 							<td colspan="6" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">
-								Select a group to view student analysis.
+								Loading group selection...
 							</td>
 						</tr>
 					{:else if homeworkOptions.length === 0 && !useFrontendTestingData}
@@ -542,22 +609,10 @@
 								No homework uploaded for this group yet.
 							</td>
 						</tr>
-					{:else if selectedHomework === 'All' && !useFrontendTestingData}
-						<tr class="bg-white text-xs dark:bg-gray-900">
-							<td colspan="6" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">
-								Choose a homework to load student analysis.
-							</td>
-						</tr>
-					{:else if loading}
-						<tr class="bg-white text-xs dark:bg-gray-900">
-							<td colspan="6" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">
-								Loading student analysis...
-							</td>
-						</tr>
 					{:else if filteredAndSortedData.length === 0}
 						<tr class="bg-white text-xs dark:bg-gray-900">
 							<td colspan="6" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">
-								{studentAnalysisEmptyMessage}
+								{loading ? 'Loading student analysis...' : studentAnalysisEmptyMessage}
 							</td>
 						</tr>
 					{:else}

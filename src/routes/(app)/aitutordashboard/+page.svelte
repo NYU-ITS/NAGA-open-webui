@@ -10,6 +10,10 @@
 	} from '$lib/constants';
 	import { aiTutorFrontendTestingErrorTypes } from '$lib/stores';
 	import { showAITutorTestToast } from '$lib/utils/aiTutorTesting';
+	import {
+		clearAITutorSessionCacheByPrefix,
+		loadWithAITutorSessionCache
+	} from '$lib/utils/aiTutorSessionCache';
 	import ChevronUp from '$lib/components/icons/ChevronUp.svelte';
 	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
 
@@ -29,6 +33,8 @@
 	// ── Global flag ───────────────────────────────────────────────────────────
 	const useFrontendTestingData = AI_TUTOR_FRONTEND_TESTING_MODE;
 	const testToast = showAITutorTestToast;
+	const SUMMARY_SESSION_TTL_MS = 5 * 60 * 1000;
+	const LAST_AI_TUTOR_GROUP_STORAGE_KEY = 'ai_tutor_last_selected_group_id';
 
 	// ── Types ─────────────────────────────────────────────────────────────────
 	type HomeworkStat = {
@@ -269,7 +275,20 @@ const bannerPlaceholderTime = 'TEST-TIME';
 
 	$: avgSolvedChart = chartPoints(homeworkStats.map((s) => s.avgSolved));
 	$: avgAttemptedChart = chartPoints(homeworkStats.map((s) => s.avgAttempted));
-	$: selectedGroupId = $page.url.searchParams.get('group_id') || '';
+	function getPersistedGroupId() {
+		if (typeof sessionStorage === 'undefined') return '';
+		return sessionStorage.getItem(LAST_AI_TUTOR_GROUP_STORAGE_KEY) || '';
+	}
+
+	$: selectedGroupId = $page.url.searchParams.get('group_id') || getPersistedGroupId();
+	$: if ($page.url.searchParams.get('group_id')) {
+		if (typeof sessionStorage !== 'undefined') {
+			sessionStorage.setItem(
+				LAST_AI_TUTOR_GROUP_STORAGE_KEY,
+				$page.url.searchParams.get('group_id') || ''
+			);
+		}
+	}
 
 	// ── Data fetching ─────────────────────────────────────────────────────────
 	onMount(async () => {
@@ -313,30 +332,49 @@ async function loadHomeworkStats(groupId: string) {
 			return;
 		}
 		if (!groupId) {
-			homeworkStats = [];
 			await tick();
 			updateScrollState();
 			return;
 		}
 
-		const uploadStatusMap = new Map<string, { status: boolean; answerUploaded: boolean; totalProblems: number | null }>();
-		const topicMappedByHomeworkId = new Map<string, boolean>();
-		const modelIdByHomeworkId = new Map<string, string | null>();
+		const applySummarySnapshot = (snapshot: {
+			homeworkStats: HomeworkStat[];
+			homeworkRows: HomeworkRow[];
+		}) => {
+			homeworkStats = snapshot.homeworkStats;
+			homeworkRows = snapshot.homeworkRows;
+			if (homeworkStats.length > 0 && selectedRunHomeworks.size === 0) {
+				selectedRunHomeworks = new Set(homeworkStats.map((stat) => stat.homework));
+				syncRunSelectionFlags();
+			}
+		};
+
 		try {
+			const snapshot = await loadWithAITutorSessionCache({
+				key: `summary:${groupId}:homework-stats`,
+				ttlMs: SUMMARY_SESSION_TTL_MS,
+				onCached: applySummarySnapshot,
+				loader: async () => {
+					const uploadStatusMap = new Map<
+						string,
+						{ status: boolean; answerUploaded: boolean; totalProblems: number | null }
+					>();
+					const topicMappedByHomeworkId = new Map<string, boolean>();
+					const modelIdByHomeworkId = new Map<string, string | null>();
 			// Page: AI Tutor Dashboard Summary
 			// Endpoint: GET /homework/?group_id={group_id}
 			// Purpose: load homework pipeline rows for the selected instructor group.
-			const hwResponse = await fetch(
-				`${AI_TUTOR_API_BASE}/homework/?group_id=${encodeURIComponent(groupId)}`,
-				{
-					method: 'GET',
-					headers: { Authorization: `Bearer ${localStorage.token}` }
-				}
-			);
-			if (!hwResponse.ok) throw new Error('Homework fetch failed');
-			const hwData = await hwResponse.json();
-			if (Array.isArray(hwData)) {
-				homeworkRows = hwData.map((hw: any) => ({
+					const hwResponse = await fetch(
+						`${AI_TUTOR_API_BASE}/homework/?group_id=${encodeURIComponent(groupId)}`,
+						{
+							method: 'GET',
+							headers: { Authorization: `Bearer ${localStorage.token}` }
+						}
+					);
+					if (!hwResponse.ok) throw new Error('Homework fetch failed');
+					const hwData = await hwResponse.json();
+					const nextHomeworkRows: HomeworkRow[] = Array.isArray(hwData)
+						? hwData.map((hw: any) => ({
 					id: hw.id,
 					modelId: hw.model_id ?? null,
 					questionUploaded: hw.question_uploaded ?? false,
@@ -345,88 +383,104 @@ async function loadHomeworkStats(groupId: string) {
 					answerSource: hw.answer_source ?? null,
 					questionFileName: hw.question_filename ?? null,
 					answerFileName: hw.answer_filename ?? null
-				}));
-				for (const hw of hwData) {
-					topicMappedByHomeworkId.set(hw.id, hw.topic_mapped ?? false);
-					modelIdByHomeworkId.set(hw.id, hw.model_id ?? null);
-					uploadStatusMap.set(hw.id, {
-						status: hw.question_uploaded ?? false,
-						answerUploaded: hw.answer_uploaded ?? false,
-						totalProblems: countHomeworkQuestions(hw.question_data, hw.topic_mapping) || null
-					});
-				}
-			}
-			testToast('Summary loaded /homework data');
-		} catch (error) {
-			testToast('Summary failed loading /homework data');
-			console.error('Homework fetch failed:', error);
-		}
+						}))
+						: [];
+					for (const hw of Array.isArray(hwData) ? hwData : []) {
+						topicMappedByHomeworkId.set(hw.id, hw.topic_mapped ?? false);
+						modelIdByHomeworkId.set(hw.id, hw.model_id ?? null);
+						uploadStatusMap.set(hw.id, {
+							status: hw.question_uploaded ?? false,
+							answerUploaded: hw.answer_uploaded ?? false,
+							totalProblems: countHomeworkQuestions(hw.question_data, hw.topic_mapping) || null
+						});
+					}
+					testToast('Summary loaded /homework data');
 
-		const statsMap = new Map<string, {
-			totalProblems: number; attemptedSum: number; solvedSum: number; errorSum: number; count: number;
-		}>();
-		const hasAnalysisByHomeworkId = new Set<string>();
+					const statsMap = new Map<
+						string,
+						{
+							totalProblems: number;
+							attemptedSum: number;
+							solvedSum: number;
+							errorSum: number;
+							count: number;
+						}
+					>();
+					const hasAnalysisByHomeworkId = new Set<string>();
 
-		for (const homeworkId of uploadStatusMap.keys()) {
-			try {
+					for (const homeworkId of uploadStatusMap.keys()) {
 				// Page: AI Tutor Dashboard Summary
 				// Endpoint: GET /analysis/?homework_id={homework_id}
 				// Purpose: aggregate student analysis rows into homework-level summary metrics.
-				const analysisResponse = await fetch(
-					`${AI_TUTOR_API_BASE}/analysis/?homework_id=${encodeURIComponent(homeworkId)}`,
-					{
-						method: 'GET',
-						headers: { Authorization: `Bearer ${localStorage.token}` }
+						const analysisResponse = await fetch(
+							`${AI_TUTOR_API_BASE}/analysis/?homework_id=${encodeURIComponent(homeworkId)}`,
+							{
+								method: 'GET',
+								headers: { Authorization: `Bearer ${localStorage.token}` }
+							}
+						);
+						if (!analysisResponse.ok) throw new Error(`Analysis fetch failed for ${homeworkId}`);
+						const analysisData = await analysisResponse.json();
+						if (Array.isArray(analysisData)) {
+							if (analysisData.length > 0) {
+								hasAnalysisByHomeworkId.add(homeworkId);
+							}
+							for (const row of analysisData) {
+								const id = row?.homework_id ?? homeworkId;
+								const prev = statsMap.get(id) ?? {
+									totalProblems: 0,
+									attemptedSum: 0,
+									solvedSum: 0,
+									errorSum: 0,
+									count: 0
+								};
+								prev.totalProblems = Math.max(prev.totalProblems, Number(row?.total_question ?? 0));
+								prev.attemptedSum += Number(row?.total_attempted ?? 0);
+								prev.solvedSum += Number(row?.total_solved ?? 0);
+								prev.errorSum += Number(row?.total_errors ?? 0);
+								prev.count += 1;
+								statsMap.set(id, prev);
+							}
+						}
 					}
-				);
-				if (!analysisResponse.ok) throw new Error(`Analysis fetch failed for ${homeworkId}`);
-				const analysisData = await analysisResponse.json();
-				if (Array.isArray(analysisData)) {
-					if (analysisData.length > 0) {
-						hasAnalysisByHomeworkId.add(homeworkId);
-					}
-					for (const row of analysisData) {
-						const id = row?.homework_id ?? homeworkId;
-						const prev = statsMap.get(id) ?? { totalProblems: 0, attemptedSum: 0, solvedSum: 0, errorSum: 0, count: 0 };
-						prev.totalProblems = Math.max(prev.totalProblems, Number(row?.total_question ?? 0));
-						prev.attemptedSum += Number(row?.total_attempted ?? 0);
-						prev.solvedSum += Number(row?.total_solved ?? 0);
-						prev.errorSum += Number(row?.total_errors ?? 0);
-						prev.count += 1;
-						statsMap.set(id, prev);
-					}
+					if (uploadStatusMap.size > 0) testToast('Summary loaded /analysis data');
+
+					const allIds = new Set([...uploadStatusMap.keys(), ...statsMap.keys()]);
+					const merged: HomeworkStat[] = Array.from(allIds).map((id) => {
+						const upload = uploadStatusMap.get(id);
+						const stats = statsMap.get(id);
+						return {
+							homework: id,
+							status: hasAnalysisByHomeworkId.has(id),
+							answerUploaded: upload?.answerUploaded ?? false,
+							totalProblems: stats?.totalProblems ?? upload?.totalProblems ?? null,
+							avgAttempted: stats
+								? Number((stats.attemptedSum / Math.max(stats.count, 1)).toFixed(1))
+								: null,
+							avgSolved: stats
+								? Number((stats.solvedSum / Math.max(stats.count, 1)).toFixed(1))
+								: null,
+							avgErrors: stats
+								? Number((stats.errorSum / Math.max(stats.count, 1)).toFixed(1))
+								: null
+						};
+					});
+					merged.sort((a, b) => a.homework.localeCompare(b.homework));
+
+					return {
+						homeworkStats: merged,
+						homeworkRows: nextHomeworkRows.map((row) => ({
+							...row,
+							modelId: modelIdByHomeworkId.get(row.id) ?? row.modelId,
+							topicMapped: topicMappedByHomeworkId.get(row.id) ?? row.topicMapped ?? false
+						}))
+					};
 				}
-			} catch (error) {
-				console.error('Analysis fetch failed:', error);
-			}
-		}
-
-		if (uploadStatusMap.size > 0) testToast('Summary loaded /analysis data');
-
-		const allIds = new Set([...uploadStatusMap.keys(), ...statsMap.keys()]);
-		const merged: HomeworkStat[] = Array.from(allIds).map((id) => {
-			const upload = uploadStatusMap.get(id);
-			const stats = statsMap.get(id);
-			return {
-				homework: id,
-				status: hasAnalysisByHomeworkId.has(id),
-				answerUploaded: upload?.answerUploaded ?? false,
-				totalProblems: stats?.totalProblems ?? upload?.totalProblems ?? null,
-				avgAttempted: stats ? Number((stats.attemptedSum / Math.max(stats.count, 1)).toFixed(1)) : null,
-				avgSolved: stats ? Number((stats.solvedSum / Math.max(stats.count, 1)).toFixed(1)) : null,
-				avgErrors: stats ? Number((stats.errorSum / Math.max(stats.count, 1)).toFixed(1)) : null
-			};
-		});
-		merged.sort((a, b) => a.homework.localeCompare(b.homework));
-		homeworkStats = merged;
-		homeworkRows = homeworkRows.map((row) => ({
-			...row,
-			modelId: modelIdByHomeworkId.get(row.id) ?? row.modelId,
-			topicMapped: topicMappedByHomeworkId.get(row.id) ?? row.topicMapped ?? false
-		}));
-		if (homeworkStats.length > 0 && selectedRunHomeworks.size === 0) {
-			selectedRunHomeworks = new Set(homeworkStats.map((stat) => stat.homework));
-			syncRunSelectionFlags();
+			});
+			applySummarySnapshot(snapshot);
+		} catch (error) {
+			testToast('Summary failed loading /homework data');
+			console.error('Homework fetch failed:', error);
 		}
 
 		await tick();
@@ -447,7 +501,13 @@ async function loadModels() {
 		if (!res.ok) throw new Error('Models fetch failed');
 		const data = await res.json();
 		availableModels = Array.isArray(data?.data)
-			? data.data.map((m: any) => ({ id: m.id, name: m.name ?? m.id }))
+			? data.data
+					.map((m: any) => ({ id: m.id, name: m.name ?? m.id }))
+					.filter((model: { id: string; name: string }) => {
+						// Mastery-prefixed workspace models are generated practice-chat clones
+						// and should stay out of the instructor homework candidate list.
+						return !(model.name ?? model.id).startsWith('Mastery');
+					})
 			: [];
 
 	} catch (e) {
@@ -462,7 +522,7 @@ async function loadConversationCounts(groupId: string) {
 		convCountByModelId = groupId ? frontendTestingConversationCounts : {};
 		return;
 	}
-	if (!groupId) { convCountByModelId = {}; return; }
+	if (!groupId) return;
 	try {
 		// Page: AI Tutor Dashboard Summary
 		// Endpoint: POST /api/v1/chats/filter/meta
@@ -486,7 +546,6 @@ async function loadConversationCounts(groupId: string) {
 		}
 		convCountByModelId = counts;
 	} catch (e) {
-		convCountByModelId = {};
 		console.error('Conversation count fetch failed:', e);
 	}
 }
@@ -497,29 +556,34 @@ async function loadErrorTypes(groupId: string) {
 		errorTypeDefs = $aiTutorFrontendTestingErrorTypes;
 		return;
 	}
-	if (!groupId) {
-		errorTypeDefs = [];
-		return;
-	}
+	if (!groupId) return;
 	try {
-		const res = await fetch(
-			`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(groupId)}`,
-			{ headers: { Authorization: `Bearer ${localStorage.token}` } }
-		);
-		if (!res.ok) throw new Error('Error types fetch failed');
-		const data = await res.json();
-		const errorTypes = Array.isArray(data?.error_types)
-			? data.error_types
-			: Array.isArray(data)
-				? data
-				: [];
-		errorTypeDefs = errorTypes.slice(0, 4).map((et: any, i: number) => ({
-			type: et.name ?? 'Unknown',
-			color: errorTypeColors[i % errorTypeColors.length],
-			description: et.description ?? ''
-		}));
+		errorTypeDefs = await loadWithAITutorSessionCache({
+			key: `summary:${groupId}:error-types`,
+			ttlMs: SUMMARY_SESSION_TTL_MS,
+			onCached: (cached) => {
+				errorTypeDefs = cached;
+			},
+			loader: async () => {
+				const res = await fetch(
+					`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(groupId)}`,
+					{ headers: { Authorization: `Bearer ${localStorage.token}` } }
+				);
+				if (!res.ok) throw new Error('Error types fetch failed');
+				const data = await res.json();
+				const errorTypes = Array.isArray(data?.error_types)
+					? data.error_types
+					: Array.isArray(data)
+						? data
+						: [];
+				return errorTypes.slice(0, 4).map((et: any, i: number) => ({
+					type: et.name ?? 'Unknown',
+					color: errorTypeColors[i % errorTypeColors.length],
+					description: et.description ?? ''
+				}));
+			}
+		});
 	} catch (e) {
-		errorTypeDefs = [];
 		console.error('Error types fetch failed:', e);
 	}
 }
@@ -532,30 +596,45 @@ async function loadPrompts(groupId: string) {
 		return;
 	}
 	try {
-		const generalRes = await fetch(`${AI_TUTOR_API_BASE}/prompts/general`, {
-			headers: { Authorization: `Bearer ${localStorage.token}` }
+		generalPrompts = await loadWithAITutorSessionCache({
+			key: 'summary:global:general-prompts',
+			ttlMs: SUMMARY_SESSION_TTL_MS,
+			onCached: (cached) => {
+				generalPrompts = cached;
+			},
+			loader: async () => {
+				const generalRes = await fetch(`${AI_TUTOR_API_BASE}/prompts/general`, {
+					headers: { Authorization: `Bearer ${localStorage.token}` }
+				});
+				if (!generalRes.ok) throw new Error('General prompts fetch failed');
+				return await generalRes.json();
+			}
 		});
-		if (!generalRes.ok) throw new Error('General prompts fetch failed');
-		generalPrompts = await generalRes.json();
 	} catch (e) {
-		generalPrompts = [];
 		console.error('General prompts fetch failed:', e);
 	}
 
 	if (!groupId) {
-		tutorPrompts = [];
 		return;
 	}
 
 	try {
-		const tutorRes = await fetch(
-			`${AI_TUTOR_API_BASE}/prompts/tutor?group_id=${encodeURIComponent(groupId)}`,
-			{ headers: { Authorization: `Bearer ${localStorage.token}` } }
-		);
-		if (!tutorRes.ok) throw new Error('Tutor prompts fetch failed');
-		tutorPrompts = await tutorRes.json();
+		tutorPrompts = await loadWithAITutorSessionCache({
+			key: `summary:${groupId}:tutor-prompts`,
+			ttlMs: SUMMARY_SESSION_TTL_MS,
+			onCached: (cached) => {
+				tutorPrompts = cached;
+			},
+			loader: async () => {
+				const tutorRes = await fetch(
+					`${AI_TUTOR_API_BASE}/prompts/tutor?group_id=${encodeURIComponent(groupId)}`,
+					{ headers: { Authorization: `Bearer ${localStorage.token}` } }
+				);
+				if (!tutorRes.ok) throw new Error('Tutor prompts fetch failed');
+				return await tutorRes.json();
+			}
+		});
 	} catch (e) {
-		tutorPrompts = [];
 		console.error('Tutor prompts fetch failed:', e);
 	}
 }
@@ -758,6 +837,7 @@ async function savePromptOverride() {
 				})
 			});
 		}
+		clearAITutorSessionCacheByPrefix(`summary:${selectedGroupId}:tutor-prompts`);
 		await loadPrompts(selectedGroupId);
 		showPromptModal = false;
 		testToast('Summary saved prompt override');
@@ -791,6 +871,7 @@ async function useDefaultPrompt() {
 			},
 			body: JSON.stringify({ is_active: false })
 		});
+		clearAITutorSessionCacheByPrefix(`summary:${selectedGroupId}:tutor-prompts`);
 		await loadPrompts(selectedGroupId);
 		showPromptModal = false;
 		testToast('Summary reset prompt to default');
@@ -819,7 +900,10 @@ async function persistErrorTypes() {
 				body: JSON.stringify(errorTypeDefs.map((d) => ({ name: d.type, description: d.description })))
 			}
 		);
-		if (res.ok) testToast('Summary saved error types');
+		if (res.ok) {
+			clearAITutorSessionCacheByPrefix(`summary:${selectedGroupId}:error-types`);
+			testToast('Summary saved error types');
+		}
 	} catch (e) {
 		testToast('Summary failed saving error types');
 		console.error('Failed to persist error types:', e);
@@ -839,6 +923,7 @@ async function resetErrorTypesToDefault() {
 			`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(selectedGroupId)}`,
 			{ method: 'DELETE', headers: { Authorization: `Bearer ${localStorage.token}` } }
 		);
+		clearAITutorSessionCacheByPrefix(`summary:${selectedGroupId}:error-types`);
 		await loadErrorTypes(selectedGroupId);
 		testToast('Summary reset error types to default');
 	} catch (e) {
@@ -994,6 +1079,7 @@ async function uploadPdf(hwId: string | null, docType: 'question' | 'answer', mo
 		await pollPipelineJob(jobId, 3000, `${docType} upload`);
 		toast.success(`${docType === 'question' ? 'Homework' : 'Answer'} upload completed.`);
 		if (hwId === null && draftUid !== undefined) draftRows = draftRows.filter(d => d.uid !== draftUid);
+		clearAITutorSessionCacheByPrefix(`summary:${selectedGroupId}:homework-stats`);
 		await loadHomeworkStats(selectedGroupId);
 	} catch (e) {
 		toast.error(e instanceof Error ? e.message : 'Upload failed.');
@@ -1037,8 +1123,12 @@ function getHomeworkNumberLabel(homework: string) {
 }
 
 function getHomeworkModelName(homework: string) {
-	// homework name is now homework model name
-	return homework;
+	// Summary rows are keyed by AI Tutor homework_id, but the UI should always
+	// display the originating workspace model name when one is available.
+	const homeworkRow = homeworkRows.find((row) => row.id === homework);
+	const modelId = homeworkRow?.modelId ?? homework;
+	const matchingModel = availableModels.find((model) => model.id === modelId);
+	return matchingModel?.name ?? modelId;
 }
 
 function getUpdatedHomeworkIds() {
@@ -1165,6 +1255,7 @@ async function runAnalysis() {
 			await pollPipelineJob(jobId, 10000, 'analysis run');
 			toast.success('Analysis completed.');
 			analysisHistory = [{ contents, startedAt, completedAt: new Date().toLocaleTimeString(), failed: false }, ...analysisHistory];
+			clearAITutorSessionCacheByPrefix(`summary:${selectedGroupId}:homework-stats`);
 			await loadHomeworkStats(selectedGroupId);
 		} else {
 			toast.error(await parseErrorDetail(res));

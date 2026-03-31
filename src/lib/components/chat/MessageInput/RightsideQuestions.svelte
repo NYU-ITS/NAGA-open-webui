@@ -12,14 +12,14 @@
 		completed?: boolean;
 	};
 
-	const groupName = 'MATH-I - InstructorName - CourseCode - Section';
-	const homeworkOptions = [
+	const fallbackGroupName = 'MATH-I - InstructorName - CourseCode - Section';
+	const fallbackHomeworkOptions = [
 		'Homework1-MATH-Code-Section-Semester',
 		'Homework2-MATH-Code-Section-Semester',
 		'Homework3-MATH-Code-Section-Semester',
 		'Homework4-MATH-Code-Section-Semester'
 	];
-	const topicOptions = [
+	const fallbackTopicOptions = [
 		'Linear Algebra',
 		'Differentiation',
 		'Integration by Parts',
@@ -28,7 +28,7 @@
 		'Trigonometric Identities'
 	];
 
-	const questions: PracticeQuestion[] = [
+	const fallbackQuestions: PracticeQuestion[] = [
 		{
 			id: 'hq-1',
 			sequence: 1,
@@ -63,8 +63,14 @@
 		}
 	];
 
+	let groupName = fallbackGroupName;
+	let homeworkOptions = fallbackHomeworkOptions;
+	let topicOptions = fallbackTopicOptions;
+	let questions: PracticeQuestion[] = fallbackQuestions;
+
 	$: practicing = $page.url.searchParams.get('practicing');
 	$: practicingValue = practicing ? String(practicing) : null;
+	$: assignmentId = $page.url.searchParams.get('assignment_id');
 	$: initialHomework =
 		practicingValue && homeworkOptions[Number(practicingValue) - 1]
 			? homeworkOptions[Number(practicingValue) - 1]
@@ -78,9 +84,98 @@
 
 	$: if (practicingValue !== lastPracticing) {
 		lastPracticing = practicingValue;
-		selectedHomework = initialHomework;
-		selectedTopics = new Set(initialTopics);
+		const nextContext = loadAssignmentPracticeContext();
+		selectedHomework = nextContext.initialHomework;
+		selectedTopics = new Set(nextContext.initialTopics);
 		started = false;
+	}
+
+	function loadAssignmentPracticeContext() {
+		if (typeof sessionStorage === 'undefined') {
+			groupName = fallbackGroupName;
+			homeworkOptions = fallbackHomeworkOptions;
+			topicOptions = fallbackTopicOptions;
+			questions = fallbackQuestions;
+			const fallbackInitialHomework = fallbackHomeworkOptions[0];
+			return {
+				initialHomework: fallbackInitialHomework,
+				initialTopics: getTopicsForHomework(fallbackInitialHomework)
+			};
+		}
+
+		const raw = sessionStorage.getItem('aiTutorActivePracticeAssignment');
+		if (!raw) {
+			groupName = fallbackGroupName;
+			homeworkOptions = fallbackHomeworkOptions;
+			topicOptions = fallbackTopicOptions;
+			questions = fallbackQuestions;
+			const fallbackInitialHomework = fallbackHomeworkOptions[0];
+			return {
+				initialHomework: fallbackInitialHomework,
+				initialTopics: getTopicsForHomework(fallbackInitialHomework)
+			};
+		}
+
+		try {
+			const payload = JSON.parse(raw);
+			if (assignmentId && payload?.assignmentId && payload.assignmentId !== assignmentId) {
+				groupName = fallbackGroupName;
+				homeworkOptions = fallbackHomeworkOptions;
+				topicOptions = fallbackTopicOptions;
+				questions = fallbackQuestions;
+				const fallbackInitialHomework = fallbackHomeworkOptions[0];
+				return {
+					initialHomework: fallbackInitialHomework,
+					initialTopics: getTopicsForHomework(fallbackInitialHomework)
+				};
+			}
+
+			const assignmentQuestions = Array.isArray(payload?.assignedItems) ? payload.assignedItems : [];
+			const homeworkLabel = payload?.homeworkLabel || fallbackHomeworkOptions[0];
+			const derivedTopicOptions = Array.from(
+				new Set(
+					assignmentQuestions
+						.flatMap((item: any) => (Array.isArray(item?.topics) ? item.topics : []))
+						.map((topic: any) => String(topic).trim())
+						.filter(Boolean)
+				)
+			);
+
+			groupName = 'Assigned Practice Questions';
+			homeworkOptions = [homeworkLabel];
+			topicOptions = derivedTopicOptions.length > 0 ? derivedTopicOptions : ['General Practice'];
+			questions =
+				assignmentQuestions.length > 0
+					? assignmentQuestions.map((item: any, index: number) => ({
+							id: String(item?.id ?? `${payload?.assignmentId ?? 'assignment'}-${index + 1}`),
+							sequence: index + 1,
+							homework: homeworkLabel,
+							topics:
+								Array.isArray(item?.topics) && item.topics.length > 0
+									? item.topics.map((topic: any) => String(topic))
+									: ['General Practice'],
+							question: String(
+								item?.question ?? item?.prompt ?? item?.text ?? 'Practice question'
+							),
+							completed: false
+						}))
+					: fallbackQuestions;
+			return {
+				initialHomework: homeworkLabel,
+				initialTopics:
+					derivedTopicOptions.length > 0 ? derivedTopicOptions : getTopicsForHomework(homeworkLabel)
+			};
+		} catch {
+			groupName = fallbackGroupName;
+			homeworkOptions = fallbackHomeworkOptions;
+			topicOptions = fallbackTopicOptions;
+			questions = fallbackQuestions;
+			const fallbackInitialHomework = fallbackHomeworkOptions[0];
+			return {
+				initialHomework: fallbackInitialHomework,
+				initialTopics: getTopicsForHomework(fallbackInitialHomework)
+			};
+		}
 	}
 
 	function resetFilters() {
