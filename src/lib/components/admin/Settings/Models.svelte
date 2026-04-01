@@ -59,6 +59,15 @@
 
 	let searchValue = '';
 
+	const getModelAvatarSrc = (profileImageUrl?: string) => {
+		// Default/provider models use favicon marker; show grey flower for those.
+		if (profileImageUrl && profileImageUrl !== '/static/favicon.png') {
+			return profileImageUrl;
+		}
+
+		return '/flower-grey.png';
+	};
+
 	const downloadModels = async (models) => {
 		let blob = new Blob([JSON.stringify(models)], {
 			type: 'application/json'
@@ -229,7 +238,7 @@
 										: 'opacity-50 dark:opacity-50'} "
 								>
 									<img
-										src={model?.meta?.profile_image_url ?? '/static/favicon.png'}
+										src={getModelAvatarSrc(model?.meta?.profile_image_url)}
 										alt="modelfile profile"
 										class=" rounded-full w-full h-auto object-cover"
 									/>
