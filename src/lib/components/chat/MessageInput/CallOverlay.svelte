@@ -16,6 +16,15 @@
 
 	const i18n = getContext('i18n');
 
+	function getFaviconSrc(profileImageUrl?: string) {
+	// Default/provider models use favicon marker; show grey flower for those.
+		if (profileImageUrl && profileImageUrl !== '/static/favicon.png') {
+			return profileImageUrl;
+		}
+
+	return '/flower-grey.png';
+	}
+
 	export let eventTarget: EventTarget;
 	export let submitPrompt: Function;
 	export let stopResponse: Function;
@@ -730,7 +739,7 @@
 					</div>
 				{:else if loading || assistantSpeaking}
 					<svg
-						class="size-12 text-gray-900 dark:text-gray-400"
+						class="size-12 text-[#57068c]"
 						viewBox="0 0 24 24"
 						fill="currentColor"
 						xmlns="http://www.w3.org/2000/svg"
@@ -773,14 +782,8 @@
 								? ' size-16'
 								: rmsLevel * 100 > 1
 									? 'size-14'
-									: 'size-12'}  transition-all rounded-full {(model?.info?.meta
-							?.profile_image_url ?? '/static/favicon.png') !== '/static/favicon.png'
-							? ' bg-cover bg-center bg-no-repeat'
-							: 'bg-black dark:bg-white'}  bg-black dark:bg-white"
-						style={(model?.info?.meta?.profile_image_url ?? '/static/favicon.png') !==
-						'/static/favicon.png'
-							? `background-image: url('${model?.info?.meta?.profile_image_url}');`
-							: ''}
+									: 'size-12'}  transition-all rounded-full bg-cover bg-center bg-no-repeat bg-transparent"
+						style={`background-image: url('${getFaviconSrc(model?.info?.meta?.profile_image_url)}');`}
 					/>
 				{/if}
 				<!-- navbar -->
@@ -812,7 +815,7 @@
 						</div>
 					{:else if loading || assistantSpeaking}
 						<svg
-							class="size-44 text-gray-900 dark:text-gray-400"
+							class="size-44 text-[#57068c]"
 							viewBox="0 0 24 24"
 							fill="currentColor"
 							xmlns="http://www.w3.org/2000/svg"
@@ -855,14 +858,8 @@
 									? 'size-48'
 									: rmsLevel * 100 > 1
 										? 'size-44'
-										: 'size-40'}  transition-all rounded-full {(model?.info?.meta
-								?.profile_image_url ?? '/static/favicon.png') !== '/static/favicon.png'
-								? ' bg-cover bg-center bg-no-repeat'
-								: 'bg-black dark:bg-white'} "
-							style={(model?.info?.meta?.profile_image_url ?? '/static/favicon.png') !==
-							'/static/favicon.png'
-								? `background-image: url('${model?.info?.meta?.profile_image_url}');`
-								: ''}
+										: 'size-40'}  transition-all rounded-full bg-cover bg-center bg-no-repeat bg-transparent"
+							style={`background-image: url('${getFaviconSrc(model?.info?.meta?.profile_image_url)}');`}
 						/>
 					{/if}
 				</button>
@@ -985,7 +982,9 @@
 
 			<div>
 				<button
-					class=" p-3 rounded-full bg-gray-50 dark:bg-gray-900"
+					class="group flex {$activeCallMode === 'live_text'
+						? 'flex-col items-center'
+						: 'flex-row items-center'} gap-2"
 					on:click={async () => {
 						await stopAudioStream();
 						await stopVideoStream();
@@ -1005,16 +1004,42 @@
 					}}
 					type="button"
 				>
-					<svg
-						xmlns="http://www.w3.org/2000/svg"
-						viewBox="0 0 20 20"
-						fill="currentColor"
-						class="size-5"
-					>
-						<path
-							d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z"
-						/>
-					</svg>
+					{#if $activeCallMode === 'live_text'}
+						<div
+							class="flex items-center justify-center p-2.5 rounded-xl border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800
+								group-hover:border-[#8900e1] group-hover:bg-[#8900e1]/10
+								group-active:border-[#57068c] group-active:bg-[#57068c]
+								transition-all duration-150"
+						>
+							<img
+								src="/call-violet.png"
+								alt="End Call"
+								class="size-5 group-active:brightness-0 group-active:invert transition-all duration-150"
+							/>
+						</div>
+						<div
+							class="px-4 py-2.5 rounded-xl border border-gray-300 dark:border-gray-600 bg-transparent text-sm font-medium text-gray-800 dark:text-gray-200
+								group-hover:border-[#8900e1] group-hover:bg-[#8900e1]/10
+								group-active:border-[#57068c] group-active:bg-[#57068c] group-active:text-white
+								transition-all duration-150"
+						>
+							{$i18n.t('End Call')}
+						</div>
+					{:else}
+						<div
+							class="flex flex-row items-center gap-3 px-4 py-2.5 rounded-xl border border-gray-300 dark:border-gray-600 bg-transparent text-sm font-medium text-gray-800 dark:text-gray-200
+								group-hover:border-[#8900e1] group-hover:bg-[#8900e1]/10
+								group-active:border-[#57068c] group-active:bg-[#57068c] group-active:text-white
+								transition-all duration-150"
+						>
+							{$i18n.t('End Call')}
+							<img
+								src="/call-violet.png"
+								alt="End Call"
+								class="size-5 group-active:brightness-0 group-active:invert transition-all duration-150"
+							/>
+						</div>
+					{/if}
 				</button>
 			</div>
 		</div>

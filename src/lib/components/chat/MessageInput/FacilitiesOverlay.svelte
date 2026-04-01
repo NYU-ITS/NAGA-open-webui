@@ -1,7 +1,8 @@
 <script lang="ts">
-	import { getContext, createEventDispatcher, onMount } from 'svelte';
+	import { getContext, createEventDispatcher, onMount, onDestroy, tick } from 'svelte';
 	import { showFacilitiesOverlay, showControls, models, chatId, chats, currentChatPage } from '$lib/stores';
-	import { slide } from 'svelte/transition';
+	import { slide, fade } from 'svelte/transition';
+	import { flyAndScale } from '$lib/utils/transitions';
 	import { generateFacilitiesResponse, generateFacilitiesSection, downloadFacilitiesDocument, extractFormDataFromFiles } from '$lib/apis/facilities';
 	import { updateChatById, getChatList } from '$lib/apis/chats';
 	import Spinner from '$lib/components/common/Spinner.svelte';
@@ -51,12 +52,19 @@
 	let currentChatId = $chatId;
 	let showFilesUsedMessage = false;
 	let usedFiles: string[] = [];
+	let downloadBottomAnchor: HTMLElement | null = null;
 	
 	let downloadFilename = 'facilities_draft';
 	let lastProjectTitle = '';
 	let sectionProgress: Array<{key: string, label: string, status: 'pending' | 'processing' | 'done' | 'error'}> = [];
 	let generatedSectionContent: Record<string, string> = {};
-	
+	let descriptionExpanded = false;
+	let disclaimerExpanded = false;
+	let showDownloadModal = false;
+	let citationOption: 'with' | 'without' = 'with';
+	let downloadModalElement: HTMLElement | null = null;
+	let downloadModalMounted = false;
+
 	$: if (formData.projectTitle !== lastProjectTitle) {
 		lastProjectTitle = formData.projectTitle;
 		const projectTitle = formData.projectTitle || '';
@@ -73,8 +81,6 @@
 
 	$: if ($chatId !== currentChatId) {
 		currentChatId = $chatId;
-		showDownloadOptions = false;
-		lastGeneratedResponse = null;
 	}
 
 
@@ -102,7 +108,7 @@
 	// Select sections based on sponsor
 	$: currentSections = selectedSponsor === 'NIH' ? nihFormSections : nsfFormSections;
 
-	$: if ($chatId && (selectedSponsor || Object.values(formData).some(v => v.trim() !== '') || showFilesUsedMessage)) {
+	$: if ($chatId && (selectedSponsor || Object.values(formData).some(v => v.trim() !== '') || showFilesUsedMessage || showDownloadOptions)) {
 		saveToLocalStorage();
 	}
 
@@ -119,6 +125,8 @@
 				formData,
 				showFilesUsedMessage,
 				usedFiles,
+				showDownloadOptions,
+				lastGeneratedResponse,
 				chatId: $chatId,
 				timestamp: Date.now()
 			};
@@ -147,6 +155,8 @@
 					formData = parsed.formData || formData;
 					showFilesUsedMessage = parsed.showFilesUsedMessage || false;
 					usedFiles = parsed.usedFiles || [];
+					showDownloadOptions = parsed.showDownloadOptions || false;
+					lastGeneratedResponse = parsed.lastGeneratedResponse || null;
 					
 					console.log(`Loaded form data from localStorage for chat: ${$chatId}`, {
 						sponsor: selectedSponsor,
@@ -776,6 +786,10 @@
 					sources: allSources
 				};
 				showDownloadOptions = true;
+				// After generation, auto-scroll to the Download section.
+				await tick();
+				downloadBottomAnchor?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+				if ($chatId) saveToLocalStorage();
 
 				if (usedFiles.length > 0) {
 					showFilesUsedMessage = true;
@@ -899,7 +913,7 @@
 		return null;
 	}
 
-	async function handleDownload(format: 'pdf' | 'pdf-clean' | 'doc') {
+	async function handleDownload(format: 'pdf' | 'pdf-clean' | 'doc' | 'doc-clean') {
 		if (!lastGeneratedResponse) {
 			toast.error('No document to download');
 			return;
@@ -932,7 +946,10 @@
 		
 		if (format === 'doc') {
 			downloadFormat = 'doc';
-			removeCitations = true; // DOC always removes citations
+			removeCitations = false; // With citations
+		} else if (format === 'doc-clean') {
+			downloadFormat = 'doc';
+			removeCitations = true; // Without citations
 		} else if (format === 'pdf-clean') {
 			downloadFormat = 'pdf';
 			removeCitations = true;
@@ -968,14 +985,39 @@
 	}
 
 	function closeOverlay() {
-		// Reset download state when form is closed
-		showDownloadOptions = false;
-		lastGeneratedResponse = null;
-		
+
 		showFacilitiesOverlay.set(false);
 		showControls.set(false);
 		dispatch('close');
 	}
+
+	function onDownloadModalKeydown(e: KeyboardEvent) {
+		if (e.key === 'Escape') showDownloadModal = false;
+	}
+	onMount(() => {
+		downloadModalMounted = true;
+	});
+	// Portal download modal to body and disable background (same as CallModeModal)
+	$: if (downloadModalMounted) {
+		if (showDownloadModal && downloadModalElement) {
+			document.body.appendChild(downloadModalElement);
+			window.addEventListener('keydown', onDownloadModalKeydown);
+			document.body.style.overflow = 'hidden';
+		} else if (downloadModalElement) {
+			window.removeEventListener('keydown', onDownloadModalKeydown);
+			if (document.body.contains(downloadModalElement)) {
+				document.body.removeChild(downloadModalElement);
+			}
+			document.body.style.overflow = 'unset';
+		}
+	}
+	onDestroy(() => {
+		window.removeEventListener('keydown', onDownloadModalKeydown);
+		if (downloadModalElement && document.body.contains(downloadModalElement)) {
+			document.body.removeChild(downloadModalElement);
+		}
+		document.body.style.overflow = 'unset';
+	});
 </script>
 
 <style>
@@ -1057,7 +1099,7 @@
 
 {#if $showFacilitiesOverlay}
 	<div
-	class="flex flex-col h-full bg-white dark:bg-gray-850 border border-gray-100 dark:border-gray-850 rounded-xl shadow-lg dark:shadow-lg relative"
+	class="flex flex-col flex-1 min-h-0 bg-white dark:bg-gray-850 border border-[#ab82c5] dark:border-[#ab82c5] rounded-xl shadow-lg dark:shadow-lg relative"
 	class:pointer-events-none={generating}
 	class:opacity-50={generating}
 	>
@@ -1079,15 +1121,15 @@
 			</div>
 		{/if}
 		<!-- Header -->
-		<div class="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
+		<div class="flex items-center justify-between p-4 bg-[#57068c] border-b border-[#57068c]">
 			<div class="flex-1">
-				<h1 class="text-lg font-semibold text-gray-900 dark:text-white">
+				<h1 class="text-lg font-semibold text-white">
 					{('NYU Research Facilities Draft Generator')}
 				</h1>		
 			</div>
 			
 			<button
-				class="p-2 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
+				class="p-2 rounded-lg text-white/90 hover:text-white hover:bg-white/10 transition-colors focus:outline-none focus:ring-2 focus:ring-white/70 focus:ring-offset-2 focus:ring-offset-[#57068c]"
 				on:click={closeOverlay}
 				type="button"
 				aria-label="Close research facilities form"
@@ -1135,14 +1177,48 @@
 				</div>
 			{/if}
 
-			<p class="text-sm text-gray-600 dark:text-gray-400 mt-1">
-					<b>Description</b><br>
-					This tool assists in developing the DRAFT section related to  Facilities & Equipment for grant proposals where sponsors are NSF (National Science Foundation) and NIH (National Institute of Health).<br><br>
-					Users should complete only those sections that are applicable to their research; any sections left blank will be omitted from the final document. Large Language Model (LLM) will generate responses in a template form.<br><br>
-					<b>Disclaimer</b><br>
-					The Al-generated text is intended as a DRAFT.<br><br>
-					As LLMs are inherently non-deterministic, the output is not guaranteed to be consistent or predictable. As a result, all content must be carefully reviewed, verified, and revised by the researcher to ensure accuracy and compliance with the sponsor's requirements, and adherence to institutional policies. Researchers are solely responsible for the final submitted materials.
-				</p>
+			<!-- Description (dropdown) -->
+			<div class="border border-gray-200 dark:border-gray-600 rounded-lg overflow-hidden">
+				<button
+					type="button"
+					class="w-full flex items-center justify-between gap-2 py-2 px-3 text-left text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors"
+					on:click={() => (descriptionExpanded = !descriptionExpanded)}
+					aria-expanded={descriptionExpanded}
+					aria-controls="description-content"
+					id="description-toggle"
+				>
+					<span class="flex items-center gap-2">
+						<svg class="size-4 text-gray-500 dark:text-gray-400 flex-shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true">
+							<path stroke-linecap="round" stroke-linejoin="round" d="m11.25 11.25.041-.02a.75.75 0 0 1 1.063.852l-.708 2.836a.75.75 0 0 0 1.063.853l.041-.021M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9-3.75h.008v.008H12V8.25Z" />
+						</svg>
+						{('Description')}
+					</span>
+					<svg
+						class="size-4 text-gray-500 dark:text-gray-400 flex-shrink-0 transition-transform duration-200 {descriptionExpanded ? 'rotate-180' : ''}"
+						xmlns="http://www.w3.org/2000/svg"
+						fill="none"
+						viewBox="0 0 24 24"
+						stroke-width="2"
+						stroke="currentColor"
+						aria-hidden="true"
+					>
+						<path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
+					</svg>
+				</button>
+				{#if descriptionExpanded}
+					<div
+						id="description-content"
+						role="region"
+						aria-labelledby="description-toggle"
+						class="border-t border-gray-200 dark:border-gray-600 bg-gray-50/50 dark:bg-gray-800/30 px-3 py-3"
+					>
+						<p class="text-sm text-gray-600 dark:text-gray-400 whitespace-pre-line">
+							This tool assists in developing the DRAFT section related to Facilities & Equipment for grant proposals where sponsors are NSF (National Science Foundation) and NIH (National Institute of Health).<br>
+							Users should complete only those sections that are applicable to their research; any sections left blank will be omitted from the final document. Large Language Model (LLM) will generate responses in a template form.
+						</p>
+					</div>
+				{/if}
+			</div>
 
 			<!-- Sponsor Selection -->
 			<div>
@@ -1212,7 +1288,7 @@
 
 						<button
 							type="button"
-							class="w-full mt-6 px-4 py-3 bg-[#57068C] hover:bg-[#8900E1] text-white dark:bg-white dark:text-gray-900 dark:hover:bg-gray-100 dark:disabled:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg font-medium text-sm transition-colors"
+							class="block w-3/4 mx-auto mt-6 px-4 py-3 bg-[#57068C] hover:bg-[#8900E1] text-white dark:bg-white dark:text-gray-900 dark:hover:bg-gray-100 dark:disabled:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg font-medium text-sm transition-colors"
 							on:click={generateSection}
 							disabled={generating}
 							aria-describedby="generate-help"
@@ -1228,60 +1304,177 @@
 							{/if}
 						</button>
 
-						<!-- Download Options -->
-						{#if showDownloadOptions && lastGeneratedResponse}
-							<div class="mt-6 border-t border-gray-200 dark:border-gray-700 pt-6">
-								<h3 class="text-sm font-medium text-gray-900 dark:text-white mb-4">
-									Download Generated Response
-								</h3>
-								
-								<!-- Filename Input -->
-								<div class="mb-4">
-									<label for="download-filename" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-										Enter filename (without extension):
-									</label>
-									<input
-										id="download-filename"
-										type="text"
-										bind:value={downloadFilename}
-										class="w-full rounded-lg py-2.5 px-3 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-800 border border-gray-300 dark:border-gray-600 outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-colors"
-										placeholder="facilities_draft"
-									/>
-									<p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-										Timestamp will be automatically appended to the filename
-									</p>
-								</div>
-
-								<!-- Download Buttons Side by Side -->
-								<div class="grid grid-cols-2 gap-3">
+						<!-- Download: always visible once sponsor/sections shown; disabled until output exists -->
+						<div class="mt-6 border-t border-gray-200 dark:border-gray-700 pt-6">
+							<h3 class="text-sm font-medium text-gray-900 dark:text-white mb-4">
+								Download Generated Response
+							</h3>
+							<!-- Disclaimer (collapsible): only inside Download section, right after title -->
+							<div class="mb-4 border border-gray-200 dark:border-gray-600 rounded-lg overflow-hidden">
 								<button
 									type="button"
-									class="px-4 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-medium text-sm transition-colors"
-									on:click={() => handleDownload('doc')}
+									class="w-full flex items-center justify-between gap-2 py-2 px-3 text-left text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors"
+									on:click={() => (disclaimerExpanded = !disclaimerExpanded)}
+									aria-expanded={disclaimerExpanded}
+									aria-controls="disclaimer-content-download-section"
+									id="disclaimer-toggle-download-section"
 								>
-									<svg class="inline w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
-									</svg>
-									Download DOC
-								</button>
-								
-								<button
-									type="button"
-									class="px-4 py-2.5 bg-green-800 hover:bg-green-600 text-white rounded-lg font-medium text-sm transition-colors"
-										on:click={() => handleDownload('pdf-clean')}
+									<span class="text-sm text-gray-600 dark:text-gray-400">
+										{disclaimerExpanded ? ('Disclaimer') : ('Disclaimer - Please review before downloading')}
+									</span>
+									<svg
+										class="size-4 text-gray-500 dark:text-gray-400 flex-shrink-0 transition-transform duration-200 {disclaimerExpanded ? 'rotate-180' : ''}"
+										xmlns="http://www.w3.org/2000/svg"
+										fill="none"
+										viewBox="0 0 24 24"
+										stroke-width="2"
+										stroke="currentColor"
+										aria-hidden="true"
 									>
-										<svg class="inline w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
-										</svg>
-										Download PDF
-									</button>
-								</div>
+										<path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
+									</svg>
+								</button>
+								{#if disclaimerExpanded}
+									<div
+										id="disclaimer-content-download-section"
+										role="region"
+										aria-labelledby="disclaimer-toggle-download-section"
+										class="border-t border-gray-200 dark:border-gray-600 bg-gray-50/50 dark:bg-gray-800/30 px-3 py-3"
+									>
+										<p class="text-sm text-gray-600 dark:text-gray-400 whitespace-pre-line">
+											The AI-generated text is intended as a DRAFT.<br>
+											As LLMs are inherently non-deterministic, the output is not guaranteed to be consistent or predictable. As a result, all content must be carefully reviewed, verified, and revised by the researcher to ensure accuracy and compliance with the sponsor's requirements, and adherence to institutional policies. Researchers are solely responsible for the final submitted materials.
+										</p>
+									</div>
+								{/if}
 							</div>
-						{/if}
+
+							<button
+								type="button"
+								class="block w-3/4 mx-auto px-4 py-2.5 bg-[#57068C] hover:bg-[#8900E1] text-white rounded-lg font-medium text-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-[#57068C] dark:disabled:hover:bg-[#57068C]"
+								disabled={!showDownloadOptions || !lastGeneratedResponse}
+								on:click={() => {
+									if (showDownloadOptions && lastGeneratedResponse) showDownloadModal = true;
+								}}
+								aria-describedby={!showDownloadOptions || !lastGeneratedResponse ? 'download-button-hint' : undefined}
+							>
+								<svg class="inline w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+								</svg>
+								Download
+							</button>
+							{#if !showDownloadOptions || !lastGeneratedResponse}
+								<p id="download-button-hint" class="mt-2 text-xs text-gray-500 dark:text-gray-400">
+									Generate a response to enable download.
+								</p>
+							{/if}
+						</div>
+						<div bind:this={downloadBottomAnchor} class="h-0 w-full" />
 
 					</fieldset>
 				</div>
 			{/if}
 		</div>
 	</div>
+
+	<!-- Download modal: portaled to body (same pattern as CallModeModal) -->
+	{#if showDownloadModal}
+		<!-- svelte-ignore a11y-click-events-have-key-events -->
+		<!-- svelte-ignore a11y-no-static-element-interactions -->
+		<!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+		<div
+			bind:this={downloadModalElement}
+			class="fixed top-0 right-0 left-0 bottom-0 bg-black/60 w-full h-screen max-h-[100dvh] flex justify-center z-[99999999] overflow-hidden overscroll-contain"
+			in:fade={{ duration: 10 }}
+			on:mousedown={() => (showDownloadModal = false)}
+			role="dialog"
+			aria-modal="true"
+			aria-labelledby="download-modal-title"
+		>
+			<div
+				class="m-auto rounded-2xl max-w-full w-[26rem] mx-2 bg-gray-50 dark:bg-gray-950 max-h-[100dvh] shadow-3xl"
+				in:flyAndScale
+				on:mousedown={(e) => e.stopPropagation()}
+			>
+				<div class="px-6 py-5 flex flex-col gap-4">
+					<h2 id="download-modal-title" class="text-lg font-semibold text-gray-900 dark:text-gray-200">
+						Download
+					</h2>
+
+					<!-- Filename -->
+					<div>
+						<label for="download-modal-filename" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">
+							Enter filename (without extension):
+						</label>
+						<input
+							id="download-modal-filename"
+							type="text"
+							bind:value={downloadFilename}
+							class="w-full rounded-lg py-2.5 px-3 text-sm bg-white dark:bg-gray-900 border border-gray-300 dark:border-gray-600 outline-none focus:ring-2 focus:ring-[#57068C] focus:border-transparent"
+							placeholder="facilities_draft"
+						/>
+						<p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+							Timestamp will be automatically appended to the filename
+						</p>
+					</div>
+
+					<!-- Citation options -->
+					<div class="flex gap-4">
+						<label class="flex items-center gap-2 cursor-pointer select-none flex-1">
+							<input
+								type="radio"
+								name="citation"
+								value="with"
+								class="w-4 h-4 border-gray-300 dark:border-gray-600 text-[#57068C] focus:ring-[#57068C] cursor-pointer"
+								bind:group={citationOption}
+							/>
+							<span class="text-sm font-medium text-gray-700 dark:text-gray-300">With citations</span>
+						</label>
+						<label class="flex items-center gap-2 cursor-pointer select-none flex-1">
+							<input
+								type="radio"
+								name="citation"
+								value="without"
+								class="w-4 h-4 border-gray-300 dark:border-gray-600 text-[#57068C] focus:ring-[#57068C] cursor-pointer"
+								bind:group={citationOption}
+							/>
+							<span class="text-sm font-medium text-gray-700 dark:text-gray-300">Without citations</span>
+						</label>
+					</div>
+
+					<!-- Download format buttons -->
+					<div class="flex flex-col gap-2 pt-1">
+						<button
+							type="button"
+							class="w-full px-4 py-2.5 bg-[#57068C] hover:bg-[#8900E1] text-white rounded-lg font-medium text-sm transition-colors"
+							on:click={async () => {
+								await handleDownload(citationOption === 'with' ? 'pdf' : 'pdf-clean');
+								showDownloadModal = false;
+							}}
+						>
+							Download as PDF
+						</button>
+						<button
+							type="button"
+							class="w-full px-4 py-2.5 bg-gray-200 hover:bg-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-800 dark:text-gray-200 rounded-lg font-medium text-sm transition-colors"
+							on:click={async () => {
+								await handleDownload(citationOption === 'with' ? 'doc' : 'doc-clean');
+								showDownloadModal = false;
+							}}
+						>
+							Download as DOC
+						</button>
+					</div>
+
+					<button
+						type="button"
+						class="text-sm text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 pt-1"
+						on:click={() => (showDownloadModal = false)}
+					>
+						Cancel
+					</button>
+				</div>
+			</div>
+		</div>
+	{/if}
 {/if}

@@ -14,6 +14,22 @@
 
 	const i18n = getContext('i18n');
 
+	function isDarkMode() {
+		if (typeof window !== 'undefined') {
+			return document.documentElement.classList.contains('dark');
+		}
+		return false;
+	}
+
+	function getFaviconSrc(profileImageUrl?: string) {
+		// Treat the default favicon marker as "unset" so we can pick the dark/light variant.
+		if (profileImageUrl && profileImageUrl !== '/static/favicon.png') {
+			return profileImageUrl;
+		}
+
+		return `${WEBUI_BASE_URL}/static/${isDarkMode() ? 'favicon-white' : 'favicon-violet'}.png`;
+	}
+
 	export let modelIds = [];
 	export let models = [];
 	export let atSelectedModel;
@@ -52,10 +68,7 @@
 						>
 							<img
 								crossorigin="anonymous"
-								src={model?.info?.meta?.profile_image_url ??
-									($i18n.language === 'dg-DG'
-										? `/doge.png`
-										: `${WEBUI_BASE_URL}/static/favicon.png`)}
+								src={getFaviconSrc(model?.info?.meta?.profile_image_url)}
 								class=" size-[2.7rem] rounded-full border-[1px] border-gray-200 dark:border-none"
 								alt="logo"
 								draggable="false"
