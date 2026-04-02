@@ -69,6 +69,8 @@
 	let selectedChatId = null;
 	let showDropdown = false;
 	let showPinnedChat = true;
+	let newChatLogoSrc = `${WEBUI_BASE_URL}/static/favicon-white.png`;
+	let userAvatarSrc = `${WEBUI_BASE_URL}/static/user_temp.png`;
 
 	let showCreateChannel = false;
 
@@ -155,7 +157,17 @@
 	};
 
 	const initChannels = async () => {
-		await channels.set(await getChannels(localStorage.token));
+		if (!$config?.features?.enable_channels) {
+			channels.set([]);
+			return;
+		}
+
+		const channelList = await getChannels(localStorage.token).catch((error) => {
+			console.error('Failed to load channels:', error);
+			return [];
+		});
+
+		channels.set(channelList ?? []);
 	};
 
 	const initChatList = async () => {
@@ -521,7 +533,10 @@
 					<div class="self-center mx-1.5">
 						<img
 							crossorigin="anonymous"
-							src="{WEBUI_BASE_URL}/static/favicon-white.png"
+							src={newChatLogoSrc}
+							on:error={() => {
+								newChatLogoSrc = `${WEBUI_BASE_URL}/favicon.png`;
+							}}
 							class=" size-7 -translate-x-1.5 rounded-full"
 							alt="logo"
 						/>
@@ -597,6 +612,85 @@
 
 					<div class="flex self-center translate-y-[0.5px]">
 						<div class=" self-center font-medium text-sm font-primary">{$i18n.t('Workspace')}</div>
+					</div>
+				</a>
+			</div>
+
+			<div class="px-1.5 flex justify-center text-gray-50 dark:text-gray-200">
+				<a
+					class="grow flex items-center space-x-3 rounded-lg px-2 py-[7px] hover:bg-[#8900E1] dark:hover:bg-gray-700 transition"
+					href="/aitutordashboard"
+					on:click={() => {
+						selectedChatId = null;
+						chatId.set('');
+
+						if ($mobile) {
+							showSidebar.set(false);
+						}
+					}}
+					draggable="false"
+				>
+					<div class="self-center">
+						<svg
+							xmlns="http://www.w3.org/2000/svg"
+							fill="none"
+							viewBox="0 0 24 24"
+							stroke-width="2"
+							stroke="currentColor"
+							class="size-[1.1rem]"
+						>
+							<path
+								d="M4.66667 11.3333H6V4.66667H4.66667V11.3333ZM10 10H11.3333V4.66667H10V10ZM7.33333 8H8.66667V4.66667H7.33333V8ZM3.33333 14C2.96667 14 2.65278 13.8694 2.39167 13.6083C2.13056 13.3472 2 13.0333 2 12.6667V3.33333C2 2.96667 2.13056 2.65278 2.39167 2.39167C2.65278 2.13056 2.96667 2 3.33333 2H12.6667C13.0333 2 13.3472 2.13056 13.6083 2.39167C13.8694 2.65278 14 2.96667 14 3.33333V12.6667C14 13.0333 13.8694 13.3472 13.6083 13.6083C13.3472 13.8694 13.0333 14 12.6667 14H3.33333ZM3.33333 12.6667H12.6667V3.33333H3.33333V12.6667Z"
+								fill="white"
+							/>
+						</svg>
+					</div>
+
+					<div class="flex self-center translate-y-[0.5px]">
+						<div class=" self-center font-medium text-sm font-primary">
+							{$i18n.t('AI Tutor Dashboard - Instructor')}
+						</div>
+					</div>
+				</a>
+			</div>
+
+		{/if}
+
+		{#if $user?.role === 'user'}
+			<div class="px-1.5 flex justify-center text-gray-50 dark:text-gray-200">
+				<a
+					class="grow flex items-center space-x-3 rounded-lg px-2 py-[7px] hover:bg-[#8900E1] dark:hover:bg-gray-700 transition"
+					href="/studentdashboard"
+					on:click={() => {
+						selectedChatId = null;
+						chatId.set('');
+
+						if ($mobile) {
+							showSidebar.set(false);
+						}
+					}}
+					draggable="false"
+				>
+					<div class="self-center">
+						<svg
+							xmlns="http://www.w3.org/2000/svg"
+							fill="none"
+							viewBox="0 0 24 24"
+							stroke-width="2"
+							stroke="currentColor"
+							class="size-[1.1rem]"
+						>
+							<path
+								d="M4.66667 11.3333H6V4.66667H4.66667V11.3333ZM10 10H11.3333V4.66667H10V10ZM7.33333 8H8.66667V4.66667H7.33333V8ZM3.33333 14C2.96667 14 2.65278 13.8694 2.39167 13.6083C2.13056 13.3472 2 13.0333 2 12.6667V3.33333C2 2.96667 2.13056 2.65278 2.39167 2.39167C2.65278 2.13056 2.96667 2 3.33333 2H12.6667C13.0333 2 13.3472 2.13056 13.6083 2.39167C13.8694 2.65278 14 2.96667 14 3.33333V12.6667C14 13.0333 13.8694 13.3472 13.6083 13.6083C13.3472 13.8694 13.0333 14 12.6667 14H3.33333ZM3.33333 12.6667H12.6667V3.33333H3.33333V12.6667Z"
+								fill="white"
+							/>
+						</svg>
+					</div>
+
+					<div class="flex self-center translate-y-[0.5px]">
+						<div class=" self-center font-medium text-sm font-primary">
+							{$i18n.t('AI Tutor Dashboard - Student')}
+						</div>
 					</div>
 				</a>
 			</div>
@@ -909,7 +1003,10 @@
 							<div class="self-center mx-1.5">
 								<img
 									crossorigin="anonymous"
-									src="{WEBUI_BASE_URL}/static/user_temp.png"
+									src={userAvatarSrc}
+									on:error={() => {
+										userAvatarSrc = `${WEBUI_BASE_URL}/favicon.png`;
+									}}
 									class=" size-7 -translate-x-1.5 rounded-full"
 									alt="logo"
 								/>
