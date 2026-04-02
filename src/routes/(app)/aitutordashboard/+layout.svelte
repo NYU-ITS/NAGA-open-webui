@@ -342,14 +342,24 @@
 						<a
 							class="min-w-fit rounded-full p-1.5 {$page.url.pathname.includes(
 								'/aitutordashboard/topicanalysis'
-							)
+							) &&
+							!$page.url.pathname.includes('/aitutordashboard/topicanalysis/reviewquestionset')
 								? 'text-[#57068c] dark:text-white'
 								: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
 							href={buildDashboardHref('/aitutordashboard/topicanalysis')}
 						>
-							{$page.url.pathname.includes('/aitutordashboard/topicanalysis/reviewquestionset')
-								? 'Topic Analysis - Reviewing Question Set'
-								: 'Topic Analysis'}
+							Topic Analysis
+						</a>
+
+						<a
+							class="min-w-fit rounded-full p-1.5 {$page.url.pathname.includes(
+								'/aitutordashboard/topicanalysis/reviewquestionset'
+							)
+								? 'text-[#57068c] dark:text-white'
+								: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
+							href={buildDashboardHref('/aitutordashboard/topicanalysis/reviewquestionset')}
+						>
+							Practice Question
 						</a>
 
 						<a

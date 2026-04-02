@@ -1,7 +1,9 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
+	import { toast } from 'svelte-sonner';
 	import { showControls, showRightsideQuestions } from '$lib/stores';
+	import Markdown from '$lib/components/chat/Messages/Markdown.svelte';
 
 	type PracticeQuestion = {
 		id: string;
@@ -81,6 +83,9 @@
 	let selectedTopics = new Set<string>(topicOptions);
 	let started = false;
 	let lastPracticing: string | null = null;
+	let sendingQuestionId: string | null = null;
+
+	export let submitPrompt: Function | null = null;
 
 	$: if (practicingValue !== lastPracticing) {
 		lastPracticing = practicingValue;
@@ -251,6 +256,32 @@
 			noScroll: true
 		});
 	}
+
+	async function copyQuestion(question: PracticeQuestion) {
+		try {
+			await navigator.clipboard.writeText(question.question);
+			toast.success('Question copied.');
+		} catch (error) {
+			toast.error('Failed to copy question.');
+		}
+	}
+
+	async function sendQuestion(question: PracticeQuestion) {
+		if (!submitPrompt) {
+			toast.error('Chat send is unavailable right now.');
+			return;
+		}
+
+		try {
+			sendingQuestionId = question.id;
+			await submitPrompt(question.question);
+			toast.success('Question sent to chat.');
+		} catch (error) {
+			toast.error('Failed to send question to chat.');
+		} finally {
+			sendingQuestionId = null;
+		}
+	}
 </script>
 
 <div class="flex h-full w-full flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-900">
@@ -351,16 +382,28 @@
 				<div class="space-y-3 text-gray-900 dark:text-gray-100">
 					{#each filteredQuestions as question}
 						<article class="space-y-1">
-							<p class="text-sm leading-6 mt-6 mb-1">{question.question}</p>
-							<div class="min-h-[1.25rem]">
-								{#if started}
-									<button
-										type="button"
-										class="text-left text-sm font-semibold text-gray-600 transition hover:text-gray-800 dark:text-gray-300 dark:hover:text-gray-100"
-									>
-										{question.completed ? 'Completed!' : 'Go'}
-									</button>
-								{/if}
+							<div class="mt-6 mb-1 markdown-prose-xs text-sm leading-6 text-gray-900 dark:text-gray-100">
+								<Markdown
+									id={`practice-question-${assignmentId ?? 'fallback'}-${question.id}`}
+									content={question.question}
+								/>
+							</div>
+							<div class="flex min-h-[1.25rem] items-center justify-end gap-3 pt-1">
+								<button
+									type="button"
+									class="text-left text-xs font-semibold text-gray-600 transition hover:text-gray-800 dark:text-gray-300 dark:hover:text-gray-100"
+									on:click={() => copyQuestion(question)}
+								>
+									Copy
+								</button>
+								<button
+									type="button"
+									class="text-left text-xs font-semibold text-gray-600 transition hover:text-gray-800 disabled:text-gray-400 dark:text-gray-300 dark:hover:text-gray-100 dark:disabled:text-gray-500"
+									on:click={() => sendQuestion(question)}
+									disabled={sendingQuestionId === question.id}
+								>
+									{sendingQuestionId === question.id ? 'Sending...' : 'Send'}
+								</button>
 							</div>
 						</article>
 					{/each}

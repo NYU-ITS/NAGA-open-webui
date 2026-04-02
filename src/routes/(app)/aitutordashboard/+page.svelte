@@ -268,9 +268,8 @@ const bannerPlaceholderTime = 'TEST-TIME';
 	function shortLabel(values: (number | null)[], i: number): string {
 		const stat = homeworkStats[i];
 		if (!stat) return `${i + 1}`;
-		const name = stat.homework;
-		const m = name.match(/\d+/);
-		return m ? `HW${m[0]}` : `${i + 1}`;
+		const homeworkLabel = getHomeworkModelName(stat.homework);
+		return homeworkLabel.length > 10 ? `${homeworkLabel.slice(0, 10)}...` : homeworkLabel;
 	}
 
 	$: avgSolvedChart = chartPoints(homeworkStats.map((s) => s.avgSolved));

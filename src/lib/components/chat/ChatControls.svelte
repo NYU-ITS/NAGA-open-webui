@@ -227,7 +227,7 @@
 						<div
 							class=" h-full max-h-[100dvh] bg-white text-gray-700 dark:bg-black dark:text-gray-300 flex justify-center"
 						>
-							<RightsideQuestions />
+							<RightsideQuestions {submitPrompt} />
 						</div>
 					{:else if $showArtifacts}
 						<Artifacts {history} />
@@ -327,7 +327,7 @@
 							</div>
 						{:else if $showRightsideQuestions}
 							<div class="w-full h-full flex justify-center">
-								<RightsideQuestions />
+								<RightsideQuestions {submitPrompt} />
 							</div>
 						{:else if $showArtifacts}
 							<Artifacts {history} overlay={dragged} />

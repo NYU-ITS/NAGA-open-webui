@@ -67,8 +67,9 @@
 	let syncRequestId = 0;
 
 	function getHomeworkModelName(homework: string) {
-		// homework name is now homework model name
-		return homework;
+		// Student analysis rows store the AI Tutor homework id, but the UI should
+		// always resolve and display the linked workspace model name when possible.
+		return homeworkMetaById[homework]?.label ?? homework;
 	}
 
 	function downloadStudentReport(student: StudentRow) {
