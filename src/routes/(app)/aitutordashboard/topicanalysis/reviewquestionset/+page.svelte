@@ -353,60 +353,90 @@
 		});
 	}
 
+	function buildPracticeMarkdownFromQuestions(questions: QuestionItem[]) {
+		const lines: string[] = [];
+		for (const [index, question] of questions.entries()) {
+			const number = question?.number ?? index + 1;
+			const text =
+				typeof question?.text === 'string'
+					? question.text
+					: typeof question?.question === 'string'
+						? question.question
+						: 'Practice question';
+			const topics = Array.isArray(question?.topics)
+				? question.topics.filter(Boolean).join(', ')
+				: question?.topic
+					? String(question.topic)
+					: '';
+
+			lines.push(`## Question ${number}`);
+			if (topics) lines.push(`Topics: ${topics}`);
+			lines.push('');
+			lines.push(text);
+			lines.push('');
+		}
+		return lines.join('\n').trim();
+	}
+
 	async function handleSave() {
 		try {
 			const currentHomework = currentReviewHomework;
-			let nextStatus: QuestionSetData['status'] | null = null;
+			if (!currentHomework?.practiceId) {
+				toast.success('Question set changes saved locally.');
+				return;
+			}
 
-			updateCurrentHomework((homework) => {
-				const parsedQuestions = homework.questionEditors.map((_, index) =>
-					parseQuestionEditor(homework, index)
-				);
-				const nextHomework = refreshDerivedStatus({
-					...homework,
-					questionData: { ...homework.questionData, questions: parsedQuestions },
-					studentAssignments: buildStudentAssignments(parsedQuestions)
-				});
-				nextStatus = nextHomework.questionData.status;
-				return nextHomework;
-			});
+			const parsedQuestions = currentHomework.questionEditors.map((_, index) =>
+				parseQuestionEditor(currentHomework, index)
+			);
+			const nextStatus =
+				parsedQuestions.length > 0 &&
+				currentHomework.approvedQuestionIndexes.size === parsedQuestions.length
+					? ('approved' as const)
+					: ('in_progress' as const);
 
-			if (currentHomework?.practiceId) {
-				approvingQuestionSet = true;
-				const response = await fetch(
-					`${AI_TUTOR_API_BASE}/practice/${encodeURIComponent(currentHomework.practiceId)}/status?status=approved`,
-					{
-						method: 'PATCH',
-						headers: {
-							Authorization: `Bearer ${localStorage.token}`
-						}
-					}
-				);
-				if (!response.ok) {
-					const detail = await response.text();
-					throw new Error(detail || 'Failed to approve practice question set.');
+			approvingQuestionSet = true;
+			const response = await fetch(
+				`${AI_TUTOR_API_BASE}/practice/${encodeURIComponent(currentHomework.practiceId)}`,
+				{
+					method: 'PATCH',
+					headers: {
+						Authorization: `Bearer ${localStorage.token}`,
+						'Content-Type': 'application/json'
+					},
+					body: JSON.stringify({
+						problem_items: parsedQuestions,
+						problem_data: buildPracticeMarkdownFromQuestions(parsedQuestions),
+						status: 'approved'
+					})
 				}
+			);
+			if (!response.ok) {
+				const detail = await response.text();
+				throw new Error(detail || 'Failed to approve practice question set.');
+			}
 
-				const approvedPractice = await response.json();
-				updateCurrentHomework((homework) => ({
+			const approvedPractice = await response.json();
+			updateCurrentHomework((homework) =>
+				refreshDerivedStatus({
 					...homework,
 					practiceId: approvedPractice?.id ?? homework.practiceId,
 					questionData: {
 						...homework.questionData,
+						questions: parsedQuestions,
 						status:
 							(approvedPractice?.status as QuestionSetData['status'] | undefined) ??
-							nextStatus ??
-							homework.questionData.status
-					}
-				}));
+							nextStatus
+					},
+					questionEditors: buildQuestionEditors(parsedQuestions),
+					studentAssignments: buildStudentAssignments(parsedQuestions)
+				})
+			);
 
-				clearAITutorSessionCacheByPrefix(`practice-question:${groupId}:practice`);
-				await loadPracticeQuestionData();
-				toast.success('Practice question set approved.');
-				return;
-			}
-
-			toast.success('Question set changes saved locally.');
+			clearAITutorSessionCacheByPrefix(`practice-question:${groupId}:practice`);
+			await loadPracticeQuestionData();
+			await syncMasteryWorkspaceModel(currentHomework.homeworkId);
+			toast.success('Practice question set approved.');
 		} catch (error) {
 			toast.error(error instanceof Error ? error.message : 'Failed to save question set');
 		} finally {
@@ -441,18 +471,40 @@
 		});
 	}
 
-	function saveQuestionEdit(index: number) {
+	async function saveQuestionEdit(index: number) {
 		try {
-			let nextQuestionsForPlaceholder: QuestionItem[] = [];
-			updateCurrentHomework((homework) => {
-				const parsedQuestion = parseQuestionEditor(homework, index);
-				const nextQuestions = [...homework.questionData.questions];
-				nextQuestions[index] = parsedQuestion;
-				const nextEditors = [...homework.questionEditors];
-				nextEditors[index] = JSON.stringify(parsedQuestion, null, 2);
-				nextQuestionsForPlaceholder = nextQuestions;
+			const currentHomework = currentReviewHomework;
+			if (!currentHomework?.practiceId) {
+				throw new Error('This practice set is missing a practice ID.');
+			}
 
-				return refreshDerivedStatus({
+			const parsedQuestion = parseQuestionEditor(currentHomework, index);
+			const nextQuestions = [...currentHomework.questionData.questions];
+			nextQuestions[index] = parsedQuestion;
+			const nextEditors = [...currentHomework.questionEditors];
+			nextEditors[index] = JSON.stringify(parsedQuestion, null, 2);
+
+			const response = await fetch(
+				`${AI_TUTOR_API_BASE}/practice/${encodeURIComponent(currentHomework.practiceId)}`,
+				{
+					method: 'PATCH',
+					headers: {
+						Authorization: `Bearer ${localStorage.token}`,
+						'Content-Type': 'application/json'
+					},
+					body: JSON.stringify({
+						problem_items: nextQuestions,
+						problem_data: buildPracticeMarkdownFromQuestions(nextQuestions)
+					})
+				}
+			);
+			if (!response.ok) {
+				const detail = await response.text();
+				throw new Error(detail || 'Failed to save practice question JSON.');
+			}
+
+			updateCurrentHomework((homework) =>
+				refreshDerivedStatus({
 					...homework,
 					questionData: {
 						...homework.questionData,
@@ -461,14 +513,13 @@
 					},
 					questionEditors: nextEditors,
 					studentAssignments: buildStudentAssignments(nextQuestions)
-				});
-			});
-			void persistEditedPracticePlaceholder(
-				currentReviewHomework?.practiceId ?? null,
-				nextQuestionsForPlaceholder
+				})
 			);
+			clearAITutorSessionCacheByPrefix(`practice-question:${groupId}:practice`);
+			await loadPracticeQuestionData();
+			await syncMasteryWorkspaceModel(currentHomework.homeworkId);
 			if (editingQuestionIndex === index) editingQuestionIndex = null;
-			toast.success(`Question ${index + 1} changes saved locally. Edit sync is still demo-only.`);
+			toast.success(`Question ${index + 1} changes saved.`);
 		} catch (error) {
 			toast.error(error instanceof Error ? error.message : 'Failed to save question JSON');
 		}
@@ -501,19 +552,6 @@
 		} catch {
 			return '';
 		}
-	}
-
-	async function persistEditedPracticePlaceholder(practiceId: string | null, questions: QuestionItem[]) {
-		console.log('[reviewquestionset] demo-only edit persistence placeholder', {
-			practiceId,
-			questionCount: questions.length
-		});
-
-		return {
-			ok: true as const,
-			practiceId,
-			questions
-		};
 	}
 
 	function handleApproveQuestion(index: number) {
