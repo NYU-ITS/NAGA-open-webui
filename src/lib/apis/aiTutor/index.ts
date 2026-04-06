@@ -20,7 +20,7 @@ export const buildAITutorUrl = (
 	query: Record<string, QueryValue> = {}
 ) => {
 	const normalizedPath = path.startsWith('/') ? path : `/${path}`;
-	const url = new URL(`${AI_TUTOR_API_BASE_URL}${normalizedPath}`);
+	const url = new URL(`${AI_TUTOR_API_BASE_URL}${normalizedPath}`, window.location.origin);
 
 	for (const [key, value] of Object.entries(query)) {
 		if (value === null || value === undefined || value === '') continue;
