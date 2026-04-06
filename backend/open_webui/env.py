@@ -123,6 +123,10 @@ TRUSTED_SIGNATURE_KEY = os.environ.get("TRUSTED_SIGNATURE_KEY", "")
 
 ENV = os.environ.get("ENV", "dev")
 
+# AI Tutor requests should go through the Open WebUI backend in deployed environments.
+# The frontend uses a same-origin proxy path while this upstream points to the actual AI Tutor service.
+AI_TUTOR_API_BASE_URL = os.environ.get("AI_TUTOR_API_BASE_URL", "http://localhost:8000")
+
 FROM_INIT_PY = os.environ.get("FROM_INIT_PY", "False").lower() == "true"
 
 if FROM_INIT_PY:
