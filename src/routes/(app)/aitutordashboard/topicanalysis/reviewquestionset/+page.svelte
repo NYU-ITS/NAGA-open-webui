@@ -63,35 +63,6 @@
 	const JSON_EXPLANATION_PARAGRAPH =
 		'<span class="font-semibold">Number</span> is the displayed question number, <span class="font-semibold">text</span> is the full prompt students will see, and <span class="font-semibold">topics</span> is the list used for skill tagging. Only the <span class="font-semibold">text</span> property is rendered as Markdown + LaTeX preview, so you can use formats such as <span class="font-semibold">$...$</span> for inline math, <span class="font-semibold">$$...$$</span> for display math, and commands like <span class="font-semibold">\\frac</span>, <span class="font-semibold">\\sqrt</span>, and <span class="font-semibold">\\ln</span> inside the text string.';
 
-	const fallbackHomeworkOptions = ['Homework 1', 'Homework 2', 'Homework 3'];
-
-	const fallbackQuestions: QuestionItem[] = [
-		{
-			id: 1,
-			question: 'Solve the following quadratic equation: x² + 5x + 6 = 0',
-			topic: 'Quadratic Equations',
-			answer: 'x = -2 or x = -3',
-			steps: ['Factor the equation', 'Set each factor to zero', 'Solve for x'],
-			difficulty: 'medium'
-		},
-		{
-			id: 2,
-			question: 'Find the derivative of f(x) = 3x² + 2x - 5',
-			topic: 'Differentiation',
-			answer: "f'(x) = 6x + 2",
-			steps: ['Apply power rule to each term', 'Combine the results'],
-			difficulty: 'medium'
-		},
-		{
-			id: 3,
-			question: 'Calculate the limit: lim(x→0) (sin x)/x',
-			topic: 'Limits',
-			answer: '1',
-			steps: ['Recognize standard limit', 'Apply limit rule'],
-			difficulty: 'easy'
-		}
-	];
-
 	const fallbackStudents = ['Alice Chen', 'Marco Patel', 'Nina Johnson', 'Leo Garcia'];
 
 	let groupId = '';
@@ -141,44 +112,6 @@
 		}
 	}
 
-	const cloneQuestions = (questions: QuestionItem[]) =>
-		questions.map((item) => structuredClone(item));
-
-	const fallbackReviewHomeworks = [
-		{
-			homeworkId: 'Homework 2',
-			generatedTime: '2026-03-23 09:00:00',
-			status: 'in_progress' as const,
-			questions: cloneQuestions(fallbackQuestions)
-		},
-		{
-			homeworkId: 'Homework 3',
-			generatedTime: '2026-03-23 09:12:00',
-			status: 'in_progress' as const,
-			questions: cloneQuestions(
-				fallbackQuestions.map((question, index) => ({
-					...question,
-					id: index + 1,
-					question: `${String(question.question)} (Homework 3)`,
-					topic: index === 0 ? 'Integration' : index === 1 ? 'Derivatives' : 'Limits'
-				}))
-			)
-		},
-		{
-			homeworkId: 'Homework 4',
-			generatedTime: '2026-03-23 09:25:00',
-			status: 'in_progress' as const,
-			questions: cloneQuestions(
-				fallbackQuestions.map((question, index) => ({
-					...question,
-					id: index + 1,
-					question: `${String(question.question)} (Homework 4)`,
-					topic: index === 0 ? 'Sequences' : index === 1 ? 'Optimization' : 'Trigonometry'
-				}))
-			)
-		}
-	];
-
 	const normalizeQuestionPayload = (payload: unknown): QuestionItem[] => {
 		if (Array.isArray(payload)) {
 			return payload.map((item, idx) => {
@@ -213,7 +146,7 @@
 			}
 		}
 
-		return cloneQuestions(fallbackQuestions);
+		return [];
 	};
 
 	const buildQuestionEditors = (questions: QuestionItem[]) =>
@@ -901,13 +834,11 @@
 		id: '',
 		status: 'pending',
 		generatedTime: '2026-03-23 09:00:00',
-		questions: fallbackQuestions
+		questions: []
 	};
 	$: approvedQuestionIndexes = currentReviewHomework?.approvedQuestionIndexes ?? new Set<number>();
-	$: questionEditors =
-		currentReviewHomework?.questionEditors ?? buildQuestionEditors(fallbackQuestions);
-	$: studentAssignments =
-		currentReviewHomework?.studentAssignments ?? buildStudentAssignments(fallbackQuestions);
+	$: questionEditors = currentReviewHomework?.questionEditors ?? [];
+	$: studentAssignments = currentReviewHomework?.studentAssignments ?? [];
 
 	$: practiceQuestionsEmptyMessage = !groupId
 		? 'Loading group selection...'
@@ -1235,12 +1166,8 @@
 		await loadHomeworkPipelineData(groupId);
 		await loadPracticeQuestionData();
 
-		if (homeworkOptions.length === 0) {
-			homeworkOptions = fallbackHomeworkOptions;
-		}
-
 		const requestedHomeworkId =
-			$page.url.searchParams.get('homework_id') ?? homeworkOptions[0] ?? 'Homework 1';
+			$page.url.searchParams.get('homework_id') ?? homeworkOptions[0] ?? '';
 		const loadedReviewHomeworks = (
 			await Promise.all(homeworkOptions.map((homeworkId) => loadReviewHomework(homeworkId)))
 		).filter(
@@ -1251,17 +1178,7 @@
 					homework.questionData.status === 'approved')
 		);
 
-		reviewHomeworks =
-			loadedReviewHomeworks.length > 0
-				? loadedReviewHomeworks
-				: fallbackReviewHomeworks.map((homework) =>
-						createReviewHomework(
-							homework.homeworkId,
-							homework.questions,
-							homework.generatedTime,
-							homework.status
-						)
-					);
+		reviewHomeworks = loadedReviewHomeworks;
 
 		const requestedIndex = reviewHomeworks.findIndex(
 			(homework) => homework.homeworkId === requestedHomeworkId

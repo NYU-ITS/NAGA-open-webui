@@ -71,6 +71,7 @@
 		groupId: string;
 		modelId: string;
 		homeworkId: string | null;
+		fileName?: string | null;
 	};
 
 	let homeworkRows: HomeworkRow[] = [];
@@ -1019,25 +1020,62 @@
 		if (activeJobIds.has(job.jobId)) return;
 		activeJobIds.add(job.jobId);
 		markPersistedJobActive(job, true);
+		console.info('[AI Tutor][Instructor Setup] monitor job start', {
+			jobId: job.jobId,
+			type: job.type,
+			groupId: job.groupId,
+			modelId: job.modelId,
+			homeworkId: job.homeworkId
+		});
 		try {
 			await pollPipelineJob(
 				job.jobId,
-				job.type === 'analysis' ? 10000 : 3000,
+				3000,
 				job.type === 'analysis'
 					? 'analysis run'
 					: job.type === 'question-upload'
 						? 'question upload'
 						: 'answer upload',
 				(data) => {
+					console.info('[AI Tutor][Instructor Setup] monitor job progress', {
+						jobId: job.jobId,
+						type: job.type,
+						status: data?.status ?? 'unknown',
+						step: data?.step ?? 'unknown'
+					});
 					// Keep a refresh-safe step message per model so the status column
 					// shows which backend step is currently running.
 					setJobStep(job.modelId, data?.step ? `Step: ${data.step}` : null);
 				}
 			);
+			console.info('[AI Tutor][Instructor Setup] monitor job done', {
+				jobId: job.jobId,
+				type: job.type,
+				groupId: job.groupId,
+				modelId: job.modelId,
+				homeworkId: job.homeworkId
+			});
 
 			if (job.type === 'analysis') {
 				toast.success('Analysis completed.');
 			} else {
+				homeworkRows = homeworkRows.map((row) => {
+					if (job.homeworkId && row.id !== job.homeworkId && row.modelId !== job.modelId) return row;
+					if (!job.homeworkId && row.modelId !== job.modelId) return row;
+					if (job.type === 'question-upload') {
+						return {
+							...row,
+							questionUploaded: true,
+							questionFileName: job.fileName ?? row.questionFileName
+						};
+					}
+					return {
+						...row,
+						answerUploaded: true,
+						answerSource: 'uploaded',
+						answerFileName: job.fileName ?? row.answerFileName
+					};
+				});
 				toast.success(`${job.type === 'question-upload' ? 'Homework' : 'Answer'} upload completed.`);
 			}
 
@@ -1045,6 +1083,14 @@
 				await loadHomeworkStats(job.groupId);
 			}
 		} catch (error) {
+			console.error('[AI Tutor][Instructor Setup] monitor job failed', {
+				jobId: job.jobId,
+				type: job.type,
+				groupId: job.groupId,
+				modelId: job.modelId,
+				homeworkId: job.homeworkId,
+				error
+			});
 			toast.error(error instanceof Error ? error.message : 'Background job failed.');
 		} finally {
 			setJobStep(job.modelId, null);
@@ -1468,12 +1514,21 @@
 			const data = await res.json();
 			const jobId = data?.job_id;
 			if (!jobId) throw new Error('Upload started but no job ID was returned.');
+			console.info('[AI Tutor][Instructor Setup] upload job created', {
+				jobId,
+				docType,
+				groupId: selectedGroupId,
+				modelId,
+				homeworkId: hwId,
+				fileName: file.name
+			});
 			const persistedJob: PersistedInstructorJob = {
 				jobId,
 				type: docType === 'question' ? 'question-upload' : 'answer-upload',
 				groupId: selectedGroupId,
 				modelId,
-				homeworkId: hwId
+				homeworkId: hwId,
+				fileName: file.name
 			};
 			clearAITutorSessionCacheByPrefix(getInstructorSetupCacheKey('homework-stats', selectedGroupId));
 			upsertPersistedJob(persistedJob);
@@ -1753,6 +1808,12 @@
 			return;
 		}
 		try {
+			console.info('[AI Tutor][Instructor Setup] run requested', {
+				groupId: selectedGroupId,
+				targetHomeworkId,
+				modelId: row?.modelId ?? targetHomeworkId,
+				selectedHomeworks: Array.from(selectedRunHomeworks)
+			});
 			// Page: AI Tutor Dashboard > Instructor Setup
 			// Endpoint: POST /analysis/run?homework_id={homework_id}
 			// Purpose: start the analysis pipeline for the selected homework after prerequisite checks pass.
@@ -1764,6 +1825,12 @@
 				const data = await res.json();
 				const jobId = data?.job_id;
 				if (!jobId) throw new Error('Analysis started but no job ID was returned.');
+				console.info('[AI Tutor][Instructor Setup] analysis job created', {
+					jobId,
+					groupId: selectedGroupId,
+					targetHomeworkId,
+					modelId: row?.modelId ?? targetHomeworkId
+				});
 				const persistedJob: PersistedInstructorJob = {
 					jobId,
 					type: 'analysis',
