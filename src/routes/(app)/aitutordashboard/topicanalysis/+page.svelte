@@ -217,6 +217,16 @@
 
 		generatingPracticeJobsByHomeworkId = nextJobs;
 		generatingPracticeByHomeworkId = nextGeneratingFlags;
+		console.log('AI Tutor Dashboard - Topic Analysis restored practice jobs', {
+			groupId,
+			jobs: Object.entries(nextJobs).map(([homeworkId, job]) => ({
+				homeworkId,
+				jobId: job.jobId,
+				step: job.step,
+				status: job.status,
+				startedAt: job.startedAt
+			}))
+		});
 	}
 
 	function buildMasteryModelId(sourceModelId: string) {
@@ -629,6 +639,17 @@
 				}
 			});
 			applyTopicAnalysisSnapshot(snapshot);
+			console.log('AI Tutor Dashboard - Topic Analysis data loaded', {
+				groupId,
+				homeworks: homeworkRows.map((row) => ({
+					id: row.id,
+					modelId: row.modelId ?? '',
+					questionUploaded: row.questionUploaded,
+					answerUploaded: row.answerUploaded,
+					topicMapped: row.topicMapped
+				})),
+				homeworkIdsWithAnalysis: Array.from(homeworkIdsWithAnalysis)
+			});
 		} catch (error) {
 			testToast('Topic Analysis failed loading /analysis data');
 			console.error('Topic analysis API failed:', error);
@@ -787,6 +808,15 @@
 				}
 			});
 			applyPracticeSnapshot(snapshot);
+			console.log('AI Tutor Dashboard - Topic Analysis practice loaded', {
+				groupId,
+				practiceQuestions: practiceQuestions.map((practice) => ({
+					homeworkId: practice.homeworkId ?? '',
+					homeworkName: practice.homework ?? '',
+					practiceId: practice.practiceId ?? '',
+					status: practice.status ?? ''
+				}))
+			});
 		} catch (error) {
 			testToast('Topic Analysis failed loading /practice data');
 			console.error('Practice question set API failed:', error);
@@ -986,7 +1016,11 @@
 		testToast(
 			`loading aitutordashboard - Topic Analysis | group=${groupId || 'pending'} | frontend_testing=${String(useFrontendTestingData)}`
 		);
-		console.log('AI Tutor Dashboard - Topic Analysis loaded');
+		console.log('AI Tutor Dashboard - Topic Analysis mount', {
+			pathname: $page.url.pathname,
+			groupId,
+			groupIdFromUrl: $page.url.searchParams.get('group_id') || ''
+		});
 		initialized = true;
 		if (useFrontendTestingData) {
 			homeworkRows = frontendTestingTopicByHomework.map((item) => ({

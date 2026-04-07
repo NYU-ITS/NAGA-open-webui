@@ -146,7 +146,12 @@
 			`loading aitutordashboard - Student Analysis | group=${selectedGroupId || 'pending'} | frontend_testing=${String(useFrontendTestingData)}`
 		);
 		initialized = true;
-		console.log('AI Tutor Dashboard - Student Analysis loaded');
+		console.log('AI Tutor Dashboard - Student Analysis mount', {
+			pathname: $page.url.pathname,
+			groupId: selectedGroupId,
+			groupIdFromUrl: $page.url.searchParams.get('group_id') || '',
+			selectedHomework
+		});
 		if (useFrontendTestingData) {
 			homeworkOptions = frontendTestingHomeworkOptions;
 			homeworkMetaById = Object.fromEntries(frontendTestingHomeworkOptions.map((option) => [option.id, option]));
@@ -206,6 +211,17 @@
 
 			studentData = buildStudentRowsForHomeworks(nextHomeworks, analysesByHomeworkId, users, groupUserIds);
 			testToast('Student Analysis loaded all homework analyses');
+			console.log('AI Tutor Dashboard - Student Analysis data loaded', {
+				groupId,
+				selectedHomework,
+				homeworks: nextHomeworks.map((homework) => ({
+					id: homework.id,
+					name: homework.label,
+					modelId: homework.model_id ?? ''
+				})),
+				studentCount: studentData.length,
+				groupUserIds
+			});
 		} catch (error) {
 			testToast('Student Analysis failed loading group data');
 			console.error('Student Analysis sync failed:', error);

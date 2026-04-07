@@ -52,6 +52,11 @@
 	onMount(async () => {
 		loaded = true;
 		showAITutorTestToast('loading aitutordashboard - Layout');
+		console.log('AI Tutor Dashboard - Layout mount', {
+			pathname: $page.url.pathname,
+			groupIdFromUrl: $page.url.searchParams.get('group_id') || '',
+			persistedGroupId: getPersistedGroupId()
+		});
 
 		// Load user identity information
 		if ($user && localStorage.token) {
@@ -77,6 +82,16 @@
 						...createdGroups.map(g => ({ ...g, identity: 'Admin' })),
 						...memberGroups.map(g => ({ ...g, identity: 'Member' }))
 					];
+					console.log('AI Tutor Dashboard - Layout groups resolved', {
+						selectedGroupId,
+						selectedGroupName: selectedGroup?.name ?? '',
+						groupCount: allUserGroups.length,
+						groups: allUserGroups.map((group) => ({
+							id: group.id,
+							name: group.name,
+							identity: group.identity
+						}))
+					});
 
 					if (!$page.url.searchParams.get('group_id') && allUserGroups.length > 0) {
 						await selectGroup(allUserGroups[0]);

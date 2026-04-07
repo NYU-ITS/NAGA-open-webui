@@ -93,7 +93,7 @@
 	let reviewHomeworks: ReviewHomework[] = [];
 	let currentHomeworkIndex = 0;
 	let selectedHomework = '';
-	let expandedGuide = false;
+	let expandedGuide = true;
 	let editingQuestionIndex: number | null = null;
 	let approvingQuestionSet = false;
 
@@ -640,6 +640,16 @@
 
 		generatingPracticeJobsByHomeworkId = nextJobs;
 		generatingPracticeByHomeworkId = nextGeneratingFlags;
+		console.log('AI Tutor Dashboard - Practice Question restored practice jobs', {
+			groupId,
+			jobs: Object.entries(nextJobs).map(([homeworkId, job]) => ({
+				homeworkId,
+				jobId: job.jobId,
+				step: job.step,
+				status: job.status,
+				startedAt: job.startedAt
+			}))
+		});
 	}
 
 	function getSelectedHomeworkIndex(homeworkId: string) {
@@ -890,6 +900,18 @@
 			})
 		);
 		homeworkIdsWithAnalysis = nextHomeworkIdsWithAnalysis;
+		console.log('AI Tutor Dashboard - Practice Question homework pipeline loaded', {
+			groupId: currentGroupId,
+			homeworks: homeworkRows.map((row) => ({
+				id: row.id,
+				name: homeworkLabelsById[row.id] ?? row.id,
+				modelId: row.modelId ?? '',
+				questionUploaded: row.questionUploaded,
+				answerUploaded: row.answerUploaded,
+				topicMapped: row.topicMapped
+			})),
+			homeworkIdsWithAnalysis: Array.from(homeworkIdsWithAnalysis)
+		});
 	}
 
 	async function loadPracticeQuestionData() {
@@ -992,6 +1014,15 @@
 				}
 			});
 			applyPracticeSnapshot(snapshot);
+			console.log('AI Tutor Dashboard - Practice Question set loaded', {
+				groupId,
+				practiceQuestions: practiceQuestions.map((practice) => ({
+					homeworkId: practice.homeworkId ?? '',
+					homeworkName: practice.homework ?? '',
+					practiceId: practice.practiceId ?? '',
+					status: practice.status ?? ''
+				}))
+			});
 		} catch (error) {
 			console.error('Practice question set API failed:', error);
 		} finally {
@@ -1160,6 +1191,12 @@
 
 	onMount(async () => {
 		testToast(`loading aitutordashboard - Practice Question | group=${groupId || 'pending'}`);
+		console.log('AI Tutor Dashboard - Practice Question mount', {
+			pathname: $page.url.pathname,
+			groupId,
+			groupIdFromUrl: $page.url.searchParams.get('group_id') || '',
+			homeworkIdFromUrl: $page.url.searchParams.get('homework_id') || ''
+		});
 		restorePersistedPracticeJobs();
 
 		if (useFrontendTestingData) return;
@@ -1184,6 +1221,18 @@
 			(homework) => homework.homeworkId === requestedHomeworkId
 		);
 		currentHomeworkIndex = requestedIndex >= 0 ? requestedIndex : 0;
+		console.log('AI Tutor Dashboard - Practice Question review loaded', {
+			groupId,
+			requestedHomeworkId,
+			currentHomeworkIndex,
+			reviewHomeworks: reviewHomeworks.map((homework) => ({
+				homeworkId: homework.homeworkId,
+				homeworkName: homeworkLabelsById[homework.homeworkId] ?? homework.homeworkId,
+				practiceId: homework.practiceId ?? '',
+				status: homework.questionData.status,
+				questionCount: homework.questionData.questions.length
+			}))
+		});
 	});
 
 	$: if (!useFrontendTestingData && groupId) {

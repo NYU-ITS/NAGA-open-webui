@@ -342,6 +342,7 @@
 			(model) =>
 				model.preset === true &&
 				model.base_model_id != null &&
+				(model.name ?? model.id).toLowerCase().includes('homework') &&
 				// Mastery-prefixed workspace models are reserved for student practice chat
 				// and should not reappear as instructor homework upload candidates.
 				!(model.name ?? model.id).startsWith('Mastery')
@@ -596,6 +597,11 @@
 		testToast(
 			`loading aitutordashboard - Instructor Setup | group=${selectedGroupId || 'pending'} | frontend_testing=${String(useFrontendTestingData)}`
 		);
+		console.log('AI Tutor Dashboard - Instructor Setup mount', {
+			pathname: $page.url.pathname,
+			groupId: selectedGroupId,
+			groupIdFromUrl: $page.url.searchParams.get('group_id') || ''
+		});
 		await loadModels();
 		if (useFrontendTestingData) {
 			seedDummyDashboard(selectedGroupId);
@@ -762,6 +768,24 @@
 						topicMapped: topicMappedByHomeworkId.get(row.id) ?? row.topicMapped ?? false
 					}));
 
+					console.log('AI Tutor Dashboard - Instructor Setup homework loaded', {
+						groupId,
+						homeworkRows: fetchedHomeworkRows.map((row) => ({
+							id: row.id,
+							name: row.id,
+							modelId: row.modelId ?? '',
+							questionUploaded: row.questionUploaded,
+							answerUploaded: row.answerUploaded,
+							topicMapped: row.topicMapped ?? false
+						})),
+						homeworkStats: mergedStats.map((stat) => ({
+							id: stat.homework,
+							name: stat.homework,
+							status: stat.status,
+							answerUploaded: stat.answerUploaded
+						}))
+					});
+
 					return {
 						homeworkRows: fetchedHomeworkRows,
 						homeworkStats: mergedStats
@@ -815,6 +839,9 @@
 									base_model_id: m.info?.base_model_id ?? m.base_model_id ?? null
 								}))
 								.filter((model: { id: string; name: string }) => {
+									if (!(model.name ?? model.id).toLowerCase().includes('homework')) {
+										return false;
+									}
 									// Mastery workspace models are generated practice-chat clones and
 									// should not be offered back as instructor homework candidates.
 									return !(model.name ?? model.id).startsWith('Mastery');
@@ -1101,7 +1128,18 @@
 	}
 
 	async function resumePersistedJobs(groupId: string) {
-		for (const job of readPersistedJobs().filter((item) => item.groupId === groupId)) {
+		const jobs = readPersistedJobs().filter((item) => item.groupId === groupId);
+		console.log('AI Tutor Dashboard - Instructor Setup restored jobs', {
+			groupId,
+			jobs: jobs.map((job) => ({
+				jobId: job.jobId,
+				type: job.type,
+				homeworkId: job.homeworkId ?? '',
+				modelId: job.modelId,
+				fileName: job.fileName ?? ''
+			}))
+		});
+		for (const job of jobs) {
 			void monitorPersistedJob(job);
 		}
 	}

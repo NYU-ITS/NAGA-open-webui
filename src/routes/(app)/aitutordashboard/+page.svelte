@@ -297,6 +297,11 @@ const bannerPlaceholderTime = 'TEST-TIME';
 		testToast(
 			`loading aitutordashboard - Summary | group=${selectedGroupId || 'pending'} | frontend_testing=${String(useFrontendTestingData)}`
 		);
+		console.log('AI Tutor Dashboard - Summary mount', {
+			pathname: $page.url.pathname,
+			groupId: selectedGroupId,
+			groupIdFromUrl: $page.url.searchParams.get('group_id') || ''
+		});
 		await loadModels();
 		if (useFrontendTestingData) {
 			seedDummyDashboard(selectedGroupId);
@@ -465,6 +470,17 @@ async function loadHomeworkStats(groupId: string) {
 						};
 					});
 					merged.sort((a, b) => a.homework.localeCompare(b.homework));
+
+					console.log('AI Tutor Dashboard - Summary data loaded', {
+						groupId,
+						homeworkCount: merged.length,
+						homeworks: merged.map((stat) => ({
+							id: stat.homework,
+							name: stat.homework,
+							status: stat.status,
+							answerUploaded: stat.answerUploaded
+						}))
+					});
 
 					return {
 						homeworkStats: merged,
