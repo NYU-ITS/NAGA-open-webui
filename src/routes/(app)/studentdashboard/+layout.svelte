@@ -31,6 +31,30 @@
 	let selectedGroupId = '';
 	let selectedGroup: GroupOption | null = null;
 	let searchTopic = '';
+	const LAST_SELECTED_GROUP_KEY = 'student_dashboard_last_selected_group_id';
+
+	function getPersistedGroupId() {
+		if (typeof sessionStorage === 'undefined') return '';
+		return sessionStorage.getItem(LAST_SELECTED_GROUP_KEY) || '';
+	}
+
+	function persistGroupId(groupId: string) {
+		if (typeof sessionStorage === 'undefined') return;
+		if (!groupId) {
+			sessionStorage.removeItem(LAST_SELECTED_GROUP_KEY);
+			return;
+		}
+		sessionStorage.setItem(LAST_SELECTED_GROUP_KEY, groupId);
+	}
+
+	function sortGroupsForDefaultSelection(items: GroupOption[]) {
+		return [...items].sort((a, b) => {
+			const aHasClass = a.name.toLowerCase().includes('class');
+			const bHasClass = b.name.toLowerCase().includes('class');
+			if (aHasClass !== bHasClass) return aHasClass ? -1 : 1;
+			return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+		});
+	}
 
 	let selectedHomework = 'All';
 	// TODO(student-dashboard-backend): Replace the static homework/topic filter model with
@@ -64,9 +88,13 @@
 		return (homeworkTopicMap[option] ?? []).some((topic) => topic.toLowerCase().includes(query));
 	});
 
-	$: selectedGroupId = $page.url.searchParams.get('group_id') || '';
+	$: selectedGroupId = $page.url.searchParams.get('group_id') || getPersistedGroupId() || '';
 	$: selectedGroup =
 		allUserGroups.find((group) => group.id === selectedGroupId) || allUserGroups[0] || null;
+
+	$: if ($page.url.searchParams.get('group_id')) {
+		persistGroupId($page.url.searchParams.get('group_id') || '');
+	}
 
 	onMount(async () => {
 		loaded = true;
@@ -90,13 +118,14 @@
 					memberGroups = groups.filter(g => g.user_id !== $user.id && g.user_ids?.includes($user.id));
 
 					// Combine all groups with identity
-					allUserGroups = [
+					allUserGroups = sortGroupsForDefaultSelection([
 						...createdGroups.map((g) => ({ ...g, identity: 'Admin' as const })),
 						...memberGroups.map((g) => ({ ...g, identity: 'Member' as const }))
-					];
+					]);
 
 					if (!$page.url.searchParams.get('group_id') && allUserGroups.length > 0) {
-						await selectGroup(allUserGroups[0]);
+						const persistedGroup = allUserGroups.find((group) => group.id === getPersistedGroupId());
+						await selectGroup(persistedGroup ?? allUserGroups[0]);
 					}
 				}
 			} catch (error) {
@@ -127,6 +156,7 @@
 	async function selectGroup(group: GroupOption) {
 		const params = new URLSearchParams($page.url.searchParams);
 		params.set('group_id', group.id);
+		persistGroupId(group.id);
 		showGroupDropdown = false;
 		await goto(`${$page.url.pathname}?${params.toString()}`, {
 			keepFocus: true,

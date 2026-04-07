@@ -293,6 +293,14 @@
 		reviewHomeworks = [...reviewHomeworks, nextHomework];
 	}
 
+	function updatePracticeQuestionRow(homeworkId: string, updater: (practice: any) => any) {
+		const practiceIndex = practiceQuestions.findIndex((practice) => practice.homeworkId === homeworkId);
+		if (practiceIndex < 0) return;
+		const nextPracticeQuestions = [...practiceQuestions];
+		nextPracticeQuestions[practiceIndex] = updater(nextPracticeQuestions[practiceIndex]);
+		practiceQuestions = nextPracticeQuestions;
+	}
+
 	async function refreshReviewHomework(homeworkId: string) {
 		const reloadedHomework = await loadReviewHomework(homeworkId);
 		if (!reloadedHomework) return;
@@ -853,6 +861,8 @@
 
 	$: currentReviewHomework = reviewHomeworks[currentHomeworkIndex];
 	$: selectedHomework = currentReviewHomework?.homeworkId ?? '';
+	$: currentPracticeQuestion =
+		practiceQuestions.find((practice) => practice.homeworkId === selectedHomework) ?? null;
 	$: questionData = currentReviewHomework?.questionData ?? {
 		id: '',
 		status: 'pending',
@@ -1115,6 +1125,20 @@
 			...generatingPracticeByHomeworkId,
 			[homeworkId]: true
 		};
+		if (currentReviewHomework?.homeworkId === homeworkId) {
+			updateCurrentHomework((homework) => ({
+				...homework,
+				questionData: {
+					...homework.questionData,
+					status: 'pending'
+				},
+				approvedQuestionIndexes: new Set<number>()
+			}));
+		}
+		updatePracticeQuestionRow(homeworkId, (practice) => ({
+			...practice,
+			status: 'generating'
+		}));
 		failedPracticeGenerationByHomeworkId = Object.fromEntries(
 			Object.entries(failedPracticeGenerationByHomeworkId).filter(([id]) => id !== homeworkId)
 		);
@@ -1135,6 +1159,10 @@
 			const jobId = data?.job_id;
 			if (!jobId) throw new Error('Practice generation started but no job ID was returned.');
 			const startedAt = new Date().toISOString();
+			updatePracticeQuestionRow(homeworkId, (practice) => ({
+				...practice,
+				status: 'generating'
+			}));
 			generatingPracticeJobsByHomeworkId = {
 				...generatingPracticeJobsByHomeworkId,
 				[homeworkId]: { jobId, step: 'queued', status: 'queued', startedAt }
@@ -1359,7 +1387,7 @@
 									<div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-gray-700 dark:text-gray-300">
 										{#if practice.generatedAt}
 											<div class="flex items-center gap-2 whitespace-nowrap">
-												<span class="w-2 h-2 rounded-full bg-gray-400 flex-shrink-0"></span>
+												<span class="w-2 h-2 rounded-full bg-green-500 flex-shrink-0"></span>
 												<span>Generated on {formatAITutorTimestamp(practice.generatedAt)}</span>
 											</div>
 										{/if}
@@ -1408,16 +1436,6 @@
 								<td class="px-3 py-1.5">
 									<div class="flex items-center gap-1">
 										{#if practice.status === 'approved' || practice.status === 'ready'}
-											{#if practice.status === 'approved' && !practice.sentAt}
-												<button
-													type="button"
-													class="self-center flex w-fit items-center gap-1 whitespace-nowrap rounded-xl px-2 py-1.5 text-xs font-semibold text-gray-700 transition hover:bg-black/5 disabled:cursor-not-allowed disabled:opacity-50 dark:text-gray-300 dark:hover:bg-white/5"
-													on:click={() => sendPracticeToStudents(practice)}
-													disabled={!practice.practiceId || sendingPracticeById[practice.practiceId]}
-												>
-													{sendingPracticeById[practice.practiceId] ? 'Sending…' : 'Send'}
-												</button>
-											{/if}
 											{#if canGeneratePractice(practice.homeworkId)}
 												<button
 													type="button"
@@ -1627,6 +1645,33 @@
 			{/each}
 
 			<div class="flex items-center justify-end gap-3 pt-4 pr-4">
+				<button
+					type="button"
+					on:click={() => currentPracticeQuestion && sendPracticeToStudents(currentPracticeQuestion)}
+					disabled={
+						!currentPracticeQuestion?.practiceId ||
+						questionData.status !== 'approved' ||
+						Boolean(currentPracticeQuestion?.sentAt) ||
+						Boolean(
+							currentPracticeQuestion?.practiceId &&
+								sendingPracticeById[currentPracticeQuestion.practiceId]
+						)
+					}
+					class={`min-w-[7.5rem] rounded-full px-4 py-2 text-center text-sm font-medium transition ${
+						currentPracticeQuestion?.sentAt
+							? 'cursor-default bg-gray-200 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
+							: questionData.status !== 'approved'
+								? 'cursor-not-allowed bg-gray-200 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
+								: 'bg-black text-white hover:bg-gray-800'
+					}`}
+				>
+					{currentPracticeQuestion?.practiceId &&
+					sendingPracticeById[currentPracticeQuestion.practiceId]
+						? 'Sending...'
+						: currentPracticeQuestion?.sentAt
+							? 'Sent'
+							: 'Send'}
+				</button>
 				<button
 					on:click={handleSave}
 					disabled={questionData.status === 'approved' || approvingQuestionSet}

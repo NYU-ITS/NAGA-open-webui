@@ -267,6 +267,8 @@
 	let selectedConcepts: Set<string> = new Set();
 	let hoveredLegendStatus: string | null = null;
 	let selectedGroupId = '';
+	let lastLoadedGroupId = '';
+	let studentDashboardRequestId = 0;
 	let followUpQuestions = [
 		{ homework: 'Homework 1', status: 'Not Ready' },
 		{ homework: 'Homework 2', status: 'Not Ready' },
@@ -373,7 +375,11 @@
 	];
 	let conceptsData: ConceptRow[] = placeholderConceptsData;
 
-	$: selectedGroupId = $page.url.searchParams.get('group_id') || '';
+	$: selectedGroupId =
+		$page.url.searchParams.get('group_id') ||
+		(typeof sessionStorage !== 'undefined'
+			? sessionStorage.getItem('student_dashboard_last_selected_group_id') || ''
+			: '');
 	$: filteredConcepts =
 		selectedHomework === 'All'
 			? conceptsData
@@ -476,6 +482,8 @@
 	}
 
 	async function loadStudentDashboardData() {
+		const requestId = ++studentDashboardRequestId;
+
 		if (useFrontendTestingData) {
 			homeworkData = placeholderHomeworkData;
 			practiceAssignments = placeholderPracticeAssignments;
@@ -488,10 +496,6 @@
 		}
 
 		if (!selectedGroupId || !$user || !localStorage.token) {
-			homeworkData = [];
-			practiceAssignments = [];
-			conceptsData = [];
-			followUpQuestions = [];
 			return;
 		}
 
@@ -518,6 +522,8 @@
 				})
 			]);
 
+			if (requestId !== studentDashboardRequestId) return;
+
 			// Page: Student Dashboard
 			// Endpoint: GET /assignment/?student_id={student_id}
 			// Purpose: load practice assignments for the current student after group membership is confirmed.
@@ -525,6 +531,8 @@
 				token: localStorage.token,
 				query: { student_id: $user.id }
 			});
+
+			if (requestId !== studentDashboardRequestId) return;
 
 			const analysesByHomeworkId = new Map<string, any | null>();
 			await Promise.all(
@@ -543,6 +551,8 @@
 					analysesByHomeworkId.set(homework.id, studentAnalysis);
 				})
 			);
+
+			if (requestId !== studentDashboardRequestId) return;
 
 			const homeworkLabelById = new Map<string, string>();
 			for (const homework of homeworkRows) {
@@ -665,6 +675,7 @@
 					};
 				})
 				.sort((a, b) => a.name.localeCompare(b.name));
+			lastLoadedGroupId = selectedGroupId;
 
 			testToast(
 				`Student dashboard sync completed | group=${selectedGroupId} | homework=${homeworkData.length} | assignments=${practiceAssignments.length}`
@@ -675,10 +686,6 @@
 		} catch (error) {
 			console.error('Student dashboard sync failed:', error);
 			toast.error(error instanceof Error ? error.message : 'Failed to sync student dashboard data.');
-			homeworkData = [];
-			practiceAssignments = [];
-			conceptsData = [];
-			followUpQuestions = [];
 		}
 	}
 
@@ -695,10 +702,11 @@
 	}
 
 	$: if (!useFrontendTestingData && !selectedGroupId) {
-		homeworkData = [];
-		practiceAssignments = [];
-		conceptsData = [];
-		followUpQuestions = [];
+		console.log('[StudentDashboard] waiting for selected group before syncing', {
+			lastLoadedGroupId,
+			pathname: $page.url.pathname,
+			search: $page.url.search
+		});
 	}
 </script>
 
