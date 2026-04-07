@@ -92,6 +92,7 @@
 	let assignmentSentAtByPracticeId: Record<string, string> = {};
 	let resumedPracticeJobIds = new Set<string>();
 	let reviewHomeworks: ReviewHomework[] = [];
+	let hasLoadedReviewHomeworksOnce = useFrontendTestingData;
 	let currentHomeworkIndex = 0;
 	let selectedHomework = '';
 	let expandedGuide = true;
@@ -308,6 +309,46 @@
 		replaceReviewHomework(reloadedHomework);
 	}
 
+	async function loadReviewHomeworkCollection(currentGroupId: string, requestedHomeworkId = '') {
+		if (!currentGroupId || homeworkOptions.length === 0) return;
+
+		const applyReviewSnapshot = (snapshot: {
+			reviewHomeworks: ReviewHomework[];
+			requestedHomeworkId: string;
+		}) => {
+			reviewHomeworks = snapshot.reviewHomeworks;
+			hasLoadedReviewHomeworksOnce = true;
+			const requestedIndex = reviewHomeworks.findIndex(
+				(homework) => homework.homeworkId === snapshot.requestedHomeworkId
+			);
+			currentHomeworkIndex = requestedIndex >= 0 ? requestedIndex : 0;
+		};
+
+		const snapshot = await loadWithAITutorSessionCache({
+			key: `practice-question:${currentGroupId}:review-homeworks`,
+			ttlMs: PRACTICE_QUESTION_SESSION_TTL_MS,
+			onCached: applyReviewSnapshot,
+			loader: async () => {
+				const loadedReviewHomeworks = (
+					await Promise.all(homeworkOptions.map((homeworkId) => loadReviewHomework(homeworkId)))
+				).filter(
+					(homework): homework is ReviewHomework =>
+						!!homework &&
+						(homework.questionData.status === 'pending' ||
+							homework.questionData.status === 'in_progress' ||
+							homework.questionData.status === 'approved')
+				);
+
+				return {
+					reviewHomeworks: loadedReviewHomeworks,
+					requestedHomeworkId
+				};
+			}
+		});
+
+		applyReviewSnapshot(snapshot);
+	}
+
 	function handleStart() {
 		updateCurrentHomework((homework) => {
 			if (homework.questionData.status === 'pending') {
@@ -408,6 +449,7 @@
 			);
 
 			clearAITutorSessionCacheByPrefix(`practice-question:${groupId}:practice`);
+			clearAITutorSessionCacheByPrefix(`practice-question:${groupId}:review-homeworks`);
 			await loadPracticeQuestionData();
 			await refreshReviewHomework(currentHomework.homeworkId);
 			await syncMasteryWorkspaceModel(currentHomework.homeworkId);
@@ -492,6 +534,7 @@
 				})
 			);
 			clearAITutorSessionCacheByPrefix(`practice-question:${groupId}:practice`);
+			clearAITutorSessionCacheByPrefix(`practice-question:${groupId}:review-homeworks`);
 			await loadPracticeQuestionData();
 			await refreshReviewHomework(currentHomework.homeworkId);
 			await syncMasteryWorkspaceModel(currentHomework.homeworkId);
@@ -1185,6 +1228,7 @@
 				persistPracticeJobState(homeworkId, nextJobState);
 			});
 			clearAITutorSessionCacheByPrefix(`practice-question:${groupId}:practice`);
+			clearAITutorSessionCacheByPrefix(`practice-question:${groupId}:review-homeworks`);
 			await loadPracticeQuestionData();
 			await refreshReviewHomework(homeworkId);
 			await syncMasteryWorkspaceModel(homeworkId);
@@ -1240,6 +1284,7 @@
 				throw new Error(detail || 'Failed to send practice to students.');
 			}
 			clearAITutorSessionCacheByPrefix(`practice-question:${groupId}:practice`);
+			clearAITutorSessionCacheByPrefix(`practice-question:${groupId}:review-homeworks`);
 			await loadPracticeQuestionData();
 			toast.success('Practice question set sent to students.');
 		} catch (error) {
@@ -1269,22 +1314,7 @@
 
 		const requestedHomeworkId =
 			$page.url.searchParams.get('homework_id') ?? homeworkOptions[0] ?? '';
-		const loadedReviewHomeworks = (
-			await Promise.all(homeworkOptions.map((homeworkId) => loadReviewHomework(homeworkId)))
-		).filter(
-			(homework): homework is ReviewHomework =>
-				!!homework &&
-				(homework.questionData.status === 'pending' ||
-					homework.questionData.status === 'in_progress' ||
-					homework.questionData.status === 'approved')
-		);
-
-		reviewHomeworks = loadedReviewHomeworks;
-
-		const requestedIndex = reviewHomeworks.findIndex(
-			(homework) => homework.homeworkId === requestedHomeworkId
-		);
-		currentHomeworkIndex = requestedIndex >= 0 ? requestedIndex : 0;
+		await loadReviewHomeworkCollection(groupId, requestedHomeworkId);
 		console.log('AI Tutor Dashboard - Practice Question review loaded', {
 			groupId,
 			requestedHomeworkId,
@@ -1648,6 +1678,23 @@
 
 			<div class="flex items-center justify-end gap-3 pt-4 pr-4">
 				<button
+					on:click={handleSave}
+					disabled={questionData.status === 'approved' || approvingQuestionSet}
+					class={`min-w-[7.5rem] rounded-full px-4 py-2 text-center text-sm font-medium text-white transition ${
+						questionData.status === 'approved'
+							? 'cursor-default bg-green-600'
+							: approvingQuestionSet
+								? 'cursor-wait bg-gray-600'
+								: 'bg-black hover:bg-gray-800'
+					}`}
+				>
+					{questionData.status === 'approved'
+						? 'Approved'
+						: approvingQuestionSet
+							? 'Approving...'
+							: 'Approve'}
+				</button>
+				<button
 					type="button"
 					on:click={() => currentPracticeQuestion && sendPracticeToStudents(currentPracticeQuestion)}
 					disabled={
@@ -1673,23 +1720,6 @@
 						: currentPracticeQuestion?.sentAt
 							? 'Sent'
 							: 'Send'}
-				</button>
-				<button
-					on:click={handleSave}
-					disabled={questionData.status === 'approved' || approvingQuestionSet}
-					class={`rounded-full px-4 py-2 text-sm font-medium text-white transition ${
-						questionData.status === 'approved'
-							? 'cursor-default bg-green-600'
-							: approvingQuestionSet
-								? 'cursor-wait bg-gray-600'
-								: 'bg-black hover:bg-gray-800'
-					}`}
-				>
-					{questionData.status === 'approved'
-						? 'Approved'
-						: approvingQuestionSet
-							? 'Approving...'
-							: 'Approve'}
 				</button>
 			</div>
 		</div>

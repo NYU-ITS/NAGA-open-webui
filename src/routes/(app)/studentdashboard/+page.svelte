@@ -610,8 +610,11 @@
 						const topic = formatPracticeTopicList(
 							assignment?.assigned_items ?? practice?.problem_items ?? []
 						);
+						const hasAssignedItems = Array.isArray(assignment?.assigned_items)
+							? assignment.assigned_items.length > 0
+							: false;
 						const status =
-							assignment && (assignment.assigned_count ?? 0) > 0
+							assignment && ((assignment.assigned_count ?? 0) > 0 || hasAssignedItems)
 								? 'Ready'
 								: practice?.status === 'approved'
 									? 'Awaiting Assignment'
@@ -629,6 +632,32 @@
 							practiceProblemId: assignment?.practice_problem_id ?? practice?.id,
 							assignedItems: assignment?.assigned_items ?? []
 						};
+					});
+
+					console.log('Student Dashboard - assignment sync detail', {
+						groupId: selectedGroupId,
+						studentId: $user.id,
+						studentEmail: $user.email ?? '',
+						assignments: nextPracticeAssignments.map((item) => {
+							const assignment = assignments.find((entry) => entry.homework_id === item.homeworkId);
+							const hasAssignedItems = Array.isArray(assignment?.assigned_items)
+								? assignment.assigned_items.length > 0
+								: false;
+							return {
+								homeworkId: item.homeworkId,
+								homeworkName: item.homeworkLabel,
+								status: item.status,
+								assignmentId: item.assignmentId ?? '',
+								practiceProblemId: item.practiceProblemId ?? '',
+								assignedCount: assignment?.assigned_count ?? null,
+								assignedItemsCount: Array.isArray(assignment?.assigned_items)
+									? assignment.assigned_items.length
+									: 0,
+								hasAssignedItems,
+								assignmentCreatedAt: assignment?.created_at ?? '',
+								topics: item.topic
+							};
+						})
 					});
 
 					const nextFollowUpQuestions = nextPracticeAssignments.map((item) => ({
