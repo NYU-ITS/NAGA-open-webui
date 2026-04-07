@@ -656,6 +656,19 @@
 		return reviewHomeworks.findIndex((homework) => homework.homeworkId === homeworkId);
 	}
 
+	function formatAITutorTimestamp(value: string | null | undefined) {
+		if (!value) return '';
+		const parsed = new Date(value);
+		if (Number.isNaN(parsed.getTime())) return value;
+		return parsed.toLocaleString([], {
+			year: 'numeric',
+			month: 'short',
+			day: 'numeric',
+			hour: 'numeric',
+			minute: '2-digit'
+		});
+	}
+
 	function goToPreviousHomework() {
 		if (currentHomeworkIndex > 0) {
 			currentHomeworkIndex -= 1;
@@ -994,17 +1007,38 @@
 								homework: homeworkLabel,
 								homeworkId,
 								status: 'approved',
-								date: latest.created_at,
+								generatedAt: latest.created_at,
 								sentAt: latest.id ? nextAssignmentSentAtByPracticeId[latest.id] ?? null : null
 							};
 						}
 						if (latest.status === 'generating') {
-							return { practiceId: latest.id ?? null, homework: homeworkLabel, homeworkId, status: 'generating' };
+							return {
+								practiceId: latest.id ?? null,
+								homework: homeworkLabel,
+								homeworkId,
+								status: 'generating',
+								generatedAt: latest.created_at ?? null,
+								sentAt: null
+							};
 						}
 						if (latest.status === 'pending' || latest.status === 'rejected') {
-							return { practiceId: latest.id ?? null, homework: homeworkLabel, homeworkId, status: 'ready' };
+							return {
+								practiceId: latest.id ?? null,
+								homework: homeworkLabel,
+								homeworkId,
+								status: 'ready',
+								generatedAt: latest.created_at ?? null,
+								sentAt: null
+							};
 						}
-						return { practiceId: latest.id ?? null, homework: homeworkLabel, homeworkId, status: 'not_ready' };
+						return {
+							practiceId: latest.id ?? null,
+							homework: homeworkLabel,
+							homeworkId,
+							status: 'not_ready',
+							generatedAt: latest.created_at ?? null,
+							sentAt: latest.id ? nextAssignmentSentAtByPracticeId[latest.id] ?? null : null
+						};
 					});
 
 					return {
@@ -1323,17 +1357,17 @@
 								</td>
 								<td class="px-3 py-1.5">
 									<div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-gray-700 dark:text-gray-300">
+										{#if practice.generatedAt}
+											<div class="flex items-center gap-2 whitespace-nowrap">
+												<span class="w-2 h-2 rounded-full bg-gray-400 flex-shrink-0"></span>
+												<span>Generated on {formatAITutorTimestamp(practice.generatedAt)}</span>
+											</div>
+										{/if}
 										{#if practice.status === 'approved'}
 											<div class="flex items-center gap-2 whitespace-nowrap">
 												<span class="w-2 h-2 rounded-full bg-green-500 flex-shrink-0"></span>
-												<span>Approved on {practice.date}</span>
+												<span>Approved</span>
 											</div>
-											{#if practice.sentAt}
-												<div class="flex items-center gap-2 whitespace-nowrap">
-													<span class="w-2 h-2 rounded-full bg-green-500 flex-shrink-0"></span>
-													<span>Sent on {practice.sentAt}</span>
-												</div>
-											{/if}
 										{:else if practice.status === 'ready'}
 											<span class="w-2 h-2 rounded-full bg-yellow-500 flex-shrink-0"></span>
 											<span>Ready for review</span>
@@ -1363,12 +1397,18 @@
 											<span class="w-2 h-2 rounded-full bg-gray-400 flex-shrink-0"></span>
 											<span>Not ready</span>
 										{/if}
+										{#if practice.sentAt}
+											<div class="flex items-center gap-2 whitespace-nowrap">
+												<span class="w-2 h-2 rounded-full bg-green-500 flex-shrink-0"></span>
+												<span>Sent on {formatAITutorTimestamp(practice.sentAt)}</span>
+											</div>
+										{/if}
 									</div>
 								</td>
 								<td class="px-3 py-1.5">
 									<div class="flex items-center gap-1">
 										{#if practice.status === 'approved' || practice.status === 'ready'}
-											{#if practice.status === 'approved'}
+											{#if practice.status === 'approved' && !practice.sentAt}
 												<button
 													type="button"
 													class="self-center flex w-fit items-center gap-1 whitespace-nowrap rounded-xl px-2 py-1.5 text-xs font-semibold text-gray-700 transition hover:bg-black/5 disabled:cursor-not-allowed disabled:opacity-50 dark:text-gray-300 dark:hover:bg-white/5"
@@ -1497,8 +1537,8 @@
 							</div>
 						</div>
 					</div>
-					<div class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-						Generated on {questionData.generatedTime}
+						<div class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+						Generated on {formatAITutorTimestamp(questionData.generatedTime)}
 						<span class="ml-3"
 							>{approvedQuestionIndexes.size}/{questionData.questions.length} approved</span
 						>

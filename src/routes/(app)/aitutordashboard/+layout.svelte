@@ -23,6 +23,17 @@
 	let selectedGroupId = '';
 	let selectedGroup = null;
 
+	function sortGroupsForDefaultSelection(groups) {
+		return [...groups].sort((a, b) => {
+			const aName = String(a?.name ?? '');
+			const bName = String(b?.name ?? '');
+			const aHasClass = aName.toLowerCase().includes('class');
+			const bHasClass = bName.toLowerCase().includes('class');
+			if (aHasClass !== bHasClass) return aHasClass ? -1 : 1;
+			return aName.localeCompare(bName, undefined, { numeric: true, sensitivity: 'base' });
+		});
+	}
+
 	function buildDashboardHref(pathname: string) {
 		const params = new URLSearchParams();
 		if (selectedGroupId) {
@@ -78,10 +89,10 @@
 					memberGroups = groups.filter(g => g.user_id !== $user.id && g.user_ids?.includes($user.id));
 
 					// Combine all groups with identity
-					allUserGroups = [
+					allUserGroups = sortGroupsForDefaultSelection([
 						...createdGroups.map(g => ({ ...g, identity: 'Admin' })),
 						...memberGroups.map(g => ({ ...g, identity: 'Member' }))
-					];
+					]);
 					console.log('AI Tutor Dashboard - Layout groups resolved', {
 						selectedGroupId,
 						selectedGroupName: selectedGroup?.name ?? '',
@@ -94,7 +105,8 @@
 					});
 
 					if (!$page.url.searchParams.get('group_id') && allUserGroups.length > 0) {
-						await selectGroup(allUserGroups[0]);
+						const persistedGroup = allUserGroups.find((group) => group.id === getPersistedGroupId());
+						await selectGroup(persistedGroup ?? allUserGroups[0]);
 					}
 				}
 			} catch (error) {
