@@ -57,19 +57,49 @@ export function clearAITutorSessionCacheByPrefix(prefix: string) {
 	}
 }
 
+const inflightSessionCacheLoads = new Map<string, Promise<unknown>>();
+
+async function loadFreshAndPersist<T>(key: string, loader: () => Promise<T>) {
+	const existing = inflightSessionCacheLoads.get(key) as Promise<T> | undefined;
+	if (existing) return existing;
+
+	const nextLoad = loader()
+		.then((fresh) => {
+			writeAITutorSessionCache(key, fresh);
+			return fresh;
+		})
+		.finally(() => {
+			inflightSessionCacheLoads.delete(key);
+		});
+
+	inflightSessionCacheLoads.set(key, nextLoad as Promise<unknown>);
+	return nextLoad;
+}
+
 export async function loadWithAITutorSessionCache<T>(options: {
 	key: string;
 	ttlMs: number;
 	loader: () => Promise<T>;
 	onCached?: (value: T) => void;
+	onRefreshError?: (error: unknown) => void;
+	revalidateInBackground?: boolean;
 }): Promise<T> {
 	const cached = readAITutorSessionCache<T>(options.key, options.ttlMs);
 	if (cached !== null) {
 		options.onCached?.(cached);
+		if (options.revalidateInBackground !== false) {
+			void loadFreshAndPersist(options.key, options.loader)
+				.then((fresh) => {
+					options.onCached?.(fresh);
+				})
+				.catch((error) => {
+					options.onRefreshError?.(error);
+				});
+		}
 		return cached;
 	}
 
-	const fresh = await options.loader();
-	writeAITutorSessionCache(options.key, fresh);
+	const fresh = await loadFreshAndPersist(options.key, options.loader);
+	options.onCached?.(fresh);
 	return fresh;
 }

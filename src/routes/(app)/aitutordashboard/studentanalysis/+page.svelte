@@ -53,6 +53,7 @@
 
 	let initialized = false;
 	let loading = false;
+	let hasLoadedOnce = useFrontendTestingData;
 	let sortField: SortField = null;
 	let sortOrder: SortOrder = null;
 	let search = '';
@@ -179,7 +180,7 @@
 		}
 
 		const requestId = ++syncRequestId;
-		loading = true;
+		loading = !hasLoadedOnce && studentData.length === 0;
 
 		try {
 			const [users, groupUserIds, nextHomeworks] = await Promise.all([
@@ -210,6 +211,7 @@
 			}
 
 			studentData = buildStudentRowsForHomeworks(nextHomeworks, analysesByHomeworkId, users, groupUserIds);
+			hasLoadedOnce = true;
 			testToast('Student Analysis loaded all homework analyses');
 			console.log('AI Tutor Dashboard - Student Analysis data loaded', {
 				groupId,
@@ -629,7 +631,7 @@
 					{:else if filteredAndSortedData.length === 0}
 						<tr class="bg-white text-xs dark:bg-gray-900">
 							<td colspan="6" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">
-								{loading ? 'Loading student analysis...' : studentAnalysisEmptyMessage}
+								{loading && !hasLoadedOnce ? 'Loading student analysis...' : studentAnalysisEmptyMessage}
 							</td>
 						</tr>
 					{:else}

@@ -7,9 +7,11 @@
 	import { user } from '$lib/stores';
 	import { fetchAITutorJson } from '$lib/apis/aiTutor';
 	import { showAITutorTestToast } from '$lib/utils/aiTutorTesting';
+	import { loadWithAITutorSessionCache } from '$lib/utils/aiTutorSessionCache';
 
 	const testToast = showAITutorTestToast;
 	const useFrontendTestingData = AI_TUTOR_FRONTEND_TESTING_MODE;
+	const STUDENT_DASHBOARD_SESSION_TTL_MS = 5 * 60 * 1000;
 
 	type HomeworkSummaryRow = {
 		homework: string;
@@ -46,6 +48,13 @@
 	type TopicPerformance = {
 		topic_name: string;
 		status: string;
+	};
+
+	type StudentDashboardSnapshot = {
+		homeworkData: HomeworkSummaryRow[];
+		practiceAssignments: PracticeAssignmentRow[];
+		conceptsData: ConceptRow[];
+		followUpQuestions: { homework: string; status: string }[];
 	};
 
 	onMount(() => {
@@ -269,6 +278,7 @@
 	let selectedGroupId = '';
 	let lastLoadedGroupId = '';
 	let studentDashboardRequestId = 0;
+	let hasLoadedStudentDashboardOnce = useFrontendTestingData;
 	let followUpQuestions = [
 		{ homework: 'Homework 1', status: 'Not Ready' },
 		{ homework: 'Homework 2', status: 'Not Ready' },
@@ -481,6 +491,18 @@
 		return 'Practice Available';
 	}
 
+	function getStudentDashboardCacheKey(groupId: string, studentId: string) {
+		return `student-dashboard:${groupId}:${studentId}`;
+	}
+
+	function applyStudentDashboardSnapshot(snapshot: StudentDashboardSnapshot) {
+		homeworkData = snapshot.homeworkData;
+		practiceAssignments = snapshot.practiceAssignments;
+		conceptsData = snapshot.conceptsData;
+		followUpQuestions = snapshot.followUpQuestions;
+		hasLoadedStudentDashboardOnce = true;
+	}
+
 	async function loadStudentDashboardData() {
 		const requestId = ++studentDashboardRequestId;
 
@@ -502,179 +524,182 @@
 		testToast(`Student dashboard sync started | group=${selectedGroupId} | student=${$user.id}`);
 
 		try {
-			// Student Dashboard summary sync:
-			// - Student access should not depend on the admin-only group detail endpoint.
-			// - AI Tutor endpoints below are scoped to the selected group, and assignment/analysis rows are filtered by the current student.
-			const [homeworkRows, practiceRows] = await Promise.all([
-				// Page: Student Dashboard
-				// Endpoint: GET /homework/?group_id={group_id}
-				// Purpose: load the homework records for the selected group; homework label comes from model_id.
-				fetchAITutorJson<any[]>('/homework/', {
-					token: localStorage.token,
-					query: { group_id: selectedGroupId }
-				}),
-				// Page: Student Dashboard
-				// Endpoint: GET /practice?group_id={group_id}
-				// Purpose: load the latest practice generation state for the selected group.
-				fetchAITutorJson<any[]>('/practice', {
-					token: localStorage.token,
-					query: { group_id: selectedGroupId }
-				})
-			]);
+			const snapshot = await loadWithAITutorSessionCache<StudentDashboardSnapshot>({
+				key: getStudentDashboardCacheKey(selectedGroupId, $user.id),
+				ttlMs: STUDENT_DASHBOARD_SESSION_TTL_MS,
+				onCached: (cached) => {
+					if (requestId !== studentDashboardRequestId) return;
+					applyStudentDashboardSnapshot(cached);
+				},
+				loader: async () => {
+					// Student Dashboard summary sync:
+					// - Student access should not depend on the admin-only group detail endpoint.
+					// - AI Tutor endpoints below are scoped to the selected group, and assignment/analysis rows are filtered by the current student.
+					const [homeworkRows, practiceRows] = await Promise.all([
+						fetchAITutorJson<any[]>('/homework/', {
+							token: localStorage.token,
+							query: { group_id: selectedGroupId }
+						}),
+						fetchAITutorJson<any[]>('/practice', {
+							token: localStorage.token,
+							query: { group_id: selectedGroupId }
+						})
+					]);
 
-			if (requestId !== studentDashboardRequestId) return;
-
-			// Page: Student Dashboard
-			// Endpoint: GET /assignment/?student_id={student_id}
-			// Purpose: load practice assignments for the current student after group membership is confirmed.
-			const assignments = await fetchAITutorJson<any[]>('/assignment/', {
-				token: localStorage.token,
-				query: { student_id: $user.id }
-			});
-
-			if (requestId !== studentDashboardRequestId) return;
-
-			const analysesByHomeworkId = new Map<string, any | null>();
-			await Promise.all(
-				homeworkRows.map(async (homework) => {
-					// Page: Student Dashboard
-					// Endpoint: GET /analysis/?homework_id={homework_id}
-					// Purpose: load per-homework analysis rows, then match only the current student by id/email.
-					const analyses = await fetchAITutorJson<any[]>('/analysis/', {
+					const assignments = await fetchAITutorJson<any[]>('/assignment/', {
 						token: localStorage.token,
-						query: { homework_id: homework.id }
+						query: { student_id: $user.id }
 					});
-					const studentAnalysis =
-						analyses.find((analysis) => analysis.student_id === $user.id) ??
-						analyses.find((analysis) => analysis.student_email === $user.email) ??
-						null;
-					analysesByHomeworkId.set(homework.id, studentAnalysis);
-				})
-			);
+
+					const analysesByHomeworkId = new Map<string, any | null>();
+					await Promise.all(
+						homeworkRows.map(async (homework) => {
+							const analyses = await fetchAITutorJson<any[]>('/analysis/', {
+								token: localStorage.token,
+								query: { homework_id: homework.id }
+							});
+							const studentAnalysis =
+								analyses.find((analysis) => analysis.student_id === $user.id) ??
+								analyses.find((analysis) => analysis.student_email === $user.email) ??
+								null;
+							analysesByHomeworkId.set(homework.id, studentAnalysis);
+						})
+					);
+
+					const homeworkLabelById = new Map<string, string>();
+					for (const homework of homeworkRows) {
+						homeworkLabelById.set(homework.id, formatHomeworkLabel(homework.model_id, homework.id));
+					}
+
+					const nextHomeworkData = homeworkRows.map((homework) => {
+						const label = homeworkLabelById.get(homework.id) ?? homework.id;
+						const analysis = analysesByHomeworkId.get(homework.id);
+						const masteredTopics =
+							(analysis?.topic_performances as TopicPerformance[] | undefined)
+								?.filter((topic: TopicPerformance) => topic.status === 'mastered')
+								.map((topic: TopicPerformance) => topic.topic_name) ?? [];
+						const needMorePractice =
+							(analysis?.topic_performances as TopicPerformance[] | undefined)
+								?.filter((topic: TopicPerformance) => topic.status === 'needs_practice')
+								.map((topic: TopicPerformance) => topic.topic_name) ?? [];
+
+						return {
+							homework: label,
+							homeworkId: homework.id,
+							masteredTopics,
+							needMorePractice,
+							totalCount: analysis?.total_question ?? null,
+							solved: analysis?.total_solved ?? null,
+							attempted: analysis?.total_attempted ?? null,
+							errors: analysis?.total_errors ?? null,
+							notStarted: !analysis
+						};
+					});
+
+					const latestPracticeByHomeworkId = new Map<string, any>();
+					for (const practice of practiceRows) {
+						const previous = latestPracticeByHomeworkId.get(practice.homework_id);
+						if (!previous || Number(practice.version_number ?? 0) >= Number(previous.version_number ?? 0)) {
+							latestPracticeByHomeworkId.set(practice.homework_id, practice);
+						}
+					}
+
+					const nextPracticeAssignments = homeworkRows.map((homework, index) => {
+						const assignment = assignments.find((item) => item.homework_id === homework.id);
+						const practice = latestPracticeByHomeworkId.get(homework.id);
+						const topic = formatPracticeTopicList(
+							assignment?.assigned_items ?? practice?.problem_items ?? []
+						);
+						const status =
+							assignment && (assignment.assigned_count ?? 0) > 0
+								? 'Ready'
+								: practice?.status === 'approved'
+									? 'Awaiting Assignment'
+									: 'Not Ready';
+
+						return {
+							id: assignment?.id ?? practice?.id ?? `practice-${homework.id}`,
+							index: index + 1,
+							homeworkId: homework.id,
+							modelId: homework.model_id ?? undefined,
+							homeworkLabel: homeworkLabelById.get(homework.id) ?? homework.id,
+							topic: topic || 'General Practice',
+							status,
+							assignmentId: assignment?.id,
+							practiceProblemId: assignment?.practice_problem_id ?? practice?.id,
+							assignedItems: assignment?.assigned_items ?? []
+						};
+					});
+
+					const nextFollowUpQuestions = nextPracticeAssignments.map((item) => ({
+						homework: item.homeworkLabel,
+						status: item.status
+					}));
+
+					const conceptMap = new Map<string, ConceptRow>();
+					for (const row of nextHomeworkData) {
+						const trackedTopics = [
+							...row.masteredTopics.map((topic) => ({ topic, mastered: true })),
+							...row.needMorePractice.map((topic) => ({ topic, mastered: false }))
+						];
+
+						for (const entry of trackedTopics) {
+							if (!conceptMap.has(entry.topic)) {
+								conceptMap.set(entry.topic, {
+									name: entry.topic,
+									testedIn: [],
+									practicedDate: null,
+									homeworkStatuses: {}
+								});
+							}
+
+							const concept = conceptMap.get(entry.topic)!;
+							if (!concept.testedIn.includes(row.homework)) {
+								concept.testedIn.push(row.homework);
+							}
+							concept.homeworkStatuses[row.homework] = entry.mastered
+								? 'Mastered'
+								: 'Practice Available';
+						}
+					}
+
+					for (const item of nextPracticeAssignments) {
+						if (item.status !== 'Ready') continue;
+						for (const topic of getPracticeTopics(item.topic)) {
+							if (!conceptMap.has(topic)) continue;
+							const concept = conceptMap.get(topic)!;
+							concept.practicedDate = new Date().toLocaleDateString(undefined, {
+								month: 'short',
+								day: 'numeric'
+							});
+						}
+					}
+
+					const nextConceptsData = Array.from(conceptMap.values())
+						.map((concept) => ({
+							...concept,
+							testedIn: [...concept.testedIn].sort(),
+							practicedDate: concept.practicedDate,
+							homeworkStatuses: Object.fromEntries(
+								Object.entries(concept.homeworkStatuses).map(([homework, status]) => [
+									homework,
+									summarizeHomeworkStatus(status === 'Mastered', status !== 'Mastered')
+								])
+							)
+						}))
+						.sort((a, b) => a.name.localeCompare(b.name));
+
+					return {
+						homeworkData: nextHomeworkData,
+						practiceAssignments: nextPracticeAssignments,
+						conceptsData: nextConceptsData,
+						followUpQuestions: nextFollowUpQuestions
+					};
+				}
+			});
 
 			if (requestId !== studentDashboardRequestId) return;
-
-			const homeworkLabelById = new Map<string, string>();
-			for (const homework of homeworkRows) {
-				homeworkLabelById.set(homework.id, formatHomeworkLabel(homework.model_id, homework.id));
-			}
-
-			homeworkData = homeworkRows.map((homework) => {
-				const label = homeworkLabelById.get(homework.id) ?? homework.id;
-				const analysis = analysesByHomeworkId.get(homework.id);
-				const masteredTopics =
-					(analysis?.topic_performances as TopicPerformance[] | undefined)
-						?.filter((topic: TopicPerformance) => topic.status === 'mastered')
-						.map((topic: TopicPerformance) => topic.topic_name) ?? [];
-				const needMorePractice =
-					(analysis?.topic_performances as TopicPerformance[] | undefined)
-						?.filter((topic: TopicPerformance) => topic.status === 'needs_practice')
-						.map((topic: TopicPerformance) => topic.topic_name) ?? [];
-
-				return {
-					homework: label,
-					homeworkId: homework.id,
-					masteredTopics,
-					needMorePractice,
-					totalCount: analysis?.total_question ?? null,
-					solved: analysis?.total_solved ?? null,
-					attempted: analysis?.total_attempted ?? null,
-					errors: analysis?.total_errors ?? null,
-					notStarted: !analysis
-				};
-			});
-
-			const latestPracticeByHomeworkId = new Map<string, any>();
-			for (const practice of practiceRows) {
-				const previous = latestPracticeByHomeworkId.get(practice.homework_id);
-				if (!previous || Number(practice.version_number ?? 0) >= Number(previous.version_number ?? 0)) {
-					latestPracticeByHomeworkId.set(practice.homework_id, practice);
-				}
-			}
-
-			practiceAssignments = homeworkRows.map((homework, index) => {
-				const assignment = assignments.find((item) => item.homework_id === homework.id);
-				const practice = latestPracticeByHomeworkId.get(homework.id);
-				const topic = formatPracticeTopicList(assignment?.assigned_items ?? practice?.problem_items ?? []);
-				const status =
-					assignment && (assignment.assigned_count ?? 0) > 0
-						? 'Ready'
-						: practice?.status === 'approved'
-							? 'Awaiting Assignment'
-							: 'Not Ready';
-
-				return {
-					id: assignment?.id ?? practice?.id ?? `practice-${homework.id}`,
-					index: index + 1,
-					homeworkId: homework.id,
-					modelId: homework.model_id ?? undefined,
-					homeworkLabel: homeworkLabelById.get(homework.id) ?? homework.id,
-					topic: topic || 'General Practice',
-					status,
-					assignmentId: assignment?.id,
-					practiceProblemId: assignment?.practice_problem_id ?? practice?.id,
-					assignedItems: assignment?.assigned_items ?? []
-				};
-			});
-
-			followUpQuestions = practiceAssignments.map((item) => ({
-				homework: item.homeworkLabel,
-				status: item.status
-			}));
-
-			const conceptMap = new Map<string, ConceptRow>();
-			for (const row of homeworkData) {
-				const trackedTopics = [
-					...row.masteredTopics.map((topic) => ({ topic, mastered: true })),
-					...row.needMorePractice.map((topic) => ({ topic, mastered: false }))
-				];
-
-				for (const entry of trackedTopics) {
-					if (!conceptMap.has(entry.topic)) {
-						conceptMap.set(entry.topic, {
-							name: entry.topic,
-							testedIn: [],
-							practicedDate: null,
-							homeworkStatuses: {}
-						});
-					}
-
-					const concept = conceptMap.get(entry.topic)!;
-					if (!concept.testedIn.includes(row.homework)) {
-						concept.testedIn.push(row.homework);
-					}
-					concept.homeworkStatuses[row.homework] = entry.mastered ? 'Mastered' : 'Practice Available';
-				}
-			}
-
-			for (const item of practiceAssignments) {
-				if (item.status !== 'Ready') continue;
-				for (const topic of getPracticeTopics(item.topic)) {
-					if (!conceptMap.has(topic)) continue;
-					const concept = conceptMap.get(topic)!;
-					concept.practicedDate = new Date().toLocaleDateString(undefined, {
-						month: 'short',
-						day: 'numeric'
-					});
-				}
-			}
-
-			conceptsData = Array.from(conceptMap.values())
-				.map((concept) => {
-					const statuses = Object.values(concept.homeworkStatuses);
-					return {
-						...concept,
-						testedIn: [...concept.testedIn].sort(),
-						practicedDate: concept.practicedDate,
-						homeworkStatuses: Object.fromEntries(
-							Object.entries(concept.homeworkStatuses).map(([homework, status]) => [
-								homework,
-								summarizeHomeworkStatus(status === 'Mastered', status !== 'Mastered')
-							])
-						)
-					};
-				})
-				.sort((a, b) => a.name.localeCompare(b.name));
+			applyStudentDashboardSnapshot(snapshot);
 			lastLoadedGroupId = selectedGroupId;
 
 			testToast(

@@ -155,7 +155,9 @@
 	};
 	let homeworkRows: HomeworkPipelineRow[] = [];
 	let topicAnalysisLoading = false;
+	let hasLoadedTopicAnalysisOnce = useFrontendTestingData;
 	let practiceLoading = false;
+	let hasLoadedPracticeOnce = useFrontendTestingData;
 	let initialized = false;
 	let generatingPracticeByHomeworkId: Record<string, boolean> = {};
 	let sendingPracticeById: Record<string, boolean> = {};
@@ -508,7 +510,9 @@
 				homeworkRows = snapshot.homeworkRows;
 				topicGroupsByHomework = snapshot.topicGroupsByHomework;
 				homeworkIdsWithAnalysis = new Set(snapshot.homeworkIdsWithAnalysis);
+				hasLoadedTopicAnalysisOnce = true;
 			};
+			topicAnalysisLoading = !hasLoadedTopicAnalysisOnce && topicGroupsByHomework.length === 0;
 			const snapshot = await loadWithAITutorSessionCache({
 				key: `topic-analysis:${groupId}:analysis`,
 				ttlMs: TOPIC_ANALYSIS_SESSION_TTL_MS,
@@ -667,7 +671,7 @@
 		if (!groupId) {
 			return;
 		}
-		practiceLoading = true;
+		practiceLoading = !hasLoadedPracticeOnce && practiceQuestions.length === 0;
 		try {
 			const applyPracticeSnapshot = (snapshot: {
 				practiceQuestions: any[];
@@ -675,6 +679,7 @@
 			}) => {
 				practiceQuestions = snapshot.practiceQuestions;
 				assignmentSentAtByPracticeId = snapshot.assignmentSentAtByPracticeId;
+				hasLoadedPracticeOnce = true;
 			};
 			const snapshot = await loadWithAITutorSessionCache({
 				key: `topic-analysis:${groupId}:practice`,

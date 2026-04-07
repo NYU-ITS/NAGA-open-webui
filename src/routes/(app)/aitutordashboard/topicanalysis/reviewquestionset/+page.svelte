@@ -77,6 +77,7 @@
 	}[] = [];
 	let homeworkIdsWithAnalysis = new Set<string>();
 	let practiceLoading = false;
+	let hasLoadedPracticeOnce = useFrontendTestingData;
 	let practiceQuestions = [];
 	let generatingPracticeByHomeworkId: Record<string, boolean> = {};
 	let generatingPracticeJobsByHomeworkId: Record<
@@ -939,7 +940,7 @@
 
 	async function loadPracticeQuestionData() {
 		if (!groupId) return;
-		practiceLoading = true;
+		practiceLoading = !hasLoadedPracticeOnce && practiceQuestions.length === 0;
 		try {
 			const applyPracticeSnapshot = (snapshot: {
 				practiceQuestions: any[];
@@ -947,6 +948,7 @@
 			}) => {
 				practiceQuestions = snapshot.practiceQuestions;
 				assignmentSentAtByPracticeId = snapshot.assignmentSentAtByPracticeId;
+				hasLoadedPracticeOnce = true;
 			};
 			const snapshot = await loadWithAITutorSessionCache({
 				key: `practice-question:${groupId}:practice`,
