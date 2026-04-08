@@ -1511,7 +1511,7 @@
 											{#if canGeneratePractice(practice.homeworkId)}
 												<button
 													type="button"
-													class="self-center w-fit whitespace-nowrap rounded-xl px-2 py-1.5 text-sm font-semibold text-[#57068C] bg-purple-50 transition hover:bg-purple-100 dark:text-purple-300 dark:bg-purple-900/20 dark:hover:bg-purple-900/40"
+													class="self-center w-fit whitespace-nowrap rounded-xl px-2 py-1.5 text-sm font-semibold text-[#57068C] bg-purple-100 transition hover:bg-purple-200 dark:text-purple-300 dark:bg-purple-900/30 dark:hover:bg-purple-900/50"
 													on:click={() => generatePractice(practice.homeworkId)}
 													disabled={generatingPracticeByHomeworkId[practice.homeworkId]}
 												>
@@ -1521,7 +1521,7 @@
 										{:else if practice.status === 'not_ready' && canGeneratePractice(practice.homeworkId)}
 											<button
 												type="button"
-												class="self-center w-fit whitespace-nowrap rounded-xl px-2 py-1.5 text-sm font-semibold text-[#57068C] bg-purple-50 transition hover:bg-purple-100 dark:text-purple-300 dark:bg-purple-900/20 dark:hover:bg-purple-900/40"
+												class="self-center w-fit whitespace-nowrap rounded-xl px-2 py-1.5 text-sm font-semibold text-[#57068C] bg-purple-100 transition hover:bg-purple-200 dark:text-purple-300 dark:bg-purple-900/30 dark:hover:bg-purple-900/50"
 												on:click={() => generatePractice(practice.homeworkId)}
 												disabled={generatingPracticeByHomeworkId[practice.homeworkId]}
 											>

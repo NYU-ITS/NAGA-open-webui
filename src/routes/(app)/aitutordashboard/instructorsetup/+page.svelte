@@ -2289,7 +2289,7 @@
 												<!-- in_button_style -->
 												<button
 													type="button"
-													class="rounded-lg px-2 py-1 text-sm font-semibold text-[#57068C] bg-purple-50 transition hover:bg-purple-100 disabled:cursor-not-allowed disabled:opacity-50 dark:text-purple-300 dark:bg-purple-900/20 dark:hover:bg-purple-900/40"
+													class="rounded-lg px-2 py-1 text-sm font-semibold text-[#57068C] bg-purple-100 transition hover:bg-purple-200 disabled:cursor-not-allowed disabled:opacity-50 dark:text-purple-300 dark:bg-purple-900/30 dark:hover:bg-purple-900/50"
 													on:click={() => handleHomeworkPrimaryAction(row)}
 													disabled={isHomeworkActionBusy(row)}
 												>
