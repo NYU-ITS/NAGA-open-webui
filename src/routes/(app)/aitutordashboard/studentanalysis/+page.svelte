@@ -127,14 +127,14 @@
 	];
 
 	function getPersistedGroupId() {
-		if (typeof sessionStorage === 'undefined') return '';
-		return sessionStorage.getItem(LAST_AI_TUTOR_GROUP_STORAGE_KEY) || '';
+		if (typeof localStorage === 'undefined') return '';
+		return localStorage.getItem(LAST_AI_TUTOR_GROUP_STORAGE_KEY) || '';
 	}
 
 	$: selectedGroupId = $page.url.searchParams.get('group_id') || getPersistedGroupId();
 	$: if ($page.url.searchParams.get('group_id')) {
-		if (typeof sessionStorage !== 'undefined') {
-			sessionStorage.setItem(LAST_AI_TUTOR_GROUP_STORAGE_KEY, $page.url.searchParams.get('group_id') || '');
+		if (typeof localStorage !== 'undefined') {
+			localStorage.setItem(LAST_AI_TUTOR_GROUP_STORAGE_KEY, $page.url.searchParams.get('group_id') || '');
 		}
 	}
 	$: isFilterActive = selectedHomework !== 'All' || search.trim() !== '';

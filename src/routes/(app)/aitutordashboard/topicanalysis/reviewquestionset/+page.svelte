@@ -100,14 +100,14 @@
 	let approvingQuestionSet = false;
 
 	function getPersistedGroupId() {
-		if (typeof sessionStorage === 'undefined') return '';
-		return sessionStorage.getItem(LAST_AI_TUTOR_GROUP_STORAGE_KEY) || '';
+		if (typeof localStorage === 'undefined') return '';
+		return localStorage.getItem(LAST_AI_TUTOR_GROUP_STORAGE_KEY) || '';
 	}
 
 	$: groupId = $page.url.searchParams.get('group_id') || getPersistedGroupId();
 	$: if ($page.url.searchParams.get('group_id')) {
-		if (typeof sessionStorage !== 'undefined') {
-			sessionStorage.setItem(
+		if (typeof localStorage !== 'undefined') {
+			localStorage.setItem(
 				LAST_AI_TUTOR_GROUP_STORAGE_KEY,
 				$page.url.searchParams.get('group_id') || ''
 			);
@@ -1037,6 +1037,22 @@
 								if (!assignmentResponse.ok) return;
 								const assignments = await assignmentResponse.json();
 								if (Array.isArray(assignments) && assignments.length > 0) {
+									console.log('AI Tutor Dashboard - Practice Question assignment detail', {
+										groupId,
+										practiceId,
+										assignments: assignments.map((assignment) => ({
+											id: assignment?.id ?? '',
+											studentId: assignment?.student_id ?? '',
+											studentEmail: assignment?.student_email ?? '',
+											homeworkId: assignment?.homework_id ?? '',
+											practiceProblemId: assignment?.practice_problem_id ?? '',
+											assignedCount: assignment?.assigned_count ?? null,
+											assignedItemsCount: Array.isArray(assignment?.assigned_items)
+												? assignment.assigned_items.length
+												: 0,
+											createdAt: assignment?.created_at ?? ''
+										}))
+									});
 									const latestAssignment = [...assignments].sort((a, b) =>
 										String(b?.created_at ?? '').localeCompare(String(a?.created_at ?? ''))
 									)[0];

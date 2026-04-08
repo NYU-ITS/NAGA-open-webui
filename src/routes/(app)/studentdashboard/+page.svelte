@@ -279,6 +279,8 @@
 	let lastLoadedGroupId = '';
 	let studentDashboardRequestId = 0;
 	let hasLoadedStudentDashboardOnce = useFrontendTestingData;
+	let isDashboardLoading = false;
+	let dashboardLoadError: string | null = null;
 	let followUpQuestions = [
 		{ homework: 'Homework 1', status: 'Not Ready' },
 		{ homework: 'Homework 2', status: 'Not Ready' },
@@ -387,8 +389,8 @@
 
 	$: selectedGroupId =
 		$page.url.searchParams.get('group_id') ||
-		(typeof sessionStorage !== 'undefined'
-			? sessionStorage.getItem('student_dashboard_last_selected_group_id') || ''
+		(typeof localStorage !== 'undefined'
+			? localStorage.getItem('student_dashboard_last_selected_group_id') || ''
 			: '');
 	$: filteredConcepts =
 		selectedHomework === 'All'
@@ -521,6 +523,11 @@
 			return;
 		}
 
+		// Show loading skeleton only on the very first load (cache-miss path).
+		// On subsequent refreshes / group changes the cached data stays visible.
+		isDashboardLoading = !hasLoadedStudentDashboardOnce;
+		dashboardLoadError = null;
+
 		testToast(`Student dashboard sync started | group=${selectedGroupId} | student=${$user.id}`);
 
 		try {
@@ -549,6 +556,21 @@
 					const assignments = await fetchAITutorJson<any[]>('/assignment/', {
 						token: localStorage.token,
 						query: { student_id: $user.id }
+					});
+
+					console.log('Student Dashboard - raw assignments response', {
+						groupId: selectedGroupId,
+						assignmentCount: assignments.length,
+						assignments: assignments.map((assignment) => ({
+							id: assignment?.id ?? '',
+							homeworkId: assignment?.homework_id ?? '',
+							practiceProblemId: assignment?.practice_problem_id ?? '',
+							assignedCount: assignment?.assigned_count ?? null,
+							assignedItemsCount: Array.isArray(assignment?.assigned_items)
+								? assignment.assigned_items.length
+								: 0,
+							createdAt: assignment?.created_at ?? ''
+						}))
 					});
 
 					const analysesByHomeworkId = new Map<string, any | null>();
@@ -636,8 +658,6 @@
 
 					console.log('Student Dashboard - assignment sync detail', {
 						groupId: selectedGroupId,
-						studentId: $user.id,
-						studentEmail: $user.email ?? '',
 						assignments: nextPracticeAssignments.map((item) => {
 							const assignment = assignments.find((entry) => entry.homework_id === item.homeworkId);
 							const hasAssignedItems = Array.isArray(assignment?.assigned_items)
@@ -734,12 +754,18 @@
 			testToast(
 				`Student dashboard sync completed | group=${selectedGroupId} | homework=${homeworkData.length} | assignments=${practiceAssignments.length}`
 			);
-			toast.success(
-				`Student dashboard synced ${homeworkData.length} homework record${homeworkData.length === 1 ? '' : 's'} for the selected group.`
-			);
 		} catch (error) {
+			if (requestId !== studentDashboardRequestId) return; // stale, ignore
 			console.error('Student dashboard sync failed:', error);
-			toast.error(error instanceof Error ? error.message : 'Failed to sync student dashboard data.');
+			// Persist the error so the user can see it and retry — the toast alone
+			// disappears too quickly and leaves no actionable UI.
+			dashboardLoadError = error instanceof Error ? error.message : 'Failed to load student dashboard data.';
+			// Mark as loaded so the loading skeleton clears and the retry UI renders.
+			hasLoadedStudentDashboardOnce = true;
+		} finally {
+			if (requestId === studentDashboardRequestId) {
+				isDashboardLoading = false;
+			}
 		}
 	}
 
@@ -765,6 +791,33 @@
 </script>
 
 <div class="flex flex-col space-y-6 py-4 gap-8">
+	{#if dashboardLoadError}
+		<div class="flex items-start gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300">
+			<svg xmlns="http://www.w3.org/2000/svg" class="mt-0.5 h-4 w-4 shrink-0" viewBox="0 0 20 20" fill="currentColor">
+				<path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd" />
+			</svg>
+			<div class="flex flex-1 flex-wrap items-center justify-between gap-2">
+				<span>{dashboardLoadError}</span>
+				<button
+					class="rounded px-2 py-0.5 text-xs font-medium underline underline-offset-2 hover:opacity-80"
+					on:click={() => loadStudentDashboardData()}
+				>
+					Retry
+				</button>
+			</div>
+		</div>
+	{/if}
+
+	{#if isDashboardLoading}
+		<div class="flex items-center justify-center py-10 text-sm text-gray-400 dark:text-gray-500">
+			<svg class="mr-2 h-4 w-4 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+				<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
+				<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
+			</svg>
+			Loading dashboard data…
+		</div>
+	{/if}
+
 	<div class="space-y-3">
 		<div class="flex items-center text-lg font-medium px-0.5">
 			<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Practice Questions</h2>

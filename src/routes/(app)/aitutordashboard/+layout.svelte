@@ -44,14 +44,14 @@
 	}
 
 	function getPersistedGroupId() {
-		if (typeof sessionStorage === 'undefined') return '';
-		return sessionStorage.getItem(LAST_AI_TUTOR_GROUP_STORAGE_KEY) || '';
+		if (typeof localStorage === 'undefined') return '';
+		return localStorage.getItem(LAST_AI_TUTOR_GROUP_STORAGE_KEY) || '';
 	}
 
 	$: selectedGroupId = $page.url.searchParams.get('group_id') || getPersistedGroupId();
 	$: if ($page.url.searchParams.get('group_id')) {
-		if (typeof sessionStorage !== 'undefined') {
-			sessionStorage.setItem(
+		if (typeof localStorage !== 'undefined') {
+			localStorage.setItem(
 				LAST_AI_TUTOR_GROUP_STORAGE_KEY,
 				$page.url.searchParams.get('group_id') || ''
 			);
@@ -89,10 +89,22 @@
 					memberGroups = groups.filter(g => g.user_id !== $user.id && g.user_ids?.includes($user.id));
 
 					// Combine all groups with identity
-					allUserGroups = sortGroupsForDefaultSelection([
-						...createdGroups.map(g => ({ ...g, identity: 'Admin' })),
-						...memberGroups.map(g => ({ ...g, identity: 'Member' }))
-					]);
+					// Super admins see every group the API returns, labelled by their actual relationship.
+					if (isSuperAdmin) {
+						allUserGroups = sortGroupsForDefaultSelection(
+							groups.map(g => ({
+								...g,
+								identity: g.user_id === $user.id ? 'Admin'
+										: g.user_ids?.includes($user.id) ? 'Member'
+										: 'View'
+							}))
+						);
+					} else {
+						allUserGroups = sortGroupsForDefaultSelection([
+							...createdGroups.map(g => ({ ...g, identity: 'Admin' })),
+							...memberGroups.map(g => ({ ...g, identity: 'Member' }))
+						]);
+					}
 					console.log('AI Tutor Dashboard - Layout groups resolved', {
 						selectedGroupId,
 						selectedGroupName: selectedGroup?.name ?? '',
@@ -228,7 +240,9 @@
 													</span>
 													<span class="px-2 py-1 text-xs font-medium rounded {group.identity === 'Admin'
 														? 'bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200'
-														: 'bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200'}">
+														: group.identity === 'Member'
+														? 'bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200'
+														: 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300'}">
 														{group.identity}
 													</span>
 												</button>

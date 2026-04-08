@@ -42,14 +42,14 @@
 	// Group ID (needed for error-types endpoints)
 	let groupId = '';
 	function getPersistedGroupId() {
-		if (typeof sessionStorage === 'undefined') return '';
-		return sessionStorage.getItem(LAST_AI_TUTOR_GROUP_STORAGE_KEY) || '';
+		if (typeof localStorage === 'undefined') return '';
+		return localStorage.getItem(LAST_AI_TUTOR_GROUP_STORAGE_KEY) || '';
 	}
 
 	$: groupId = $page.url.searchParams.get('group_id') || getPersistedGroupId();
 	$: if ($page.url.searchParams.get('group_id')) {
-		if (typeof sessionStorage !== 'undefined') {
-			sessionStorage.setItem(
+		if (typeof localStorage !== 'undefined') {
+			localStorage.setItem(
 				LAST_AI_TUTOR_GROUP_STORAGE_KEY,
 				$page.url.searchParams.get('group_id') || ''
 			);
@@ -159,6 +159,7 @@
 	let practiceLoading = false;
 	let hasLoadedPracticeOnce = useFrontendTestingData;
 	let initialized = false;
+	let _prevGroupIdForReset = '';
 	let generatingPracticeByHomeworkId: Record<string, boolean> = {};
 	let sendingPracticeById: Record<string, boolean> = {};
 	let generatingPracticeJobsByHomeworkId: Record<
@@ -391,22 +392,23 @@
 
 	// Helper: load error types from server
 	async function loadErrorTypes() {
-		testToast(`Topic Analysis fetch: error types group=${groupId || 'none'}`);
+		const calledForGroupId = groupId; // capture before any await
+		testToast(`Topic Analysis fetch: error types group=${calledForGroupId || 'none'}`);
 		if (useFrontendTestingData) {
 			errorTypeDefs = $aiTutorFrontendTestingErrorTypes;
 			return;
 		}
-		if (!groupId) return;
+		if (!calledForGroupId) return;
 		try {
-			errorTypeDefs = await loadWithAITutorSessionCache({
-				key: `topic-analysis:${groupId}:error-types`,
+			const freshErrorTypes = await loadWithAITutorSessionCache({
+				key: `topic-analysis:${calledForGroupId}:error-types`,
 				ttlMs: TOPIC_ANALYSIS_SESSION_TTL_MS,
 				onCached: (cached) => {
-					errorTypeDefs = cached;
+					if (groupId === calledForGroupId) errorTypeDefs = cached;
 				},
 				loader: async () => {
 					const res = await fetch(
-						`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(groupId)}`,
+						`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(calledForGroupId)}`,
 						{ headers: { Authorization: `Bearer ${localStorage.token}` } }
 					);
 					if (!res.ok) throw new Error('Error types fetch failed');
@@ -428,6 +430,8 @@
 					return nextErrorTypes;
 				}
 			});
+			if (groupId !== calledForGroupId) return; // stale
+			errorTypeDefs = freshErrorTypes;
 		} catch (e) {
 			testToast('Topic Analysis failed loading error types');
 			console.error('Error types fetch failed:', e);
@@ -492,12 +496,13 @@
 	}
 
 	async function loadTopicAnalysisData() {
-		testToast(`Topic Analysis fetch: analysis group=${groupId || 'none'}`);
+		const calledForGroupId = groupId; // capture before any await
+		testToast(`Topic Analysis fetch: analysis group=${calledForGroupId || 'none'}`);
 		if (useFrontendTestingData) {
 			topicGroupsByHomework = frontendTestingTopicByHomework;
 			return;
 		}
-		if (!groupId) {
+		if (!calledForGroupId) {
 			return;
 		}
 		topicAnalysisLoading = true;
@@ -507,6 +512,7 @@
 				topicGroupsByHomework: any[];
 				homeworkIdsWithAnalysis: string[];
 			}) => {
+				if (groupId !== calledForGroupId) return; // stale
 				homeworkRows = snapshot.homeworkRows;
 				topicGroupsByHomework = snapshot.topicGroupsByHomework;
 				homeworkIdsWithAnalysis = new Set(snapshot.homeworkIdsWithAnalysis);
@@ -514,14 +520,14 @@
 			};
 			topicAnalysisLoading = !hasLoadedTopicAnalysisOnce && topicGroupsByHomework.length === 0;
 			const snapshot = await loadWithAITutorSessionCache({
-				key: `topic-analysis:${groupId}:analysis`,
+				key: `topic-analysis:${calledForGroupId}:analysis`,
 				ttlMs: TOPIC_ANALYSIS_SESSION_TTL_MS,
 				onCached: applyTopicAnalysisSnapshot,
 				loader: async () => {
 			// Page: AI Tutor Dashboard > Topic Analysis
 			// Endpoint: GET /homework/?group_id={group_id}
 			// Purpose: scope topic analysis to homework that belongs to the selected group.
-			const homeworkResponse = await fetch(`${AI_TUTOR_API_BASE}/homework/?group_id=${encodeURIComponent(groupId)}`, {
+			const homeworkResponse = await fetch(`${AI_TUTOR_API_BASE}/homework/?group_id=${encodeURIComponent(calledForGroupId)}`, {
 				method: 'GET',
 				headers: {
 					Authorization: `Bearer ${localStorage.token}`
@@ -642,9 +648,10 @@
 					};
 				}
 			});
+			if (groupId !== calledForGroupId) return; // stale — group changed while loading
 			applyTopicAnalysisSnapshot(snapshot);
 			console.log('AI Tutor Dashboard - Topic Analysis data loaded', {
-				groupId,
+				groupId: calledForGroupId,
 				homeworks: homeworkRows.map((row) => ({
 					id: row.id,
 					modelId: row.modelId ?? '',
@@ -663,12 +670,13 @@
 	}
 
 	async function loadPracticeQuestionData() {
-		testToast(`Topic Analysis fetch: practice group=${groupId || 'none'}`);
+		const calledForGroupId = groupId; // capture before any await
+		testToast(`Topic Analysis fetch: practice group=${calledForGroupId || 'none'}`);
 		if (useFrontendTestingData) {
 			practiceQuestions = frontendTestingPracticeQuestions;
 			return;
 		}
-		if (!groupId) {
+		if (!calledForGroupId) {
 			return;
 		}
 		practiceLoading = !hasLoadedPracticeOnce && practiceQuestions.length === 0;
@@ -677,19 +685,20 @@
 				practiceQuestions: any[];
 				assignmentSentAtByPracticeId: Record<string, string>;
 			}) => {
+				if (groupId !== calledForGroupId) return; // stale
 				practiceQuestions = snapshot.practiceQuestions;
 				assignmentSentAtByPracticeId = snapshot.assignmentSentAtByPracticeId;
 				hasLoadedPracticeOnce = true;
 			};
 			const snapshot = await loadWithAITutorSessionCache({
-				key: `topic-analysis:${groupId}:practice`,
+				key: `topic-analysis:${calledForGroupId}:practice`,
 				ttlMs: TOPIC_ANALYSIS_SESSION_TTL_MS,
 				onCached: applyPracticeSnapshot,
 				loader: async () => {
 			// Page: AI Tutor Dashboard > Topic Analysis
 			// Endpoint: GET /homework/?group_id={group_id}
 			// Purpose: build the group-scoped homework list used to label practice question sets.
-			const homeworkResponse = await fetch(`${AI_TUTOR_API_BASE}/homework/?group_id=${encodeURIComponent(groupId)}`, {
+			const homeworkResponse = await fetch(`${AI_TUTOR_API_BASE}/homework/?group_id=${encodeURIComponent(calledForGroupId)}`, {
 				method: 'GET',
 				headers: {
 					Authorization: `Bearer ${localStorage.token}`
@@ -700,7 +709,7 @@
 			// Endpoint: GET /practice?group_id={group_id}
 			// Purpose: load the latest practice generation/review status for the selected group.
 			const practiceResponse = await fetch(
-				`${AI_TUTOR_API_BASE}/practice?group_id=${encodeURIComponent(groupId)}`,
+				`${AI_TUTOR_API_BASE}/practice?group_id=${encodeURIComponent(calledForGroupId)}`,
 				{
 				method: 'GET',
 				headers: {
@@ -812,9 +821,10 @@
 					};
 				}
 			});
+			if (groupId !== calledForGroupId) return; // stale — group changed while loading
 			applyPracticeSnapshot(snapshot);
 			console.log('AI Tutor Dashboard - Topic Analysis practice loaded', {
-				groupId,
+				groupId: calledForGroupId,
 				practiceQuestions: practiceQuestions.map((practice) => ({
 					homeworkId: practice.homeworkId ?? '',
 					homeworkName: practice.homework ?? '',
@@ -1100,6 +1110,17 @@
 				}
 			})();
 		}
+	}
+
+	// Reset per-homework action/error state when the group changes so that
+	// failure banners and in-progress indicators from a previous group never bleed into the new one.
+	$: if (initialized && groupId && groupId !== _prevGroupIdForReset) {
+		_prevGroupIdForReset = groupId;
+		failedPracticeGenerationByHomeworkId = {};
+		generatingPracticeByHomeworkId = {};
+		generatingPracticeJobsByHomeworkId = {};
+		sendingPracticeById = {};
+		resumedPracticeJobIds = new Set();
 	}
 
 	$: if (initialized && !useFrontendTestingData && groupId) {

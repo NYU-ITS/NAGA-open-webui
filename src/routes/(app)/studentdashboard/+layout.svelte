@@ -14,7 +14,7 @@
 		name: string;
 		user_id?: string;
 		user_ids?: string[];
-		identity?: 'Admin' | 'Member';
+		identity?: 'Admin' | 'Member' | 'View';
 	};
 
 	const i18n: any = getContext('i18n');
@@ -34,17 +34,17 @@
 	const LAST_SELECTED_GROUP_KEY = 'student_dashboard_last_selected_group_id';
 
 	function getPersistedGroupId() {
-		if (typeof sessionStorage === 'undefined') return '';
-		return sessionStorage.getItem(LAST_SELECTED_GROUP_KEY) || '';
+		if (typeof localStorage === 'undefined') return '';
+		return localStorage.getItem(LAST_SELECTED_GROUP_KEY) || '';
 	}
 
 	function persistGroupId(groupId: string) {
-		if (typeof sessionStorage === 'undefined') return;
+		if (typeof localStorage === 'undefined') return;
 		if (!groupId) {
-			sessionStorage.removeItem(LAST_SELECTED_GROUP_KEY);
+			localStorage.removeItem(LAST_SELECTED_GROUP_KEY);
 			return;
 		}
-		sessionStorage.setItem(LAST_SELECTED_GROUP_KEY, groupId);
+		localStorage.setItem(LAST_SELECTED_GROUP_KEY, groupId);
 	}
 
 	function sortGroupsForDefaultSelection(items: GroupOption[]) {
@@ -118,10 +118,22 @@
 					memberGroups = groups.filter(g => g.user_id !== $user.id && g.user_ids?.includes($user.id));
 
 					// Combine all groups with identity
-					allUserGroups = sortGroupsForDefaultSelection([
-						...createdGroups.map((g) => ({ ...g, identity: 'Admin' as const })),
-						...memberGroups.map((g) => ({ ...g, identity: 'Member' as const }))
-					]);
+					// Super admins see every group the API returns, labelled by their actual relationship.
+					if (isSuperAdmin) {
+						allUserGroups = sortGroupsForDefaultSelection(
+							groups.map(g => ({
+								...g,
+								identity: (g.user_id === $user.id ? 'Admin'
+										: g.user_ids?.includes($user.id) ? 'Member'
+										: 'View') as 'Admin' | 'Member' | 'View'
+							}))
+						);
+					} else {
+						allUserGroups = sortGroupsForDefaultSelection([
+							...createdGroups.map((g) => ({ ...g, identity: 'Admin' as const })),
+							...memberGroups.map((g) => ({ ...g, identity: 'Member' as const }))
+						]);
+					}
 
 					if (!$page.url.searchParams.get('group_id') && allUserGroups.length > 0) {
 						const persistedGroup = allUserGroups.find((group) => group.id === getPersistedGroupId());
@@ -286,7 +298,9 @@
 													</span>
 													<span class="px-3 py-1 text-xs font-medium rounded {group.identity === 'Admin'
 														? 'bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200'
-														: 'bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200'}">
+														: group.identity === 'Member'
+														? 'bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200'
+														: 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300'}">
 														{group.identity}
 													</span>
 												</button>

@@ -90,6 +90,7 @@
 	const activeJobIds = new Set<string>();
 	type DraftRow = { uid: number; modelId: string };
 	let draftRows: DraftRow[] = [];
+	let _prevGroupIdForReset = '';
 	let _nextDraftUid = 0;
 	let errorTypeDefs: { type: string; color: string; description: string }[] = [];
 	const dashboardPalette = ['#EE352E', '#00933C', '#B933AD', '#0039A6', '#FF6319', '#996633'];
@@ -575,14 +576,14 @@
 	$: avgSolvedChart = chartPoints(homeworkStats.map((s) => s.avgSolved));
 	$: avgAttemptedChart = chartPoints(homeworkStats.map((s) => s.avgAttempted));
 	function getPersistedGroupId() {
-		if (typeof sessionStorage === 'undefined') return '';
-		return sessionStorage.getItem(LAST_AI_TUTOR_GROUP_STORAGE_KEY) || '';
+		if (typeof localStorage === 'undefined') return '';
+		return localStorage.getItem(LAST_AI_TUTOR_GROUP_STORAGE_KEY) || '';
 	}
 
 	$: selectedGroupId = $page.url.searchParams.get('group_id') || getPersistedGroupId();
 	$: if ($page.url.searchParams.get('group_id')) {
-		if (typeof sessionStorage !== 'undefined') {
-			sessionStorage.setItem(
+		if (typeof localStorage !== 'undefined') {
+			localStorage.setItem(
 				LAST_AI_TUTOR_GROUP_STORAGE_KEY,
 				$page.url.searchParams.get('group_id') || ''
 			);
@@ -610,6 +611,17 @@
 			return;
 		}
 	});
+
+	// Reset per-homework action state whenever the selected group changes so that
+	// in-progress indicators from a previous group never bleed into the new one.
+	$: if (selectedGroupId && selectedGroupId !== _prevGroupIdForReset) {
+		_prevGroupIdForReset = selectedGroupId;
+		uploadingMap = {};
+		exportingConversationMap = {};
+		runningAnalysisByHomeworkId = {};
+		homeworkJobStepByModelId = {};
+		draftRows = [];
+	}
 
 	$: if (!useFrontendTestingData && selectedGroupId) {
 		void loadHomeworkStats(selectedGroupId);
@@ -793,6 +805,7 @@
 				}
 			});
 
+			if (selectedGroupId !== groupId) return; // stale — group changed while loading
 			homeworkRows = cached.homeworkRows;
 			homeworkStats = cached.homeworkStats;
 		} catch (error) {
@@ -896,6 +909,7 @@
 					return nextCounts;
 				}
 			});
+			if (selectedGroupId !== groupId) return; // stale
 			convCountByModelId = counts;
 		} catch (e) {
 			console.error('Conversation count fetch failed:', e);
@@ -913,6 +927,9 @@
 			const cachedErrorTypes = await loadWithAITutorSessionCache<typeof errorTypeDefs>({
 				key: getInstructorSetupCacheKey('error-types', groupId),
 				ttlMs: CACHE_TTL_MS,
+				onCached: (cached) => {
+					if (selectedGroupId === groupId) errorTypeDefs = cached;
+				},
 				loader: async () => {
 					const res = await fetch(
 						`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(groupId)}`,
@@ -932,6 +949,7 @@
 					}));
 				}
 			});
+			if (selectedGroupId !== groupId) return; // stale
 			errorTypeDefs = cachedErrorTypes;
 		} catch (e) {
 			console.error('Error types fetch failed:', e);
@@ -952,6 +970,12 @@
 			}>({
 				key: getInstructorSetupCacheKey('prompts', groupId),
 				ttlMs: CACHE_TTL_MS,
+				onCached: (cached) => {
+					if (selectedGroupId === groupId) {
+						generalPrompts = cached.generalPrompts;
+						tutorPrompts = cached.tutorPrompts;
+					}
+				},
 				loader: async () => {
 					const generalRes = await fetch(`${AI_TUTOR_API_BASE}/prompts/general`, {
 						headers: { Authorization: `Bearer ${localStorage.token}` }
@@ -978,6 +1002,7 @@
 					};
 				}
 			});
+			if (selectedGroupId !== groupId) return; // stale
 			generalPrompts = prompts.generalPrompts;
 			tutorPrompts = prompts.tutorPrompts;
 		} catch (e) {

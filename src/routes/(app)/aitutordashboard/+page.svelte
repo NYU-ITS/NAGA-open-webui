@@ -67,6 +67,7 @@
 	let runningAnalysisByHomeworkId: Record<string, boolean> = {};
 	type DraftRow = { uid: number; modelId: string };
 	let draftRows: DraftRow[] = [];
+	let _prevGroupIdForReset = '';
 	let _nextDraftUid = 0;
 	let errorTypeDefs: { type: string; color: string; description: string }[] = [];
 	const dashboardPalette = ['#EE352E', '#00933C', '#B933AD', '#0039A6', '#FF6319', '#996633'];
@@ -275,14 +276,14 @@ const bannerPlaceholderTime = 'TEST-TIME';
 	$: avgSolvedChart = chartPoints(homeworkStats.map((s) => s.avgSolved));
 	$: avgAttemptedChart = chartPoints(homeworkStats.map((s) => s.avgAttempted));
 	function getPersistedGroupId() {
-		if (typeof sessionStorage === 'undefined') return '';
-		return sessionStorage.getItem(LAST_AI_TUTOR_GROUP_STORAGE_KEY) || '';
+		if (typeof localStorage === 'undefined') return '';
+		return localStorage.getItem(LAST_AI_TUTOR_GROUP_STORAGE_KEY) || '';
 	}
 
 	$: selectedGroupId = $page.url.searchParams.get('group_id') || getPersistedGroupId();
 	$: if ($page.url.searchParams.get('group_id')) {
-		if (typeof sessionStorage !== 'undefined') {
-			sessionStorage.setItem(
+		if (typeof localStorage !== 'undefined') {
+			localStorage.setItem(
 				LAST_AI_TUTOR_GROUP_STORAGE_KEY,
 				$page.url.searchParams.get('group_id') || ''
 			);
@@ -310,6 +311,16 @@ const bannerPlaceholderTime = 'TEST-TIME';
 			return;
 		}
 	});
+
+	// Reset per-homework action state whenever the selected group changes so that
+	// in-progress indicators from a previous group never bleed into the new one.
+	$: if (selectedGroupId && selectedGroupId !== _prevGroupIdForReset) {
+		_prevGroupIdForReset = selectedGroupId;
+		uploadingMap = {};
+		exportingConversationMap = {};
+		runningAnalysisByHomeworkId = {};
+		draftRows = [];
+	}
 
 	$: if (!useFrontendTestingData && selectedGroupId) {
 		void loadHomeworkStats(selectedGroupId);
@@ -357,7 +368,7 @@ async function loadHomeworkStats(groupId: string) {
 			const snapshot = await loadWithAITutorSessionCache({
 				key: `summary:${groupId}:homework-stats`,
 				ttlMs: SUMMARY_SESSION_TTL_MS,
-				onCached: applySummarySnapshot,
+				onCached: (cached) => { if (selectedGroupId === groupId) applySummarySnapshot(cached); },
 				loader: async () => {
 					const uploadStatusMap = new Map<
 						string,
@@ -492,6 +503,7 @@ async function loadHomeworkStats(groupId: string) {
 					};
 				}
 			});
+			if (selectedGroupId !== groupId) return; // stale — group changed while loading
 			applySummarySnapshot(snapshot);
 		} catch (error) {
 			testToast('Summary failed loading /homework data');
@@ -559,6 +571,7 @@ async function loadConversationCounts(groupId: string) {
 				if (modelId) counts[modelId] = (counts[modelId] ?? 0) + 1;
 			}
 		}
+		if (selectedGroupId !== groupId) return; // stale
 		convCountByModelId = counts;
 	} catch (e) {
 		console.error('Conversation count fetch failed:', e);
@@ -573,11 +586,11 @@ async function loadErrorTypes(groupId: string) {
 	}
 	if (!groupId) return;
 	try {
-		errorTypeDefs = await loadWithAITutorSessionCache({
+		const freshErrorTypes = await loadWithAITutorSessionCache({
 			key: `summary:${groupId}:error-types`,
 			ttlMs: SUMMARY_SESSION_TTL_MS,
 			onCached: (cached) => {
-				errorTypeDefs = cached;
+				if (selectedGroupId === groupId) errorTypeDefs = cached;
 			},
 			loader: async () => {
 				const res = await fetch(
@@ -598,6 +611,8 @@ async function loadErrorTypes(groupId: string) {
 				}));
 			}
 		});
+		if (selectedGroupId !== groupId) return; // stale
+		errorTypeDefs = freshErrorTypes;
 	} catch (e) {
 		console.error('Error types fetch failed:', e);
 	}
@@ -611,11 +626,11 @@ async function loadPrompts(groupId: string) {
 		return;
 	}
 	try {
-		generalPrompts = await loadWithAITutorSessionCache({
+		const freshGeneralPrompts = await loadWithAITutorSessionCache({
 			key: 'summary:global:general-prompts',
 			ttlMs: SUMMARY_SESSION_TTL_MS,
 			onCached: (cached) => {
-				generalPrompts = cached;
+				if (selectedGroupId === groupId) generalPrompts = cached;
 			},
 			loader: async () => {
 				const generalRes = await fetch(`${AI_TUTOR_API_BASE}/prompts/general`, {
@@ -625,6 +640,8 @@ async function loadPrompts(groupId: string) {
 				return await generalRes.json();
 			}
 		});
+		if (selectedGroupId !== groupId) return; // stale
+		generalPrompts = freshGeneralPrompts;
 	} catch (e) {
 		console.error('General prompts fetch failed:', e);
 	}
@@ -634,11 +651,11 @@ async function loadPrompts(groupId: string) {
 	}
 
 	try {
-		tutorPrompts = await loadWithAITutorSessionCache({
+		const freshTutorPrompts = await loadWithAITutorSessionCache({
 			key: `summary:${groupId}:tutor-prompts`,
 			ttlMs: SUMMARY_SESSION_TTL_MS,
 			onCached: (cached) => {
-				tutorPrompts = cached;
+				if (selectedGroupId === groupId) tutorPrompts = cached;
 			},
 			loader: async () => {
 				const tutorRes = await fetch(
@@ -649,6 +666,8 @@ async function loadPrompts(groupId: string) {
 				return await tutorRes.json();
 			}
 		});
+		if (selectedGroupId !== groupId) return; // stale
+		tutorPrompts = freshTutorPrompts;
 	} catch (e) {
 		console.error('Tutor prompts fetch failed:', e);
 	}
