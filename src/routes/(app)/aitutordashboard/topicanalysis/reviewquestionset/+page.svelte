@@ -500,7 +500,7 @@
 			const alreadySent = Boolean(currentPracticeQuestion?.sentAt);
 			if (alreadySent) {
 				const confirmed = window.confirm(
-					'This practice set has already been sent to students. Saving will update the question content and the Mastery knowledge base immediately. Students will receive the updated version when you Re-send. Continue?'
+					'This practice set has already been sent to students. Saving will update the question content and the Mastery knowledge base immediately. Students will receive the updated version when you Send one more time. Continue?'
 				);
 				if (!confirmed) return;
 			}
@@ -1635,11 +1635,11 @@
 								<span class="h-1.5 w-1.5 rounded-full bg-yellow-500"></span>
 								Edited — Re-send to notify students
 							</span>
-						{:else if questionData.status === 'approved' && currentPracticeQuestion?.sentAt}
+						<!-- {:else if questionData.status === 'approved' && currentPracticeQuestion?.sentAt}
 							<span class="inline-flex items-center gap-1 rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700 dark:bg-green-900/40 dark:text-green-300">
 								<span class="h-1.5 w-1.5 rounded-full bg-green-500"></span>
 								Approved &amp; Sent
-							</span>
+							</span> -->
 						{/if}
 						{#if groupId}
 							<span>Group: {groupId}</span>
@@ -1757,12 +1757,12 @@
 					}
 					class={`min-w-[7.5rem] rounded-full px-4 py-2 text-center text-sm font-medium transition ${
 						isEditedAfterSent
-							? 'bg-yellow-500 text-white hover:bg-yellow-600'
+							? 'bg-purple-600 text-white hover:bg-purple-700'
 							: currentPracticeQuestion?.sentAt
 								? 'cursor-default bg-gray-200 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
 								: questionData.status !== 'approved'
 									? 'cursor-not-allowed bg-gray-200 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
-									: 'bg-black text-white hover:bg-gray-800'
+									: 'bg-purple-600 text-white hover:bg-purple-700'
 					}`}
 				>
 					{currentPracticeQuestion?.practiceId &&
