@@ -50,6 +50,7 @@
 		questionEditors: string[];
 		originalQuestionEditors: string[];
 		studentAssignments: StudentAssignment[][];
+		editedAfterSent: boolean;
 	};
 
 	const STANDARD_QUESTION_TEMPLATE = {
@@ -188,7 +189,8 @@
 			approvedQuestionIndexes: approvedIndexes,
 			questionEditors: buildQuestionEditors(questions),
 			originalQuestionEditors: buildQuestionEditors(questions),
-			studentAssignments: buildStudentAssignments(questions)
+			studentAssignments: buildStudentAssignments(questions),
+			editedAfterSent: false
 		};
 	};
 
@@ -495,6 +497,14 @@
 				throw new Error('This practice set is missing a practice ID.');
 			}
 
+			const alreadySent = Boolean(currentPracticeQuestion?.sentAt);
+			if (alreadySent) {
+				const confirmed = window.confirm(
+					'This practice set has already been sent to students. Saving will update the question content and the Mastery knowledge base immediately. Students will receive the updated version when you Re-send. Continue?'
+				);
+				if (!confirmed) return;
+			}
+
 			const parsedQuestion = parseQuestionEditor(currentHomework, index);
 			const nextQuestions = [...currentHomework.questionData.questions];
 			nextQuestions[index] = parsedQuestion;
@@ -537,6 +547,10 @@
 			clearAITutorSessionCacheByPrefix(`practice-question:${groupId}:review-homeworks`);
 			await loadPracticeQuestionData();
 			await refreshReviewHomework(currentHomework.homeworkId);
+			// Mark as edited-after-sent AFTER refresh so it isn't overwritten by createReviewHomework
+			if (alreadySent) {
+				updateCurrentHomework((hw) => ({ ...hw, editedAfterSent: true }));
+			}
 			await syncMasteryWorkspaceModel(currentHomework.homeworkId);
 			if (editingQuestionIndex === index) editingQuestionIndex = null;
 			toast.success(`Question ${index + 1} changes saved.`);
@@ -916,6 +930,9 @@
 	$: approvedQuestionIndexes = currentReviewHomework?.approvedQuestionIndexes ?? new Set<number>();
 	$: questionEditors = currentReviewHomework?.questionEditors ?? [];
 	$: studentAssignments = currentReviewHomework?.studentAssignments ?? [];
+	$: isEditedAfterSent =
+		(currentReviewHomework?.editedAfterSent ?? false) &&
+		Boolean(currentPracticeQuestion?.sentAt);
 
 	$: practiceQuestionsEmptyMessage = !groupId
 		? 'Loading group selection...'
@@ -1302,6 +1319,8 @@
 			clearAITutorSessionCacheByPrefix(`practice-question:${groupId}:practice`);
 			clearAITutorSessionCacheByPrefix(`practice-question:${groupId}:review-homeworks`);
 			await loadPracticeQuestionData();
+			// Re-send succeeded — clear the edited-after-sent flag
+			updateCurrentHomework((hw) => ({ ...hw, editedAfterSent: false }));
 			toast.success('Practice question set sent to students.');
 		} catch (error) {
 			toast.error(error instanceof Error ? error.message : 'Failed to send practice to students.');
@@ -1439,7 +1458,12 @@
 												<span>Generated on {formatAITutorTimestamp(practice.generatedAt)}</span>
 											</div>
 										{/if}
-										{#if practice.status === 'approved'}
+										{#if practice.status === 'approved' && assignmentSentAtByPracticeId[practice.practiceId] && reviewHomeworks.find(h => h.practiceId === practice.practiceId)?.editedAfterSent}
+											<div class="flex items-center gap-2 whitespace-nowrap">
+												<span class="w-2 h-2 rounded-full bg-yellow-500 flex-shrink-0"></span>
+												<span class="text-yellow-600 dark:text-yellow-400">Edited</span>
+											</div>
+										{:else if practice.status === 'approved'}
 											<div class="flex items-center gap-2 whitespace-nowrap">
 												<span class="w-2 h-2 rounded-full bg-green-500 flex-shrink-0"></span>
 												<span>Approved</span>
@@ -1603,13 +1627,22 @@
 							</div>
 						</div>
 					</div>
-						<div class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-						Generated on {formatAITutorTimestamp(questionData.generatedTime)}
-						<span class="ml-3"
-							>{approvedQuestionIndexes.size}/{questionData.questions.length} approved</span
-						>
+						<div class="mt-1 flex flex-wrap items-center gap-x-3 text-xs text-gray-500 dark:text-gray-400">
+						<span>Generated on {formatAITutorTimestamp(questionData.generatedTime)}</span>
+						<span>{approvedQuestionIndexes.size}/{questionData.questions.length} approved</span>
+						{#if isEditedAfterSent}
+							<span class="inline-flex items-center gap-1 rounded-full bg-yellow-100 px-2 py-0.5 text-xs font-medium text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-300">
+								<span class="h-1.5 w-1.5 rounded-full bg-yellow-500"></span>
+								Edited — Re-send to notify students
+							</span>
+						{:else if questionData.status === 'approved' && currentPracticeQuestion?.sentAt}
+							<span class="inline-flex items-center gap-1 rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700 dark:bg-green-900/40 dark:text-green-300">
+								<span class="h-1.5 w-1.5 rounded-full bg-green-500"></span>
+								Approved &amp; Sent
+							</span>
+						{/if}
 						{#if groupId}
-							<span class="ml-3">Group: {groupId}</span>
+							<span>Group: {groupId}</span>
 						{/if}
 					</div>
 				</div>
@@ -1716,26 +1749,30 @@
 					disabled={
 						!currentPracticeQuestion?.practiceId ||
 						questionData.status !== 'approved' ||
-						Boolean(currentPracticeQuestion?.sentAt) ||
+						(Boolean(currentPracticeQuestion?.sentAt) && !isEditedAfterSent) ||
 						Boolean(
 							currentPracticeQuestion?.practiceId &&
 								sendingPracticeById[currentPracticeQuestion.practiceId]
 						)
 					}
 					class={`min-w-[7.5rem] rounded-full px-4 py-2 text-center text-sm font-medium transition ${
-						currentPracticeQuestion?.sentAt
-							? 'cursor-default bg-gray-200 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
-							: questionData.status !== 'approved'
-								? 'cursor-not-allowed bg-gray-200 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
-								: 'bg-black text-white hover:bg-gray-800'
+						isEditedAfterSent
+							? 'bg-yellow-500 text-white hover:bg-yellow-600'
+							: currentPracticeQuestion?.sentAt
+								? 'cursor-default bg-gray-200 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
+								: questionData.status !== 'approved'
+									? 'cursor-not-allowed bg-gray-200 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
+									: 'bg-black text-white hover:bg-gray-800'
 					}`}
 				>
 					{currentPracticeQuestion?.practiceId &&
 					sendingPracticeById[currentPracticeQuestion.practiceId]
 						? 'Sending...'
-						: currentPracticeQuestion?.sentAt
-							? 'Sent'
-							: 'Send'}
+						: isEditedAfterSent
+							? 'Re-send'
+							: currentPracticeQuestion?.sentAt
+								? 'Sent'
+								: 'Send'}
 				</button>
 			</div>
 		</div>
