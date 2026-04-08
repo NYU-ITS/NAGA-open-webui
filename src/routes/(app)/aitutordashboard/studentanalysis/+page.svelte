@@ -654,7 +654,7 @@
 									<!-- in_button_style -->
 									<button
 										type="button"
-										class="rounded-lg p-1 text-xs font-medium text-black transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent dark:text-white dark:hover:bg-gray-850 dark:disabled:hover:bg-transparent"
+										class="rounded-lg p-1 text-xs font-medium text-gray-600 transition hover:text-gray-900 disabled:cursor-not-allowed disabled:opacity-50 dark:text-gray-400 dark:hover:text-gray-100"
 										disabled={!student.hasAnalysis}
 										on:click={() => downloadStudentReport(student)}
 									>

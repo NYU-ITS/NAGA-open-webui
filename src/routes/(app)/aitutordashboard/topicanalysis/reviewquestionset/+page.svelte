@@ -1511,7 +1511,7 @@
 											{#if canGeneratePractice(practice.homeworkId)}
 												<button
 													type="button"
-													class="self-center w-fit whitespace-nowrap rounded-xl px-2 py-1.5 text-xs font-semibold text-gray-700 transition hover:bg-black/5 dark:text-gray-300 dark:hover:bg-white/5"
+													class="self-center w-fit whitespace-nowrap rounded-xl px-2 py-1.5 text-sm font-semibold text-[#57068C] bg-purple-50 transition hover:bg-purple-100 dark:text-purple-300 dark:bg-purple-900/20 dark:hover:bg-purple-900/40"
 													on:click={() => generatePractice(practice.homeworkId)}
 													disabled={generatingPracticeByHomeworkId[practice.homeworkId]}
 												>
@@ -1521,7 +1521,7 @@
 										{:else if practice.status === 'not_ready' && canGeneratePractice(practice.homeworkId)}
 											<button
 												type="button"
-												class="self-center w-fit whitespace-nowrap rounded-xl px-2 py-1.5 text-xs font-semibold text-gray-700 transition hover:bg-black/5 dark:text-gray-300 dark:hover:bg-white/5"
+												class="self-center w-fit whitespace-nowrap rounded-xl px-2 py-1.5 text-sm font-semibold text-[#57068C] bg-purple-50 transition hover:bg-purple-100 dark:text-purple-300 dark:bg-purple-900/20 dark:hover:bg-purple-900/40"
 												on:click={() => generatePractice(practice.homeworkId)}
 												disabled={generatingPracticeByHomeworkId[practice.homeworkId]}
 											>
@@ -1665,6 +1665,7 @@
 								>
 									Cancel
 								</button>
+								<!-- Reset button hidden: low utility, can be restored if needed
 								<button
 									type="button"
 									on:click={() => useOriginalQuestion(index)}
@@ -1672,10 +1673,11 @@
 								>
 									Reset
 								</button>
+								-->
 								<button
 									type="button"
 									on:click={() => saveQuestionEdit(index)}
-									class="font-medium text-gray-900 transition hover:text-gray-700 dark:text-gray-100 dark:hover:text-gray-300"
+									class="font-medium text-[#57068C] transition hover:text-[#702B9D] dark:text-purple-400 dark:hover:text-purple-300"
 								>
 									Save
 								</button>
@@ -1729,12 +1731,12 @@
 				<button
 					on:click={handleSave}
 					disabled={questionData.status === 'approved' || approvingQuestionSet}
-					class={`min-w-[7.5rem] rounded-full px-4 py-2 text-center text-sm font-medium text-white transition ${
+					class={`min-w-[7.5rem] rounded-full px-4 py-2 text-center text-sm font-medium transition ${
 						questionData.status === 'approved'
-							? 'cursor-default bg-green-600'
+							? 'cursor-default bg-gray-200 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
 							: approvingQuestionSet
-								? 'cursor-wait bg-gray-600'
-								: 'bg-black hover:bg-gray-800'
+								? 'cursor-wait bg-gray-600 text-white'
+								: 'bg-[#57068C] hover:bg-[#702B9D] text-white'
 					}`}
 				>
 					{questionData.status === 'approved'
@@ -1757,12 +1759,12 @@
 					}
 					class={`min-w-[7.5rem] rounded-full px-4 py-2 text-center text-sm font-medium transition ${
 						isEditedAfterSent
-							? 'bg-purple-600 text-white hover:bg-purple-700'
+							? 'bg-[#57068C] text-white hover:bg-[#702B9D]'
 							: currentPracticeQuestion?.sentAt
 								? 'cursor-default bg-gray-200 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
 								: questionData.status !== 'approved'
 									? 'cursor-not-allowed bg-gray-200 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
-									: 'bg-purple-600 text-white hover:bg-purple-700'
+									: 'bg-[#57068C] text-white hover:bg-[#702B9D]'
 					}`}
 				>
 					{currentPracticeQuestion?.practiceId &&

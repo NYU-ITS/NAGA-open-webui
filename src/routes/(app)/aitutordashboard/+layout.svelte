@@ -373,7 +373,7 @@
 						<a
 							class="min-w-fit rounded-full p-1.5 {$page.url.pathname === '/aitutordashboard' ||
 							$page.url.pathname === '/aitutordashboard/'
-								? 'text-[#57068c] dark:text-white'
+								? 'font-semibold text-[#57068c] dark:text-white'
 								: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
 							href={buildDashboardHref('/aitutordashboard')}
 						>
@@ -385,7 +385,7 @@
 								'/aitutordashboard/topicanalysis'
 							) &&
 							!$page.url.pathname.includes('/aitutordashboard/topicanalysis/reviewquestionset')
-								? 'text-[#57068c] dark:text-white'
+								? 'font-semibold text-[#57068c] dark:text-white'
 								: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
 							href={buildDashboardHref('/aitutordashboard/topicanalysis')}
 						>
@@ -396,7 +396,7 @@
 							class="min-w-fit rounded-full p-1.5 {$page.url.pathname.includes(
 								'/aitutordashboard/topicanalysis/reviewquestionset'
 							)
-								? 'text-[#57068c] dark:text-white'
+								? 'font-semibold text-[#57068c] dark:text-white'
 								: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
 							href={buildDashboardHref('/aitutordashboard/topicanalysis/reviewquestionset')}
 						>
@@ -407,7 +407,7 @@
 							class="min-w-fit rounded-full p-1.5 {$page.url.pathname.includes(
 								'/aitutordashboard/studentanalysis'
 							)
-								? 'text-[#57068c] dark:text-white'
+								? 'font-semibold text-[#57068c] dark:text-white'
 								: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
 							href={buildDashboardHref('/aitutordashboard/studentanalysis')}
 						>
@@ -418,7 +418,7 @@
 							class="min-w-fit rounded-full p-1.5 {$page.url.pathname.includes(
 								'/aitutordashboard/instructorsetup'
 							)
-								? 'text-[#57068c] dark:text-white'
+								? 'font-semibold text-[#57068c] dark:text-white'
 								: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
 							href={buildDashboardHref('/aitutordashboard/instructorsetup')}
 						>

@@ -1488,8 +1488,13 @@
 	<div class="space-y-3">
 		<div class="flex items-center justify-between gap-3">
 			<div>
-				<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Error Type Configuration</h2>
-				<div class="text-xs text-gray-400 dark:text-gray-500">You can have at most 4 error types</div>
+				<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Error Types</h2>
+				<div class="text-xs text-gray-400 dark:text-gray-500">
+					You can have at most 4 error types. You can configure in <a
+						href="/aitutordashboard/instructorsetup{groupId ? `?group_id=${groupId}` : ''}"
+						class="font-bold text-[#57068C] hover:text-[#702B9D] dark:text-purple-400 dark:hover:text-purple-300"
+					>Instructor Setup</a>.
+				</div>
 			</div>
 			<!-- <div class="flex items-center gap-3">
 				<button
@@ -1539,7 +1544,7 @@
 				{#each errorTypeDefs as def, i}
 					<button
 						type="button"
-						class="rounded-lg border border-gray-200 bg-white p-4 text-left transition hover:border-gray-300 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-900 dark:hover:border-gray-600 dark:hover:bg-gray-800"
+						class="flex flex-col items-start rounded-lg border border-gray-200 bg-white p-4 text-left transition hover:border-gray-300 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-900 dark:hover:border-gray-600 dark:hover:bg-gray-800"
 						on:click={() => openEdit(i)}
 					>
 						<div class="flex items-center gap-2">
@@ -1555,22 +1560,11 @@
 		{/if}
 
 	</div>
-	<div class="flex justify-end gap-3">
-				<!-- <button
-				class="rounded-full bg-black px-3 py-1.5 text-xs font-medium text-white transition hover:bg-gray-800"
-				on:click={persistErrorTypes}
-			>
-				Save
-			</button> -->
-
-	<a
-		href="/aitutordashboard/instructorsetup"
-		class="inline-flex w-fit items-center rounded-full border border-gray-300 px-3 py-1.5 text-sm font-semibold text-gray-800 transition hover:border-[#57068c] hover:text-[#57068c] dark:border-gray-600 dark:text-gray-200 dark:hover:border-white dark:hover:text-white"
-	>
-		Configure in Setup &gt;
-	</a>
-
-	</div>
+	<!-- Configure in Setup button and Save removed; link moved into subtitle above -->
+	<!-- <div class="flex justify-end gap-3">
+		<button class="rounded-full bg-black px-3 py-1.5 text-xs font-medium text-white transition hover:bg-gray-800" on:click={persistErrorTypes}>Save</button>
+		<a href="/aitutordashboard/instructorsetup" class="inline-flex w-fit items-center rounded-full border border-gray-300 px-3 py-1.5 text-sm font-semibold text-gray-800 transition hover:border-[#57068c] hover:text-[#57068c] dark:border-gray-600 dark:text-gray-200 dark:hover:border-white dark:hover:text-white">Configure in Setup &gt;</a>
+	</div> -->
 
 	{#if showResetDefaultsModal}
 		<div
@@ -1596,7 +1590,7 @@
 						Cancel
 					</button>
 					<button
-						class="px-3 py-1.5 text-sm font-medium text-gray-900 transition hover:text-black dark:text-gray-100 dark:hover:text-white"
+						class="px-3 py-1.5 text-sm font-medium text-[#57068C] transition hover:text-[#702B9D] dark:text-purple-400 dark:hover:text-purple-300"
 						on:click={confirmResetDefaults}
 					>
 						Confirm
@@ -1669,7 +1663,7 @@
 							on:click={closeModal}
 						>Cancel</button>
 						<button
-							class="px-3 py-1.5 text-sm font-medium text-gray-900 dark:text-gray-100 hover:text-black dark:hover:text-white transition"
+							class="px-3 py-1.5 text-sm font-medium text-[#57068C] hover:text-[#702B9D] dark:text-purple-400 dark:hover:text-purple-300 transition"
 							on:click={saveEdit}
 						>Save</button>
 					</div>

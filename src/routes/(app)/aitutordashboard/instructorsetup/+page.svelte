@@ -46,6 +46,7 @@
 		avgAttempted: number | null;
 		avgSolved: number | null;
 		avgErrors: number | null;
+		latestAnalysisAt?: string | null;
 	};
 
 	// ── Homework rows (raw API data) ─────────────────────────────────────────
@@ -95,9 +96,34 @@
 	let errorTypeDefs: { type: string; color: string; description: string }[] = [];
 	const dashboardPalette = ['#EE352E', '#00933C', '#B933AD', '#0039A6', '#FF6319', '#996633'];
 	const errorTypeColors = dashboardPalette.slice(0, 4);
+	// B: backend-sourced timestamp — null until loadErrorTypes resolves
+	let errorTypesUpdatedAt: string | null = null;
 	let showEditErrorTypeModal = false;
 	let showResetDefaultsModal = false;
 	let resetDefaultsModalMode: 'default' | 'delete' = 'default';
+
+	function errorTypesSavedAtKey(gid: string): string {
+		return `ai_tutor_error_types_saved_at_${gid}`;
+	}
+
+	/** Returns the best available timestamp for when error types were last saved.
+	 *  Priority: B (backend updated_at) > A (localStorage fallback). */
+	function getEffectiveErrorTypeTimestamp(): string | null {
+		if (errorTypesUpdatedAt) return errorTypesUpdatedAt;
+		if (!selectedGroupId || typeof localStorage === 'undefined') return null;
+		return localStorage.getItem(errorTypesSavedAtKey(selectedGroupId)) ?? null;
+	}
+
+	function getHomeworkStaleNote(row: HomeworkRow): string {
+		const stat = homeworkStats.find((item) => item.homework === row.id);
+		if (!stat?.latestAnalysisAt) return '';
+		const effectiveTs = getEffectiveErrorTypeTimestamp();
+		if (!effectiveTs) return '';
+		if (effectiveTs > stat.latestAnalysisAt) {
+			return 'Error type definition is newer than the analysis';
+		}
+		return '';
+	}
 	let showPromptSection = false;
 	let editingErrorTypeIndex: number | null = null;
 	let editingErrorTypeIsNew = false;
@@ -717,6 +743,7 @@
 						}
 					>();
 					const hasAnalysisByHomeworkId = new Set<string>();
+					const latestAnalysisAtByHomeworkId = new Map<string, string>();
 
 					for (const homeworkId of uploadStatusMap.keys()) {
 						// Page: AI Tutor Dashboard > Instructor Setup
@@ -750,6 +777,13 @@
 								prev.errorSum += Number(row?.total_errors ?? 0);
 								prev.count += 1;
 								statsMap.set(id, prev);
+								// Track the most recent analysis timestamp per homework (for stale detection)
+								if (row?.created_at) {
+									const existing = latestAnalysisAtByHomeworkId.get(id);
+									if (!existing || row.created_at > existing) {
+										latestAnalysisAtByHomeworkId.set(id, row.created_at);
+									}
+								}
 							}
 						}
 					}
@@ -769,7 +803,8 @@
 								? Number((stats.attemptedSum / Math.max(stats.count, 1)).toFixed(1))
 								: null,
 							avgSolved: stats ? Number((stats.solvedSum / Math.max(stats.count, 1)).toFixed(1)) : null,
-							avgErrors: stats ? Number((stats.errorSum / Math.max(stats.count, 1)).toFixed(1)) : null
+							avgErrors: stats ? Number((stats.errorSum / Math.max(stats.count, 1)).toFixed(1)) : null,
+							latestAnalysisAt: latestAnalysisAtByHomeworkId.get(id) ?? null
 						};
 					});
 					mergedStats.sort((a, b) => a.homework.localeCompare(b.homework));
@@ -923,12 +958,16 @@
 			return;
 		}
 		if (!groupId) return;
+		type CachedErrorTypesPayload = { defs: typeof errorTypeDefs; updatedAt: string | null };
 		try {
-			const cachedErrorTypes = await loadWithAITutorSessionCache<typeof errorTypeDefs>({
+			const cached = await loadWithAITutorSessionCache<CachedErrorTypesPayload>({
 				key: getInstructorSetupCacheKey('error-types', groupId),
 				ttlMs: CACHE_TTL_MS,
-				onCached: (cached) => {
-					if (selectedGroupId === groupId) errorTypeDefs = cached;
+				onCached: (c) => {
+					if (selectedGroupId === groupId) {
+						errorTypeDefs = c.defs;
+						errorTypesUpdatedAt = c.updatedAt;
+					}
 				},
 				loader: async () => {
 					const res = await fetch(
@@ -942,15 +981,20 @@
 						: Array.isArray(data)
 							? data
 							: [];
-					return errorTypes.slice(0, 4).map((et: any, i: number) => ({
+					const defs = errorTypes.slice(0, 4).map((et: any, i: number) => ({
 						type: et.name ?? 'Unknown',
 						color: errorTypeColors[i % errorTypeColors.length],
 						description: et.description ?? ''
 					}));
+					// B: backend updated_at — null for legacy rows or default source
+					const updatedAt: string | null = data?.updated_at ?? null;
+					return { defs, updatedAt };
 				}
 			});
 			if (selectedGroupId !== groupId) return; // stale
-			errorTypeDefs = cachedErrorTypes;
+			errorTypeDefs = cached.defs;
+			// B: prefer backend timestamp; fall back gracefully to null (getEffectiveErrorTypeTimestamp handles A)
+			errorTypesUpdatedAt = cached.updatedAt;
 		} catch (e) {
 			console.error('Error types fetch failed:', e);
 		}
@@ -1351,24 +1395,54 @@
 		if (useFrontendTestingData) {
 			toast.success('Frontend testing error types saved.');
 			aiTutorFrontendTestingErrorTypes.set(errorTypeDefs);
+			const ts = new Date().toISOString();
+			if (typeof localStorage !== 'undefined')
+				localStorage.setItem(errorTypesSavedAtKey(selectedGroupId), ts);
+			errorTypesUpdatedAt = ts;
 			return;
 		}
 		try {
-			const res = await fetch(
-				`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(selectedGroupId)}`,
-				{
-					method: 'PUT',
-					headers: {
-						'Content-Type': 'application/json',
-						Authorization: `Bearer ${localStorage.token}`
-					},
-					body: JSON.stringify(
-						errorTypeDefs.map((d) => ({ name: d.type, description: d.description }))
-					)
+			let savedAt: string | null = null;
+			if (errorTypeDefs.length === 0) {
+				// Deleting the last type — DELETE reverts to server defaults
+				const res = await fetch(
+					`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(selectedGroupId)}`,
+					{ method: 'DELETE', headers: { Authorization: `Bearer ${localStorage.token}` } }
+				);
+				if (res.ok) {
+					savedAt = new Date().toISOString();
+					// No server-side updated_at on DELETE (row is removed); record change time in A only
+					errorTypesUpdatedAt = null;
 				}
-			);
-			if (res.ok) {
-				writeAITutorSessionCache(getInstructorSetupCacheKey('error-types', selectedGroupId), errorTypeDefs);
+			} else {
+				const res = await fetch(
+					`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(selectedGroupId)}`,
+					{
+						method: 'PUT',
+						headers: {
+							'Content-Type': 'application/json',
+							Authorization: `Bearer ${localStorage.token}`
+						},
+						body: JSON.stringify(
+							errorTypeDefs.map((d) => ({ name: d.type, description: d.description }))
+						)
+					}
+				);
+				if (res.ok) {
+					const data = await res.json();
+					// B: use server-returned updated_at; fall back to local time if backend hasn't been updated
+					savedAt = data?.updated_at ?? new Date().toISOString();
+					errorTypesUpdatedAt = savedAt;
+				}
+			}
+			if (savedAt !== null) {
+				// A: always write localStorage as a robust fallback
+				if (typeof localStorage !== 'undefined')
+					localStorage.setItem(errorTypesSavedAtKey(selectedGroupId), savedAt);
+				writeAITutorSessionCache(getInstructorSetupCacheKey('error-types', selectedGroupId), {
+					defs: errorTypeDefs,
+					updatedAt: errorTypesUpdatedAt
+				});
 				testToast('Instructor Setup saved error types');
 			}
 		} catch (e) {
@@ -1382,6 +1456,10 @@
 		if (useFrontendTestingData) {
 			errorTypeDefs = AI_TUTOR_FRONTEND_TESTING_ERROR_TYPES;
 			aiTutorFrontendTestingErrorTypes.set(AI_TUTOR_FRONTEND_TESTING_ERROR_TYPES);
+			const ts = new Date().toISOString();
+			if (typeof localStorage !== 'undefined')
+				localStorage.setItem(errorTypesSavedAtKey(selectedGroupId), ts);
+			errorTypesUpdatedAt = null; // defaults have no server-side updated_at
 			toast.success('Frontend testing error types reset to defaults.');
 			return;
 		}
@@ -1390,6 +1468,11 @@
 				`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(selectedGroupId)}`,
 				{ method: 'DELETE', headers: { Authorization: `Bearer ${localStorage.token}` } }
 			);
+			// A: record when definition changed (revert to defaults still changes what types are in effect)
+			const ts = new Date().toISOString();
+			if (typeof localStorage !== 'undefined')
+				localStorage.setItem(errorTypesSavedAtKey(selectedGroupId), ts);
+			errorTypesUpdatedAt = null; // no server-side updated_at after DELETE
 			clearAITutorSessionCacheByPrefix(getInstructorSetupCacheKey('error-types', selectedGroupId));
 			await loadErrorTypes(selectedGroupId);
 			testToast('Instructor Setup reset error types to default');
@@ -1399,26 +1482,14 @@
 		}
 	}
 
-	async function deleteAllErrorTypes() {
-		if (!selectedGroupId) return;
+	function deleteAllErrorTypes() {
+		// Purely local — clears the list without touching the backend.
+		// The user must press Save to persist the deletion.
+		errorTypeDefs = [];
 		if (useFrontendTestingData) {
-			errorTypeDefs = [];
 			aiTutorFrontendTestingErrorTypes.set([]);
-			toast.success('Frontend testing error types deleted.');
-			return;
 		}
-		try {
-			await fetch(
-				`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(selectedGroupId)}`,
-				{ method: 'DELETE', headers: { Authorization: `Bearer ${localStorage.token}` } }
-			);
-			clearAITutorSessionCacheByPrefix(getInstructorSetupCacheKey('error-types', selectedGroupId));
-			errorTypeDefs = [];
-			testToast('Instructor Setup deleted all custom error types');
-		} catch (e) {
-			testToast('Instructor Setup failed deleting custom error types');
-			console.error('Failed to delete all error types:', e);
-		}
+		testToast('Instructor Setup delete all (local) — Save to persist');
 	}
 
 	function openEditErrorType(index: number) {
@@ -1469,7 +1540,7 @@
 	async function confirmResetDefaults() {
 		showResetDefaultsModal = false;
 		if (resetDefaultsModalMode === 'delete') {
-			await deleteAllErrorTypes();
+			deleteAllErrorTypes();
 			return;
 		}
 		await resetErrorTypesToDefault();
@@ -1966,7 +2037,7 @@
 						<button
 							class={`flex items-center gap-1 rounded-full border px-3 py-1.5 text-xs font-semibold transition ${
 								errorTypeDefs.length < 4
-									? 'border-gray-300 text-gray-700 hover:border-gray-400 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:border-gray-500 dark:hover:bg-gray-800'
+									? 'border-[#57068C] text-[#57068C] hover:border-[#702B9D] hover:bg-purple-50 dark:border-purple-400 dark:text-purple-400 dark:hover:border-purple-300 dark:hover:bg-purple-900/20'
 									: 'cursor-not-allowed border-gray-200 text-gray-400 dark:border-gray-700 dark:text-gray-500'
 							}`}
 							on:click|stopPropagation={addErrorType}
@@ -1989,7 +2060,7 @@
 							class="rounded-full border border-gray-300 px-3 py-1.5 text-xs font-semibold text-gray-700 transition hover:border-gray-400 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:border-gray-500 dark:hover:bg-gray-800"
 							on:click|stopPropagation={() => {
 								resetDefaultsModalMode = 'default';
-								void confirmResetDefaults();
+								showResetDefaultsModal = true;
 							}}
 						>
 							Use default
@@ -2037,7 +2108,7 @@
 						{#each errorTypeDefs as def, i}
 							<button
 								type="button"
-								class="rounded-lg border border-gray-200 bg-white p-4 text-left transition hover:border-gray-300 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-900 dark:hover:border-gray-600 dark:hover:bg-gray-800"
+								class="flex flex-col items-start rounded-lg border border-gray-200 bg-white p-4 text-left transition hover:border-gray-300 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-900 dark:hover:border-gray-600 dark:hover:bg-gray-800"
 								on:click={() => openEditErrorType(i)}
 							>
 								<div class="flex items-center gap-2">
@@ -2206,6 +2277,11 @@
 														{getHomeworkAnalysisStep(row)}
 													</div>
 												{/if}
+												{#if getHomeworkStaleNote(row)}
+													<div class="mt-0.5 text-[11px] text-gray-500 dark:text-gray-400">
+														{getHomeworkStaleNote(row)}
+													</div>
+												{/if}
 											</div>
 										</td>
 										<td class="px-3 py-1">
@@ -2213,7 +2289,7 @@
 												<!-- in_button_style -->
 												<button
 													type="button"
-													class="rounded-lg p-1 text-xs font-medium text-black transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50 dark:text-white dark:hover:bg-gray-850"
+													class="rounded-lg px-2 py-1 text-sm font-semibold text-[#57068C] bg-purple-50 transition hover:bg-purple-100 disabled:cursor-not-allowed disabled:opacity-50 dark:text-purple-300 dark:bg-purple-900/20 dark:hover:bg-purple-900/40"
 													on:click={() => handleHomeworkPrimaryAction(row)}
 													disabled={isHomeworkActionBusy(row)}
 												>
@@ -2364,7 +2440,7 @@
 									<td class="px-3 py-1.5">
 										<!-- in_button_style -->
 										<button
-											class="rounded-lg p-1 text-xs font-medium text-black transition hover:bg-gray-100 dark:text-white dark:hover:bg-gray-850"
+											class="rounded-lg p-1 text-sm font-medium text-[#57068C] transition hover:bg-purple-50 dark:text-purple-400 dark:hover:bg-purple-900/20"
 											on:click={() => openPromptModal(def)}
 										>
 											Edit
@@ -2493,12 +2569,12 @@
 	>
 		<div class="w-[420px] max-w-[90vw] rounded-xl bg-white p-6 shadow-2xl dark:bg-gray-900">
 			<div class="text-base font-semibold text-gray-900 dark:text-gray-100">
-				{resetDefaultsModalMode === 'delete' ? 'Delete all custom error types?' : 'Use default error types?'}
+				{resetDefaultsModalMode === 'delete' ? 'Delete all custom error types?' : 'Revert to default error types?'}
 			</div>
 			<p class="mt-3 text-sm text-gray-500 dark:text-gray-400">
 				{resetDefaultsModalMode === 'delete'
 					? 'This will remove all current custom error types from the class configuration. Default error types will be used after refresh.'
-					: 'This will replace the current error types with the default set.'}
+					: 'Abandon all customized error types and revert to defaults?'}
 			</p>
 			<div class="mt-6 flex justify-end gap-2">
 				<button
@@ -2568,7 +2644,7 @@
 					>Prompt</label
 				>
 				<textarea
-					class="min-h-[280px] w-full rounded-lg border border-gray-300 bg-white px-3 py-2 font-mono text-sm text-gray-900 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
+					class="min-h-[280px] w-full rounded-lg border border-gray-300 bg-white px-3 py-2 font-mono text-sm text-gray-900 focus:outline-none focus:ring-1 focus:ring-[#57068C] dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
 					rows="12"
 					bind:value={selectedPromptText}
 				></textarea>
@@ -2635,7 +2711,7 @@
 				<label class="text-xs font-medium text-gray-600 dark:text-gray-400 block mb-1.5">Name</label
 				>
 				<input
-					class="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500"
+					class="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-1 focus:ring-[#57068C]"
 					bind:value={editErrorTypeName}
 					placeholder="Error type name"
 				/>
@@ -2646,7 +2722,7 @@
 					>Description</label
 				>
 				<textarea
-					class="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500 resize-none"
+					class="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-1 focus:ring-[#57068C] resize-none"
 					rows="7"
 					bind:value={editErrorTypeDescription}
 					placeholder="Describe this error type..."

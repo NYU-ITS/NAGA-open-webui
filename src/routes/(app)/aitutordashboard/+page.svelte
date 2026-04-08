@@ -1509,7 +1509,7 @@ async function runAnalysis() {
 					Cancel
 				</button>
 				<button
-					class="px-3 py-1.5 text-sm font-medium text-gray-900 transition hover:text-black dark:text-gray-100 dark:hover:text-white"
+					class="px-3 py-1.5 text-sm font-medium text-[#57068C] transition hover:text-[#702B9D] dark:text-purple-400 dark:hover:text-purple-300"
 					on:click={confirmResetDefaults}
 				>
 					Confirm
@@ -1578,7 +1578,7 @@ async function runAnalysis() {
 						on:click={closeErrorTypeModal}
 					>Cancel</button>
 					<button
-						class="px-3 py-1.5 text-sm font-medium text-gray-900 dark:text-gray-100 hover:text-black dark:hover:text-white transition"
+						class="px-3 py-1.5 text-sm font-medium text-[#57068C] hover:text-[#702B9D] dark:text-purple-400 dark:hover:text-purple-300 transition"
 						on:click={saveErrorTypeEdit}
 					>Save</button>
 				</div>
@@ -1643,7 +1643,7 @@ async function runAnalysis() {
 						Cancel
 					</button>
 					<button
-						class="px-3 py-1.5 text-sm font-medium text-gray-900 dark:text-gray-100 hover:text-black dark:hover:text-white transition"
+						class="px-3 py-1.5 text-sm font-medium text-[#57068C] hover:text-[#702B9D] dark:text-purple-400 dark:hover:text-purple-300 transition"
 						on:click={savePromptOverride}
 					>
 						Save as Class Prompt
