@@ -22,12 +22,23 @@ from pgvector.sqlalchemy import Vector
 from sqlalchemy.ext.mutable import MutableDict
 from sqlalchemy.exc import NoSuchTableError
 
-from open_webui.retrieval.vector.main import VectorItem, SearchResult, GetResult
-from open_webui.config import PGVECTOR_DB_URL, PGVECTOR_INITIALIZE_MAX_VECTOR_LENGTH
+from open_webui.retrieval.vector.main import (
+    VectorItem,
+    SearchResult,
+    GetResult,
+    ImageVectorItem,
+    ImageSearchResult,
+)
+from open_webui.config import (
+    PGVECTOR_DB_URL,
+    PGVECTOR_INITIALIZE_MAX_VECTOR_LENGTH,
+    PGVECTOR_IMAGE_VECTOR_LENGTH,
+)
 
 from open_webui.env import SRC_LOG_LEVELS
 
 VECTOR_LENGTH = PGVECTOR_INITIALIZE_MAX_VECTOR_LENGTH
+IMAGE_VECTOR_LENGTH = PGVECTOR_IMAGE_VECTOR_LENGTH
 Base = declarative_base()
 
 log = logging.getLogger(__name__)
@@ -41,6 +52,17 @@ class DocumentChunk(Base):
     vector = Column(Vector(dim=VECTOR_LENGTH), nullable=True)
     collection_name = Column(Text, nullable=False)
     text = Column(Text, nullable=True)
+    vmetadata = Column(MutableDict.as_mutable(JSONB), nullable=True)
+
+
+class ImageChunk(Base):
+    __tablename__ = "image_chunk"
+
+    id = Column(Text, primary_key=True)
+    vector = Column(Vector(dim=IMAGE_VECTOR_LENGTH), nullable=True)
+    collection_name = Column(Text, nullable=False)
+    image_data = Column(Text, nullable=True)  # base64-encoded PNG
+    page_number = Column(Integer, nullable=True)
     vmetadata = Column(MutableDict.as_mutable(JSONB), nullable=True)
 
 
@@ -85,6 +107,20 @@ class PgvectorClient:
                 text(
                     "CREATE INDEX IF NOT EXISTS idx_document_chunk_collection_name "
                     "ON document_chunk (collection_name);"
+                )
+            )
+
+            # Image chunk indexes
+            self.session.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_image_chunk_vector "
+                    "ON image_chunk USING ivfflat (vector vector_cosine_ops) WITH (lists = 100);"
+                )
+            )
+            self.session.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_image_chunk_collection_name "
+                    "ON image_chunk (collection_name);"
                 )
             )
             self.session.commit()
@@ -429,3 +465,198 @@ class PgvectorClient:
         log.info("[PGVECTOR] delete_collection START | collection=%s", collection_name)
         self.delete(collection_name)
         log.info("[PGVECTOR] delete_collection SUCCESS | collection=%s", collection_name)
+
+    # ------------------------------------------------------------------
+    # Image chunk operations
+    # ------------------------------------------------------------------
+
+    def insert_images(
+        self, collection_name: str, items: List[ImageVectorItem]
+    ) -> None:
+        log.info(
+            "[PGVECTOR] insert_images START | collection=%s | items_count=%s",
+            collection_name,
+            len(items),
+        )
+        try:
+            new_items = []
+            for item in items:
+                vector = list(item["vector"])
+                # Pad if shorter than IMAGE_VECTOR_LENGTH
+                if len(vector) < IMAGE_VECTOR_LENGTH:
+                    vector += [0.0] * (IMAGE_VECTOR_LENGTH - len(vector))
+                elif len(vector) > IMAGE_VECTOR_LENGTH:
+                    raise Exception(
+                        f"Image vector length {len(vector)} exceeds max {IMAGE_VECTOR_LENGTH}"
+                    )
+                new_items.append(
+                    ImageChunk(
+                        id=item["id"],
+                        vector=vector,
+                        collection_name=collection_name,
+                        image_data=item["image_data"],
+                        page_number=item["page_number"],
+                        vmetadata=item["metadata"],
+                    )
+                )
+            self.session.bulk_save_objects(new_items)
+            self.session.commit()
+            log.info(
+                "[PGVECTOR] insert_images SUCCESS | collection=%s | inserted=%s",
+                collection_name,
+                len(new_items),
+            )
+        except Exception as e:
+            self.session.rollback()
+            log.exception(f"Error during insert_images: {e}")
+            raise
+
+    def search_images(
+        self,
+        collection_name: str,
+        vectors: List[List[float]],
+        limit: Optional[int] = None,
+    ) -> Optional[ImageSearchResult]:
+        log.info(
+            "[PGVECTOR] search_images START | collection=%s | vectors_count=%s | limit=%s",
+            collection_name,
+            len(vectors) if vectors else 0,
+            limit,
+        )
+        try:
+            if not vectors:
+                return None
+
+            vectors = [self._adjust_image_vector(v) for v in vectors]
+            num_queries = len(vectors)
+
+            def vector_expr(vector):
+                return cast(array(vector), Vector(IMAGE_VECTOR_LENGTH))
+
+            qid_col = column("qid", Integer)
+            q_vector_col = column("q_vector", Vector(IMAGE_VECTOR_LENGTH))
+            query_vectors = (
+                values(qid_col, q_vector_col)
+                .data(
+                    [(idx, vector_expr(v)) for idx, v in enumerate(vectors)]
+                )
+                .alias("query_vectors")
+            )
+
+            subq = (
+                select(
+                    ImageChunk.id,
+                    ImageChunk.image_data,
+                    ImageChunk.page_number,
+                    ImageChunk.vmetadata,
+                    (
+                        ImageChunk.vector.cosine_distance(
+                            query_vectors.c.q_vector
+                        )
+                    ).label("distance"),
+                )
+                .where(ImageChunk.collection_name == collection_name)
+                .order_by(
+                    ImageChunk.vector.cosine_distance(query_vectors.c.q_vector)
+                )
+            )
+            if limit is not None:
+                subq = subq.limit(limit)
+            subq = subq.lateral("result")
+
+            stmt = (
+                select(
+                    query_vectors.c.qid,
+                    subq.c.id,
+                    subq.c.image_data,
+                    subq.c.page_number,
+                    subq.c.vmetadata,
+                    subq.c.distance,
+                )
+                .select_from(query_vectors)
+                .join(subq, true())
+                .order_by(query_vectors.c.qid, subq.c.distance)
+            )
+
+            results = self.session.execute(stmt).all()
+
+            ids = [[] for _ in range(num_queries)]
+            image_data = [[] for _ in range(num_queries)]
+            distances = [[] for _ in range(num_queries)]
+            metadatas = [[] for _ in range(num_queries)]
+
+            for row in results:
+                qid = int(row.qid)
+                ids[qid].append(row.id)
+                image_data[qid].append(row.image_data)
+                distances[qid].append(row.distance)
+                metadatas[qid].append(row.vmetadata)
+
+            total_hits = sum(len(d) for d in ids)
+            log.info(
+                "[PGVECTOR] search_images SUCCESS | collection=%s | results_total=%s",
+                collection_name,
+                total_hits,
+            )
+            return ImageSearchResult(
+                ids=ids,
+                image_data=image_data,
+                distances=distances,
+                metadatas=metadatas,
+            )
+        except Exception as e:
+            try:
+                self.session.rollback()
+            except Exception:
+                pass
+            log.exception(f"Error during search_images: {e}")
+            return None
+
+    def delete_image_collection(self, collection_name: str) -> None:
+        log.info(
+            "[PGVECTOR] delete_image_collection START | collection=%s",
+            collection_name,
+        )
+        try:
+            deleted = (
+                self.session.query(ImageChunk)
+                .filter(ImageChunk.collection_name == collection_name)
+                .delete(synchronize_session=False)
+            )
+            self.session.commit()
+            log.info(
+                "[PGVECTOR] delete_image_collection SUCCESS | collection=%s | deleted=%s",
+                collection_name,
+                deleted,
+            )
+        except Exception as e:
+            self.session.rollback()
+            log.exception(f"Error during delete_image_collection: {e}")
+            raise
+
+    def has_image_collection(self, collection_name: str) -> bool:
+        try:
+            exists = (
+                self.session.query(ImageChunk)
+                .filter(ImageChunk.collection_name == collection_name)
+                .first()
+                is not None
+            )
+            return exists
+        except Exception as e:
+            try:
+                self.session.rollback()
+            except Exception:
+                pass
+            log.exception(f"Error checking image collection existence: {e}")
+            return False
+
+    def _adjust_image_vector(self, vector: List[float]) -> List[float]:
+        current_length = len(vector)
+        if current_length < IMAGE_VECTOR_LENGTH:
+            vector = vector + [0.0] * (IMAGE_VECTOR_LENGTH - current_length)
+        elif current_length > IMAGE_VECTOR_LENGTH:
+            raise Exception(
+                f"Image vector length {current_length} exceeds max {IMAGE_VECTOR_LENGTH}"
+            )
+        return vector

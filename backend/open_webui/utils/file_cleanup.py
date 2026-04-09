@@ -144,6 +144,11 @@ def cleanup_file_completely(
         else:
             log.debug(f"File collection {file_collection} does not exist, skipping")
             details["file_collection_deleted"] = True  # Consider it success if it doesn't exist
+        # Also clean up image embeddings
+        try:
+            VECTOR_DB_CLIENT.delete_image_collection(collection_name=file_collection)
+        except Exception:
+            pass
     except Exception as e:
         error_msg = f"Error deleting file collection {file_collection}: {e}"
         log.exception(error_msg)

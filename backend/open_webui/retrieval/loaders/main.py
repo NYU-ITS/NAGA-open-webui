@@ -22,6 +22,7 @@ from langchain_community.document_loaders import (
 )
 from langchain_core.documents import Document
 from open_webui.env import SRC_LOG_LEVELS, GLOBAL_LOG_LEVEL
+from open_webui.retrieval.loaders.pdf import MultimodalPDFLoader, ExtractedImage
 
 logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
@@ -176,6 +177,53 @@ class Loader:
         ]
         log.info(f"[Loader.load] Returning {len(result)} processed document(s)")
         return result
+
+    def load_with_images(
+        self, filename: str, file_content_type: str, file_path: str
+    ) -> tuple[list[Document], list[ExtractedImage]]:
+        """
+        Extended load that also returns extracted images for PDFs.
+
+        For PDFs, uses MultimodalPDFLoader (pymupdf + pdfplumber) for
+        layout-aware text, table-as-markdown, and image extraction.
+        For non-PDFs, delegates to the existing load() and returns no images.
+        """
+        file_ext = filename.split(".")[-1].lower() if "." in filename else ""
+
+        if file_ext == "pdf":
+            if not os.path.exists(file_path):
+                log.error(f"[LOADER] FAILED | file={filename} | reason=FILE_NOT_FOUND | path={file_path}")
+                raise FileNotFoundError(f"File not found: {file_path}")
+
+            file_size = os.path.getsize(file_path)
+            log.info(
+                f"[LOADER] PDF_MULTIMODAL | file={filename} | size={file_size}B | "
+                f"extract_images={self.kwargs.get('EXTRACT_IMAGES', True)} | "
+                f"extract_tables={self.kwargs.get('EXTRACT_TABLES', True)}"
+            )
+
+            loader = MultimodalPDFLoader(
+                file_path,
+                extract_images=self.kwargs.get("EXTRACT_IMAGES", True),
+                extract_tables=self.kwargs.get("EXTRACT_TABLES", True),
+            )
+            docs, images = loader.load()
+            docs = [
+                Document(
+                    page_content=ftfy.fix_text(d.page_content),
+                    metadata=d.metadata,
+                )
+                for d in docs
+            ]
+            log.info(
+                f"[LOADER] PDF_MULTIMODAL_DONE | file={filename} | "
+                f"docs={len(docs)} | images={len(images)}"
+            )
+            return docs, images
+
+        # Non-PDF: delegate to existing path, no images
+        docs = self.load(filename, file_content_type, file_path)
+        return docs, []
 
     def _get_loader(self, filename: str, file_content_type: str, file_path: str):
         file_ext = filename.split(".")[-1].lower() if "." in filename else ""

@@ -339,6 +339,7 @@ test_frameworks/
 
 # Cursor IDE files
 .cursor/
+.cursorignore
 
 # Kubernetes manifests with hardcoded secrets (OpenShift-specific, keep local only)
 kubernetes/manifest/base/rq-worker-deployment-openshift.yaml
@@ -377,3 +378,8 @@ TEST_RESULTS.md
 TEST_SUMMARY.md
 llm_portkey.py
 .test_otel_generators/
+
+# Claude files
+CLAUDE.md
+.claudeignore
+.claude/

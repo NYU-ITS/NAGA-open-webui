@@ -17,3 +17,18 @@ class GetResult(BaseModel):
 
 class SearchResult(GetResult):
     distances: Optional[List[List[float | int]]]
+
+
+class ImageVectorItem(BaseModel):
+    id: str
+    image_data: str  # base64-encoded PNG
+    vector: List[float | int]
+    page_number: int
+    metadata: Any
+
+
+class ImageSearchResult(BaseModel):
+    ids: Optional[List[List[str]]]
+    image_data: Optional[List[List[str]]]
+    distances: Optional[List[List[float | int]]]
+    metadatas: Optional[List[List[Any]]]

@@ -598,6 +598,76 @@ def get_single_batch_embedding_function(
         raise ValueError(f"Unknown embedding engine: {embedding_engine}")
 
 
+def generate_image_embeddings(
+    engine: str,
+    model: str,
+    images: list[str],  # base64-encoded PNG strings
+    url: str,
+    key: str,
+    user=None,
+) -> list[list[float]]:
+    """
+    Embed images using a multimodal embedding model via Portkey/OpenAI gateway.
+
+    Uses the same API infrastructure as text embeddings — same base URL,
+    same API key — but with a different model name that routes to a
+    multimodal embedding provider (e.g. CLIP).
+
+    The images are sent as base64 data URIs in the embedding request input.
+    """
+    # Format images as data URIs for the embedding API
+    image_inputs = [
+        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img}"}}
+        for img in images
+    ]
+
+    try:
+        r = requests.post(
+            f"{url}/embeddings",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {key}",
+            },
+            json={"input": image_inputs, "model": model},
+            timeout=120,
+        )
+        r.raise_for_status()
+        data = r.json()
+        if "data" in data:
+            return [elem["embedding"] for elem in data["data"]]
+        else:
+            raise ValueError(f"Unexpected response format from image embedding API: {data}")
+    except Exception as e:
+        log.exception(f"Error generating image embeddings: {e}")
+        raise
+
+
+def get_image_embedding_function(
+    embedding_engine: str,
+    embedding_model: str,
+    url: str,
+    key: str,
+):
+    """
+    Create an image embedding function using the same Portkey/OpenAI gateway
+    as text embeddings but with a different (multimodal) model name.
+    """
+    if embedding_engine in ["openai", "portkey"]:
+        return lambda images, user=None: generate_image_embeddings(
+            engine=embedding_engine,
+            model=embedding_model,
+            images=images,
+            url=url,
+            key=key,
+            user=user,
+        )
+    else:
+        raise ValueError(
+            f"Image embedding not supported for engine: {embedding_engine}. "
+            f"Use 'openai' or 'portkey'."
+        )
+
+
 def get_sources_from_files(
     request,
     files,

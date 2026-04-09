@@ -926,12 +926,15 @@ async def delete_knowledge_by_id(id: str, user=Depends(get_verified_user)):
                 )
                 Models.update_model_by_id(model.id, model_form)
 
-    # Clean up vector DB
+    # Clean up vector DB (text + image chunks)
     try:
         VECTOR_DB_CLIENT.delete_collection(collection_name=id)
     except Exception as e:
         log.debug(e)
-        pass
+    try:
+        VECTOR_DB_CLIENT.delete_image_collection(collection_name=id)
+    except Exception as e:
+        log.debug(e)
     result = Knowledges.delete_knowledge_by_id(id=id)
     return result
 
@@ -964,7 +967,10 @@ async def reset_knowledge_by_id(id: str, user=Depends(get_verified_user)):
         VECTOR_DB_CLIENT.delete_collection(collection_name=id)
     except Exception as e:
         log.debug(e)
-        pass
+    try:
+        VECTOR_DB_CLIENT.delete_image_collection(collection_name=id)
+    except Exception as e:
+        log.debug(e)
 
     knowledge = Knowledges.update_knowledge_data_by_id(id=id, data={"file_ids": []})
 

@@ -71,12 +71,14 @@ from open_webui.retrieval.web.exa import search_exa
 from open_webui.retrieval.utils import (
     get_single_batch_embedding_function,
     get_embedding_function,
+    get_image_embedding_function,
     get_model_path,
     query_collection,
     query_collection_with_hybrid_search,
     query_doc,
     query_doc_with_hybrid_search,
 )
+from open_webui.retrieval.loaders.pdf import ExtractedImage
 from open_webui.utils.misc import (
     calculate_sha256_string,
 )
@@ -1251,6 +1253,10 @@ def save_docs_to_vector_db(
 
                     if overwrite:
                         VECTOR_DB_CLIENT.delete_collection(collection_name=collection_name)
+                        try:
+                            VECTOR_DB_CLIENT.delete_image_collection(collection_name=collection_name)
+                        except Exception:
+                            pass
                         log.info(f"deleting existing collection {collection_name}")
                     elif add is False:
                         log.info(
@@ -1509,6 +1515,126 @@ def save_docs_to_vector_db(
             raise e
 
 
+def save_images_to_vector_db(
+    request: Request,
+    images: list[ExtractedImage],
+    collection_name: str,
+    metadata: Optional[dict] = None,
+    overwrite: bool = False,
+    user=None,
+    owner_email: Optional[str] = None,
+) -> bool:
+    """
+    Embed extracted images and store in the image_chunk table.
+
+    Uses the same Portkey gateway and per-admin API key as text embeddings,
+    but routes to a different (multimodal) embedding model via
+    RAG_IMAGE_EMBEDDING_MODEL_USER.
+
+    Returns True if images were embedded, False if skipped (no model configured).
+    """
+    import base64
+
+    effective_owner_email = owner_email if owner_email else (user.email if user else None)
+    if not effective_owner_email:
+        log.warning("[IMAGE_EMBED] No owner_email available, skipping image embedding")
+        return False
+
+    # RBAC: Get per-admin image embedding model
+    image_model = request.app.state.config.RAG_IMAGE_EMBEDDING_MODEL_USER.get(
+        effective_owner_email
+    )
+    if not image_model or not image_model.strip():
+        log.info(
+            f"[IMAGE_EMBED] No image embedding model configured for {effective_owner_email}, "
+            f"skipping image embedding for {len(images)} images"
+        )
+        return False
+
+    # Reuse the same API key and base URL as text embeddings
+    owner_api_key = request.app.state.config.RAG_OPENAI_API_KEY.get(
+        effective_owner_email
+    )
+    if not owner_api_key or not owner_api_key.strip():
+        log.warning(
+            f"[IMAGE_EMBED] No API key for {effective_owner_email}, skipping image embedding"
+        )
+        return False
+
+    base_url_config = request.app.state.config.RAG_OPENAI_API_BASE_URL
+    base_url = (
+        base_url_config.value if hasattr(base_url_config, "value") else str(base_url_config)
+    )
+    if not base_url or base_url.strip() == "" or base_url == "None":
+        base_url = "https://ai-gateway.apps.cloud.rt.nyu.edu/v1"
+
+    log.info(
+        f"[IMAGE_EMBED] START | images={len(images)} | collection={collection_name} | "
+        f"model={image_model} | owner={effective_owner_email}"
+    )
+
+    # Delete existing image collection if overwriting
+    if overwrite:
+        try:
+            VECTOR_DB_CLIENT.delete_image_collection(collection_name)
+        except Exception:
+            pass
+
+    # Convert images to base64
+    image_b64_list = [base64.b64encode(img.image_bytes).decode("utf-8") for img in images]
+
+    # Create embedding function via Portkey (same gateway, different model)
+    embedding_engine = request.app.state.config.RAG_EMBEDDING_ENGINE
+    embedding_fn = get_image_embedding_function(
+        embedding_engine=embedding_engine,
+        embedding_model=image_model,
+        url=base_url,
+        key=owner_api_key,
+    )
+
+    # Generate embeddings
+    embeddings = embedding_fn(image_b64_list, user=user)
+
+    if not embeddings or len(embeddings) != len(images):
+        raise ValueError(
+            f"Image embedding count mismatch: expected {len(images)}, got {len(embeddings) if embeddings else 0}"
+        )
+
+    # Build items for vector DB insertion
+    items = [
+        {
+            "id": str(uuid.uuid4()),
+            "image_data": image_b64_list[idx],
+            "vector": embeddings[idx],
+            "page_number": img.page_number,
+            "metadata": {
+                **(metadata or {}),
+                "page": img.page_number,
+                "image_index": img.image_index,
+                "width": img.width,
+                "height": img.height,
+                "embedding_config": json.dumps(
+                    {
+                        "engine": embedding_engine,
+                        "model": image_model,
+                    }
+                ),
+            },
+        }
+        for idx, img in enumerate(images)
+    ]
+
+    VECTOR_DB_CLIENT.insert_images(
+        collection_name=collection_name,
+        items=items,
+    )
+
+    log.info(
+        f"[IMAGE_EMBED] SUCCESS | images={len(items)} | collection={collection_name}"
+    )
+    return True
+
+
 def get_embeddings_with_fallback(
     embedding_engine: str,
     embedding_model: str,
@@ -1759,6 +1885,10 @@ def save_docs_to_multiple_collections(
                 log.info(f"Collection {collection_name} already exists")
                 if overwrite:
                     VECTOR_DB_CLIENT.delete_collection(collection_name=collection_name)
+                    try:
+                        VECTOR_DB_CLIENT.delete_image_collection(collection_name=collection_name)
+                    except Exception:
+                        pass
                     log.info(f"Deleting existing collection {collection_name}")
 
         # RBAC: Get per-admin model and API key for the owner
@@ -2096,10 +2226,14 @@ def _process_file_sync(
         if collection_name is None:
             collection_name = f"file-{file.id}"
 
+        # Track extracted images for multimodal embedding (populated only for fresh PDF extraction)
+        extracted_images = []
+
         if content:
             # Update the content in the file
             try:
                 VECTOR_DB_CLIENT.delete_collection(collection_name=f"file-{file.id}")
+                VECTOR_DB_CLIENT.delete_image_collection(collection_name=f"file-{file.id}")
             except Exception:
                 # Audio file upload pipeline - ignore deletion errors
                 pass
@@ -2182,15 +2316,18 @@ def _process_file_sync(
                         f"content_type={file.meta.get('content_type')} | engine={extraction_engine}"
                     )
                     
-                    # CRITICAL: Force PDF_EXTRACT_IMAGES=False to prevent hangs (image extraction causes 2+ minute slowdowns)
+                    # Use multimodal loader for PDFs (pymupdf + pdfplumber)
+                    # Non-PDFs fall through to existing loader path via load_with_images()
                     loader = Loader(
                         engine=request.app.state.config.CONTENT_EXTRACTION_ENGINE,
                         TIKA_SERVER_URL=request.app.state.config.TIKA_SERVER_URL,
-                        PDF_EXTRACT_IMAGES=False,  # FORCED TO FALSE - image extraction causes hangs
+                        PDF_EXTRACT_IMAGES=False,  # Legacy flag — images now extracted via pymupdf in load_with_images
+                        EXTRACT_IMAGES=True,  # Enable pymupdf image extraction
+                        EXTRACT_TABLES=getattr(request.app.state.config, "PDF_EXTRACT_TABLES", True),
                         DOCUMENT_INTELLIGENCE_ENDPOINT=request.app.state.config.DOCUMENT_INTELLIGENCE_ENDPOINT,
                         DOCUMENT_INTELLIGENCE_KEY=request.app.state.config.DOCUMENT_INTELLIGENCE_KEY,
                     )
-                    docs = loader.load(
+                    docs, extracted_images = loader.load_with_images(
                         file.filename, file.meta.get("content_type"), file_path
                     )
                     
@@ -2384,6 +2521,41 @@ def _process_file_sync(
                     )
                 except Exception as update_error:
                     log.error(f"Failed to update file status after vector DB error: {update_error}")
+
+            # Phase 2: Save image embeddings (non-fatal — text embeddings already saved)
+            if extracted_images and len(extracted_images) > 0:
+                try:
+                    image_result = save_images_to_vector_db(
+                        request,
+                        images=extracted_images,
+                        collection_name=f"file-{file.id}",
+                        metadata={"file_id": file.id, "name": file.filename},
+                        user=user,
+                        owner_email=owner_email,
+                    )
+                    if image_result:
+                        log.info(
+                            f"[IMAGE_EMBED] Saved {len(extracted_images)} image embeddings "
+                            f"for file {file.id}"
+                        )
+                        Files.update_file_metadata_by_id(
+                            file.id,
+                            {
+                                "has_images": True,
+                                "image_count": len(extracted_images),
+                            },
+                        )
+                    else:
+                        log.info(
+                            f"[IMAGE_EMBED] Skipped for file {file.id} "
+                            f"(no image embedding model configured)"
+                        )
+                except Exception as img_err:
+                    log.warning(
+                        f"[IMAGE_EMBED] Non-fatal failure for file {file.id}: {img_err}"
+                    )
+                    # Text embeddings already saved — don't fail the file
+
         else:
             # Bypass embedding, just mark as completed
             print(f"  [STEP 4] ⚠️  Embedding and retrieval bypassed (BYPASS_EMBEDDING_AND_RETRIEVAL=True)", flush=True)
@@ -2644,6 +2816,9 @@ def process_file(
                         """),
                         {"file_id": form_data.file_id}
                     )
+                    # Consume RETURNING before commit — psycopg2 closes the cursor on commit
+                    updated_row = result.fetchone()
+                    update_succeeded = updated_row is not None
                 else:
                     # SQLite: Use JSON functions (json_set, json_extract)
                     result = db.execute(
@@ -2662,15 +2837,8 @@ def process_file(
                         """),
                         {"file_id": form_data.file_id}
                     )
-                db.commit()
-                
-                # Check if update actually happened (row was updated)
-                # For SQLite, check rowcount; for PostgreSQL, check RETURNING result
-                if is_postgresql:
-                    updated_row = result.fetchone()
-                    update_succeeded = updated_row is not None
-                else:
                     update_succeeded = result.rowcount > 0
+                db.commit()
                 
                 if not update_succeeded:
                     # Another request already set status to pending/processing

@@ -1962,6 +1962,12 @@ PGVECTOR_INITIALIZE_MAX_VECTOR_LENGTH = int(
     os.environ.get("PGVECTOR_INITIALIZE_MAX_VECTOR_LENGTH", "1536")
 )
 
+# Dimension for image embedding vectors (separate from text embeddings)
+# Typical values: 512 (CLIP ViT-B), 768 (CLIP ViT-L), 1024 (larger models)
+PGVECTOR_IMAGE_VECTOR_LENGTH = int(
+    os.environ.get("PGVECTOR_IMAGE_VECTOR_LENGTH", "1024")
+)
+
 ####################################
 # Information Retrieval (RAG)
 ####################################
@@ -2098,6 +2104,14 @@ PDF_EXTRACT_IMAGES = PersistentConfig(
     os.environ.get("PDF_EXTRACT_IMAGES", "False").lower() == "true",
 )
 
+# PDF_EXTRACT_TABLES: Use pdfplumber to extract tables as structured Markdown
+# Enabled by default — tables are converted to Markdown and embedded as text
+PDF_EXTRACT_TABLES = PersistentConfig(
+    "PDF_EXTRACT_TABLES",
+    "rag.pdf_extract_tables",
+    os.environ.get("PDF_EXTRACT_TABLES", "True").lower() == "true",
+)
+
 # DEPRECATED: Legacy global embedding model - NOT USED for RAG operations
 # We only use Portkey for embeddings, and each admin has their own model name (see RAG_EMBEDDING_MODEL_USER below)
 RAG_EMBEDDING_MODEL = PersistentConfig(
@@ -2115,6 +2129,16 @@ log.info(f"Embedding model set: {RAG_EMBEDDING_MODEL.value!r}")
 RAG_EMBEDDING_MODEL_USER = UserScopedConfig(
     "rag.embedding_model_user",
     os.getenv("RAG_EMBEDDING_MODEL_USER", ""),  # Empty default - must be configured by admin
+)
+
+# Per-admin multimodal (image) embedding model name (RBAC-scoped)
+# Used for embedding images extracted from PDFs via Portkey gateway
+# Same API key (RAG_OPENAI_API_KEY) and base URL (RAG_OPENAI_API_BASE_URL) as text embeddings
+# Only the model name differs (e.g. @clip-provider/clip-vit-large-patch14)
+# If empty, image embedding is skipped (text+table extraction still works)
+RAG_IMAGE_EMBEDDING_MODEL_USER = UserScopedConfig(
+    "rag.image_embedding_model_user",
+    os.getenv("RAG_IMAGE_EMBEDDING_MODEL_USER", ""),
 )
 
 RAG_EMBEDDING_MODEL_AUTO_UPDATE = (

@@ -708,6 +708,7 @@ def process_file_job(
                         # Update the content in the file
                         try:
                             VECTOR_DB_CLIENT.delete_collection(collection_name=vector_collection_name)
+                            VECTOR_DB_CLIENT.delete_image_collection(collection_name=vector_collection_name)
                         except Exception:
                             # Audio file upload pipeline - ignore deletion errors
                             pass
