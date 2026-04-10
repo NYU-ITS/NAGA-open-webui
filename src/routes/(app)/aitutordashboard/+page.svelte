@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount, tick } from 'svelte';
 	import { page } from '$app/stores';
+	import { aiTutorSelectedGroupId } from '$lib/stores';
 	import { toast } from 'svelte-sonner';
 	import {
 		AI_TUTOR_API_BASE_URL,
@@ -34,7 +35,7 @@
 	const useFrontendTestingData = AI_TUTOR_FRONTEND_TESTING_MODE;
 	const testToast = showAITutorTestToast;
 	const SUMMARY_SESSION_TTL_MS = 5 * 60 * 1000;
-	const LAST_AI_TUTOR_GROUP_STORAGE_KEY = 'ai_tutor_last_selected_group_id';
+	let lastSyncedGroupId = '';
 
 	// ── Types ─────────────────────────────────────────────────────────────────
 	type HomeworkStat = {
@@ -175,7 +176,7 @@ const bannerPlaceholderTime = 'TEST-TIME';
 
 	// ── State ─────────────────────────────────────────────────────────────────
 	let homeworkStats: HomeworkStat[] = useFrontendTestingData ? placeholderStats : [];
-	let selectedGroupId = '';
+	// $aiTutorSelectedGroupId now comes from store
 
 	// Table sort
 	let sortKey = 'homework';
@@ -223,7 +224,8 @@ const bannerPlaceholderTime = 'TEST-TIME';
 		availableModels = frontendTestingModels;
 		homeworkRows = frontendTestingHomeworkRows;
 		convCountByModelId = frontendTestingConversationCounts;
-		errorTypeDefs = $aiTutorFrontendTestingErrorTypes;
+		originalErrorTypeDefs = $aiTutorFrontendTestingErrorTypes;
+		draftErrorTypeDefs = $aiTutorFrontendTestingErrorTypes;
 		generalPrompts = frontendTestingGeneralPrompts;
 		tutorPrompts = frontendTestingTutorPrompts.map((p) => ({ ...p, group_id: groupId || 'frontend-testing-group' }));
 		homeworkStats = placeholderStats.map((stat, i) => ({
@@ -305,19 +307,13 @@ const bannerPlaceholderTime = 'TEST-TIME';
 	$: avgSolvedChart = chartPoints(homeworkStats.map((s) => s.avgSolved));
 	$: avgAttemptedChart = chartPoints(homeworkStats.map((s) => s.avgAttempted));
 	$: combinedChart = combinedChartPoints(homeworkStats.map((s) => s.avgSolved), homeworkStats.map((s) => s.avgAttempted));
-	function getPersistedGroupId() {
-		if (typeof localStorage === 'undefined') return '';
-		return localStorage.getItem(LAST_AI_TUTOR_GROUP_STORAGE_KEY) || '';
-	}
-
-	$: selectedGroupId = $page.url.searchParams.get('group_id') || getPersistedGroupId();
-	$: if ($page.url.searchParams.get('group_id')) {
-		if (typeof localStorage !== 'undefined') {
-			localStorage.setItem(
-				LAST_AI_TUTOR_GROUP_STORAGE_KEY,
-				$page.url.searchParams.get('group_id') || ''
-			);
-		}
+	// Subscribe to store for group changes - prevents flash of wrong group data
+	$: if ($aiTutorSelectedGroupId && $aiTutorSelectedGroupId !== lastSyncedGroupId) {
+		lastSyncedGroupId = $aiTutorSelectedGroupId;
+		void loadHomeworkStats($aiTutorSelectedGroupId);
+		void loadConversationCounts($aiTutorSelectedGroupId);
+		void loadErrorTypes($aiTutorSelectedGroupId);
+		void loadPrompts($aiTutorSelectedGroupId);
 	}
 
 	// ── Data fetching ─────────────────────────────────────────────────────────
@@ -326,16 +322,16 @@ const bannerPlaceholderTime = 'TEST-TIME';
 		// Purpose: load non-group-scoped data immediately, then wait for the layout to
 		// write the default group_id into the URL before issuing group-scoped requests.
 		testToast(
-			`loading aitutordashboard - Summary | group=${selectedGroupId || 'pending'} | frontend_testing=${String(useFrontendTestingData)}`
+			`loading aitutordashboard - Summary | group=${$aiTutorSelectedGroupId || 'pending'} | frontend_testing=${String(useFrontendTestingData)}`
 		);
 		console.log('AI Tutor Dashboard - Summary mount', {
 			pathname: $page.url.pathname,
-			groupId: selectedGroupId,
+			groupId: $aiTutorSelectedGroupId,
 			groupIdFromUrl: $page.url.searchParams.get('group_id') || ''
 		});
 		await loadModels();
 		if (useFrontendTestingData) {
-			seedDummyDashboard(selectedGroupId);
+			seedDummyDashboard($aiTutorSelectedGroupId);
 			await tick();
 			updateScrollState();
 			return;
@@ -344,28 +340,12 @@ const bannerPlaceholderTime = 'TEST-TIME';
 
 	// Reset per-homework action state whenever the selected group changes so that
 	// in-progress indicators from a previous group never bleed into the new one.
-	$: if (selectedGroupId && selectedGroupId !== _prevGroupIdForReset) {
-		_prevGroupIdForReset = selectedGroupId;
+	$: if ($aiTutorSelectedGroupId && $aiTutorSelectedGroupId !== _prevGroupIdForReset) {
+		_prevGroupIdForReset = $aiTutorSelectedGroupId;
 		uploadingMap = {};
 		exportingConversationMap = {};
 		runningAnalysisByHomeworkId = {};
 		draftRows = [];
-	}
-
-	$: if (!useFrontendTestingData && selectedGroupId) {
-		void loadHomeworkStats(selectedGroupId);
-	}
-
-	$: if (!useFrontendTestingData && selectedGroupId) {
-		void loadConversationCounts(selectedGroupId);
-	}
-
-	$: if (!useFrontendTestingData && selectedGroupId) {
-		void loadErrorTypes(selectedGroupId);
-	}
-
-	$: if (!useFrontendTestingData && selectedGroupId) {
-		void loadPrompts(selectedGroupId);
 	}
 
 async function loadHomeworkStats(groupId: string) {
@@ -398,7 +378,7 @@ async function loadHomeworkStats(groupId: string) {
 			const snapshot = await loadWithAITutorSessionCache({
 				key: `summary:${groupId}:homework-stats`,
 				ttlMs: SUMMARY_SESSION_TTL_MS,
-				onCached: (cached) => { if (selectedGroupId === groupId) applySummarySnapshot(cached); },
+				onCached: (cached) => { if ($aiTutorSelectedGroupId === groupId) applySummarySnapshot(cached); },
 				loader: async () => {
 					const uploadStatusMap = new Map<
 						string,
@@ -533,7 +513,7 @@ async function loadHomeworkStats(groupId: string) {
 					};
 				}
 			});
-			if (selectedGroupId !== groupId) return; // stale — group changed while loading
+			if ($aiTutorSelectedGroupId !== groupId) return; // stale — group changed while loading
 			applySummarySnapshot(snapshot);
 		} catch (error) {
 			testToast('Summary failed loading /homework data');
@@ -601,52 +581,57 @@ async function loadConversationCounts(groupId: string) {
 				if (modelId) counts[modelId] = (counts[modelId] ?? 0) + 1;
 			}
 		}
-		if (selectedGroupId !== groupId) return; // stale
+		if ($aiTutorSelectedGroupId !== groupId) return; // stale
 		convCountByModelId = counts;
 	} catch (e) {
 		console.error('Conversation count fetch failed:', e);
 	}
 }
 
-async function loadErrorTypes(groupId: string) {
-	testToast(`Summary fetch: error types group=${groupId || 'none'}`);
-	if (useFrontendTestingData) {
-		errorTypeDefs = $aiTutorFrontendTestingErrorTypes;
-		return;
+	async function loadErrorTypes(groupId: string) {
+		testToast(`Summary fetch: error types group=${groupId || 'none'}`);
+		if (useFrontendTestingData) {
+			originalErrorTypeDefs = $aiTutorFrontendTestingErrorTypes;
+			draftErrorTypeDefs = $aiTutorFrontendTestingErrorTypes;
+			return;
+		}
+		if (!groupId) return;
+		try {
+			const freshErrorTypes = await loadWithAITutorSessionCache({
+				key: `summary:${groupId}:error-types`,
+				ttlMs: SUMMARY_SESSION_TTL_MS,
+				onCached: (cached) => {
+					if ($aiTutorSelectedGroupId === groupId) {
+						originalErrorTypeDefs = cached;
+						draftErrorTypeDefs = cached;
+					}
+				},
+				loader: async () => {
+					const res = await fetch(
+						`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(groupId)}`,
+						{ headers: { Authorization: `Bearer ${localStorage.token}` } }
+					);
+					if (!res.ok) throw new Error('Error types fetch failed');
+					const data = await res.json();
+					const errorTypes = Array.isArray(data?.error_types)
+						? data.error_types
+						: Array.isArray(data)
+							? data
+							: [];
+					return errorTypes.slice(0, 4).map((et: any, i: number) => ({
+						type: et.name ?? 'Unknown',
+						color: errorTypeColors[i % errorTypeColors.length],
+						description: et.description ?? ''
+					}));
+				}
+			});
+			if ($aiTutorSelectedGroupId !== groupId) return; // stale
+			originalErrorTypeDefs = freshErrorTypes;
+			draftErrorTypeDefs = freshErrorTypes;
+		} catch (e) {
+			console.error('Error types fetch failed:', e);
+		}
 	}
-	if (!groupId) return;
-	try {
-		const freshErrorTypes = await loadWithAITutorSessionCache({
-			key: `summary:${groupId}:error-types`,
-			ttlMs: SUMMARY_SESSION_TTL_MS,
-			onCached: (cached) => {
-				if (selectedGroupId === groupId) errorTypeDefs = cached;
-			},
-			loader: async () => {
-				const res = await fetch(
-					`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(groupId)}`,
-					{ headers: { Authorization: `Bearer ${localStorage.token}` } }
-				);
-				if (!res.ok) throw new Error('Error types fetch failed');
-				const data = await res.json();
-				const errorTypes = Array.isArray(data?.error_types)
-					? data.error_types
-					: Array.isArray(data)
-						? data
-						: [];
-				return errorTypes.slice(0, 4).map((et: any, i: number) => ({
-					type: et.name ?? 'Unknown',
-					color: errorTypeColors[i % errorTypeColors.length],
-					description: et.description ?? ''
-				}));
-			}
-		});
-		if (selectedGroupId !== groupId) return; // stale
-		errorTypeDefs = freshErrorTypes;
-	} catch (e) {
-		console.error('Error types fetch failed:', e);
-	}
-}
 
 async function loadPrompts(groupId: string) {
 	testToast(`Summary fetch: prompts group=${groupId || 'none'}`);
@@ -660,7 +645,7 @@ async function loadPrompts(groupId: string) {
 			key: 'summary:global:general-prompts',
 			ttlMs: SUMMARY_SESSION_TTL_MS,
 			onCached: (cached) => {
-				if (selectedGroupId === groupId) generalPrompts = cached;
+				if ($aiTutorSelectedGroupId === groupId) generalPrompts = cached;
 			},
 			loader: async () => {
 				const generalRes = await fetch(`${AI_TUTOR_API_BASE}/prompts/general`, {
@@ -670,7 +655,7 @@ async function loadPrompts(groupId: string) {
 				return await generalRes.json();
 			}
 		});
-		if (selectedGroupId !== groupId) return; // stale
+		if ($aiTutorSelectedGroupId !== groupId) return; // stale
 		generalPrompts = freshGeneralPrompts;
 	} catch (e) {
 		console.error('General prompts fetch failed:', e);
@@ -685,7 +670,7 @@ async function loadPrompts(groupId: string) {
 			key: `summary:${groupId}:tutor-prompts`,
 			ttlMs: SUMMARY_SESSION_TTL_MS,
 			onCached: (cached) => {
-				if (selectedGroupId === groupId) tutorPrompts = cached;
+				if ($aiTutorSelectedGroupId === groupId) tutorPrompts = cached;
 			},
 			loader: async () => {
 				const tutorRes = await fetch(
@@ -696,7 +681,7 @@ async function loadPrompts(groupId: string) {
 				return await tutorRes.json();
 			}
 		});
-		if (selectedGroupId !== groupId) return; // stale
+		if ($aiTutorSelectedGroupId !== groupId) return; // stale
 		tutorPrompts = freshTutorPrompts;
 	} catch (e) {
 		console.error('Tutor prompts fetch failed:', e);
@@ -827,7 +812,7 @@ async function validateRunPrerequisites(homeworkId: string) {
 		toast.error('Select a homework before running analysis.');
 		return false;
 	}
-	if (!selectedGroupId) {
+	if (!$aiTutorSelectedGroupId) {
 		toast.error('Select a group before running analysis.');
 		return false;
 	}
@@ -855,7 +840,7 @@ function openPromptModal(def: { name: string; label: string; usedFor: string }) 
 }
 
 async function savePromptOverride() {
-	if (!selectedGroupId || !selectedPromptName) return;
+	if (!$aiTutorSelectedGroupId || !selectedPromptName) return;
 	if (useFrontendTestingData) {
 		if (selectedPromptTutorId) {
 			tutorPrompts = tutorPrompts.map((prompt) =>
@@ -867,7 +852,7 @@ async function savePromptOverride() {
 				{
 					id: `tp-${Date.now()}`,
 					name: selectedPromptName,
-					group_id: selectedGroupId,
+					group_id: $aiTutorSelectedGroupId,
 					prompt: selectedPromptText,
 					is_active: true
 				}
@@ -896,13 +881,13 @@ async function savePromptOverride() {
 				},
 				body: JSON.stringify({
 					name: selectedPromptName,
-					group_id: selectedGroupId,
+					group_id: $aiTutorSelectedGroupId,
 					prompt: selectedPromptText
 				})
 			});
 		}
-		clearAITutorSessionCacheByPrefix(`summary:${selectedGroupId}:tutor-prompts`);
-		await loadPrompts(selectedGroupId);
+		clearAITutorSessionCacheByPrefix(`summary:${$aiTutorSelectedGroupId}:tutor-prompts`);
+		await loadPrompts($aiTutorSelectedGroupId);
 		showPromptModal = false;
 		testToast('Summary saved prompt override');
 	} catch (e) {
@@ -935,8 +920,8 @@ async function useDefaultPrompt() {
 			},
 			body: JSON.stringify({ is_active: false })
 		});
-		clearAITutorSessionCacheByPrefix(`summary:${selectedGroupId}:tutor-prompts`);
-		await loadPrompts(selectedGroupId);
+		clearAITutorSessionCacheByPrefix(`summary:${$aiTutorSelectedGroupId}:tutor-prompts`);
+		await loadPrompts($aiTutorSelectedGroupId);
 		showPromptModal = false;
 		testToast('Summary reset prompt to default');
 	} catch (e) {
@@ -946,26 +931,44 @@ async function useDefaultPrompt() {
 }
 
 async function persistErrorTypes() {
-	if (!selectedGroupId) return;
+	if (!$aiTutorSelectedGroupId) return;
 	if (useFrontendTestingData) {
 		toast.success('Frontend testing error types saved.');
-		aiTutorFrontendTestingErrorTypes.set(errorTypeDefs);
+		aiTutorFrontendTestingErrorTypes.set(draftErrorTypeDefs);
+		originalErrorTypeDefs = draftErrorTypeDefs;
+		justSavedErrorTypes = true;
+		if (saveSuccessTimeout) clearTimeout(saveSuccessTimeout);
+		saveSuccessTimeout = setTimeout(() => { justSavedErrorTypes = false; }, 2000);
 		return;
 	}
 	try {
-		const res = await fetch(
-			`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(selectedGroupId)}`,
-			{
-				method: 'PUT',
-				headers: {
-					'Content-Type': 'application/json',
-					Authorization: `Bearer ${localStorage.token}`
-				},
-				body: JSON.stringify(errorTypeDefs.map((d) => ({ name: d.type, description: d.description })))
-			}
-		);
-		if (res.ok) {
-			clearAITutorSessionCacheByPrefix(`summary:${selectedGroupId}:error-types`);
+		let saved = false;
+		if (draftErrorTypeDefs.length === 0) {
+			const res = await fetch(
+				`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent($aiTutorSelectedGroupId)}`,
+				{ method: 'DELETE', headers: { Authorization: `Bearer ${localStorage.token}` } }
+			);
+			saved = res.ok;
+		} else {
+			const res = await fetch(
+				`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent($aiTutorSelectedGroupId)}`,
+				{
+					method: 'PUT',
+					headers: {
+						'Content-Type': 'application/json',
+						Authorization: `Bearer ${localStorage.token}`
+					},
+					body: JSON.stringify(draftErrorTypeDefs.map((d) => ({ name: d.type, description: d.description })))
+				}
+			);
+			saved = res.ok;
+		}
+		if (saved) {
+			clearAITutorSessionCacheByPrefix(`summary:${$aiTutorSelectedGroupId}:error-types`);
+			originalErrorTypeDefs = draftErrorTypeDefs;
+			justSavedErrorTypes = true;
+			if (saveSuccessTimeout) clearTimeout(saveSuccessTimeout);
+			saveSuccessTimeout = setTimeout(() => { justSavedErrorTypes = false; }, 2000);
 			testToast('Summary saved error types');
 		}
 	} catch (e) {
@@ -974,65 +977,53 @@ async function persistErrorTypes() {
 	}
 }
 
-async function resetErrorTypesToDefault() {
-	if (!selectedGroupId) return;
-	if (useFrontendTestingData) {
-		errorTypeDefs = AI_TUTOR_FRONTEND_TESTING_ERROR_TYPES;
-		aiTutorFrontendTestingErrorTypes.set(AI_TUTOR_FRONTEND_TESTING_ERROR_TYPES);
-		toast.success('Frontend testing error types reset to defaults.');
-		return;
-	}
-	try {
-		await fetch(
-			`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(selectedGroupId)}`,
-			{ method: 'DELETE', headers: { Authorization: `Bearer ${localStorage.token}` } }
-		);
-		clearAITutorSessionCacheByPrefix(`summary:${selectedGroupId}:error-types`);
-		await loadErrorTypes(selectedGroupId);
-		testToast('Summary reset error types to default');
-	} catch (e) {
-		testToast('Summary failed resetting error types');
-		console.error('Failed to reset error types:', e);
-	}
+function resetErrorTypesToDefault() {
+	if (!$aiTutorSelectedGroupId) return;
+	// Draft mode: only update draft, require Save to persist
+	draftErrorTypeDefs = AI_TUTOR_FRONTEND_TESTING_ERROR_TYPES.map((et, i) => ({
+		...et,
+		color: errorTypeColors[i % errorTypeColors.length]
+	}));
+	testToast('Summary reset to defaults (draft) — Save to persist');
 }
 
 function openEditErrorType(index: number) {
 	editingErrorTypeIndex = index;
 	editingErrorTypeIsNew = false;
-	editErrorTypeName = errorTypeDefs[index].type;
-	editErrorTypeDescription = errorTypeDefs[index].description;
+	editErrorTypeName = draftErrorTypeDefs[index].type;
+	editErrorTypeDescription = draftErrorTypeDefs[index].description;
 	showEditErrorTypeModal = true;
 }
 
 function addErrorType() {
-	if (errorTypeDefs.length >= 4) return;
-	const color = errorTypeColors[errorTypeDefs.length % errorTypeColors.length];
+	if (draftErrorTypeDefs.length >= 4) return;
+	const color = errorTypeColors[draftErrorTypeDefs.length % errorTypeColors.length];
 	const newDef = { type: 'New Error Type', color, description: '' };
-	errorTypeDefs = [...errorTypeDefs, newDef];
-	editingErrorTypeIndex = errorTypeDefs.length - 1;
+	draftErrorTypeDefs = [...draftErrorTypeDefs, newDef];
+	editingErrorTypeIndex = draftErrorTypeDefs.length - 1;
 	editingErrorTypeIsNew = true;
 	editErrorTypeName = newDef.type;
 	editErrorTypeDescription = '';
 	showEditErrorTypeModal = true;
 }
 
-async function saveErrorTypeEdit() {
+function saveErrorTypeEdit() {
 	if (editingErrorTypeIndex === null) return;
-	errorTypeDefs[editingErrorTypeIndex] = {
-		...errorTypeDefs[editingErrorTypeIndex],
+	draftErrorTypeDefs[editingErrorTypeIndex] = {
+		...draftErrorTypeDefs[editingErrorTypeIndex],
 		type: editErrorTypeName,
 		description: editErrorTypeDescription
 	};
-	errorTypeDefs = [...errorTypeDefs];
+	draftErrorTypeDefs = [...draftErrorTypeDefs];
 	closeErrorTypeModal();
-	await persistErrorTypes();
+	// Draft mode: don't auto-save, user must click Save button
 }
 
-async function deleteErrorType() {
+function deleteErrorType() {
 	if (editingErrorTypeIndex === null) return;
-	errorTypeDefs = errorTypeDefs.filter((_, i) => i !== editingErrorTypeIndex);
+	draftErrorTypeDefs = draftErrorTypeDefs.filter((_, i) => i !== editingErrorTypeIndex);
 	closeErrorTypeModal();
-	await persistErrorTypes();
+	// Draft mode: don't auto-save, user must click Save button
 }
 
 function closeErrorTypeModal() {
@@ -1041,14 +1032,14 @@ function closeErrorTypeModal() {
 	editingErrorTypeIsNew = false;
 }
 
-async function confirmResetDefaults() {
+function confirmResetDefaults() {
 	showResetDefaultsModal = false;
-	await resetErrorTypesToDefault();
+	resetErrorTypesToDefault();
 }
 
 async function uploadPdf(hwId: string | null, docType: 'question' | 'answer', modelId: string, file: File, draftUid?: number) {
 	testToast(`Upload ${docType} PDF is triggered | page=aitutordashboard - Summary | model=${modelId} | target=${hwId ?? `draft-${draftUid ?? 0}`}`);
-	if (!selectedGroupId && !useFrontendTestingData) {
+	if (!$aiTutorSelectedGroupId && !useFrontendTestingData) {
 		toast.error('Select a group before uploading PDFs.');
 		return;
 	}
@@ -1124,7 +1115,7 @@ async function uploadPdf(hwId: string | null, docType: 'question' | 'answer', mo
 		formData.append('file', file);
 		const params = new URLSearchParams({
 			doc_type: docType,
-			group_id: selectedGroupId,
+			group_id: $aiTutorSelectedGroupId,
 			model_id: modelId
 		});
 		// Page: AI Tutor Dashboard Summary
@@ -1143,8 +1134,8 @@ async function uploadPdf(hwId: string | null, docType: 'question' | 'answer', mo
 		await pollPipelineJob(jobId, 3000, `${docType} upload`);
 		toast.success(`${docType === 'question' ? 'Homework' : 'Answer'} upload completed.`);
 		if (hwId === null && draftUid !== undefined) draftRows = draftRows.filter(d => d.uid !== draftUid);
-		clearAITutorSessionCacheByPrefix(`summary:${selectedGroupId}:homework-stats`);
-		await loadHomeworkStats(selectedGroupId);
+		clearAITutorSessionCacheByPrefix(`summary:${$aiTutorSelectedGroupId}:homework-stats`);
+		await loadHomeworkStats($aiTutorSelectedGroupId);
 	} catch (e) {
 		toast.error(e instanceof Error ? e.message : 'Upload failed.');
 		console.error('PDF upload failed:', e);
@@ -1319,8 +1310,8 @@ async function runAnalysis() {
 			await pollPipelineJob(jobId, 10000, 'analysis run');
 			toast.success('Analysis completed.');
 			analysisHistory = [{ contents, startedAt, completedAt: new Date().toLocaleTimeString(), failed: false }, ...analysisHistory];
-			clearAITutorSessionCacheByPrefix(`summary:${selectedGroupId}:homework-stats`);
-			await loadHomeworkStats(selectedGroupId);
+			clearAITutorSessionCacheByPrefix(`summary:${$aiTutorSelectedGroupId}:homework-stats`);
+			await loadHomeworkStats($aiTutorSelectedGroupId);
 		} else {
 			toast.error(await parseErrorDetail(res));
 			analysisHistory = [{ contents, startedAt, completedAt: null, failed: true }, ...analysisHistory];
@@ -1352,7 +1343,7 @@ async function runAnalysis() {
 		</div>
 	</div> -->
 
-	<!-- Charts Summary Section -->
+	<!-- [Standard Section: Charts Summary] -->
 	<div class="space-y-3">
 		<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Charts Summary</h2>
 
@@ -1464,13 +1455,13 @@ async function runAnalysis() {
 		</div>
 	</div>
 
-	<!-- Statistics Section -->
+	<!-- [Standard Section: Statistics] -->
 	<div class="space-y-2">
 		<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Statistics</h2>
 
 		<div class="scrollbar-hidden relative whitespace-nowrap overflow-x-auto max-w-full rounded-sm pt-0.5">
 			<table class="w-full text-sm text-left text-gray-500 dark:text-gray-400 table-auto max-w-full rounded-sm">
-				<thead class="text-xs text-gray-700 uppercase bg-gray-50 dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5">
+				<thead class="text-xs text-gray-700 uppercase bg-[#EEE6F3] dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5">
 					<tr>
 						{#each [
 							{ key: 'homework',     label: 'Homework' },
@@ -1503,7 +1494,7 @@ async function runAnalysis() {
 						</tr>
 					{:else}
 						{#each sortedStats as stat}
-							<tr class="bg-white dark:bg-gray-900 dark:border-gray-850 text-xs border-t border-gray-100 dark:border-gray-850">
+							<tr class="bg-white dark:bg-gray-900 dark:border-gray-850 text-xs border-t border-gray-100 dark:border-gray-850 hover:bg-gray-50 dark:hover:bg-gray-800 transition">
 								<td class="px-3 py-1 font-medium text-gray-900 dark:text-white">
 									<div class={homeworkModelNameCellClass}>{getHomeworkModelName(stat.homework)}</div>
 								</td>

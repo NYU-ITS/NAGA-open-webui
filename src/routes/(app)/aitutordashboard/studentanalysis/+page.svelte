@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
+	import { aiTutorSelectedGroupId } from '$lib/stores';
 	import { toast } from 'svelte-sonner';
 	import {
 		AI_TUTOR_API_BASE_URL,
@@ -14,13 +15,12 @@
 	import ChevronUp from '$lib/components/icons/ChevronUp.svelte';
 	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
 	import Search from '$lib/components/icons/Search.svelte';
-	import CustomDropdown from '$lib/components/CustomDropdown.svelte';
 
 	const AI_TUTOR_API_BASE = AI_TUTOR_API_BASE_URL;
 	const useFrontendTestingData = AI_TUTOR_FRONTEND_TESTING_MODE;
 	const testToast = showAITutorTestToast;
 	const STUDENT_ANALYSIS_SESSION_TTL_MS = 5 * 60 * 1000;
-	const LAST_AI_TUTOR_GROUP_STORAGE_KEY = 'ai_tutor_last_selected_group_id';
+	let lastSyncedGroupId = '';
 	const frontendTestingHomeworkModelNames = [
 		'Homework1-MATH-Code-Section-Semester',
 		'Homework2-MATH-Code-Section-Semester',
@@ -127,30 +127,25 @@
 		}
 	];
 
-	function getPersistedGroupId() {
-		if (typeof localStorage === 'undefined') return '';
-		return localStorage.getItem(LAST_AI_TUTOR_GROUP_STORAGE_KEY) || '';
-	}
+$: isFilterActive = selectedHomework !== 'All' || search.trim() !== '';
 
-	$: selectedGroupId = $page.url.searchParams.get('group_id') || getPersistedGroupId();
-	$: if ($page.url.searchParams.get('group_id')) {
-		if (typeof localStorage !== 'undefined') {
-			localStorage.setItem(LAST_AI_TUTOR_GROUP_STORAGE_KEY, $page.url.searchParams.get('group_id') || '');
-		}
+	// Subscribe to store for group changes - prevents flash of wrong group data
+	$: if (initialized && $aiTutorSelectedGroupId && $aiTutorSelectedGroupId !== lastSyncedGroupId) {
+		lastSyncedGroupId = $aiTutorSelectedGroupId;
+		void syncStudentAnalysisData($aiTutorSelectedGroupId);
 	}
-	$: isFilterActive = selectedHomework !== 'All' || search.trim() !== '';
 
 	onMount(async () => {
 		// Page: AI Tutor Dashboard > Student Analysis
 		// Purpose: load user context immediately, then wait for the layout to select the
 		// default group before issuing group-scoped homework/member requests.
 		testToast(
-			`loading aitutordashboard - Student Analysis | group=${selectedGroupId || 'pending'} | frontend_testing=${String(useFrontendTestingData)}`
+			`loading aitutordashboard - Student Analysis | group=${$aiTutorSelectedGroupId || 'pending'} | frontend_testing=${String(useFrontendTestingData)}`
 		);
 		initialized = true;
 		console.log('AI Tutor Dashboard - Student Analysis mount', {
 			pathname: $page.url.pathname,
-			groupId: selectedGroupId,
+			groupId: $aiTutorSelectedGroupId,
 			groupIdFromUrl: $page.url.searchParams.get('group_id') || '',
 			selectedHomework
 		});
@@ -163,9 +158,7 @@
 		}
 	});
 
-	$: if (initialized && selectedGroupId) {
-		void syncStudentAnalysisData(selectedGroupId);
-	}
+
 
 	function getStudentAnalysisSessionKey(groupId: string, resource: string) {
 		return `student-analysis:${groupId || 'global'}:${resource}`;
@@ -529,7 +522,7 @@
 	})();
 	$: selectedHomeworkMeta =
 		selectedHomework !== 'All' ? homeworkMetaById[selectedHomework] ?? null : null;
-	$: studentAnalysisEmptyMessage = !selectedGroupId && !useFrontendTestingData
+	$: studentAnalysisEmptyMessage = !$aiTutorSelectedGroupId && !useFrontendTestingData
 		? 'Loading group selection...'
 		: homeworkOptions.length === 0 && !useFrontendTestingData
 			? 'No homework uploaded for this group yet.'
@@ -543,42 +536,55 @@
 </script>
 
 <div class="flex flex-col space-y-6 py-4">
+	<!-- [Standard Section: Student Analysis] -->
 	<div class="space-y-3">
-		<div class="flex flex-wrap items-center justify-between gap-4">
-			<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Student Analysis</h2>
+		<!-- Title -->
+		<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Student Analysis</h2>
 
-			<div class="flex flex-wrap items-center gap-6">
-				<CustomDropdown
-					bind:value={selectedHomework}
-					options={[{ id: 'All', label: 'All Homeworks' }, ...homeworkOptions]}
-					width="w-48"
+		<!-- Selector Row -->
+		<div class="flex flex-wrap items-center justify-end gap-2">
+			<!-- [Selector] Homework -->
+			<select
+				bind:value={selectedHomework}
+				class="rounded-full border border-gray-300 bg-white py-1.5 pl-3 pr-3 text-xs text-gray-700 cursor-pointer focus:outline-none dark:border-gray-500 dark:bg-gray-800 dark:text-gray-200"
+			>
+				<option value="All">All Homeworks</option>
+				{#each homeworkOptions as opt}
+					<option value={opt.id}>{opt.label}</option>
+				{/each}
+			</select>
+
+			<!-- [Selector] Search with X/magnify toggle -->
+			<div class="relative w-52">
+				<input
+					class="w-full rounded-full border border-gray-300 bg-white py-1.5 pl-3 pr-8 text-xs text-gray-700 focus:outline-none dark:border-gray-500 dark:bg-gray-800 dark:text-gray-200 placeholder:text-gray-400 dark:placeholder:text-gray-500"
+					bind:value={search}
+					placeholder="Search name or email"
 				/>
-
-				<div class="flex min-w-[18rem] flex-1">
-					<div class="self-center ml-1 mr-3 text-gray-500 dark:text-gray-400">
-						<Search className="size-3.5" />
-					</div>
-					<input
-						class="w-full bg-transparent py-1 pr-4 text-sm text-gray-900 outline-hidden placeholder:text-gray-400 dark:text-gray-100 dark:placeholder:text-gray-500"
-						bind:value={search}
-						placeholder="Search name or email"
-					/>
+				<div class="absolute inset-y-0 right-0 flex items-center pr-2.5">
+					{#if search}
+						<button
+							type="button"
+							on:click={() => (search = '')}
+							class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition"
+							aria-label="Clear search"
+						>
+							<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+								<path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+							</svg>
+						</button>
+					{:else}
+						<div class="pointer-events-none text-gray-400 dark:text-gray-500">
+							<Search className="size-3.5" />
+						</div>
+					{/if}
 				</div>
-
-				{#if isFilterActive}
-					<button
-						on:click={removeAllFilters}
-						class="whitespace-nowrap text-sm font-medium text-gray-700 transition hover:text-purple-600 dark:text-gray-300 dark:hover:text-purple-400"
-					>
-						Remove Filter
-					</button>
-				{/if}
 			</div>
 		</div>
 
 		<div class="scrollbar-hidden relative max-w-full overflow-x-auto whitespace-nowrap rounded-sm pt-0.5">
 			<table class="max-w-full w-full table-auto rounded-sm text-left text-sm text-gray-500 dark:text-gray-400">
-				<thead class="-translate-y-0.5 bg-gray-50 text-xs uppercase text-gray-700 dark:bg-gray-850 dark:text-gray-400">
+				<thead class="-translate-y-0.5 bg-[#EEE6F3] text-xs uppercase text-gray-700 dark:bg-gray-850 dark:text-gray-400">
 					<tr>
 						<th scope="col" class="cursor-pointer select-none px-3 py-1.5" on:click={() => toggleSort('name')}>
 							<div class="flex items-center gap-1.5">
@@ -611,7 +617,7 @@
 					</tr>
 				</thead>
 				<tbody>
-					{#if !selectedGroupId && !useFrontendTestingData}
+					{#if !$aiTutorSelectedGroupId && !useFrontendTestingData}
 						<tr class="bg-white text-xs dark:bg-gray-900">
 							<td colspan="6" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">
 								Loading group selection...
@@ -631,7 +637,7 @@
 						</tr>
 					{:else}
 						{#each filteredAndSortedData as student}
-							<tr class="border-t border-gray-100 bg-white text-xs dark:border-gray-850 dark:bg-gray-900">
+							<tr class="border-t border-gray-100 bg-white text-xs dark:border-gray-850 dark:bg-gray-900 hover:bg-gray-50 dark:hover:bg-gray-800 transition">
 								<td class="px-3 py-1 font-medium text-gray-900 dark:text-white">{student.name}</td>
 								<td class="px-3 py-1 text-gray-700 dark:text-gray-300">{student.email}</td>
 								<td class="px-3 py-1 text-gray-700 dark:text-gray-300">
@@ -646,13 +652,14 @@
 								</td>
 								<td class="max-w-xs whitespace-normal px-3 py-1 text-gray-700 dark:text-gray-300">{student.topicsToImprove}</td>
 								<td class="px-3 py-1 text-gray-700 dark:text-gray-300">
-									<!-- in_button_style -->
+									<!-- [Table Button: icon+name] Download Report -->
 									<button
 										type="button"
-										class="rounded-lg p-1 text-xs font-medium text-gray-600 transition hover:text-gray-900 disabled:cursor-not-allowed disabled:opacity-50 dark:text-gray-400 dark:hover:text-gray-100"
+										class="inline-flex items-center gap-1 rounded-full border border-gray-300 px-2.5 py-1 text-xs font-bold text-gray-600 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-600 dark:text-gray-400 dark:hover:bg-gray-800"
 										disabled={!student.hasAnalysis}
 										on:click={() => downloadStudentReport(student)}
 									>
+										<svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5m0 0l5-5m-5 5V4" /></svg>
 										Download Report
 									</button>
 								</td>

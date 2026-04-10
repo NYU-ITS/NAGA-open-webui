@@ -56,8 +56,10 @@
 
 	const STANDARD_QUESTION_TEMPLATE = {
 		number: 1,
-		text: 'Solve: $2x + 3 = 7$',
-		topics: ['Linear Equations']
+		text: '**1.** Evaluate the limit: $$\\lim_{x \\to \\infty} \\frac{x^2}{e^x}$$',
+		topics: ['Limits at Infinity', 'Exponential Functions'],
+		hint: "Use the exponential function's behavior at infinity to simplify the numerator and denominator.",
+		answer: '0'
 	};
 
 	const GUIDE_JSON_EXAMPLE = JSON.stringify(STANDARD_QUESTION_TEMPLATE, null, 2);
@@ -1419,62 +1421,141 @@
 	}
 </script>
 
-<div class="flex flex-col space-y-6 py-4">
-	<!-- Guide Section (Collapsed by default) -->
-	<div class="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-3">
-		<button
-			type="button"
-			class="flex w-full items-center justify-between text-left transition"
-			on:click={() => (expandedGuide = !expandedGuide)}
-			aria-expanded={expandedGuide}
-		>
-			<span class="text-sm font-semibold text-blue-900 dark:text-blue-100">Guide</span>
-			<span class="text-blue-600 dark:text-blue-400">
-				{#if expandedGuide}
-					<ChevronUp className="size-4" />
-				{:else}
-					<ChevronDown className="size-4" />
-				{/if}
-			</span>
-		</button>
+<div class="flex flex-col space-y-20 py-4">
+	<!-- [Visual Guide: Practice Question Workflow] -->
+	<div class="rounded-xl border-2 border-[#57068C]/30 bg-gradient-to-br from-[#57068C]/5 to-transparent p-4 dark:border-purple-500/20 dark:from-purple-500/10">
+		<div class="mb-2 flex flex-col items-center text-center">
+			<h3 class="text-lg font-bold text-gray-900 dark:text-gray-100">Practice Question Workflow</h3>
+			<p class="mt-0.5 text-xs text-gray-600 dark:text-gray-400">Follow these 3 steps to generate and send practice questions</p>
+		</div>
 
-		{#if expandedGuide}
-			<div class="mt-2 pt-2 border-t border-blue-200 dark:border-blue-800 space-y-2">
-				<!-- Instructions (Top) -->
-				<ol class="text-xs text-blue-900 dark:text-blue-100 leading-snug space-y-0.5 ml-4 list-decimal">
-					<li>Select homework set</li>
-					<li>Click <span class="font-semibold">Generate</span></li>
-					<li>Review questions in editor</li>
-					<li>Click <span class="font-semibold">Approve</span></li>
-					<li>Click <span class="font-semibold">Send</span></li>
-				</ol>
+		<!-- Flow Diagram -->
+		<div class="flex items-center justify-between px-2 py-2">
+			<!-- Step 1 Node -->
+			<div class="flex flex-col items-center gap-1.5 min-h-[60px]">
+				<div class="flex items-center justify-center w-12 h-12 rounded-full border-3 border-[#57068C] bg-white dark:bg-gray-900">
+					<!-- Checklist icon — Prepare -->
+					<svg class="w-6 h-6 text-[#57068C]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+					</svg>
+				</div>
+				<p class="text-xs font-semibold text-gray-900 dark:text-gray-100 text-center">Prepare</p>
+			</div>
 
-				<!-- Two Columns: JSON & Fields Guide -->
-				<div class="flex gap-3">
-					<!-- JSON + Markdown (Left) -->
-					<div class="flex-1 min-w-0 flex flex-col gap-2">
-						<div class="rounded bg-blue-900/10 dark:bg-blue-900/30 p-2 border border-blue-300 dark:border-blue-700">
-							<pre class="overflow-x-auto text-xs text-blue-900 dark:text-blue-100 font-mono leading-tight">{GUIDE_JSON_EXAMPLE}</pre>
-						</div>
-						<div class="rounded bg-white dark:bg-gray-950 p-2 border border-blue-200 dark:border-blue-800">
-							<div class="markdown-prose-xs text-xs text-gray-800 dark:text-gray-200">
-								<Markdown id="guide-question-preview" content={STANDARD_QUESTION_TEMPLATE.text} />
-							</div>
-						</div>
-					</div>
+			<!-- Arrow 1 -->
+			<div class="flex items-center gap-2 flex-1 mx-3">
+				<div class="flex-1 h-1 bg-gradient-to-r from-[#57068C]/40 to-[#57068C]/20 dark:from-purple-500/30 dark:to-purple-500/10"></div>
+				<svg class="w-5 h-5 text-[#57068C]/50 dark:text-purple-500/40 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+					<path fill-rule="evenodd" d="M10.293 3.293a1 1 0 011.414 0l6 6a1 1 0 010 1.414l-6 6a1 1 0 01-1.414-1.414L14.586 10l-4.293-4.293a1 1 0 010-1.414z" clip-rule="evenodd" />
+				</svg>
+			</div>
 
-					<!-- Fields Guide (Right) -->
-					<div class="flex-1 text-xs text-blue-800 dark:text-blue-200 leading-snug space-y-2">
-						<p class="font-semibold text-blue-900 dark:text-blue-100 border-b border-blue-200 dark:border-blue-800 pb-1">Fields Explanation</p>
-						<p><span class="font-semibold text-blue-900 dark:text-blue-100">number:</span> Question number</p>
-						<p><span class="font-semibold text-blue-900 dark:text-blue-100">text:</span> Question content (students see this). Supports LaTeX</p>
-						<p><span class="font-semibold text-blue-900 dark:text-blue-100">topics:</span> Topic tags, you are advised to map tpoics with the topics in "Topic Analysis"</p>
-					</div>
+			<!-- Step 2 Node -->
+			<div class="flex flex-col items-center gap-1.5 min-h-[60px]">
+				<div class="flex items-center justify-center w-12 h-12 rounded-full border-3 border-[#57068C] bg-white dark:bg-gray-900">
+					<!-- Lightning bolt icon — Generate -->
+					<svg class="w-6 h-6 text-[#57068C]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+					</svg>
+				</div>
+				<p class="text-xs font-semibold text-gray-900 dark:text-gray-100 text-center">Generate</p>
+			</div>
+
+			<!-- Arrow 2 -->
+			<div class="flex items-center gap-2 flex-1 mx-3">
+				<svg class="w-5 h-5 text-[#57068C]/50 dark:text-purple-500/40 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+					<path fill-rule="evenodd" d="M10.293 3.293a1 1 0 011.414 0l6 6a1 1 0 010 1.414l-6 6a1 1 0 01-1.414-1.414L14.586 10l-4.293-4.293a1 1 0 010-1.414z" clip-rule="evenodd" />
+				</svg>
+				<div class="flex-1 h-1 bg-gradient-to-r from-[#57068C]/20 to-[#57068C]/40 dark:from-purple-500/10 dark:to-purple-500/30"></div>
+			</div>
+
+			<!-- Step 3 Node -->
+			<div class="flex flex-col items-center gap-1.5">
+				<div class="flex items-center justify-center w-12 h-12 rounded-full border-3 border-[#57068C] bg-white dark:bg-gray-900">
+					<!-- Paper plane icon — Review & Send -->
+					<svg class="w-6 h-6 text-[#57068C]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+					</svg>
+				</div>
+				<p class="text-xs font-semibold text-gray-900 dark:text-gray-100 text-center">Review & Send</p>
+			</div>
+		</div>
+
+		<!-- Details -->
+		<div class="grid grid-cols-3 gap-4 pt-2 border-t border-gray-200 dark:border-gray-800">
+			<!-- Step 1 Details -->
+			<div class="space-y-2 pt-2">
+				<div class="flex items-center gap-2">
+					<div class="w-1 h-4 bg-[#57068C] rounded-full"></div>
+					<p class="text-xs font-bold text-gray-900 dark:text-gray-100">STEP 1: PREPARE</p>
+				</div>
+				<ul class="space-y-2 text-sm text-gray-700 dark:text-gray-300">
+					<li class="flex items-start gap-2">
+						<span class="text-[#57068C] font-bold flex-shrink-0">→</span>
+						<span>Complete analysis in <strong>Topic Analysis</strong></span>
+					</li>
+					<li class="flex items-start gap-2">
+						<span class="text-[#57068C] font-bold flex-shrink-0">→</span>
+						<span>Select the homework set here</span>
+					</li>
+				</ul>
+			</div>
+
+			<!-- Step 2 Details -->
+			<div class="space-y-2 pt-2">
+				<div class="flex items-center gap-2">
+					<div class="w-1 h-4 bg-[#57068C] rounded-full"></div>
+					<p class="text-xs font-bold text-gray-900 dark:text-gray-100">STEP 2: GENERATE</p>
+				</div>
+				<ul class="space-y-2 text-sm text-gray-700 dark:text-gray-300">
+					<li class="flex items-start gap-2">
+						<span class="text-[#57068C] font-bold flex-shrink-0">→</span>
+						<span>Click <strong>Generate</strong> to create a practice set</span>
+					</li>
+					<li class="flex items-start gap-2">
+						<span class="text-[#57068C] font-bold flex-shrink-0">→</span>
+						<span>Re-generate anytime to refresh the set</span>
+					</li>
+				</ul>
+			</div>
+
+			<!-- Step 3 Details -->
+			<div class="space-y-2 pt-2">
+				<div class="flex items-center gap-2">
+					<div class="w-1 h-4 bg-[#57068C] rounded-full"></div>
+					<p class="text-xs font-bold text-gray-900 dark:text-gray-100">STEP 3: REVIEW & SEND</p>
+				</div>
+				<ul class="space-y-2 text-sm text-gray-700 dark:text-gray-300">
+					<li class="flex items-start gap-2">
+						<span class="text-[#57068C] font-bold flex-shrink-0">→</span>
+						<span>Review and edit questions below</span>
+					</li>
+					<li class="flex items-start gap-2">
+						<span class="text-[#57068C] font-bold flex-shrink-0">→</span>
+						<span>Click <strong>Approve</strong> then <strong>Send</strong> to students</span>
+					</li>
+				</ul>
+			</div>
+		</div>
+
+		<!-- JSON Format Reference (inside Visual Guide) -->
+		<div class="mt-4 space-y-2 border-t border-gray-200 dark:border-gray-800 pt-4">
+			<div class="grid grid-cols-2 gap-3">
+				<!-- JSON Example -->
+				<div class="rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 px-4 py-3 font-mono text-xs leading-relaxed text-gray-800 dark:text-gray-200 whitespace-pre-wrap overflow-x-auto">{GUIDE_JSON_EXAMPLE}</div>
+				<!-- Field Descriptions -->
+				<div class="space-y-2 text-xs text-gray-600 dark:text-gray-400 py-1">
+					<div><span class="font-semibold text-gray-800 dark:text-gray-200">number</span> — Question number</div>
+					<div><span class="font-semibold text-gray-800 dark:text-gray-200">text</span> — Question content shown to students. Supports Markdown and LaTeX</div>
+					<div><span class="font-semibold text-gray-800 dark:text-gray-200">topics</span> — Topic tags. Map to topics in Topic Analysis</div>
+					<div><span class="font-semibold text-gray-800 dark:text-gray-200">hint</span> — (optional) Hint shown to students during practice</div>
+					<div><span class="font-semibold text-gray-800 dark:text-gray-200">answer</span> — (optional) Expected answer for reference</div>
 				</div>
 			</div>
-		{/if}
+		</div>
 	</div>
 
+	<!-- [Standard Section: Practice Question Set] -->
 	<div class="space-y-3">
 		<div class="flex items-center justify-between gap-4">
 			<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Practice Question Set</h2>
@@ -1486,7 +1567,7 @@
 
 		<div class="scrollbar-hidden relative overflow-x-auto max-w-full rounded-sm pt-0.5">
 			<table class="w-full text-sm text-left text-gray-500 dark:text-gray-400 table-auto max-w-full rounded-sm">
-				<thead class="text-xs text-gray-700 uppercase bg-gray-50 dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5">
+				<thead class="text-xs text-gray-700 uppercase bg-[#EEE6F3] dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5">
 					<tr>
 						<th scope="col" class="w-[18rem] px-3 py-1.5">Homework</th>
 						<th scope="col" class="flex-1 px-3 py-1.5">Status</th>
@@ -1504,7 +1585,7 @@
 						</tr>
 					{:else}
 						{#each practiceQuestions as practice}
-							<tr class="bg-white dark:bg-gray-900 dark:border-gray-850 text-xs border-t border-gray-100 dark:border-gray-850">
+							<tr class="bg-white dark:bg-gray-900 dark:border-gray-850 text-xs border-t border-gray-100 dark:border-gray-850 hover:bg-gray-50 dark:hover:bg-gray-800 transition">
 								<td class="px-3 py-1.5 font-medium text-gray-900 dark:text-white">
 									<div class="max-w-[18rem] overflow-hidden whitespace-normal break-words leading-4 [display:-webkit-box] [-webkit-line-clamp:3] [-webkit-box-orient:vertical]">{getHomeworkModelName(practice.homeworkId ?? practice.homework)}</div>
 								</td>
@@ -1569,21 +1650,25 @@
 											{#if canGeneratePractice(practice.homeworkId)}
 												<button
 													type="button"
-													class="self-center w-fit whitespace-nowrap rounded-xl px-3 py-2 text-base font-semibold text-[#57068C] bg-purple-100 transition hover:bg-purple-200 dark:text-purple-300 dark:bg-purple-900/30 dark:hover:bg-purple-900/50"
+													class="inline-flex items-center gap-1 self-center w-fit whitespace-nowrap rounded-full border border-[#57068C]/40 px-3 py-1.5 text-xs font-bold text-[#57068C] transition hover:bg-purple-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-purple-700 dark:text-purple-400 dark:hover:bg-purple-900/20"
 													on:click={() => generatePractice(practice.homeworkId)}
 													disabled={generatingPracticeByHomeworkId[practice.homeworkId]}
 												>
-													{generatingPracticeByHomeworkId[practice.homeworkId] ? 'Generating…' : 'Re-generate'}
+													<!-- [Table Button: icon+name] Re-generate -->
+						<svg class="h-3 w-3 flex-shrink-0" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+							{generatingPracticeByHomeworkId[practice.homeworkId] ? 'Generating…' : 'Re-generate'}
 												</button>
 											{/if}
 										{:else if practice.status === 'not_ready' && canGeneratePractice(practice.homeworkId)}
 											<button
 												type="button"
-												class="self-center w-fit whitespace-nowrap rounded-xl px-3 py-2 text-base font-semibold text-[#57068C] bg-purple-100 transition hover:bg-purple-200 dark:text-purple-300 dark:bg-purple-900/30 dark:hover:bg-purple-900/50"
+												class="inline-flex items-center gap-1 self-center w-fit whitespace-nowrap rounded-full border border-[#57068C]/40 px-3 py-1.5 text-xs font-bold text-[#57068C] transition hover:bg-purple-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-purple-700 dark:text-purple-400 dark:hover:bg-purple-900/20"
 												on:click={() => generatePractice(practice.homeworkId)}
 												disabled={generatingPracticeByHomeworkId[practice.homeworkId]}
 											>
-												{generatingPracticeByHomeworkId[practice.homeworkId] ? 'Generating…' : 'Generate'}
+												<!-- [Table Button: icon+name] Generate -->
+						<svg class="h-3 w-3 flex-shrink-0" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+							{generatingPracticeByHomeworkId[practice.homeworkId] ? 'Generating…' : 'Generate'}
 											</button>
 										{:else}
 											<div class="self-center text-xs font-normal text-gray-300 dark:text-gray-600">
@@ -1748,10 +1833,11 @@
 		{/each}
 
 		<div class="flex items-center justify-end gap-3 pt-4 pr-4">
-				<button
-					on:click={handleSave}
-					disabled={questionData.status === 'approved' || approvingQuestionSet || questionData.questions.length === 0}
-					class={`min-w-[7.5rem] rounded-full px-4 py-2 text-center text-sm font-medium transition ${
+			<!-- [Big Button] Approve -->
+			<button
+				on:click={handleSave}
+				disabled={questionData.status === 'approved' || approvingQuestionSet || questionData.questions.length === 0}
+				class={`min-w-[5rem] rounded-full px-3 py-1.5 text-center text-xs font-semibold transition ${
 						questionData.status === 'approved'
 							? 'cursor-default bg-gray-200 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
 							: approvingQuestionSet
@@ -1765,20 +1851,21 @@
 							? 'Approving...'
 							: 'Approve'}
 				</button>
-				<button
-					type="button"
-					on:click={() => currentPracticeQuestion && sendPracticeToStudents(currentPracticeQuestion)}
-					disabled={
-						questionData.questions.length === 0 ||
-						!currentPracticeQuestion?.practiceId ||
-						questionData.status !== 'approved' ||
-						(Boolean(currentPracticeQuestion?.sentAt) && !isEditedAfterSent) ||
-						Boolean(
-							currentPracticeQuestion?.practiceId &&
-								sendingPracticeById[currentPracticeQuestion.practiceId]
-						)
-					}
-					class={`min-w-[7.5rem] rounded-full px-4 py-2 text-center text-sm font-medium transition ${
+			<!-- [Big Button] Send -->
+			<button
+				type="button"
+				on:click={() => currentPracticeQuestion && sendPracticeToStudents(currentPracticeQuestion)}
+				disabled={
+					questionData.questions.length === 0 ||
+					!currentPracticeQuestion?.practiceId ||
+					questionData.status !== 'approved' ||
+					(Boolean(currentPracticeQuestion?.sentAt) && !isEditedAfterSent) ||
+					Boolean(
+						currentPracticeQuestion?.practiceId &&
+							sendingPracticeById[currentPracticeQuestion.practiceId]
+					)
+				}
+				class={`min-w-[5rem] rounded-full px-3 py-1.5 text-center text-xs font-semibold transition ${
 						isEditedAfterSent
 							? 'bg-[#57068C] text-white hover:bg-[#702B9D]'
 							: currentPracticeQuestion?.sentAt

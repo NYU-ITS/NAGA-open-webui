@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount, getContext } from 'svelte';
-	import { WEBUI_NAME, showSidebar, user, mobile } from '$lib/stores';
+	import { WEBUI_NAME, showSidebar, user, mobile, aiTutorSelectedGroupId } from '$lib/stores';
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
 	import { checkIfSuperAdmin } from '$lib/apis/users';
@@ -48,15 +48,19 @@
 		return localStorage.getItem(LAST_AI_TUTOR_GROUP_STORAGE_KEY) || '';
 	}
 
-	$: selectedGroupId = $page.url.searchParams.get('group_id') || getPersistedGroupId();
-	$: if ($page.url.searchParams.get('group_id')) {
-		if (typeof localStorage !== 'undefined') {
-			localStorage.setItem(
-				LAST_AI_TUTOR_GROUP_STORAGE_KEY,
-				$page.url.searchParams.get('group_id') || ''
-			);
+	// Sync URL group_id to store (single source of truth for child pages)
+	$: {
+		const urlGroup = $page.url.searchParams.get('group_id');
+		if (urlGroup && urlGroup !== $aiTutorSelectedGroupId) {
+			aiTutorSelectedGroupId.set(urlGroup);
+			if (typeof localStorage !== 'undefined') {
+				localStorage.setItem(LAST_AI_TUTOR_GROUP_STORAGE_KEY, urlGroup);
+			}
 		}
 	}
+
+	// Keep selectedGroupId local variable for template usage
+	$: selectedGroupId = $aiTutorSelectedGroupId || $page.url.searchParams.get('group_id') || getPersistedGroupId();
 	$: selectedGroup =
 		allUserGroups.find((group) => group.id === selectedGroupId) || allUserGroups[0] || null;
 
@@ -188,7 +192,7 @@
 				<div class="flex-1">
 					<!-- Course Title with Info Button -->
 					<div class="px-2 py-2 flex items-center justify-between">
-						<!-- Course Title Dropdown -->
+						<!-- [Group Select] Course Title Dropdown -->
 						<div class="relative">
 							<button
 								on:click={toggleGroupDropdown}

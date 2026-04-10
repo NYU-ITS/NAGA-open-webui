@@ -76,6 +76,9 @@ export const activeCallMode = writable<'live_text' | 'transcript_at_end'>('live_
 export const showRightsideQuestions = writable(false);
 export const aiTutorFrontendTestingErrorTypes = writable(AI_TUTOR_FRONTEND_TESTING_ERROR_TYPES);
 
+// AI Tutor Dashboard - single source of truth for selected group
+export const aiTutorSelectedGroupId = writable<string>('');
+
 export const temporaryChatEnabled = writable(false);
 export const scrollPaginationEnabled = writable(false);
 export const currentChatPage = writable(1);

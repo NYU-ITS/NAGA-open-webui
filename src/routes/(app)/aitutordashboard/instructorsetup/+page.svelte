@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount, tick } from 'svelte';
 	import { page } from '$app/stores';
+	import { aiTutorSelectedGroupId } from '$lib/stores';
 	import { toast } from 'svelte-sonner';
 	import {
 		AI_TUTOR_API_BASE_URL,
@@ -9,6 +10,7 @@
 		TESTING_AI_TUTOR
 	} from '$lib/constants';
 	import { aiTutorFrontendTestingErrorTypes } from '$lib/stores';
+import { DropdownMenu } from 'bits-ui';
 	import { showAITutorTestToast } from '$lib/utils/aiTutorTesting';
 	import {
 		clearAITutorSessionCacheByPrefix,
@@ -17,6 +19,10 @@
 	} from '$lib/utils/aiTutorSessionCache';
 	import ChevronUp from '$lib/components/icons/ChevronUp.svelte';
 	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
+	import EllipsisHorizontal from '$lib/components/icons/EllipsisHorizontal.svelte';
+	import Pencil from '$lib/components/icons/Pencil.svelte';
+import Dropdown from '$lib/components/common/Dropdown.svelte';
+import { flyAndScale } from '$lib/utils/transitions';
 
 	const AI_TUTOR_API_BASE = AI_TUTOR_API_BASE_URL;
 	const frontendTestingHomeworkModelNames = [
@@ -35,7 +41,7 @@
 	const useFrontendTestingData = AI_TUTOR_FRONTEND_TESTING_MODE;
 	const testToast = showAITutorTestToast;
 	const CACHE_TTL_MS = 5 * 60 * 1000;
-	const LAST_AI_TUTOR_GROUP_STORAGE_KEY = 'ai_tutor_last_selected_group_id';
+	let lastSyncedGroupId = '';
 
 	// ── Types ─────────────────────────────────────────────────────────────────
 	type HomeworkStat = {
@@ -93,7 +99,14 @@
 	let draftRows: DraftRow[] = [];
 	let _prevGroupIdForReset = '';
 	let _nextDraftUid = 0;
-	let errorTypeDefs: { type: string; color: string; description: string }[] = [];
+	// Error Type Configuration - Draft Mode
+	// original: from backend; draft: local modifications
+	let originalErrorTypeDefs: { type: string; color: string; description: string }[] = [];
+	let draftErrorTypeDefs: { type: string; color: string; description: string }[] = [];
+	let hasUnsavedErrorTypeChanges = false;
+	let justSavedErrorTypes = false;
+	let saveSuccessTimeout: ReturnType<typeof setTimeout> | null = null;
+	
 	const dashboardPalette = ['#EE352E', '#00933C', '#B933AD', '#0039A6', '#FF6319', '#996633'];
 	const errorTypeColors = dashboardPalette.slice(0, 4);
 	// B: backend-sourced timestamp — null until loadErrorTypes resolves
@@ -110,8 +123,8 @@
 	 *  Priority: B (backend updated_at) > A (localStorage fallback). */
 	function getEffectiveErrorTypeTimestamp(): string | null {
 		if (errorTypesUpdatedAt) return errorTypesUpdatedAt;
-		if (!selectedGroupId || typeof localStorage === 'undefined') return null;
-		return localStorage.getItem(errorTypesSavedAtKey(selectedGroupId)) ?? null;
+		if (!$aiTutorSelectedGroupId || typeof localStorage === 'undefined') return null;
+		return localStorage.getItem(errorTypesSavedAtKey($aiTutorSelectedGroupId)) ?? null;
 	}
 
 	function getHomeworkStaleNote(row: HomeworkRow): string {
@@ -129,6 +142,13 @@
 	let editingErrorTypeIsNew = false;
 	let editErrorTypeName = '';
 	let editErrorTypeDescription = '';
+	let showErrorTypeMenuOpen: Record<number, boolean> = {};
+
+	// Computed: derive errorTypeDefs from draft for display
+	$: errorTypeDefs = draftErrorTypeDefs;
+	
+	// Track unsaved changes
+	$: hasUnsavedErrorTypeChanges = JSON.stringify(originalErrorTypeDefs) !== JSON.stringify(draftErrorTypeDefs);
 	const promptDefinitions = [
 		{
 			name: 'pdf_to_markdown',
@@ -346,7 +366,7 @@
 
 	// ── State ─────────────────────────────────────────────────────────────────
 	let homeworkStats: HomeworkStat[] = useFrontendTestingData ? placeholderStats : [];
-	let selectedGroupId = '';
+	// $aiTutorSelectedGroupId now comes from store
 
 	function getInstructorSetupCacheKey(resource: string, groupId?: string) {
 		return ['instructor-setup', groupId || 'global', resource].join(':');
@@ -540,7 +560,8 @@
 		availableModels = frontendTestingModels;
 		homeworkRows = frontendTestingHomeworkRows;
 		convCountByModelId = frontendTestingConversationCounts;
-		errorTypeDefs = $aiTutorFrontendTestingErrorTypes;
+		originalErrorTypeDefs = $aiTutorFrontendTestingErrorTypes;
+		draftErrorTypeDefs = $aiTutorFrontendTestingErrorTypes;
 		generalPrompts = frontendTestingGeneralPrompts;
 		tutorPrompts = frontendTestingTutorPrompts.map((p) => ({ ...p, group_id: groupId || 'frontend-testing-group' }));
 		homeworkStats = placeholderStats.map((stat, i) => ({
@@ -601,19 +622,14 @@
 
 	$: avgSolvedChart = chartPoints(homeworkStats.map((s) => s.avgSolved));
 	$: avgAttemptedChart = chartPoints(homeworkStats.map((s) => s.avgAttempted));
-	function getPersistedGroupId() {
-		if (typeof localStorage === 'undefined') return '';
-		return localStorage.getItem(LAST_AI_TUTOR_GROUP_STORAGE_KEY) || '';
-	}
-
-	$: selectedGroupId = $page.url.searchParams.get('group_id') || getPersistedGroupId();
-	$: if ($page.url.searchParams.get('group_id')) {
-		if (typeof localStorage !== 'undefined') {
-			localStorage.setItem(
-				LAST_AI_TUTOR_GROUP_STORAGE_KEY,
-				$page.url.searchParams.get('group_id') || ''
-			);
-		}
+	// Subscribe to store for group changes - prevents flash of wrong group data
+	$: if ($aiTutorSelectedGroupId && $aiTutorSelectedGroupId !== lastSyncedGroupId) {
+		lastSyncedGroupId = $aiTutorSelectedGroupId;
+		void loadHomeworkStats($aiTutorSelectedGroupId);
+		void loadConversationCounts($aiTutorSelectedGroupId);
+		void loadErrorTypes($aiTutorSelectedGroupId);
+		void loadPrompts($aiTutorSelectedGroupId);
+		void resumePersistedJobs($aiTutorSelectedGroupId);
 	}
 
 	// ── Data fetching ─────────────────────────────────────────────────────────
@@ -622,16 +638,16 @@
 		// Purpose: load non-group-scoped data first, then wait for the layout-selected
 		// group_id before issuing group-scoped setup requests.
 		testToast(
-			`loading aitutordashboard - Instructor Setup | group=${selectedGroupId || 'pending'} | frontend_testing=${String(useFrontendTestingData)}`
+			`loading aitutordashboard - Instructor Setup | group=${$aiTutorSelectedGroupId || 'pending'} | frontend_testing=${String(useFrontendTestingData)}`
 		);
 		console.log('AI Tutor Dashboard - Instructor Setup mount', {
 			pathname: $page.url.pathname,
-			groupId: selectedGroupId,
+			groupId: $aiTutorSelectedGroupId,
 			groupIdFromUrl: $page.url.searchParams.get('group_id') || ''
 		});
 		await loadModels();
 		if (useFrontendTestingData) {
-			seedDummyDashboard(selectedGroupId);
+			seedDummyDashboard($aiTutorSelectedGroupId);
 			await tick();
 			updateScrollState();
 			return;
@@ -640,33 +656,13 @@
 
 	// Reset per-homework action state whenever the selected group changes so that
 	// in-progress indicators from a previous group never bleed into the new one.
-	$: if (selectedGroupId && selectedGroupId !== _prevGroupIdForReset) {
-		_prevGroupIdForReset = selectedGroupId;
+	$: if ($aiTutorSelectedGroupId && $aiTutorSelectedGroupId !== _prevGroupIdForReset) {
+		_prevGroupIdForReset = $aiTutorSelectedGroupId;
 		uploadingMap = {};
 		exportingConversationMap = {};
 		runningAnalysisByHomeworkId = {};
 		homeworkJobStepByModelId = {};
 		draftRows = [];
-	}
-
-	$: if (!useFrontendTestingData && selectedGroupId) {
-		void loadHomeworkStats(selectedGroupId);
-	}
-
-	$: if (!useFrontendTestingData && selectedGroupId) {
-		void loadConversationCounts(selectedGroupId);
-	}
-
-	$: if (!useFrontendTestingData && selectedGroupId) {
-		void loadErrorTypes(selectedGroupId);
-	}
-
-	$: if (!useFrontendTestingData && selectedGroupId) {
-		void loadPrompts(selectedGroupId);
-	}
-
-	$: if (!useFrontendTestingData && selectedGroupId) {
-		void resumePersistedJobs(selectedGroupId);
 	}
 
 	async function loadHomeworkStats(groupId: string) {
@@ -840,7 +836,7 @@
 				}
 			});
 
-			if (selectedGroupId !== groupId) return; // stale — group changed while loading
+			if ($aiTutorSelectedGroupId !== groupId) return; // stale — group changed while loading
 			homeworkRows = cached.homeworkRows;
 			homeworkStats = cached.homeworkStats;
 		} catch (error) {
@@ -944,7 +940,7 @@
 					return nextCounts;
 				}
 			});
-			if (selectedGroupId !== groupId) return; // stale
+			if ($aiTutorSelectedGroupId !== groupId) return; // stale
 			convCountByModelId = counts;
 		} catch (e) {
 			console.error('Conversation count fetch failed:', e);
@@ -954,7 +950,8 @@
 	async function loadErrorTypes(groupId: string) {
 		testToast(`Instructor Setup fetch: error types group=${groupId || 'none'}`);
 		if (useFrontendTestingData) {
-			errorTypeDefs = $aiTutorFrontendTestingErrorTypes;
+			originalErrorTypeDefs = $aiTutorFrontendTestingErrorTypes;
+			draftErrorTypeDefs = $aiTutorFrontendTestingErrorTypes;
 			return;
 		}
 		if (!groupId) return;
@@ -964,14 +961,15 @@
 				key: getInstructorSetupCacheKey('error-types', groupId),
 				ttlMs: CACHE_TTL_MS,
 				onCached: (c) => {
-					if (selectedGroupId === groupId) {
-						errorTypeDefs = c.defs;
+					if ($aiTutorSelectedGroupId === groupId) {
+						originalErrorTypeDefs = c.defs;
+						draftErrorTypeDefs = c.defs;
 						errorTypesUpdatedAt = c.updatedAt;
 					}
 				},
 				loader: async () => {
 					const res = await fetch(
-						`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(groupId)}`,
+						`${AI_Tutor_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(groupId)}`,
 						{ headers: { Authorization: `Bearer ${localStorage.token}` } }
 					);
 					if (!res.ok) throw new Error('Error types fetch failed');
@@ -991,8 +989,9 @@
 					return { defs, updatedAt };
 				}
 			});
-			if (selectedGroupId !== groupId) return; // stale
-			errorTypeDefs = cached.defs;
+			if ($aiTutorSelectedGroupId !== groupId) return; // stale
+			originalErrorTypeDefs = cached.defs;
+			draftErrorTypeDefs = cached.defs;
 			// B: prefer backend timestamp; fall back gracefully to null (getEffectiveErrorTypeTimestamp handles A)
 			errorTypesUpdatedAt = cached.updatedAt;
 		} catch (e) {
@@ -1015,7 +1014,7 @@
 				key: getInstructorSetupCacheKey('prompts', groupId),
 				ttlMs: CACHE_TTL_MS,
 				onCached: (cached) => {
-					if (selectedGroupId === groupId) {
+					if ($aiTutorSelectedGroupId === groupId) {
 						generalPrompts = cached.generalPrompts;
 						tutorPrompts = cached.tutorPrompts;
 					}
@@ -1046,7 +1045,7 @@
 					};
 				}
 			});
-			if (selectedGroupId !== groupId) return; // stale
+			if ($aiTutorSelectedGroupId !== groupId) return; // stale
 			generalPrompts = prompts.generalPrompts;
 			tutorPrompts = prompts.tutorPrompts;
 		} catch (e) {
@@ -1175,7 +1174,7 @@
 				toast.success(`${job.type === 'question-upload' ? 'Homework' : 'Answer'} upload completed.`);
 			}
 
-			if (selectedGroupId === job.groupId) {
+			if ($aiTutorSelectedGroupId === job.groupId) {
 				await loadHomeworkStats(job.groupId);
 			}
 		} catch (error) {
@@ -1270,7 +1269,7 @@
 	}
 
 	async function validateRunPrerequisites(row: HomeworkRow) {
-		if (!selectedGroupId) {
+		if (!$aiTutorSelectedGroupId) {
 			toast.error('Select a group before running analysis.');
 			return false;
 		}
@@ -1298,7 +1297,7 @@
 	}
 
 	async function savePromptOverride() {
-		if (!selectedGroupId || !selectedPromptName) return;
+		if (!$aiTutorSelectedGroupId || !selectedPromptName) return;
 		if (useFrontendTestingData) {
 			if (selectedPromptTutorId) {
 				tutorPrompts = tutorPrompts.map((prompt) =>
@@ -1312,7 +1311,7 @@
 					{
 						id: `tp-${Date.now()}`,
 						name: selectedPromptName,
-						group_id: selectedGroupId,
+						group_id: $aiTutorSelectedGroupId,
 						prompt: selectedPromptText,
 						is_active: true
 					}
@@ -1341,13 +1340,13 @@
 					},
 					body: JSON.stringify({
 						name: selectedPromptName,
-						group_id: selectedGroupId,
+						group_id: $aiTutorSelectedGroupId,
 						prompt: selectedPromptText
 					})
 				});
 			}
-			clearAITutorSessionCacheByPrefix(getInstructorSetupCacheKey('prompts', selectedGroupId));
-			await loadPrompts(selectedGroupId);
+			clearAITutorSessionCacheByPrefix(getInstructorSetupCacheKey('prompts', $aiTutorSelectedGroupId));
+			await loadPrompts($aiTutorSelectedGroupId);
 			showPromptModal = false;
 			testToast('Instructor Setup saved prompt override');
 		} catch (e) {
@@ -1380,8 +1379,8 @@
 				},
 				body: JSON.stringify({ is_active: false })
 			});
-			clearAITutorSessionCacheByPrefix(getInstructorSetupCacheKey('prompts', selectedGroupId));
-			await loadPrompts(selectedGroupId);
+			clearAITutorSessionCacheByPrefix(getInstructorSetupCacheKey('prompts', $aiTutorSelectedGroupId));
+			await loadPrompts($aiTutorSelectedGroupId);
 			showPromptModal = false;
 			testToast('Instructor Setup reset prompt to default');
 		} catch (e) {
@@ -1391,22 +1390,27 @@
 	}
 
 	async function persistErrorTypes() {
-		if (!selectedGroupId) return;
+		if (!$aiTutorSelectedGroupId) return;
 		if (useFrontendTestingData) {
 			toast.success('Frontend testing error types saved.');
-			aiTutorFrontendTestingErrorTypes.set(errorTypeDefs);
+			aiTutorFrontendTestingErrorTypes.set(draftErrorTypeDefs);
+			originalErrorTypeDefs = draftErrorTypeDefs;
 			const ts = new Date().toISOString();
 			if (typeof localStorage !== 'undefined')
-				localStorage.setItem(errorTypesSavedAtKey(selectedGroupId), ts);
+				localStorage.setItem(errorTypesSavedAtKey($aiTutorSelectedGroupId), ts);
 			errorTypesUpdatedAt = ts;
+			// Show "Saved" state briefly
+			justSavedErrorTypes = true;
+			if (saveSuccessTimeout) clearTimeout(saveSuccessTimeout);
+			saveSuccessTimeout = setTimeout(() => { justSavedErrorTypes = false; }, 2000);
 			return;
 		}
 		try {
 			let savedAt: string | null = null;
-			if (errorTypeDefs.length === 0) {
+			if (draftErrorTypeDefs.length === 0) {
 				// Deleting the last type — DELETE reverts to server defaults
 				const res = await fetch(
-					`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(selectedGroupId)}`,
+					`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent($aiTutorSelectedGroupId)}`,
 					{ method: 'DELETE', headers: { Authorization: `Bearer ${localStorage.token}` } }
 				);
 				if (res.ok) {
@@ -1416,7 +1420,7 @@
 				}
 			} else {
 				const res = await fetch(
-					`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(selectedGroupId)}`,
+					`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent($aiTutorSelectedGroupId)}`,
 					{
 						method: 'PUT',
 						headers: {
@@ -1424,7 +1428,7 @@
 							Authorization: `Bearer ${localStorage.token}`
 						},
 						body: JSON.stringify(
-							errorTypeDefs.map((d) => ({ name: d.type, description: d.description }))
+							draftErrorTypeDefs.map((d) => ({ name: d.type, description: d.description }))
 						)
 					}
 				);
@@ -1438,11 +1442,17 @@
 			if (savedAt !== null) {
 				// A: always write localStorage as a robust fallback
 				if (typeof localStorage !== 'undefined')
-					localStorage.setItem(errorTypesSavedAtKey(selectedGroupId), savedAt);
-				writeAITutorSessionCache(getInstructorSetupCacheKey('error-types', selectedGroupId), {
-					defs: errorTypeDefs,
+					localStorage.setItem(errorTypesSavedAtKey($aiTutorSelectedGroupId), savedAt);
+				writeAITutorSessionCache(getInstructorSetupCacheKey('error-types', $aiTutorSelectedGroupId), {
+					defs: draftErrorTypeDefs,
 					updatedAt: errorTypesUpdatedAt
 				});
+				// Sync original to match draft after successful save
+				originalErrorTypeDefs = draftErrorTypeDefs;
+				// Show "Saved" state briefly
+				justSavedErrorTypes = true;
+				if (saveSuccessTimeout) clearTimeout(saveSuccessTimeout);
+				saveSuccessTimeout = setTimeout(() => { justSavedErrorTypes = false; }, 2000);
 				testToast('Instructor Setup saved error types');
 			}
 		} catch (e) {
@@ -1452,83 +1462,58 @@
 	}
 
 	async function resetErrorTypesToDefault() {
-		if (!selectedGroupId) return;
-		if (useFrontendTestingData) {
-			errorTypeDefs = AI_TUTOR_FRONTEND_TESTING_ERROR_TYPES;
-			aiTutorFrontendTestingErrorTypes.set(AI_TUTOR_FRONTEND_TESTING_ERROR_TYPES);
-			const ts = new Date().toISOString();
-			if (typeof localStorage !== 'undefined')
-				localStorage.setItem(errorTypesSavedAtKey(selectedGroupId), ts);
-			errorTypesUpdatedAt = null; // defaults have no server-side updated_at
-			toast.success('Frontend testing error types reset to defaults.');
-			return;
-		}
-		try {
-			await fetch(
-				`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(selectedGroupId)}`,
-				{ method: 'DELETE', headers: { Authorization: `Bearer ${localStorage.token}` } }
-			);
-			// A: record when definition changed (revert to defaults still changes what types are in effect)
-			const ts = new Date().toISOString();
-			if (typeof localStorage !== 'undefined')
-				localStorage.setItem(errorTypesSavedAtKey(selectedGroupId), ts);
-			errorTypesUpdatedAt = null; // no server-side updated_at after DELETE
-			clearAITutorSessionCacheByPrefix(getInstructorSetupCacheKey('error-types', selectedGroupId));
-			await loadErrorTypes(selectedGroupId);
-			testToast('Instructor Setup reset error types to default');
-		} catch (e) {
-			testToast('Instructor Setup failed resetting error types');
-			console.error('Failed to reset error types:', e);
-		}
+		if (!$aiTutorSelectedGroupId) return;
+		// Draft mode: only update draft, require Save to persist
+		draftErrorTypeDefs = AI_TUTOR_FRONTEND_TESTING_ERROR_TYPES.map((et, i) => ({
+			...et,
+			color: errorTypeColors[i % errorTypeColors.length]
+		}));
+		testToast('Instructor Setup reset to defaults (draft) — Save to persist');
 	}
 
 	function deleteAllErrorTypes() {
-		// Purely local — clears the list without touching the backend.
-		// The user must press Save to persist the deletion.
-		errorTypeDefs = [];
-		if (useFrontendTestingData) {
-			aiTutorFrontendTestingErrorTypes.set([]);
-		}
-		testToast('Instructor Setup delete all (local) — Save to persist');
+		// Draft mode: only update draft, require Save to persist
+		draftErrorTypeDefs = [];
+		testToast('Instructor Setup delete all (draft) — Save to persist');
 	}
 
 	function openEditErrorType(index: number) {
 		editingErrorTypeIndex = index;
 		editingErrorTypeIsNew = false;
-		editErrorTypeName = errorTypeDefs[index].type;
-		editErrorTypeDescription = errorTypeDefs[index].description;
+		editErrorTypeName = draftErrorTypeDefs[index].type;
+		editErrorTypeDescription = draftErrorTypeDefs[index].description;
 		showEditErrorTypeModal = true;
 	}
 
 	function addErrorType() {
-		if (errorTypeDefs.length >= 4) return;
-		const color = errorTypeColors[errorTypeDefs.length % errorTypeColors.length];
+		if (draftErrorTypeDefs.length >= 4) return;
+		const color = errorTypeColors[draftErrorTypeDefs.length % errorTypeColors.length];
 		const newDef = { type: 'New Error Type', color, description: '' };
-		errorTypeDefs = [...errorTypeDefs, newDef];
-		editingErrorTypeIndex = errorTypeDefs.length - 1;
+		draftErrorTypeDefs = [...draftErrorTypeDefs, newDef];
+		editingErrorTypeIndex = draftErrorTypeDefs.length - 1;
 		editingErrorTypeIsNew = true;
 		editErrorTypeName = newDef.type;
 		editErrorTypeDescription = '';
 		showEditErrorTypeModal = true;
 	}
 
-	async function saveErrorTypeEdit() {
+	function saveErrorTypeEdit() {
 		if (editingErrorTypeIndex === null) return;
-		errorTypeDefs[editingErrorTypeIndex] = {
-			...errorTypeDefs[editingErrorTypeIndex],
+		draftErrorTypeDefs[editingErrorTypeIndex] = {
+			...draftErrorTypeDefs[editingErrorTypeIndex],
 			type: editErrorTypeName,
 			description: editErrorTypeDescription
 		};
-		errorTypeDefs = [...errorTypeDefs];
+		draftErrorTypeDefs = [...draftErrorTypeDefs];
 		closeErrorTypeModal();
-		await persistErrorTypes();
+		// Draft mode: don't auto-save, user must click Save button
 	}
 
-	async function deleteErrorType() {
+	function deleteErrorType() {
 		if (editingErrorTypeIndex === null) return;
-		errorTypeDefs = errorTypeDefs.filter((_, i) => i !== editingErrorTypeIndex);
+		draftErrorTypeDefs = draftErrorTypeDefs.filter((_, i) => i !== editingErrorTypeIndex);
 		closeErrorTypeModal();
-		await persistErrorTypes();
+		// Draft mode: don't auto-save, user must click Save button
 	}
 
 	function closeErrorTypeModal() {
@@ -1537,13 +1522,13 @@
 		editingErrorTypeIsNew = false;
 	}
 
-	async function confirmResetDefaults() {
+	function confirmResetDefaults() {
 		showResetDefaultsModal = false;
 		if (resetDefaultsModalMode === 'delete') {
 			deleteAllErrorTypes();
-			return;
+		} else {
+			resetErrorTypesToDefault();
 		}
-		await resetErrorTypesToDefault();
 	}
 
 	async function uploadPdf(
@@ -1554,7 +1539,7 @@
 		draftUid?: number
 	) {
 		testToast(`Upload ${docType} PDF is triggered | page=aitutordashboard - Instructor Setup | model=${modelId} | target=${hwId ?? `draft-${draftUid ?? 0}`}`);
-		if (!selectedGroupId && !useFrontendTestingData) {
+		if (!$aiTutorSelectedGroupId && !useFrontendTestingData) {
 			toast.error('Select a group before uploading PDFs.');
 			return;
 		}
@@ -1630,7 +1615,7 @@
 			formData.append('file', file);
 			const params = new URLSearchParams({
 				doc_type: docType,
-				group_id: selectedGroupId,
+				group_id: $aiTutorSelectedGroupId,
 				model_id: modelId
 			});
 			// Page: AI Tutor Dashboard > Instructor Setup
@@ -1651,7 +1636,7 @@
 			console.info('[AI Tutor][Instructor Setup] upload job created', {
 				jobId,
 				docType,
-				groupId: selectedGroupId,
+				groupId: $aiTutorSelectedGroupId,
 				modelId,
 				homeworkId: hwId,
 				fileName: file.name
@@ -1659,12 +1644,12 @@
 			const persistedJob: PersistedInstructorJob = {
 				jobId,
 				type: docType === 'question' ? 'question-upload' : 'answer-upload',
-				groupId: selectedGroupId,
+				groupId: $aiTutorSelectedGroupId,
 				modelId,
 				homeworkId: hwId,
 				fileName: file.name
 			};
-			clearAITutorSessionCacheByPrefix(getInstructorSetupCacheKey('homework-stats', selectedGroupId));
+			clearAITutorSessionCacheByPrefix(getInstructorSetupCacheKey('homework-stats', $aiTutorSelectedGroupId));
 			upsertPersistedJob(persistedJob);
 			toast.success(`${docType === 'question' ? 'Homework' : 'Answer'} upload started.`);
 			await monitorPersistedJob(persistedJob);
@@ -1943,7 +1928,7 @@
 		}
 		try {
 			console.info('[AI Tutor][Instructor Setup] run requested', {
-				groupId: selectedGroupId,
+				groupId: $aiTutorSelectedGroupId,
 				targetHomeworkId,
 				modelId: row?.modelId ?? targetHomeworkId,
 				selectedHomeworks: Array.from(selectedRunHomeworks)
@@ -1961,18 +1946,18 @@
 				if (!jobId) throw new Error('Analysis started but no job ID was returned.');
 				console.info('[AI Tutor][Instructor Setup] analysis job created', {
 					jobId,
-					groupId: selectedGroupId,
+					groupId: $aiTutorSelectedGroupId,
 					targetHomeworkId,
 					modelId: row?.modelId ?? targetHomeworkId
 				});
 				const persistedJob: PersistedInstructorJob = {
 					jobId,
 					type: 'analysis',
-					groupId: selectedGroupId,
+					groupId: $aiTutorSelectedGroupId,
 					modelId: row?.modelId ?? targetHomeworkId,
 					homeworkId: targetHomeworkId
 				};
-				clearAITutorSessionCacheByPrefix(getInstructorSetupCacheKey('homework-stats', selectedGroupId));
+				clearAITutorSessionCacheByPrefix(getInstructorSetupCacheKey('homework-stats', $aiTutorSelectedGroupId));
 				upsertPersistedJob(persistedJob);
 				testToast('Instructor Setup run analysis request submitted');
 				toast.success('Analysis started successfully.');
@@ -2004,16 +1989,14 @@
 	}
 </script>
 
-<div class="flex flex-col space-y-6 py-4">
-	<div class="space-y-6">
+<div class="flex flex-col space-y-24 py-4">
+	<div class="space-y-24">
 
-		<!-- Workflow Instructions -->
+		<!-- [Visual Guide: AI Tutor Workflow] -->
 		<div class="rounded-xl border-2 border-[#57068C]/30 bg-gradient-to-br from-[#57068C]/5 to-transparent p-4 dark:border-purple-500/20 dark:from-purple-500/10">
-			<div class="mb-2 flex items-center justify-between">
-				<div>
-					<h3 class="text-lg font-bold text-gray-900 dark:text-gray-100">AI Tutor Workflow</h3>
-					<p class="mt-0.5 text-xs text-gray-600 dark:text-gray-400">Follow these 3 steps to analyze and support your students</p>
-				</div>
+			<div class="mb-2 flex flex-col items-center text-center">
+				<h3 class="text-lg font-bold text-gray-900 dark:text-gray-100">AI Tutor Workflow</h3>
+				<p class="mt-0.5 text-xs text-gray-600 dark:text-gray-400">Follow these 3 steps to analyze and support your students</p>
 			</div>
 
 			<!-- Flow Diagram -->
@@ -2136,43 +2119,80 @@
 			</div>
 		</div>
 
-		<!-- Error Type Configuration Section -->
-		<div class="space-y-3">
+		<!-- [Standard Section: Error Type Configuration] -->
+		<div class="space-y-4">
 			<button
-					type="button"
-					class="flex w-full items-start justify-between gap-3 text-left"
-					on:click={() => {
-						showErrorTypeConfiguration = !showErrorTypeConfiguration;
-					}}
-				>
-					<div>
-						<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">
-							Error Type Configuration
-						</h2>
-						<div class="text-xs text-gray-400 dark:text-gray-500">
-							You can have at most 4 error types
-						</div>
+				type="button"
+				class="flex w-full items-start justify-between gap-3 text-left"
+				on:click={() => {
+					showErrorTypeConfiguration = !showErrorTypeConfiguration;
+				}}
+			>
+				<div>
+					<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">
+						Error Type Configuration
+					</h2>
+					<div class="text-xs text-gray-400 dark:text-gray-500">
+						You can have at most 4 error types
 					</div>
-				<div class="flex flex-col items-end gap-1">
-					<span class="pt-1 text-gray-500 dark:text-gray-400">
-						{#if showErrorTypeConfiguration}
-							<ChevronUp className="size-4" />
-						{:else}
-							<ChevronDown className="size-4" />
-						{/if}
-					</span>
+				</div>
+				<span class="pt-1 text-gray-500 dark:text-gray-400">
 					{#if showErrorTypeConfiguration}
-					<div class="flex flex-wrap items-center justify-end gap-2">
-						<button
-							class={`flex items-center gap-1 rounded-full border px-3 py-1.5 text-xs font-semibold transition ${
-								errorTypeDefs.length < 4
-									? 'border-[#57068C] text-[#57068C] hover:border-[#702B9D] hover:bg-purple-50 dark:border-purple-400 dark:text-purple-400 dark:hover:border-purple-300 dark:hover:bg-purple-900/20'
-									: 'cursor-not-allowed border-gray-200 text-gray-400 dark:border-gray-700 dark:text-gray-500'
+						<ChevronUp className="size-4" />
+					{:else}
+						<ChevronDown className="size-4" />
+					{/if}
+				</span>
+			</button>
+
+			{#if showErrorTypeConfiguration}
+			<div class="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
+				<!-- Action Buttons Row -->
+				<div class="flex flex-wrap items-center justify-end gap-2 mb-4">
+					<!-- [Big Button] Add -->
+					<button
+						class={`flex items-center gap-1 rounded-full border px-3 py-1.5 text-xs font-semibold transition ${
+							errorTypeDefs.length < 4
+								? 'border-[#57068C] text-[#57068C] hover:border-[#702B9D] hover:bg-purple-50 dark:border-purple-400 dark:text-purple-400 dark:hover:border-purple-300 dark:hover:bg-purple-900/20'
+								: 'cursor-not-allowed border-gray-200 text-gray-400 dark:border-gray-700 dark:text-gray-500'
 							}`}
-							on:click|stopPropagation={addErrorType}
-							disabled={errorTypeDefs.length >= 4}
+						on:click={addErrorType}
+						disabled={errorTypeDefs.length >= 4}
+					>
+						<span>Add</span>
+						<svg
+							xmlns="http://www.w3.org/2000/svg"
+							fill="none"
+							viewBox="0 0 24 24"
+							stroke-width="2"
+							stroke="currentColor"
+							class="w-3 h-3"
 						>
-							<span>Add</span>
+							<path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+						</svg>
+					</button>
+					<!-- [Big Button] Use Default -->
+					<button
+						type="button"
+						class="rounded-full border border-gray-300 px-3 py-1.5 text-xs font-semibold text-gray-700 transition hover:border-gray-400 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:border-gray-500 dark:hover:bg-gray-800"
+						on:click={() => {
+							resetDefaultsModalMode = 'default';
+							showResetDefaultsModal = true;
+						}}
+					>
+						Use default
+					</button>
+					{#if errorTypeDefs.length > 0}
+						<!-- [Big Button] Delete All -->
+						<button
+							type="button"
+							class="flex items-center gap-1 rounded-full border border-red-200 px-3 py-1.5 text-xs font-semibold text-red-600 transition hover:border-red-300 hover:bg-red-50 dark:border-red-900/70 dark:text-red-300 dark:hover:border-red-800 dark:hover:bg-red-950/40"
+							on:click={() => {
+								resetDefaultsModalMode = 'delete';
+								showResetDefaultsModal = true;
+							}}
+						>
+							<span>Delete All</span>
 							<svg
 								xmlns="http://www.w3.org/2000/svg"
 								fill="none"
@@ -2181,52 +2201,16 @@
 								stroke="currentColor"
 								class="w-3 h-3"
 							>
-								<path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+								<path
+									stroke-linecap="round"
+									stroke-linejoin="round"
+									d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0"
+								/>
 							</svg>
 						</button>
-						<button
-							type="button"
-							class="rounded-full border border-gray-300 px-3 py-1.5 text-xs font-semibold text-gray-700 transition hover:border-gray-400 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:border-gray-500 dark:hover:bg-gray-800"
-							on:click|stopPropagation={() => {
-								resetDefaultsModalMode = 'default';
-								showResetDefaultsModal = true;
-							}}
-						>
-							Use default
-						</button>
-						{#if errorTypeDefs.length > 0}
-							<button
-								type="button"
-								class="flex items-center gap-1 rounded-full border border-red-200 px-3 py-1.5 text-xs font-semibold text-red-600 transition hover:border-red-300 hover:bg-red-50 dark:border-red-900/70 dark:text-red-300 dark:hover:border-red-800 dark:hover:bg-red-950/40"
-								on:click|stopPropagation={() => {
-									resetDefaultsModalMode = 'delete';
-									showResetDefaultsModal = true;
-								}}
-							>
-								<span>Delete All</span>
-								<svg
-									xmlns="http://www.w3.org/2000/svg"
-									fill="none"
-									viewBox="0 0 24 24"
-									stroke-width="2"
-									stroke="currentColor"
-									class="w-3 h-3"
-								>
-									<path
-										stroke-linecap="round"
-										stroke-linejoin="round"
-										d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0"
-									/>
-								</svg>
-							</button>
-						{/if}
-					</div>
 					{/if}
 				</div>
-			</button>
 
-			{#if showErrorTypeConfiguration}
-			<div class="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
 				{#if errorTypeDefs.length === 0}
 					<div
 						class="rounded-lg border border-gray-200 bg-white px-4 py-6 text-sm text-gray-400 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-500"
@@ -2236,39 +2220,104 @@
 				{:else}
 					<div class="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
 						{#each errorTypeDefs as def, i}
-							<button
-								type="button"
-								class="flex flex-col items-start rounded-lg border border-gray-200 bg-white p-4 text-left transition hover:border-gray-300 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-900 dark:hover:border-gray-600 dark:hover:bg-gray-800"
-								on:click={() => openEditErrorType(i)}
+							<div
+								class="flex flex-col w-full px-3 py-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 transition hover:border-gray-300 hover:bg-gray-50 dark:hover:border-gray-600 dark:hover:bg-gray-800"
 							>
-								<div class="flex items-center gap-2">
-									<span
-										class="h-4 w-4 rounded-full flex-shrink-0"
-										style="background-color: {def.color};"
-									></span>
-									<div class="text-sm font-medium text-gray-900 dark:text-gray-100">{def.type}</div>
+								<div class="flex items-center justify-between">
+									<div class="flex items-center gap-2 min-w-0 flex-1">
+										<span
+											class="h-4 w-4 rounded-full flex-shrink-0"
+											style="background-color: {def.color};"
+										></span>
+										<div class="font-semibold text-gray-900 dark:text-gray-100 truncate">{def.type}</div>
+									</div>
+									<div class="flex items-center gap-0.5 flex-shrink-0">
+										<!-- Edit Button (Pencil) -->
+										<button
+											type="button"
+											class="self-center w-fit text-sm px-2 py-2 dark:text-gray-300 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 rounded-xl"
+											on:click={() => openEditErrorType(i)}
+										>
+											<Pencil className="w-4 h-4" />
+										</button>
+										<!-- More Button with Dropdown Menu -->
+										<Dropdown bind:show={showErrorTypeMenuOpen[i]}>
+											<button
+												slot="trigger"
+												type="button"
+												class="self-center w-fit text-sm p-1.5 dark:text-gray-300 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 rounded-xl"
+												on:click={() => {
+													showErrorTypeMenuOpen[i] = !showErrorTypeMenuOpen[i];
+																	showErrorTypeMenuOpen = showErrorTypeMenuOpen;
+												}}
+											>
+												<EllipsisHorizontal className="size-5" />
+											</button>
+											
+											<div slot="content">
+												<DropdownMenu.Content
+													class="w-full max-w-[160px] rounded-xl px-1 py-1.5 border border-gray-300/30 dark:border-gray-700/50 z-50 bg-white dark:bg-gray-850 dark:text-white shadow-sm"
+													sideOffset={-2}
+													side="bottom"
+													align="start"
+													transition={flyAndScale}
+												>
+													<DropdownMenu.Item
+														class="flex gap-2 items-center px-3 py-2 text-sm font-medium cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 rounded-md text-red-600 dark:text-red-400"
+														on:click={() => {
+															editingErrorTypeIndex = i;
+															deleteErrorType();
+															showErrorTypeMenuOpen[i] = false;
+																						showErrorTypeMenuOpen = showErrorTypeMenuOpen;
+														}}
+													>
+														<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4">
+															<path stroke-linecap="round" stroke-linejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" />
+														</svg>
+														<span>Delete</span>
+													</DropdownMenu.Item>
+												</DropdownMenu.Content>
+											</div>
+										</Dropdown>
+									</div>
 								</div>
-								<p class="mt-2 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
+								<p class="mt-1 text-xs text-gray-500 dark:text-gray-400 line-clamp-2">
 									{def.description || 'No description yet.'}
 								</p>
-							</button>
+							</div>
 						{/each}
 					</div>
 				{/if}
-				<div class="flex flex-wrap items-center justify-end gap-3 pt-2">
+				<div class="flex flex-wrap items-center justify-end gap-3 pt-4">
 					<button
-						class="rounded-full bg-black px-3 py-1.5 text-xs font-medium text-white transition hover:bg-gray-800"
-						on:click={persistErrorTypes}
+						class="rounded-full px-3 py-1.5 text-xs font-medium text-gray-600 transition hover:text-gray-900 dark:text-gray-300 dark:hover:text-white"
+						on:click={() => {
+							draftErrorTypeDefs = originalErrorTypeDefs;
+						}}
+						disabled={!hasUnsavedErrorTypeChanges}
 					>
-						Save
+						Cancel
+					</button>
+					<button
+						class={`w-20 rounded-full px-3 py-1.5 text-xs font-medium transition ${
+							justSavedErrorTypes
+								? 'cursor-default bg-gray-200 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
+								: hasUnsavedErrorTypeChanges
+									? 'bg-[#57068C] text-white hover:bg-[#702B9D]'
+									: 'cursor-default bg-gray-200 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
+							}}`}
+						on:click={persistErrorTypes}
+						disabled={!hasUnsavedErrorTypeChanges && !justSavedErrorTypes}
+					>
+						{justSavedErrorTypes ? 'Saved' : 'Save'}
 					</button>
 				</div>
 			</div>
 			{/if}
 		</div>
 
-	<!-- Homework & Answer Files Section -->
-		<div class="space-y-2">
+		<!-- [Standard Section: Homework & Answer Files] -->
+		<div class="space-y-4">
 			<button
 				type="button"
 				class="flex w-full items-start justify-between gap-3 text-left"
@@ -2298,10 +2347,10 @@
 					class="scrollbar-hidden relative overflow-x-auto max-w-full rounded-sm pt-0.5"
 				>
 					<table
-						class="text-sm text-left text-gray-500 dark:text-gray-400 rounded-sm"
+						class="w-full text-sm text-left text-gray-500 dark:text-gray-400 rounded-sm"
 					>
 						<thead
-							class="text-xs text-gray-700 uppercase bg-gray-50 dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5"
+							class="text-xs text-gray-700 uppercase bg-[#EEE6F3] dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5"
 						>
 							<tr>
 								<th class="w-[12rem] px-3 py-1.5 select-none">Homework</th>
@@ -2313,7 +2362,7 @@
 							</tr>
 						</thead>
 						<tbody>
-							{#if !selectedGroupId && !useFrontendTestingData}
+							{#if !$aiTutorSelectedGroupId && !useFrontendTestingData}
 								<tr class="bg-white dark:bg-gray-900 text-xs">
 									<td colspan="6" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">
 										Loading group selection...
@@ -2322,21 +2371,20 @@
 							{:else}
 								{#each homeworkFileRows as row, i (row.id)}
 									<tr
-										class="bg-white dark:bg-gray-900 text-xs border-t border-gray-100 dark:border-gray-850"
+										class="bg-white dark:bg-gray-900 text-xs border-t border-gray-100 dark:border-gray-850 hover:bg-gray-50 dark:hover:bg-gray-800 transition"
 									>
 										<!-- <td class="px-3 py-1 text-gray-500 dark:text-gray-400">
 									<div class={homeworkModelNameCellClass}>{getHomeworkModelName(row.id)}</div>
 								</td> -->
 										<td
-											class="px-3 py-1 text-gray-700 dark:text-gray-300"
+											class="px-3 py-1 font-semibold text-gray-900 dark:text-gray-100"
 											title={row.displayModelName}
 										>
 											<div class={homeworkModelNameCellClass}>{row.displayModelName}</div>
 										</td>
 										<td class="px-3 py-1">
 											{#if row.questionUploaded && !uploadingMap[`${row.id}-question`]}
-												<div class="flex flex-col gap-1.5">
-													<div class="text-xs text-gray-700 dark:text-gray-400">{row.questionFileName ?? `homework_${i + 1}_questions.pdf`}</div>
+												<div class="flex items-center gap-1.5">
 													<label class="cursor-pointer">
 														<input
 															type="file"
@@ -2345,7 +2393,7 @@
 															on:change={makeUploadHandler(row.id, 'question', row.modelId)}
 														/>
 														<span
-															class="inline-flex items-center gap-1.5 rounded-xl border border-gray-300 px-2 py-1.5 text-xs font-medium text-gray-700 transition hover:bg-black/5 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-white/5"
+															class="inline-flex items-center justify-center rounded-full border border-[#57068C]/40 p-1 text-[#57068C] transition hover:bg-purple-50 dark:border-purple-700 dark:text-purple-400 dark:hover:bg-purple-900/20"
 														>
 															<svg
 																xmlns="http://www.w3.org/2000/svg"
@@ -2361,9 +2409,9 @@
 																	d="M12 16.5V4.5m0 0 4.5 4.5M12 4.5 7.5 9M4.5 19.5h15"
 																/>
 															</svg>
-															Re-upload
 														</span>
 													</label>
+													<div class="max-w-[8rem] truncate text-xs text-gray-500 dark:text-gray-400">{row.questionFileName ?? `homework_${i + 1}_questions.pdf`}</div>
 												</div>
 											{:else}
 												<label class="cursor-pointer">
@@ -2374,7 +2422,7 @@
 														on:change={makeUploadHandler(row.id, 'question', row.modelId)}
 													/>
 													<span
-														class="inline-flex items-center gap-1.5 rounded-xl border border-gray-300 px-2 py-1.5 text-xs font-medium text-gray-700 transition hover:bg-black/5 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-white/5"
+														class="inline-flex items-center justify-center rounded-full border border-[#57068C]/40 p-1 text-[#57068C] transition hover:bg-purple-50 dark:border-purple-700 dark:text-purple-400 dark:hover:bg-purple-900/20"
 													>
 														<svg
 															xmlns="http://www.w3.org/2000/svg"
@@ -2390,15 +2438,13 @@
 																d="M12 16.5V4.5m0 0 4.5 4.5M12 4.5 7.5 9M4.5 19.5h15"
 															/>
 														</svg>
-														{uploadingMap[`${row.id}-question`] ? 'Uploading…' : 'Upload'}
 													</span>
 												</label>
 											{/if}
 										</td>
 										<td class="px-3 py-1">
 											{#if row.answerUploaded && !uploadingMap[`${row.id}-answer`]}
-												<div class="flex flex-col gap-1.5">
-													<div class="text-xs text-gray-700 dark:text-gray-400">{row.answerFileName ?? `homework_${i + 1}_answers.pdf`}</div>
+												<div class="flex items-center gap-1.5">
 													<label class="cursor-pointer">
 														<input
 															type="file"
@@ -2407,7 +2453,7 @@
 															on:change={makeUploadHandler(row.id, 'answer', row.modelId)}
 														/>
 														<span
-															class="inline-flex items-center gap-1.5 rounded-xl border border-gray-300 px-2 py-1.5 text-xs font-medium text-gray-700 transition hover:bg-black/5 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-white/5"
+															class="inline-flex items-center justify-center rounded-full border border-[#57068C]/40 p-1 text-[#57068C] transition hover:bg-purple-50 dark:border-purple-700 dark:text-purple-400 dark:hover:bg-purple-900/20"
 														>
 															<svg
 																xmlns="http://www.w3.org/2000/svg"
@@ -2423,9 +2469,9 @@
 																	d="M12 16.5V4.5m0 0 4.5 4.5M12 4.5 7.5 9M4.5 19.5h15"
 																/>
 															</svg>
-															Re-upload
 														</span>
 													</label>
+													<div class="max-w-[8rem] truncate text-xs text-gray-500 dark:text-gray-400">{row.answerFileName ?? `homework_${i + 1}_answers.pdf`}</div>
 												</div>
 											{:else}
 												<label class="cursor-pointer">
@@ -2436,7 +2482,7 @@
 														on:change={makeUploadHandler(row.id, 'answer', row.modelId)}
 													/>
 													<span
-														class="inline-flex items-center gap-1.5 rounded-xl border border-gray-300 px-2 py-1.5 text-xs font-medium text-gray-700 transition hover:bg-black/5 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-white/5"
+														class="inline-flex items-center justify-center rounded-full border border-[#57068C]/40 p-1 text-[#57068C] transition hover:bg-purple-50 dark:border-purple-700 dark:text-purple-400 dark:hover:bg-purple-900/20"
 													>
 														<svg
 															xmlns="http://www.w3.org/2000/svg"
@@ -2452,7 +2498,6 @@
 																d="M12 16.5V4.5m0 0 4.5 4.5M12 4.5 7.5 9M4.5 19.5h15"
 															/>
 														</svg>
-														{uploadingMap[`${row.id}-answer`] ? 'Uploading…' : 'Upload'}
 													</span>
 												</label>
 											{/if}
@@ -2460,7 +2505,7 @@
 										<td class="w-[6rem] px-3 py-1 text-gray-700 dark:text-gray-300">
 											{getConversationCountForRow(row)}
 										</td>
-										<td class="px-3 py-1 text-gray-700 dark:text-gray-300">
+										<td class="px-3 py-1 font-normal text-gray-400 dark:text-gray-500">
 											<div class="max-w-[12rem] whitespace-normal break-words leading-4">
 												<div>{getHomeworkAnalysisState(row)}</div>
 												{#if getHomeworkAnalysisStep(row)}
@@ -2477,12 +2522,14 @@
 										</td>
 										<td class="px-3 py-1">
 										{#if getHomeworkPrimaryActionLabel(row)}
+											<!-- [Table Button: icon+name] Run / Re-run -->
 											<button
 												type="button"
-												class="px-3 py-1 text-xs font-medium text-[#57068C] transition hover:text-[#702B9D] disabled:cursor-not-allowed disabled:opacity-50 dark:text-purple-400 dark:hover:text-purple-300"
+												class="inline-flex items-center gap-1 rounded-full border border-[#57068C]/40 px-3 py-1 text-xs font-bold text-[#57068C] transition hover:bg-purple-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-purple-700 dark:text-purple-400 dark:hover:bg-purple-900/20"
 												on:click={() => handleHomeworkPrimaryAction(row)}
 												disabled={isHomeworkActionBusy(row)}
 											>
+												<svg class="h-3 w-3 flex-shrink-0" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
 												{getHomeworkPrimaryActionLabel(row)}
 											</button>
 											{:else if getHomeworkActionHint(row)}
@@ -2498,7 +2545,7 @@
 							<!-- Draft rows (always rendered, outside group conditional) -->
 							{#each draftRows as draft, di (draft.uid)}
 								<tr
-									class="bg-white dark:bg-gray-900 text-xs border-t border-gray-100 dark:border-gray-850"
+									class="bg-white dark:bg-gray-900 text-xs border-t border-gray-100 dark:border-gray-850 hover:bg-gray-50 dark:hover:bg-gray-800 transition"
 								>
 									<td class="px-3 py-1 text-gray-500 dark:text-gray-400">
 										<div class={homeworkModelNameCellClass}>{draft.modelId}</div>
@@ -2512,7 +2559,7 @@
 												on:change={makeUploadHandler(null, 'question', draft.modelId, draft.uid)}
 											/>
 											<span
-												class="inline-flex items-center gap-1.5 rounded-xl border border-gray-300 px-2 py-1.5 text-xs font-medium text-gray-700 transition hover:bg-black/5 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-white/5"
+												class="inline-flex items-center justify-center rounded-full border border-[#57068C]/40 p-1 text-[#57068C] transition hover:bg-purple-50 dark:border-purple-700 dark:text-purple-400 dark:hover:bg-purple-900/20"
 											>
 												<svg
 													xmlns="http://www.w3.org/2000/svg"
@@ -2528,7 +2575,6 @@
 														d="M12 16.5V4.5m0 0 4.5 4.5M12 4.5 7.5 9M4.5 19.5h15"
 													/>
 												</svg>
-												{uploadingMap[`draft-${draft.uid}-question`] ? 'Uploading…' : 'Upload'}
 											</span>
 										</label>
 									</td>
@@ -2541,7 +2587,7 @@
 												on:change={makeUploadHandler(null, 'answer', draft.modelId, draft.uid)}
 											/>
 											<span
-												class="inline-flex items-center gap-1.5 rounded-xl border border-gray-300 px-2 py-1.5 text-xs font-medium text-gray-700 transition hover:bg-black/5 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-white/5"
+												class="inline-flex items-center justify-center rounded-full border border-[#57068C]/40 p-1 text-[#57068C] transition hover:bg-purple-50 dark:border-purple-700 dark:text-purple-400 dark:hover:bg-purple-900/20"
 											>
 												<svg
 													xmlns="http://www.w3.org/2000/svg"
@@ -2557,7 +2603,6 @@
 														d="M12 16.5V4.5m0 0 4.5 4.5M12 4.5 7.5 9M4.5 19.5h15"
 													/>
 												</svg>
-												{uploadingMap[`draft-${draft.uid}-answer`] ? 'Uploading…' : 'Upload'}
 											</span>
 										</label>
 									</td>
@@ -2576,7 +2621,7 @@
 		</div>
 
 	<!-- Prompt Configuration Section -->
-	<div class="space-y-3">
+	<div class="space-y-4">
 		<button
 			type="button"
 			class="flex w-full items-start justify-between gap-3 text-left"
@@ -2611,7 +2656,7 @@
 						class="max-w-full w-full table-auto rounded-sm text-left text-sm text-gray-500 dark:text-gray-400"
 					>
 						<thead
-							class="-translate-y-0.5 bg-gray-50 text-xs uppercase text-gray-700 dark:bg-gray-850 dark:text-gray-400"
+							class="-translate-y-0.5 bg-[#EEE6F3] text-xs uppercase text-gray-700 dark:bg-gray-850 dark:text-gray-400"
 						>
 							<tr>
 								<th class="px-3 py-1.5 select-none">Prompt</th>

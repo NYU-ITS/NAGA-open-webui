@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
+	import { aiTutorSelectedGroupId } from '$lib/stores';
 	import { toast } from 'svelte-sonner';
 	import { createNewModel, getModelById, updateModelById } from '$lib/apis/models';
 	import {
@@ -26,7 +27,7 @@
 	const useFrontendTestingData = AI_TUTOR_FRONTEND_TESTING_MODE;
 	const testToast = showAITutorTestToast;
 	const TOPIC_ANALYSIS_SESSION_TTL_MS = 5 * 60 * 1000;
-	const LAST_AI_TUTOR_GROUP_STORAGE_KEY = 'ai_tutor_last_selected_group_id';
+	let lastSyncedGroupId = '';
 	const dashboardPalette = ['#EE352E', '#00933C', '#B933AD', '#0039A6', '#FF6319', '#996633'];
 	// Error type colors
 	const errorTypeColors = ['#B588FF', '#60A5FA', '#5DD299', '#FF9E42'];
@@ -40,20 +41,13 @@
 		'max-w-[12rem] overflow-hidden whitespace-normal break-words leading-4 [display:-webkit-box] [-webkit-line-clamp:3] [-webkit-box-orient:vertical]';
 
 	// Group ID (needed for error-types endpoints)
-	let groupId = '';
-	function getPersistedGroupId() {
-		if (typeof localStorage === 'undefined') return '';
-		return localStorage.getItem(LAST_AI_TUTOR_GROUP_STORAGE_KEY) || '';
-	}
-
-	$: groupId = $page.url.searchParams.get('group_id') || getPersistedGroupId();
-	$: if ($page.url.searchParams.get('group_id')) {
-		if (typeof localStorage !== 'undefined') {
-			localStorage.setItem(
-				LAST_AI_TUTOR_GROUP_STORAGE_KEY,
-				$page.url.searchParams.get('group_id') || ''
-			);
-		}
+	// groupId now comes from store - prevents flash of wrong group data when switching tabs
+	// Subscribe to store for group changes - prevents flash of wrong group data
+	$: if (initialized && $aiTutorSelectedGroupId && $aiTutorSelectedGroupId !== lastSyncedGroupId) {
+		lastSyncedGroupId = $aiTutorSelectedGroupId;
+		void loadTopicAnalysisData();
+		void loadPracticeQuestionData();
+		void loadErrorTypes();
 	}
 	const frontendTestingTopicByHomework = [
 		{
@@ -199,7 +193,7 @@
 
 		for (let i = 0; i < localStorage.length; i += 1) {
 			const key = localStorage.key(i);
-			if (!key || !key.startsWith(`${PRACTICE_JOB_STORAGE_PREFIX}:${groupId}:`)) continue;
+			if (!key || !key.startsWith(`${PRACTICE_JOB_STORAGE_PREFIX}:${$aiTutorSelectedGroupId}:`)) continue;
 			const homeworkId = key.split(':').at(-1);
 			if (!homeworkId) continue;
 			try {
@@ -221,7 +215,7 @@
 		generatingPracticeJobsByHomeworkId = nextJobs;
 		generatingPracticeByHomeworkId = nextGeneratingFlags;
 		console.log('AI Tutor Dashboard - Topic Analysis restored practice jobs', {
-			groupId,
+			groupId: $aiTutorSelectedGroupId,
 			jobs: Object.entries(nextJobs).map(([homeworkId, job]) => ({
 				homeworkId,
 				jobId: job.jobId,
@@ -392,7 +386,7 @@
 
 	// Helper: load error types from server
 	async function loadErrorTypes() {
-		const calledForGroupId = groupId; // capture before any await
+		const calledForGroupId = $aiTutorSelectedGroupId; // capture before any await
 		testToast(`Topic Analysis fetch: error types group=${calledForGroupId || 'none'}`);
 		if (useFrontendTestingData) {
 			errorTypeDefs = $aiTutorFrontendTestingErrorTypes;
@@ -404,7 +398,7 @@
 				key: `topic-analysis:${calledForGroupId}:error-types`,
 				ttlMs: TOPIC_ANALYSIS_SESSION_TTL_MS,
 				onCached: (cached) => {
-					if (groupId === calledForGroupId) errorTypeDefs = cached;
+					if ($aiTutorSelectedGroupId === calledForGroupId) errorTypeDefs = cached;
 				},
 				loader: async () => {
 					const res = await fetch(
@@ -430,7 +424,7 @@
 					return nextErrorTypes;
 				}
 			});
-			if (groupId !== calledForGroupId) return; // stale
+			if ($aiTutorSelectedGroupId !== calledForGroupId) return; // stale
 			errorTypeDefs = freshErrorTypes;
 		} catch (e) {
 			testToast('Topic Analysis failed loading error types');
@@ -440,7 +434,7 @@
 
 	// Helper: persist current errorTypeDefs to server
 	async function loadTopicAnalysisData() {
-		const calledForGroupId = groupId; // capture before any await
+		const calledForGroupId = $aiTutorSelectedGroupId; // capture before any await
 		testToast(`Topic Analysis fetch: analysis group=${calledForGroupId || 'none'}`);
 		if (useFrontendTestingData) {
 			topicGroupsByHomework = frontendTestingTopicByHomework;
@@ -456,7 +450,7 @@
 				topicGroupsByHomework: any[];
 				homeworkIdsWithAnalysis: string[];
 			}) => {
-				if (groupId !== calledForGroupId) return; // stale
+				if ($aiTutorSelectedGroupId !== calledForGroupId) return; // stale
 				homeworkRows = snapshot.homeworkRows;
 				topicGroupsByHomework = snapshot.topicGroupsByHomework;
 				homeworkIdsWithAnalysis = new Set(snapshot.homeworkIdsWithAnalysis);
@@ -592,7 +586,7 @@
 					};
 				}
 			});
-			if (groupId !== calledForGroupId) return; // stale — group changed while loading
+			if ($aiTutorSelectedGroupId !== calledForGroupId) return; // stale — group changed while loading
 			applyTopicAnalysisSnapshot(snapshot);
 			console.log('AI Tutor Dashboard - Topic Analysis data loaded', {
 				groupId: calledForGroupId,
@@ -614,7 +608,7 @@
 	}
 
 	async function loadPracticeQuestionData() {
-		const calledForGroupId = groupId; // capture before any await
+		const calledForGroupId = $aiTutorSelectedGroupId; // capture before any await
 		testToast(`Topic Analysis fetch: practice group=${calledForGroupId || 'none'}`);
 		if (useFrontendTestingData) {
 			practiceQuestions = frontendTestingPracticeQuestions;
@@ -629,7 +623,7 @@
 				practiceQuestions: any[];
 				assignmentSentAtByPracticeId: Record<string, string>;
 			}) => {
-				if (groupId !== calledForGroupId) return; // stale
+				if ($aiTutorSelectedGroupId !== calledForGroupId) return; // stale
 				practiceQuestions = snapshot.practiceQuestions;
 				assignmentSentAtByPracticeId = snapshot.assignmentSentAtByPracticeId;
 				hasLoadedPracticeOnce = true;
@@ -765,7 +759,7 @@
 					};
 				}
 			});
-			if (groupId !== calledForGroupId) return; // stale — group changed while loading
+			if ($aiTutorSelectedGroupId !== calledForGroupId) return; // stale — group changed while loading
 			applyPracticeSnapshot(snapshot);
 			console.log('AI Tutor Dashboard - Topic Analysis practice loaded', {
 				groupId: calledForGroupId,
@@ -973,11 +967,11 @@
 
 	onMount(async () => {
 		testToast(
-			`loading aitutordashboard - Topic Analysis | group=${groupId || 'pending'} | frontend_testing=${String(useFrontendTestingData)}`
+			`loading aitutordashboard - Topic Analysis | group=${$aiTutorSelectedGroupId || 'pending'} | frontend_testing=${String(useFrontendTestingData)}`
 		);
 		console.log('AI Tutor Dashboard - Topic Analysis mount', {
 			pathname: $page.url.pathname,
-			groupId,
+			groupId: $aiTutorSelectedGroupId,
 			groupIdFromUrl: $page.url.searchParams.get('group_id') || ''
 		});
 		initialized = true;
@@ -997,11 +991,11 @@
 		restorePersistedPracticeJobs();
 	});
 
-	$: if (initialized && !useFrontendTestingData && groupId) {
+	$: if (initialized && !useFrontendTestingData && $aiTutorSelectedGroupId) {
 		restorePersistedPracticeJobs();
 	}
 
-	$: if (initialized && !useFrontendTestingData && groupId) {
+	$: if (initialized && !useFrontendTestingData && $aiTutorSelectedGroupId) {
 		for (const [homeworkId, job] of Object.entries(generatingPracticeJobsByHomeworkId)) {
 			if (!job?.jobId || !generatingPracticeByHomeworkId[homeworkId]) continue;
 			if (resumedPracticeJobIds.has(job.jobId)) continue;
@@ -1029,8 +1023,8 @@
 						};
 						persistPracticeJobState(homeworkId, nextJobState);
 					});
-					clearAITutorSessionCacheByPrefix(`topic-analysis:${groupId}:analysis`);
-					clearAITutorSessionCacheByPrefix(`topic-analysis:${groupId}:practice`);
+					clearAITutorSessionCacheByPrefix(`topic-analysis:${$aiTutorSelectedGroupId}:analysis`);
+					clearAITutorSessionCacheByPrefix(`topic-analysis:${$aiTutorSelectedGroupId}:practice`);
 					await loadPracticeQuestionData();
 					await syncMasteryWorkspaceModel(homeworkId);
 					clearPracticeJobState(homeworkId);
@@ -1058,8 +1052,8 @@
 
 	// Reset per-homework action/error state when the group changes so that
 	// failure banners and in-progress indicators from a previous group never bleed into the new one.
-	$: if (initialized && groupId && groupId !== _prevGroupIdForReset) {
-		_prevGroupIdForReset = groupId;
+	$: if (initialized && $aiTutorSelectedGroupId && $aiTutorSelectedGroupId !== _prevGroupIdForReset) {
+		_prevGroupIdForReset = $aiTutorSelectedGroupId;
 		failedPracticeGenerationByHomeworkId = {};
 		generatingPracticeByHomeworkId = {};
 		generatingPracticeJobsByHomeworkId = {};
@@ -1067,15 +1061,15 @@
 		resumedPracticeJobIds = new Set();
 	}
 
-	$: if (initialized && !useFrontendTestingData && groupId) {
+	$: if (initialized && !useFrontendTestingData && $aiTutorSelectedGroupId) {
 		void loadTopicAnalysisData();
 	}
 
-	$: if (initialized && !useFrontendTestingData && groupId) {
+	$: if (initialized && !useFrontendTestingData && $aiTutorSelectedGroupId) {
 		void loadPracticeQuestionData();
 	}
 
-	$: if (initialized && !useFrontendTestingData && groupId) {
+	$: if (initialized && !useFrontendTestingData && $aiTutorSelectedGroupId) {
 		void loadErrorTypes();
 	}
 	// Keep the last successful instructor snapshot on screen while the layout is
@@ -1143,7 +1137,6 @@
 	let selectedTopicAnalysisHomework = 'all';
 	let selectedTopicAnalysisTopic = 'all';
 	let lastTopicAnalysisFilterKey = '';
-	let openDropdown: 'homework' | 'topic' | null = null;
 
 	function getHomeworkModelName(homework: string) {
 		// homework name is now homework model name
@@ -1217,8 +1210,8 @@
 		}
 	}
 	let practiceQuestions = [];
-	$: topicAnalysisEmptyMessage = !groupId && !useFrontendTestingData
-		? 'Select a group to view topic analysis.'
+	$: topicAnalysisEmptyMessage = !$aiTutorSelectedGroupId && !useFrontendTestingData
+		? '' // Don't show loading text - wait for store to populate (prevents flash)
 		: homeworkRows.length === 0 && !useFrontendTestingData
 			? 'No homework uploaded for this group yet.'
 			: homeworkRows.length > 0 && homeworkRows.every((row) => !row.questionUploaded) && !useFrontendTestingData
@@ -1226,8 +1219,8 @@
 				: homeworkRows.length > 0 && homeworkRows.every((row) => !row.topicMapped) && !useFrontendTestingData
 					? 'Homework processing is still preparing topics.'
 					: 'No analysis data is available for the current filters. Run analysis first.';
-	$: practiceQuestionsEmptyMessage = !groupId && !useFrontendTestingData
-		? 'Select a group to view practice question sets.'
+	$: practiceQuestionsEmptyMessage = !$aiTutorSelectedGroupId && !useFrontendTestingData
+		? '' // Don't show loading text - wait for store to populate (prevents flash)
 		: homeworkRows.length === 0 && !useFrontendTestingData
 			? 'No homework uploaded for this group yet.'
 			: 'No practice question sets are available yet. Generate practice after analysis is completed.';
@@ -1235,76 +1228,39 @@
 </script>
 
 <div class="flex flex-col space-y-6 py-4 overflow-y-scroll">
-	<!-- Topic Analysis by Homework -->
+	<!-- [Standard Section: Topic Analysis by Homework] -->
 	<div class="space-y-3">
-		<div class="flex flex-wrap items-center justify-between gap-4">
-			<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">
-				Topic Analysis by Homework
-			</h2>
-			<div class="flex flex-wrap items-center gap-2">
-				<!-- Homework Dropdown -->
-				<div class="relative">
-					<button
-						class="border border-gray-300 rounded-md bg-white px-2.5 py-1.5 text-xs text-gray-700 dark:border-gray-500 dark:bg-gray-800 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-400 dark:focus:ring-blue-500 cursor-pointer flex items-center justify-between gap-2 w-40"
-						on:click={() => (openDropdown = openDropdown === 'homework' ? null : 'homework')}
-					>
-						<span class="truncate">{selectedTopicAnalysisHomework === 'all' ? 'All Homeworks' : topicAnalysisHomeworkOptions.find(o => o.id === selectedTopicAnalysisHomework)?.label || 'All Homeworks'}</span>
-						<ChevronDown className={`size-3 flex-shrink-0 transition-transform ${openDropdown === 'homework' ? 'rotate-180' : ''}`} />
-					</button>
-					{#if openDropdown === 'homework'}
-						<div class="absolute top-full left-0 mt-1 w-40 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-500 rounded-md shadow-lg z-50">
-							<button
-								class="w-full px-3 py-1.5 text-xs text-left hover:bg-gray-100 dark:hover:bg-gray-700 {selectedTopicAnalysisHomework === 'all' ? 'bg-blue-50 dark:bg-blue-900/30 font-medium' : ''}"
-								on:click={() => { selectedTopicAnalysisHomework = 'all'; openDropdown = null; }}
-							>
-								All Homeworks
-							</button>
-							{#each topicAnalysisHomeworkOptions as option}
-								<button
-									class="w-full px-3 py-1.5 text-xs text-left hover:bg-gray-100 dark:hover:bg-gray-700 {selectedTopicAnalysisHomework === option.id ? 'bg-blue-50 dark:bg-blue-900/30 font-medium' : ''}"
-									on:click={() => { selectedTopicAnalysisHomework = option.id; openDropdown = null; }}
-								>
-									{option.label}
-								</button>
-							{/each}
-						</div>
-					{/if}
-				</div>
+		<!-- Title -->
+		<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Topic Analysis by Homework</h2>
 
-				<!-- Topic Dropdown -->
-				<div class="relative">
-					<button
-						class="border border-gray-300 rounded-md bg-white px-2.5 py-1.5 text-xs text-gray-700 dark:border-gray-500 dark:bg-gray-800 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-400 dark:focus:ring-blue-500 cursor-pointer flex items-center justify-between gap-2 w-32"
-						on:click={() => (openDropdown = openDropdown === 'topic' ? null : 'topic')}
-					>
-						<span class="truncate">{selectedTopicAnalysisTopic === 'all' ? 'All Topics' : selectedTopicAnalysisTopic}</span>
-						<ChevronDown className={`size-3 flex-shrink-0 transition-transform ${openDropdown === 'topic' ? 'rotate-180' : ''}`} />
-					</button>
-					{#if openDropdown === 'topic'}
-						<div class="absolute top-full left-0 mt-1 max-h-64 w-32 overflow-y-auto bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-500 rounded-md shadow-lg z-50">
-							<button
-								class="w-full px-3 py-1.5 text-xs text-left hover:bg-gray-100 dark:hover:bg-gray-700 {selectedTopicAnalysisTopic === 'all' ? 'bg-blue-50 dark:bg-blue-900/30 font-medium' : ''}"
-								on:click={() => { selectedTopicAnalysisTopic = 'all'; openDropdown = null; }}
-							>
-								All Topics
-							</button>
-							{#each topicAnalysisTopicOptions as topic}
-								<button
-									class="w-full px-3 py-1.5 text-xs text-left hover:bg-gray-100 dark:hover:bg-gray-700 {selectedTopicAnalysisTopic === topic ? 'bg-blue-50 dark:bg-blue-900/30 font-medium' : ''}"
-									on:click={() => { selectedTopicAnalysisTopic = topic; openDropdown = null; }}
-								>
-									{topic}
-								</button>
-							{/each}
-						</div>
-					{/if}
-				</div>
-			</div>
+		<!-- Selector Row -->
+		<div class="flex flex-wrap items-center justify-end gap-2">
+			<!-- [Selector] Homework -->
+			<select
+				bind:value={selectedTopicAnalysisHomework}
+				class="rounded-full border border-gray-300 bg-white py-1.5 pl-3 pr-3 text-xs text-gray-700 cursor-pointer focus:outline-none dark:border-gray-500 dark:bg-gray-800 dark:text-gray-200"
+			>
+				<option value="all">All Homeworks</option>
+				{#each topicAnalysisHomeworkOptions as opt}
+					<option value={opt.id}>{opt.label}</option>
+				{/each}
+			</select>
+
+			<!-- [Selector] Topic -->
+			<select
+				bind:value={selectedTopicAnalysisTopic}
+				class="rounded-full border border-gray-300 bg-white py-1.5 pl-3 pr-3 text-xs text-gray-700 cursor-pointer focus:outline-none dark:border-gray-500 dark:bg-gray-800 dark:text-gray-200"
+			>
+				<option value="all">All Topics</option>
+				{#each topicAnalysisTopicOptions as topic}
+					<option value={topic}>{topic}</option>
+				{/each}
+			</select>
 		</div>
 
 		<div class="scrollbar-hidden relative overflow-x-auto rounded-sm pt-0.5">
 			<table class="min-w-[800px] table-fixed rounded-sm text-left text-sm text-gray-500 dark:text-gray-400">
-				<thead class="sticky top-0 text-xs text-gray-700 uppercase bg-gray-50 dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5 z-10">
+				<thead class="sticky top-0 text-xs text-gray-700 uppercase bg-[#EEE6F3] dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5 z-10">
 					<tr>
 						<th scope="col" class="w-[28%] px-3 py-1.5">Homework</th>
 						<th scope="col" class="w-[14%] whitespace-nowrap px-3 py-1.5">Questions in Topic</th>
