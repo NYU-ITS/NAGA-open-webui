@@ -23,6 +23,7 @@
 
 	import ChevronUp from '$lib/components/icons/ChevronUp.svelte';
 	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
+	import CustomDropdown from '$lib/components/CustomDropdown.svelte';
 
 
 	const AI_TUTOR_API_BASE = AI_TUTOR_API_BASE_URL;
@@ -54,15 +55,12 @@
 	};
 
 	const STANDARD_QUESTION_TEMPLATE = {
-		number: 6,
-		text: '**6.** Compute the difference quotient for the function $f(x) = x^2 - 3x + 2$:  \n(a) Simplify $\\frac{f(a + h) - f(a)}{h}$  \n(b) Evaluate the result when $a = 2$ and $h = 0.1$  \n(c) Rewrite the answer using $\\sqrt{x + 4}$, $\\ln(x)$, or $$\\int_0^1 x^2\\,dx = \\frac{1}{3}$$ when a problem needs radicals, logarithms, or display math.',
-		topics: ['Difference Quotient', 'Simplification of Expressions']
+		number: 1,
+		text: 'Solve: $2x + 3 = 7$',
+		topics: ['Linear Equations']
 	};
 
 	const GUIDE_JSON_EXAMPLE = JSON.stringify(STANDARD_QUESTION_TEMPLATE, null, 2);
-
-	const JSON_EXPLANATION_PARAGRAPH =
-		'<span class="font-semibold">Number</span> is the displayed question number, <span class="font-semibold">text</span> is the full prompt students will see, and <span class="font-semibold">topics</span> is the list used for skill tagging. Only the <span class="font-semibold">text</span> property is rendered as Markdown + LaTeX preview, so you can use formats such as <span class="font-semibold">$...$</span> for inline math, <span class="font-semibold">$$...$$</span> for display math, and commands like <span class="font-semibold">\\frac</span>, <span class="font-semibold">\\sqrt</span>, and <span class="font-semibold">\\ln</span> inside the text string.';
 
 	const fallbackStudents = ['Alice Chen', 'Marco Patel', 'Nina Johnson', 'Leo Garcia'];
 
@@ -96,7 +94,7 @@
 	let hasLoadedReviewHomeworksOnce = useFrontendTestingData;
 	let currentHomeworkIndex = 0;
 	let selectedHomework = '';
-	let expandedGuide = true;
+	let expandedGuide = false;
 	let editingQuestionIndex: number | null = null;
 	let approvingQuestionSet = false;
 
@@ -754,8 +752,13 @@
 		editingQuestionIndex = null;
 	}
 
-	function handleHomeworkChange(event: Event) {
-		const homeworkId = (event.currentTarget as HTMLSelectElement).value;
+	function handleHomeworkChange(event: Event | CustomEvent<{ value: string }>) {
+		let homeworkId: string;
+		if (event instanceof CustomEvent) {
+			homeworkId = event.detail.value;
+		} else {
+			homeworkId = (event.currentTarget as HTMLSelectElement).value;
+		}
 		const index = getSelectedHomeworkIndex(homeworkId);
 		if (index >= 0) {
 			currentHomeworkIndex = index;
@@ -1417,22 +1420,77 @@
 </script>
 
 <div class="flex flex-col space-y-6 py-4">
+	<!-- Guide Section (Collapsed by default) -->
+	<div class="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-3">
+		<button
+			type="button"
+			class="flex w-full items-center justify-between text-left transition"
+			on:click={() => (expandedGuide = !expandedGuide)}
+			aria-expanded={expandedGuide}
+		>
+			<span class="text-sm font-semibold text-blue-900 dark:text-blue-100">Guide</span>
+			<span class="text-blue-600 dark:text-blue-400">
+				{#if expandedGuide}
+					<ChevronUp className="size-4" />
+				{:else}
+					<ChevronDown className="size-4" />
+				{/if}
+			</span>
+		</button>
+
+		{#if expandedGuide}
+			<div class="mt-2 pt-2 border-t border-blue-200 dark:border-blue-800 space-y-2">
+				<!-- Instructions (Top) -->
+				<ol class="text-xs text-blue-900 dark:text-blue-100 leading-snug space-y-0.5 ml-4 list-decimal">
+					<li>Select homework set</li>
+					<li>Click <span class="font-semibold">Generate</span></li>
+					<li>Review questions in editor</li>
+					<li>Click <span class="font-semibold">Approve</span></li>
+					<li>Click <span class="font-semibold">Send</span></li>
+				</ol>
+
+				<!-- Two Columns: JSON & Fields Guide -->
+				<div class="flex gap-3">
+					<!-- JSON + Markdown (Left) -->
+					<div class="flex-1 min-w-0 flex flex-col gap-2">
+						<div class="rounded bg-blue-900/10 dark:bg-blue-900/30 p-2 border border-blue-300 dark:border-blue-700">
+							<pre class="overflow-x-auto text-xs text-blue-900 dark:text-blue-100 font-mono leading-tight">{GUIDE_JSON_EXAMPLE}</pre>
+						</div>
+						<div class="rounded bg-white dark:bg-gray-950 p-2 border border-blue-200 dark:border-blue-800">
+							<div class="markdown-prose-xs text-xs text-gray-800 dark:text-gray-200">
+								<Markdown id="guide-question-preview" content={STANDARD_QUESTION_TEMPLATE.text} />
+							</div>
+						</div>
+					</div>
+
+					<!-- Fields Guide (Right) -->
+					<div class="flex-1 text-xs text-blue-800 dark:text-blue-200 leading-snug space-y-2">
+						<p class="font-semibold text-blue-900 dark:text-blue-100 border-b border-blue-200 dark:border-blue-800 pb-1">Fields Explanation</p>
+						<p><span class="font-semibold text-blue-900 dark:text-blue-100">number:</span> Question number</p>
+						<p><span class="font-semibold text-blue-900 dark:text-blue-100">text:</span> Question content (students see this). Supports LaTeX</p>
+						<p><span class="font-semibold text-blue-900 dark:text-blue-100">topics:</span> Topic tags, you are advised to map tpoics with the topics in "Topic Analysis"</p>
+					</div>
+				</div>
+			</div>
+		{/if}
+	</div>
+
 	<div class="space-y-3">
 		<div class="flex items-center justify-between gap-4">
 			<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Practice Question Set</h2>
 		</div>
 
 		<p class="text-sm text-gray-600 dark:text-gray-400 leading-relaxed">
-			Start with an AI-generated question set based on students' weak topics, or upload your own questions. You can download, edit, and re-upload AI-generated content if needed. All uploaded question sets are automatically standardized by the system, with topics added and answers generated if missing, to ensure a consistent format across the platform.
+			Generate or upload a question set. Download, edit, and re-upload as needed. The system standardizes all uploads with topics and answers.
 		</p>
 
 		<div class="scrollbar-hidden relative overflow-x-auto max-w-full rounded-sm pt-0.5">
 			<table class="w-full text-sm text-left text-gray-500 dark:text-gray-400 table-auto max-w-full rounded-sm">
 				<thead class="text-xs text-gray-700 uppercase bg-gray-50 dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5">
 					<tr>
-						<th scope="col" class="w-[12rem] px-3 py-1.5">Homework</th>
-						<th scope="col" class="px-3 py-1.5">Status</th>
-						<th scope="col" class="px-3 py-1.5">Action</th>
+						<th scope="col" class="w-[18rem] px-3 py-1.5">Homework</th>
+						<th scope="col" class="flex-1 px-3 py-1.5">Status</th>
+						<th scope="col" class="w-[8rem] px-3 py-1.5 text-right">Action</th>
 					</tr>
 				</thead>
 				<tbody>
@@ -1448,7 +1506,7 @@
 						{#each practiceQuestions as practice}
 							<tr class="bg-white dark:bg-gray-900 dark:border-gray-850 text-xs border-t border-gray-100 dark:border-gray-850">
 								<td class="px-3 py-1.5 font-medium text-gray-900 dark:text-white">
-									<div class="max-w-[12rem] overflow-hidden whitespace-normal break-words leading-4 [display:-webkit-box] [-webkit-line-clamp:3] [-webkit-box-orient:vertical]">{getHomeworkModelName(practice.homeworkId ?? practice.homework)}</div>
+									<div class="max-w-[18rem] overflow-hidden whitespace-normal break-words leading-4 [display:-webkit-box] [-webkit-line-clamp:3] [-webkit-box-orient:vertical]">{getHomeworkModelName(practice.homeworkId ?? practice.homework)}</div>
 								</td>
 								<td class="px-3 py-1.5">
 									<div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-gray-700 dark:text-gray-300">
@@ -1506,12 +1564,12 @@
 									</div>
 								</td>
 								<td class="px-3 py-1.5">
-									<div class="flex items-center gap-1">
+									<div class="flex items-center justify-end gap-1">
 										{#if practice.status === 'approved' || practice.status === 'ready'}
 											{#if canGeneratePractice(practice.homeworkId)}
 												<button
 													type="button"
-													class="self-center w-fit whitespace-nowrap rounded-xl px-2 py-1.5 text-sm font-semibold text-[#57068C] bg-purple-100 transition hover:bg-purple-200 dark:text-purple-300 dark:bg-purple-900/30 dark:hover:bg-purple-900/50"
+													class="self-center w-fit whitespace-nowrap rounded-xl px-3 py-2 text-base font-semibold text-[#57068C] bg-purple-100 transition hover:bg-purple-200 dark:text-purple-300 dark:bg-purple-900/30 dark:hover:bg-purple-900/50"
 													on:click={() => generatePractice(practice.homeworkId)}
 													disabled={generatingPracticeByHomeworkId[practice.homeworkId]}
 												>
@@ -1521,7 +1579,7 @@
 										{:else if practice.status === 'not_ready' && canGeneratePractice(practice.homeworkId)}
 											<button
 												type="button"
-												class="self-center w-fit whitespace-nowrap rounded-xl px-2 py-1.5 text-sm font-semibold text-[#57068C] bg-purple-100 transition hover:bg-purple-200 dark:text-purple-300 dark:bg-purple-900/30 dark:hover:bg-purple-900/50"
+												class="self-center w-fit whitespace-nowrap rounded-xl px-3 py-2 text-base font-semibold text-[#57068C] bg-purple-100 transition hover:bg-purple-200 dark:text-purple-300 dark:bg-purple-900/30 dark:hover:bg-purple-900/50"
 												on:click={() => generatePractice(practice.homeworkId)}
 												disabled={generatingPracticeByHomeworkId[practice.homeworkId]}
 											>
@@ -1542,51 +1600,6 @@
 		</div>
 	</div>
 
-	<div class="space-y-3">
-		<button
-			type="button"
-			class="flex w-full items-center justify-between py-2 text-left transition"
-			on:click={() => (expandedGuide = !expandedGuide)}
-			aria-expanded={expandedGuide}
-		>
-			<span class="text-xl font-semibold text-gray-800 dark:text-gray-200">Guide</span>
-				<span class="pt-1 text-gray-500 dark:text-gray-400">
-					{#if expandedGuide}
-						<ChevronUp className="size-4" />
-					{:else}
-						<ChevronDown className="size-4" />
-					{/if}
-				</span>
-		</button>
-
-		{#if expandedGuide}
-			<p class="text-sm text-gray-600 dark:text-gray-400 leading-relaxed">
-				Each question is stored as JSON so the platform can read the same structure every time. Edit
-				the values, but keep the field names. Select homework for generating practice questions, click
-				<span class="font-semibold">Start</span>, review each JSON block, and use
-				<span class="font-semibold">Approve</span> when one question is ready.
-			</p>
-			<div
-				class="rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 p-4"
-			>
-				<pre
-					class="overflow-x-auto text-xs text-gray-800 dark:text-gray-200 font-mono">{GUIDE_JSON_EXAMPLE}</pre>
-			</div>
-
-			<div class="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-950">
-				<div class="markdown-prose-xs text-xs text-gray-800 dark:text-gray-200">
-					<Markdown id="guide-question-preview" content={STANDARD_QUESTION_TEMPLATE.text} />
-				</div>
-			</div>
-
-			<h4 class="text-base font-semibold text-gray-800 dark:text-gray-200">What Each Item Means</h4>
-
-			<p class="text-sm text-gray-600 dark:text-gray-400 leading-relaxed">
-				{@html JSON_EXPLANATION_PARAGRAPH}
-			</p>
-		{/if}
-	</div>
-
 	<div class="space-y-0">
 		<div class="bg-white py-2 dark:bg-gray-900">
 			<div class="flex items-end justify-between gap-4">
@@ -1594,18 +1607,13 @@
 					<div class="flex items-center justify-between gap-3">
 						<h2 class="text-xl font-semibold text-gray-900 dark:text-gray-100">Questions</h2>
 						<div class="flex items-center justify-between gap-3 text-sm min-w-[26rem]">
-							<div class="relative min-w-0 flex-1">
-								<select
+							<div class="flex-1">
+								<CustomDropdown
 									bind:value={selectedHomework}
 									on:change={handleHomeworkChange}
-									class="block w-full truncate appearance-none bg-transparent pr-5 text-sm text-gray-700 outline-hidden dark:text-gray-300"
-									title={getHomeworkLabel(selectedHomework)}
-									aria-label="Select homework practice question set"
-								>
-									{#each reviewHomeworks as homework}
-										<option value={homework.homeworkId}>{getHomeworkLabel(homework.homeworkId)}</option>
-									{/each}
-								</select>
+									options={reviewHomeworks.map(hw => ({ id: hw.homeworkId, label: getHomeworkLabel(hw.homeworkId) }))}
+									width="w-full"
+								/>
 							</div>
 							<div class="ml-auto flex shrink-0 items-center gap-2">
 							<button
@@ -1649,12 +1657,20 @@
 			</div>
 		</div>
 
-		<div class="space-y-6 py-6 rounded-lg border border-gray-200">
+		<div class="space-y-4 py-6 rounded-lg border border-gray-200 dark:border-gray-700">
 			{#each questionEditors as editor, index}
-				<div class="bg-white pr-4 pl-4 dark:bg-gray-950">
-					<div class="mb-2 flex items-center justify-between gap-3">
-						<div class="text-base font-semibold text-gray-800 dark:text-gray-200">
-							Q{index + 1}
+				<div class="bg-white dark:bg-gray-950 rounded-lg border border-gray-100 dark:border-gray-800 p-4">
+					<div class="mb-4 flex items-center justify-between gap-3">
+						<div class="flex items-center gap-3">
+							<div class="text-base font-semibold text-gray-800 dark:text-gray-200">
+								Q{index + 1}
+							</div>
+							{#if approvedQuestionIndexes.has(index)}
+								<span class="inline-flex items-center gap-1 rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-700 dark:bg-green-900/30 dark:text-green-300">
+									<span class="w-1.5 h-1.5 rounded-full bg-green-500"></span>
+									Approved
+								</span>
+							{/if}
 						</div>
 						<div class="flex items-center gap-3 text-sm">
 							{#if editingQuestionIndex === index}
@@ -1692,25 +1708,28 @@
 							{/if}
 						</div>
 					</div>
-					{#if editingQuestionIndex === index}
-						<div class="rounded-lg bg-white dark:bg-white">
-							<textarea
-								value={questionEditors[index]}
-								on:input={(event) => handleQuestionEditorInput(index, event)}
-								rows={getEditorRows(editor)}
-								class="w-full rounded-lg border border-transparent bg-white px-4 py-1 font-mono text-xs leading-relaxed text-gray-800 focus:outline-none focus:ring-2 dark:bg-white dark:text-gray-900"
-							/>
-						</div>
-					{:else}
-						<div class="rounded-lg bg-gray-50 dark:bg-gray-900">
-							<div
-								class="w-full select-none whitespace-pre-wrap rounded-lg border border-transparent bg-gray-50 px-4 py-1 font-mono text-xs leading-relaxed text-gray-800 dark:bg-gray-900 dark:text-gray-200"
-							>
-								{questionEditors[index]}
+					<div class="space-y-3">
+						<div class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide">JSON</div>
+						{#if editingQuestionIndex === index}
+							<div class="rounded-lg bg-white dark:bg-white">
+								<textarea
+									value={questionEditors[index]}
+									on:input={(event) => handleQuestionEditorInput(index, event)}
+									rows={getEditorRows(editor)}
+									class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white px-4 py-2 font-mono text-xs leading-relaxed text-gray-800 focus:outline-none focus:ring-2 focus:ring-purple-500 dark:bg-white dark:text-gray-900"
+								/>
 							</div>
-						</div>
-					{/if}
-					<div class="mt-3 rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-950">
+						{:else}
+							<div class="rounded-lg bg-gray-50 dark:bg-gray-800">
+								<div
+									class="w-full select-none whitespace-pre-wrap rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 px-4 py-2 font-mono text-xs leading-relaxed text-gray-800 dark:bg-gray-800 dark:text-gray-200"
+								>
+									{questionEditors[index]}
+								</div>
+							</div>
+						{/if}
+						<div class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide">Preview</div>
+						<div class="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-950">
 						{#if getQuestionPreviewText(questionEditors[index])}
 							<div class="markdown-prose-xs text-xs text-gray-800 dark:text-gray-200">
 								<Markdown
@@ -1725,12 +1744,13 @@
 						{/if}
 					</div>
 				</div>
-			{/each}
+			</div>
+		{/each}
 
-			<div class="flex items-center justify-end gap-3 pt-4 pr-4">
+		<div class="flex items-center justify-end gap-3 pt-4 pr-4">
 				<button
 					on:click={handleSave}
-					disabled={questionData.status === 'approved' || approvingQuestionSet}
+					disabled={questionData.status === 'approved' || approvingQuestionSet || questionData.questions.length === 0}
 					class={`min-w-[7.5rem] rounded-full px-4 py-2 text-center text-sm font-medium transition ${
 						questionData.status === 'approved'
 							? 'cursor-default bg-gray-200 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
@@ -1749,6 +1769,7 @@
 					type="button"
 					on:click={() => currentPracticeQuestion && sendPracticeToStudents(currentPracticeQuestion)}
 					disabled={
+						questionData.questions.length === 0 ||
 						!currentPracticeQuestion?.practiceId ||
 						questionData.status !== 'approved' ||
 						(Boolean(currentPracticeQuestion?.sentAt) && !isEditedAfterSent) ||

@@ -3,15 +3,15 @@ import { browser, dev } from '$app/environment';
 
 export const APP_NAME = 'Pilot GenAI';
 export const TESTING_AI_TUTOR = true;
-export const AI_TUTOR_FRONTEND_TESTING_MODE = false;
+export const AI_TUTOR_FRONTEND_TESTING_MODE = true;
 export const TEMP_HIDE = true;
 export const usePlaceHolder = true;
 export const AI_TUTOR_API_BASE_URL = '/api/ai-tutor';
 export const AI_TUTOR_FRONTEND_TESTING_ERROR_TYPES = [
-	{ type: 'Conceptual', color: '#1D4ED8', description: 'Student misunderstands the underlying concept.' },
-	{ type: 'Procedural', color: '#0F766E', description: 'Student knows the concept but applies the wrong process.' },
-	{ type: 'Arithmetic', color: '#B45309', description: 'Student makes numeric or symbolic manipulation mistakes.' },
-	{ type: 'Communication', color: '#B91C1C', description: 'Student reasoning is incomplete or poorly explained.' }
+	{ type: 'Conceptual', color: '#B588FF', description: 'Student misunderstands the underlying concept.' },
+	{ type: 'Procedural', color: '#60A5FA', description: 'Student knows the concept but applies the wrong process.' },
+	{ type: 'Arithmetic', color: '#5DD299', description: 'Student makes numeric or symbolic manipulation mistakes.' },
+	{ type: 'Communication', color: '#FF9E42', description: 'Student reasoning is incomplete or poorly explained.' }
 ];
 
 export const WEBUI_HOSTNAME = browser ? (dev ? `${location.hostname}:8080` : ``) : '';

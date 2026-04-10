@@ -273,8 +273,38 @@ const bannerPlaceholderTime = 'TEST-TIME';
 		return homeworkLabel.length > 10 ? `${homeworkLabel.slice(0, 10)}...` : homeworkLabel;
 	}
 
+	function combinedChartPoints(values1: (number | null)[], values2: (number | null)[]) {
+		const n = values1.length;
+		if (n === 0) return null;
+		const nums1 = values1.map((v) => (v != null ? v : NaN));
+		const nums2 = values2.map((v) => (v != null ? v : NaN));
+		const valid1 = nums1.filter((v) => !isNaN(v));
+		const valid2 = nums2.filter((v) => !isNaN(v));
+		if (valid1.length === 0 && valid2.length === 0) return null;
+		// Combined max/min for both datasets
+		const yMax = Math.max(...valid1, ...valid2);
+		const yMin = 0;
+		const plotW = W - padL - padR;
+		const plotH = H - padT - padB;
+		const px = (i: number) => padL + (n <= 1 ? plotW / 2 : (i / (n - 1)) * plotW);
+		const py = (v: number) =>
+			yMax === yMin ? padT + plotH / 2 : padT + plotH - ((v - yMin) / (yMax - yMin)) * plotH;
+		const dots1 = values1
+			.map((v, i) => (v != null ? { x: px(i), y: py(v), v, label: shortLabel(values1, i) } : null))
+			.filter(Boolean) as { x: number; y: number; v: number; label: string }[];
+		const dots2 = values2
+			.map((v, i) => (v != null ? { x: px(i), y: py(v), v, label: shortLabel(values2, i) } : null))
+			.filter(Boolean) as { x: number; y: number; v: number; label: string }[];
+		const pathD1 = dots1.map((p, j) => `${j === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
+		const pathD2 = dots2.map((p, j) => `${j === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
+		const yTicks = [yMin, Math.round((yMin + yMax) / 2), Math.round(yMax)];
+		const xLabels = values1.map((_, i) => ({ x: px(i), label: shortLabel(values1, i) }));
+		return { pathD1, pathD2, dots1, dots2, yTicks, yMin, yMax, py, plotH, xLabels };
+	}
+
 	$: avgSolvedChart = chartPoints(homeworkStats.map((s) => s.avgSolved));
 	$: avgAttemptedChart = chartPoints(homeworkStats.map((s) => s.avgAttempted));
+	$: combinedChart = combinedChartPoints(homeworkStats.map((s) => s.avgSolved), homeworkStats.map((s) => s.avgAttempted));
 	function getPersistedGroupId() {
 		if (typeof localStorage === 'undefined') return '';
 		return localStorage.getItem(LAST_AI_TUTOR_GROUP_STORAGE_KEY) || '';

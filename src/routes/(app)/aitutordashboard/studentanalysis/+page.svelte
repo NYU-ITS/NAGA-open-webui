@@ -14,6 +14,7 @@
 	import ChevronUp from '$lib/components/icons/ChevronUp.svelte';
 	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
 	import Search from '$lib/components/icons/Search.svelte';
+	import CustomDropdown from '$lib/components/CustomDropdown.svelte';
 
 	const AI_TUTOR_API_BASE = AI_TUTOR_API_BASE_URL;
 	const useFrontendTestingData = AI_TUTOR_FRONTEND_TESTING_MODE;
@@ -547,17 +548,11 @@
 			<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Student Analysis</h2>
 
 			<div class="flex flex-wrap items-center gap-6">
-				<div class="relative">
-					<select
-						bind:value={selectedHomework}
-						class="w-48 appearance-none bg-transparent py-1 pr-5 text-sm text-gray-900 dark:text-gray-100 outline-hidden"
-					>
-						<option value="All">All Homeworks</option>
-						{#each homeworkOptions as option}
-							<option value={option.id}>{option.label}</option>
-						{/each}
-					</select>
-				</div>
+				<CustomDropdown
+					bind:value={selectedHomework}
+					options={[{ id: 'All', label: 'All Homeworks' }, ...homeworkOptions]}
+					width="w-48"
+				/>
 
 				<div class="flex min-w-[18rem] flex-1">
 					<div class="self-center ml-1 mr-3 text-gray-500 dark:text-gray-400">

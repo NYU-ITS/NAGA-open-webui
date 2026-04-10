@@ -10,7 +10,6 @@
 	} from '$lib/apis/knowledge';
 	import {
 		AI_TUTOR_API_BASE_URL,
-		AI_TUTOR_FRONTEND_TESTING_ERROR_TYPES,
 		AI_TUTOR_FRONTEND_TESTING_MODE,
 		TESTING_AI_TUTOR
 	} from '$lib/constants';
@@ -29,7 +28,8 @@
 	const TOPIC_ANALYSIS_SESSION_TTL_MS = 5 * 60 * 1000;
 	const LAST_AI_TUTOR_GROUP_STORAGE_KEY = 'ai_tutor_last_selected_group_id';
 	const dashboardPalette = ['#EE352E', '#00933C', '#B933AD', '#0039A6', '#FF6319', '#996633'];
-	const errorTypeColors = dashboardPalette.slice(0, 4);
+	// Error type colors
+	const errorTypeColors = ['#B588FF', '#60A5FA', '#5DD299', '#FF9E42'];
 	const frontendTestingHomeworkModelNames = [
 		'Homework1-MATH-Code-Section-Semester',
 		'Homework2-MATH-Code-Section-Semester',
@@ -439,62 +439,6 @@
 	}
 
 	// Helper: persist current errorTypeDefs to server
-	async function persistErrorTypes() {
-		testToast('Save error types is triggered | page=aitutordashboard - Topic Analysis');
-		if (useFrontendTestingData) {
-			aiTutorFrontendTestingErrorTypes.set(errorTypeDefs);
-			toast.success('TestData error types saved.');
-			return;
-		}
-		if (!groupId) return;
-		try {
-			const res = await fetch(
-				`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(groupId)}`,
-				{
-					method: 'PUT',
-					headers: {
-						'Content-Type': 'application/json',
-						Authorization: `Bearer ${localStorage.token}`
-					},
-					body: JSON.stringify(
-						errorTypeDefs.map((d) => ({ name: d.type, description: d.description }))
-					)
-				}
-			);
-			if (res.ok) {
-				clearAITutorSessionCacheByPrefix(`topic-analysis:${groupId}:error-types`);
-				testToast('Topic Analysis saved error types');
-			}
-		} catch (e) {
-			testToast('Topic Analysis failed saving error types');
-			console.error('Failed to persist error types:', e);
-		}
-	}
-
-	// Delete all custom error types on server, then reload defaults
-	async function deleteAllErrorTypes() {
-		testToast('Use default error types is triggered | page=aitutordashboard - Topic Analysis');
-		if (useFrontendTestingData) {
-			errorTypeDefs = AI_TUTOR_FRONTEND_TESTING_ERROR_TYPES;
-			aiTutorFrontendTestingErrorTypes.set(AI_TUTOR_FRONTEND_TESTING_ERROR_TYPES);
-			toast.success('TestData error types reset to defaults.');
-			return;
-		}
-		if (!groupId) return;
-		try {
-			await fetch(
-				`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(groupId)}`,
-				{ method: 'DELETE', headers: { Authorization: `Bearer ${localStorage.token}` } }
-			);
-			testToast('Topic Analysis reset error types to default');
-			clearAITutorSessionCacheByPrefix(`topic-analysis:${groupId}:error-types`);
-			await loadErrorTypes();
-		} catch (e) {
-			testToast('Topic Analysis failed resetting error types');
-			console.error('Failed to delete error types:', e);
-		}
-	}
-
 	async function loadTopicAnalysisData() {
 		const calledForGroupId = groupId; // capture before any await
 		testToast(`Topic Analysis fetch: analysis group=${calledForGroupId || 'none'}`);
@@ -1141,14 +1085,6 @@
 	// Global error type definitions — source of truth for names, colors, descriptions
 	let errorTypeDefs: { type: string; color: string; description: string }[] = [];
 
-	// Modal state
-	let showEditModal = false;
-	let showResetDefaultsModal = false;
-	let editingIndex: number | null = null;
-	let editingIsNew = false;
-	let editName = '';
-	let editDescription = '';
-
 	// Reactive: compute uniform display percentages (25% each, Others gets remainder)
 	$: displayErrorTypes = (() => {
 		const n = errorTypeDefs.length;
@@ -1165,39 +1101,12 @@
 		return result;
 	})();
 
-	function openEdit(index: number) {
-		editingIndex = index;
-		editingIsNew = false;
-		editName = errorTypeDefs[index].type;
-		editDescription = errorTypeDefs[index].description;
-		showEditModal = true;
-	}
-
-	async function saveEdit() {
-		if (editingIndex === null) return;
-		errorTypeDefs[editingIndex] = { ...errorTypeDefs[editingIndex], type: editName, description: editDescription };
-		errorTypeDefs = [...errorTypeDefs];
-		closeModal();
-		await persistErrorTypes();
-	}
-
-	async function deleteType() {
-		if (editingIndex === null) return;
-		errorTypeDefs = errorTypeDefs.filter((_, i) => i !== editingIndex);
-		closeModal();
-		await persistErrorTypes();
-	}
-
 	function addErrorType() {
 		if (errorTypeDefs.length >= 4) return;
 		const color = errorTypeColors[errorTypeDefs.length % errorTypeColors.length];
 		const newDef = { type: 'New Error Type', color, description: '' };
 		errorTypeDefs = [...errorTypeDefs, newDef];
-		editingIndex = errorTypeDefs.length - 1;
-		editingIsNew = true;
-		editName = newDef.type;
-		editDescription = '';
-		showEditModal = true;
+		// Add modal handling here if needed in future
 	}
 
 	function getTopicDisplayErrorTypes(errorTypes) {
@@ -1229,22 +1138,12 @@
 		return [];
 	}
 
-	function closeModal() {
-		showEditModal = false;
-		editingIndex = null;
-		editingIsNew = false;
-	}
-
-	async function confirmResetDefaults() {
-		showResetDefaultsModal = false;
-		await deleteAllErrorTypes();
-	}
-
 	// State for expandable homework sections
 	let expandedHomework = new Set<string>();
 	let selectedTopicAnalysisHomework = 'all';
 	let selectedTopicAnalysisTopic = 'all';
 	let lastTopicAnalysisFilterKey = '';
+	let openDropdown: 'homework' | 'topic' | null = null;
 
 	function getHomeworkModelName(homework: string) {
 		// homework name is now homework model name
@@ -1335,38 +1234,77 @@
 
 </script>
 
-<div class="flex flex-col space-y-6 py-4">
+<div class="flex flex-col space-y-6 py-4 overflow-y-scroll">
 	<!-- Topic Analysis by Homework -->
 	<div class="space-y-3">
 		<div class="flex flex-wrap items-center justify-between gap-4">
 			<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">
 				Topic Analysis by Homework
 			</h2>
-			<div class="flex flex-wrap items-center gap-3">
-				<select
-					bind:value={selectedTopicAnalysisHomework}
-					class=" bg-white px-3 py-1.5 text-sm text-gray-800 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-200"
-				>
-					<option value="all">All Homeworks</option>
-					{#each topicAnalysisHomeworkOptions as option}
-						<option value={option.id}>{option.label}</option>
-					{/each}
-				</select>
-				<select
-					bind:value={selectedTopicAnalysisTopic}
-					class="bg-white px-3 py-1.5 text-sm text-gray-800 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-200"
-				>
-					<option value="all">All Topics</option>
-					{#each topicAnalysisTopicOptions as topic}
-						<option value={topic}>{topic}</option>
-					{/each}
-				</select>
+			<div class="flex flex-wrap items-center gap-2">
+				<!-- Homework Dropdown -->
+				<div class="relative">
+					<button
+						class="border border-gray-300 rounded-md bg-white px-2.5 py-1.5 text-xs text-gray-700 dark:border-gray-500 dark:bg-gray-800 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-400 dark:focus:ring-blue-500 cursor-pointer flex items-center justify-between gap-2 w-40"
+						on:click={() => (openDropdown = openDropdown === 'homework' ? null : 'homework')}
+					>
+						<span class="truncate">{selectedTopicAnalysisHomework === 'all' ? 'All Homeworks' : topicAnalysisHomeworkOptions.find(o => o.id === selectedTopicAnalysisHomework)?.label || 'All Homeworks'}</span>
+						<ChevronDown className={`size-3 flex-shrink-0 transition-transform ${openDropdown === 'homework' ? 'rotate-180' : ''}`} />
+					</button>
+					{#if openDropdown === 'homework'}
+						<div class="absolute top-full left-0 mt-1 w-40 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-500 rounded-md shadow-lg z-50">
+							<button
+								class="w-full px-3 py-1.5 text-xs text-left hover:bg-gray-100 dark:hover:bg-gray-700 {selectedTopicAnalysisHomework === 'all' ? 'bg-blue-50 dark:bg-blue-900/30 font-medium' : ''}"
+								on:click={() => { selectedTopicAnalysisHomework = 'all'; openDropdown = null; }}
+							>
+								All Homeworks
+							</button>
+							{#each topicAnalysisHomeworkOptions as option}
+								<button
+									class="w-full px-3 py-1.5 text-xs text-left hover:bg-gray-100 dark:hover:bg-gray-700 {selectedTopicAnalysisHomework === option.id ? 'bg-blue-50 dark:bg-blue-900/30 font-medium' : ''}"
+									on:click={() => { selectedTopicAnalysisHomework = option.id; openDropdown = null; }}
+								>
+									{option.label}
+								</button>
+							{/each}
+						</div>
+					{/if}
+				</div>
+
+				<!-- Topic Dropdown -->
+				<div class="relative">
+					<button
+						class="border border-gray-300 rounded-md bg-white px-2.5 py-1.5 text-xs text-gray-700 dark:border-gray-500 dark:bg-gray-800 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-400 dark:focus:ring-blue-500 cursor-pointer flex items-center justify-between gap-2 w-32"
+						on:click={() => (openDropdown = openDropdown === 'topic' ? null : 'topic')}
+					>
+						<span class="truncate">{selectedTopicAnalysisTopic === 'all' ? 'All Topics' : selectedTopicAnalysisTopic}</span>
+						<ChevronDown className={`size-3 flex-shrink-0 transition-transform ${openDropdown === 'topic' ? 'rotate-180' : ''}`} />
+					</button>
+					{#if openDropdown === 'topic'}
+						<div class="absolute top-full left-0 mt-1 max-h-64 w-32 overflow-y-auto bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-500 rounded-md shadow-lg z-50">
+							<button
+								class="w-full px-3 py-1.5 text-xs text-left hover:bg-gray-100 dark:hover:bg-gray-700 {selectedTopicAnalysisTopic === 'all' ? 'bg-blue-50 dark:bg-blue-900/30 font-medium' : ''}"
+								on:click={() => { selectedTopicAnalysisTopic = 'all'; openDropdown = null; }}
+							>
+								All Topics
+							</button>
+							{#each topicAnalysisTopicOptions as topic}
+								<button
+									class="w-full px-3 py-1.5 text-xs text-left hover:bg-gray-100 dark:hover:bg-gray-700 {selectedTopicAnalysisTopic === topic ? 'bg-blue-50 dark:bg-blue-900/30 font-medium' : ''}"
+									on:click={() => { selectedTopicAnalysisTopic = topic; openDropdown = null; }}
+								>
+									{topic}
+								</button>
+							{/each}
+						</div>
+					{/if}
+				</div>
 			</div>
 		</div>
 
-		<div class="scrollbar-hidden relative overflow-x-auto max-w-full rounded-sm pt-0.5">
-			<table class="w-full table-fixed rounded-sm text-left text-sm text-gray-500 dark:text-gray-400">
-				<thead class="text-xs text-gray-700 uppercase bg-gray-50 dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5">
+		<div class="scrollbar-hidden relative overflow-x-auto rounded-sm pt-0.5">
+			<table class="min-w-[800px] table-fixed rounded-sm text-left text-sm text-gray-500 dark:text-gray-400">
+				<thead class="sticky top-0 text-xs text-gray-700 uppercase bg-gray-50 dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5 z-10">
 					<tr>
 						<th scope="col" class="w-[28%] px-3 py-1.5">Homework</th>
 						<th scope="col" class="w-[14%] whitespace-nowrap px-3 py-1.5">Questions in Topic</th>
@@ -1381,7 +1319,7 @@
 							class="bg-white dark:bg-gray-900 border-t border-gray-100 dark:border-gray-850 hover:bg-gray-50 dark:hover:bg-gray-800 transition cursor-pointer"
 							on:click={() => toggleHomework(homework.id)}
 						>
-							<td class="px-3 py-1.5">
+							<td colspan="4" class="px-3 py-1.5">
 								<div class="grid grid-cols-[12px_minmax(0,1fr)] items-start gap-2">
 									<div class="pt-0.5">
 										{#if expandedHomework.has(homework.id)}
@@ -1397,7 +1335,6 @@
 									</div>
 								</div>
 							</td>
-							<td colspan="3"></td>
 						</tr>
 
 						<!-- Topics (expanded) -->
@@ -1436,7 +1373,7 @@
 										{:else}
 											<!-- Display the full-width color bar plus a readable percentage legend. -->
 											<div class="flex items-center gap-2">
-												<div class="flex h-5 min-w-0 flex-1 overflow-hidden rounded">
+												<div class="flex h-3 min-w-0 flex-1 overflow-hidden rounded">
 													{#each getTopicDisplayErrorTypes(topic.errorTypes) as errorType}
 														<div
 															style="width: {errorType.percentage}%; background-color: {errorType.color};"
@@ -1484,193 +1421,6 @@
 			</table>
 		</div>
 	</div>
-
-	<div class="space-y-3">
-		<div class="flex items-center justify-between gap-3">
-			<div>
-				<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Error Types</h2>
-				<div class="text-xs text-gray-400 dark:text-gray-500">
-					You can have at most 4 error types. You can configure in <a
-						href="/aitutordashboard/instructorsetup{groupId ? `?group_id=${groupId}` : ''}"
-						class="font-bold text-[#57068C] hover:text-[#702B9D] dark:text-purple-400 dark:hover:text-purple-300"
-					>Instructor Setup</a>.
-				</div>
-			</div>
-			<!-- <div class="flex items-center gap-3">
-				<button
-					type="button"
-					class="rounded-full border border-gray-300 px-3 py-1.5 text-xs font-semibold text-gray-700 transition hover:border-gray-400 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:border-gray-500 dark:hover:bg-gray-800"
-					on:click={confirmResetDefaults}
-				>
-					Use default
-				</button>
-				<div class="flex items-center gap-2">
-				{#if errorTypeDefs.length < 4}
-					<button
-						class="flex items-center gap-1 rounded-full border border-gray-300 px-3 py-1.5 text-xs font-semibold text-gray-700 transition hover:border-gray-400 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:border-gray-500 dark:hover:bg-gray-800"
-						on:click={addErrorType}
-						title="Add error type"
-					>
-						<span>Add</span>
-						<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3 h-3">
-							<path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
-						</svg>
-					</button>
-				{/if}
-				{#if errorTypeDefs.length > 0}
-					<button
-						class="flex items-center gap-1 rounded-full border border-red-200 px-3 py-1.5 text-xs font-semibold text-red-600 transition hover:border-red-300 hover:bg-red-50 dark:border-red-900/70 dark:text-red-300 dark:hover:border-red-800 dark:hover:bg-red-950/40"
-						on:click={() => {
-							showResetDefaultsModal = true;
-						}}
-						title="Reset error types to defaults"
-					>
-						<span>Delete All</span>
-						<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3 h-3">
-							<path stroke-linecap="round" stroke-linejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" />
-						</svg>
-					</button>
-				{/if}
-				</div>
-			</div> -->
-		</div>
-
-		{#if errorTypeDefs.length === 0}
-			<div class="rounded-lg border border-gray-200 bg-white px-4 py-6 text-sm text-gray-400 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-500">
-				No error types defined, please define error types
-			</div>
-		{:else}
-			<div class="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-				{#each errorTypeDefs as def, i}
-					<button
-						type="button"
-						class="flex flex-col items-start rounded-lg border border-gray-200 bg-white p-4 text-left transition hover:border-gray-300 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-900 dark:hover:border-gray-600 dark:hover:bg-gray-800"
-						on:click={() => openEdit(i)}
-					>
-						<div class="flex items-center gap-2">
-							<span class="h-4 w-4 rounded-full flex-shrink-0" style="background-color: {def.color};"></span>
-							<div class="text-sm font-medium text-gray-900 dark:text-gray-100">{def.type}</div>
-						</div>
-						<p class="mt-2 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
-							{def.description || 'No description yet.'}
-						</p>
-					</button>
-				{/each}
-			</div>
-		{/if}
-
-	</div>
-	<!-- Configure in Setup button and Save removed; link moved into subtitle above -->
-	<!-- <div class="flex justify-end gap-3">
-		<button class="rounded-full bg-black px-3 py-1.5 text-xs font-medium text-white transition hover:bg-gray-800" on:click={persistErrorTypes}>Save</button>
-		<a href="/aitutordashboard/instructorsetup" class="inline-flex w-fit items-center rounded-full border border-gray-300 px-3 py-1.5 text-sm font-semibold text-gray-800 transition hover:border-[#57068c] hover:text-[#57068c] dark:border-gray-600 dark:text-gray-200 dark:hover:border-white dark:hover:text-white">Configure in Setup &gt;</a>
-	</div> -->
-
-	{#if showResetDefaultsModal}
-		<div
-			class="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
-			on:click|self={() => {
-				showResetDefaultsModal = false;
-			}}
-			role="dialog"
-			aria-modal="true"
-		>
-			<div class="w-[420px] max-w-[90vw] rounded-xl bg-white p-6 shadow-2xl dark:bg-gray-900">
-				<div class="text-base font-semibold text-gray-900 dark:text-gray-100">Use default error types?</div>
-				<p class="mt-3 text-sm text-gray-500 dark:text-gray-400">
-					This will replace the current error types with the default set.
-				</p>
-				<div class="mt-6 flex justify-end gap-2">
-					<button
-						class="px-3 py-1.5 text-sm text-gray-600 transition hover:text-gray-900 dark:text-gray-300 dark:hover:text-white"
-						on:click={() => {
-							showResetDefaultsModal = false;
-						}}
-					>
-						Cancel
-					</button>
-					<button
-						class="px-3 py-1.5 text-sm font-medium text-[#57068C] transition hover:text-[#702B9D] dark:text-purple-400 dark:hover:text-purple-300"
-						on:click={confirmResetDefaults}
-					>
-						Confirm
-					</button>
-				</div>
-			</div>
-		</div>
-	{/if}
-	<!-- Error Type Edit Modal -->
-	{#if showEditModal}
-		<div
-			class="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
-			on:click|self={closeModal}
-			role="dialog"
-			aria-modal="true"
-		>
-			<div class="bg-white dark:bg-gray-900 rounded-xl shadow-2xl p-6 w-[520px] max-w-[90vw]">
-				<!-- Modal Header -->
-				<div class="flex justify-between items-center mb-5">
-					<h3 class="text-base font-semibold text-gray-900 dark:text-gray-100">
-						{editingIsNew ? 'Add Error Type' : 'Edit Error Type'}
-					</h3>
-					<button
-						class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 transition"
-						on:click={closeModal}
-						aria-label="Close"
-					>
-						<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-5 h-5">
-							<path d="M6.28 5.22a.75.75 0 00-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 101.06 1.06L10 11.06l3.72 3.72a.75.75 0 101.06-1.06L11.06 10l3.72-3.72a.75.75 0 00-1.06-1.06L10 8.94 6.28 5.22z" />
-						</svg>
-					</button>
-				</div>
-
-				<hr class="border-gray-100 dark:border-gray-700 mb-5" />
-
-				<!-- Name field -->
-				<div class="mb-4">
-					<label class="text-xs font-medium text-gray-600 dark:text-gray-400 block mb-1.5">Name</label>
-					<input
-						class="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500"
-						bind:value={editName}
-						placeholder="Error type name"
-					/>
-				</div>
-
-				<!-- Description field (doubled size) -->
-				<div class="mb-6">
-					<label class="text-xs font-medium text-gray-600 dark:text-gray-400 block mb-1.5">Description</label>
-					<textarea
-						class="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500 resize-none"
-						rows="7"
-						bind:value={editDescription}
-						placeholder="Describe this error type..."
-					></textarea>
-				</div>
-
-				<!-- Action Buttons -->
-				<div class="flex justify-between items-center">
-					{#if !editingIsNew}
-						<button
-							class="px-3 py-1.5 text-sm text-red-500 hover:text-red-700 dark:hover:text-red-400 transition"
-							on:click={deleteType}
-						>Delete</button>
-					{:else}
-						<div></div>
-					{/if}
-					<div class="flex gap-2">
-						<button
-							class="px-3 py-1.5 text-sm text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition"
-							on:click={closeModal}
-						>Cancel</button>
-						<button
-							class="px-3 py-1.5 text-sm font-medium text-[#57068C] hover:text-[#702B9D] dark:text-purple-400 dark:hover:text-purple-300 transition"
-							on:click={saveEdit}
-						>Save</button>
-					</div>
-				</div>
-			</div>
-		</div>
-	{/if}
 
 </div>
 
