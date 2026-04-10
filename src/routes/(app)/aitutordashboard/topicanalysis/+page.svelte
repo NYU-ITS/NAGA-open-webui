@@ -1227,15 +1227,16 @@
 
 </script>
 
-<div class="flex flex-col space-y-6 py-4 overflow-y-scroll">
+<div class="flex flex-col space-y-24 py-4 overflow-y-scroll">
 	<!-- [Standard Section: Topic Analysis by Homework] -->
-	<div class="space-y-3">
-		<!-- Title -->
-		<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Topic Analysis by Homework</h2>
-
-		<!-- Selector Row -->
-		<div class="flex flex-wrap items-center justify-end gap-2">
-			<!-- [Selector] Homework -->
+	<div class="space-y-4">
+		<!-- Header Row with Title and Selectors -->
+		<div class="flex flex-wrap items-center justify-between gap-3">
+			<h2 class="text-2xl font-semibold text-gray-800 dark:text-gray-200">Topic Analysis by Homework</h2>
+			
+			<!-- Selector Row -->
+			<div class="flex flex-wrap items-center justify-end gap-2">
+				<!-- [Selector] Homework -->
 			<select
 				bind:value={selectedTopicAnalysisHomework}
 				class="rounded-full border border-gray-300 bg-white py-1.5 pl-3 pr-3 text-xs text-gray-700 cursor-pointer focus:outline-none dark:border-gray-500 dark:bg-gray-800 dark:text-gray-200"
@@ -1256,10 +1257,13 @@
 					<option value={topic}>{topic}</option>
 				{/each}
 			</select>
+			</div>
 		</div>
 
-		<div class="scrollbar-hidden relative overflow-x-auto rounded-sm pt-0.5">
-			<table class="min-w-[800px] table-fixed rounded-sm text-left text-sm text-gray-500 dark:text-gray-400">
+		<!-- Table Card Container -->
+		<div class="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
+			<div class="scrollbar-hidden relative overflow-x-auto rounded-sm pt-0.5">
+			<table class="w-full min-w-[800px] table-fixed rounded-sm text-left text-sm text-gray-500 dark:text-gray-400">
 				<thead class="sticky top-0 text-xs text-gray-700 uppercase bg-[#EEE6F3] dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5 z-10">
 					<tr>
 						<th scope="col" class="w-[28%] px-3 py-1.5">Homework</th>
@@ -1377,7 +1381,10 @@
 			</table>
 		</div>
 	</div>
+</div>
 
+<!-- Bottom Spacer -->
+<div class="h-[20vh]"></div>
 </div>
 
 <style>

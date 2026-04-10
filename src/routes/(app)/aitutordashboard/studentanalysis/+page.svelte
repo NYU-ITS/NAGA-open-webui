@@ -535,15 +535,16 @@ $: isFilterActive = selectedHomework !== 'All' || search.trim() !== '';
 						: 'No group members are available for the selected homework.';
 </script>
 
-<div class="flex flex-col space-y-6 py-4">
+<div class="flex flex-col space-y-24 py-4">
 	<!-- [Standard Section: Student Analysis] -->
-	<div class="space-y-3">
-		<!-- Title -->
-		<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Student Analysis</h2>
-
-		<!-- Selector Row -->
-		<div class="flex flex-wrap items-center justify-end gap-2">
-			<!-- [Selector] Homework -->
+	<div class="space-y-4">
+		<!-- Header Row with Title and Selectors -->
+		<div class="flex flex-wrap items-center justify-between gap-3">
+			<h2 class="text-2xl font-semibold text-gray-800 dark:text-gray-200">Student Analysis</h2>
+			
+			<!-- Selector Row -->
+			<div class="flex flex-wrap items-center justify-end gap-2">
+				<!-- [Selector] Homework -->
 			<select
 				bind:value={selectedHomework}
 				class="rounded-full border border-gray-300 bg-white py-1.5 pl-3 pr-3 text-xs text-gray-700 cursor-pointer focus:outline-none dark:border-gray-500 dark:bg-gray-800 dark:text-gray-200"
@@ -581,9 +582,12 @@ $: isFilterActive = selectedHomework !== 'All' || search.trim() !== '';
 				</div>
 			</div>
 		</div>
+	</div>
 
-		<div class="scrollbar-hidden relative max-w-full overflow-x-auto whitespace-nowrap rounded-sm pt-0.5">
-			<table class="max-w-full w-full table-auto rounded-sm text-left text-sm text-gray-500 dark:text-gray-400">
+		<!-- Table Card Container -->
+		<div class="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
+			<div class="scrollbar-hidden relative overflow-x-auto whitespace-nowrap rounded-sm pt-0.5">
+				<table class="w-full table-auto rounded-sm text-left text-sm text-gray-500 dark:text-gray-400">
 				<thead class="-translate-y-0.5 bg-[#EEE6F3] text-xs uppercase text-gray-700 dark:bg-gray-850 dark:text-gray-400">
 					<tr>
 						<th scope="col" class="cursor-pointer select-none px-3 py-1.5" on:click={() => toggleSort('name')}>
@@ -671,6 +675,10 @@ $: isFilterActive = selectedHomework !== 'All' || search.trim() !== '';
 		</div>
 	</div>
 </div>
+</div>
+
+<!-- Bottom Spacer -->
+<div class="h-[20vh]"></div>
 
 <style>
 	.scrollbar-hidden::-webkit-scrollbar { display: none; }

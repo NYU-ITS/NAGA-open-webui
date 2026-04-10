@@ -375,7 +375,7 @@
 						class="flex gap-1 scrollbar-none overflow-x-auto w-fit text-center text-sm font-medium rounded-full bg-transparent py-1 touch-auto pointer-events-auto"
 					>
 						<a
-							class="min-w-fit rounded-full p-1.5 {$page.url.pathname.includes(
+							class="w-[130px] text-center rounded-full p-1.5 {$page.url.pathname.includes(
 								'/aitutordashboard/instructorsetup'
 							)
 								? 'font-semibold text-[#57068c] dark:text-white'
@@ -384,6 +384,9 @@
 						>
 							Instructor Setup
 						</a>
+
+						<!-- Divider -->
+						<div class="w-px h-5 self-center bg-gray-300 dark:bg-gray-600 mx-1"></div>
 
 						<a
 							class="min-w-fit rounded-full p-1.5 {$page.url.pathname === '/aitutordashboard' ||
@@ -396,7 +399,7 @@
 						</a>
 
 						<a
-							class="min-w-fit rounded-full p-1.5 {$page.url.pathname.includes(
+							class="w-[130px] text-center rounded-full p-1.5 {$page.url.pathname.includes(
 								'/aitutordashboard/topicanalysis'
 							) &&
 							!$page.url.pathname.includes('/aitutordashboard/topicanalysis/reviewquestionset')
@@ -408,7 +411,7 @@
 						</a>
 
 						<a
-							class="min-w-fit rounded-full p-1.5 {$page.url.pathname.includes(
+							class="w-[130px] text-center rounded-full p-1.5 {$page.url.pathname.includes(
 								'/aitutordashboard/studentanalysis'
 							)
 								? 'font-semibold text-[#57068c] dark:text-white'
@@ -418,8 +421,11 @@
 							Student Analysis
 						</a>
 
+						<!-- Divider -->
+						<div class="w-px h-5 self-center bg-gray-300 dark:bg-gray-600 mx-1"></div>
+
 						<a
-							class="min-w-fit rounded-full p-1.5 {$page.url.pathname.includes(
+							class="w-[140px] text-center rounded-full p-1.5 {$page.url.pathname.includes(
 								'/aitutordashboard/topicanalysis/reviewquestionset'
 							)
 								? 'font-semibold text-[#57068c] dark:text-white'

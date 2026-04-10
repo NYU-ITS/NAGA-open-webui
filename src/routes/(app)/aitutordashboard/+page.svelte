@@ -1329,7 +1329,7 @@ async function runAnalysis() {
 }
 </script>
 
-<div class="flex flex-col space-y-6 py-4">
+<div class="flex flex-col space-y-24 py-4">
 
 	<!-- Status Section NOT IN USE -->
 	<!-- <div class="rounded-lg bg-gray-100 px-3 py-2 text-xs text-gray-800 dark:bg-gray-800/80 dark:text-gray-300">
@@ -1344,10 +1344,11 @@ async function runAnalysis() {
 	</div> -->
 
 	<!-- [Standard Section: Charts Summary] -->
-	<div class="space-y-3">
-		<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Charts Summary</h2>
+	<div class="space-y-4">
+		<h2 class="text-2xl font-semibold text-gray-800 dark:text-gray-200">Charts Summary</h2>
 
-		<div class="relative">
+		<div class="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
+			<div class="relative">
 			<!-- Scroll Left — only when content overflows and scrolled right -->
 			{#if canScrollLeft}
 				<button
@@ -1453,14 +1454,16 @@ async function runAnalysis() {
 				</button>
 			{/if}
 		</div>
+		</div>
 	</div>
 
 	<!-- [Standard Section: Statistics] -->
-	<div class="space-y-2">
-		<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Statistics</h2>
+	<div class="space-y-4">
+		<h2 class="text-2xl font-semibold text-gray-800 dark:text-gray-200">Statistics</h2>
 
-		<div class="scrollbar-hidden relative whitespace-nowrap overflow-x-auto max-w-full rounded-sm pt-0.5">
-			<table class="w-full text-sm text-left text-gray-500 dark:text-gray-400 table-auto max-w-full rounded-sm">
+		<div class="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
+			<div class="scrollbar-hidden relative whitespace-nowrap overflow-x-auto max-w-full rounded-sm pt-0.5">
+				<table class="w-full text-sm text-left text-gray-500 dark:text-gray-400 table-auto max-w-full rounded-sm">
 				<thead class="text-xs text-gray-700 uppercase bg-[#EEE6F3] dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5">
 					<tr>
 						{#each [
@@ -1675,6 +1678,9 @@ async function runAnalysis() {
 	</div>
 {/if}
 
+	<!-- Bottom Spacer -->
+	<div class="h-[20vh]"></div>
+</div>
 
 <style>
 	.scrollbar-hidden::-webkit-scrollbar { display: none; }
