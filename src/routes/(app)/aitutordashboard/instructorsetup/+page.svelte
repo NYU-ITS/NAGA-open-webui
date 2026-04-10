@@ -2005,25 +2005,154 @@
 </script>
 
 <div class="flex flex-col space-y-6 py-4">
-	<div class="space-y-12">
+	<div class="space-y-6">
 
+		<!-- Workflow Instructions -->
+		<div class="rounded-xl border-2 border-[#57068C]/30 bg-gradient-to-br from-[#57068C]/5 to-transparent p-4 dark:border-purple-500/20 dark:from-purple-500/10">
+			<div class="mb-2 flex items-center justify-between">
+				<div>
+					<h3 class="text-lg font-bold text-gray-900 dark:text-gray-100">AI Tutor Workflow</h3>
+					<p class="mt-0.5 text-xs text-gray-600 dark:text-gray-400">Follow these 3 steps to analyze and support your students</p>
+				</div>
+			</div>
 
+			<!-- Flow Diagram -->
+			<div class="flex items-center justify-between px-2 py-2">
+				<!-- Step 1 Node -->
+				<div class="flex flex-col items-center gap-1.5 min-h-[60px]">
+					<div class="flex items-center justify-center w-12 h-12 rounded-full border-3 border-[#57068C] bg-white dark:bg-gray-900">
+						<svg class="w-6 h-6 text-[#57068C]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+						</svg>
+					</div>
+					<p class="text-xs font-semibold text-gray-900 dark:text-gray-100 text-center">Setup</p>
+				</div>
+
+				<!-- Arrow 1 -->
+				<div class="flex items-center gap-2 flex-1 mx-3">
+					<div class="flex-1 h-1 bg-gradient-to-r from-[#57068C]/40 to-[#57068C]/20 dark:from-purple-500/30 dark:to-purple-500/10"></div>
+					<svg class="w-5 h-5 text-[#57068C]/50 dark:text-purple-500/40 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+						<path fill-rule="evenodd" d="M10.293 3.293a1 1 0 011.414 0l6 6a1 1 0 010 1.414l-6 6a1 1 0 01-1.414-1.414L14.586 10l-4.293-4.293a1 1 0 010-1.414z" clip-rule="evenodd" />
+					</svg>
+				</div>
+
+				<!-- Step 2 Node -->
+				<div class="flex flex-col items-center gap-1.5 min-h-[60px]">
+					<div class="flex items-center justify-center w-12 h-12 rounded-full border-3 border-[#57068C] bg-white dark:bg-gray-900">
+						<svg class="w-6 h-6 text-[#57068C]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+						</svg>
+					</div>
+					<p class="text-xs font-semibold text-gray-900 dark:text-gray-100 text-center">Analyze</p>
+				</div>
+
+				<!-- Arrow 2 -->
+				<div class="flex items-center gap-2 flex-1 mx-3">
+					<svg class="w-5 h-5 text-[#57068C]/50 dark:text-purple-500/40 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+						<path fill-rule="evenodd" d="M10.293 3.293a1 1 0 011.414 0l6 6a1 1 0 010 1.414l-6 6a1 1 0 01-1.414-1.414L14.586 10l-4.293-4.293a1 1 0 010-1.414z" clip-rule="evenodd" />
+					</svg>
+					<div class="flex-1 h-1 bg-gradient-to-r from-[#57068C]/20 to-[#57068C]/40 dark:from-purple-500/10 dark:to-purple-500/30"></div>
+				</div>
+
+				<!-- Step 3 Node -->
+				<div class="flex flex-col items-center gap-1.5">
+					<div class="flex items-center justify-center w-12 h-12 rounded-full border-3 border-[#57068C] bg-white dark:bg-gray-900">
+						<svg class="w-6 h-6 text-[#57068C]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+						</svg>
+					</div>
+					<p class="text-xs font-semibold text-gray-900 dark:text-gray-100 text-center">Generate</p>
+				</div>
+			</div>
+
+			<!-- Details -->
+			<div class="grid grid-cols-3 gap-4 pt-2 border-t border-gray-200 dark:border-gray-800">
+				<!-- Step 1 Details -->
+				<div class="space-y-2 pt-2">
+					<div class="flex items-center gap-2">
+						<div class="w-1 h-4 bg-[#57068C] rounded-full"></div>
+						<p class="text-xs font-bold text-gray-900 dark:text-gray-100">STEP 1: SETUP</p>
+					</div>
+					<ul class="space-y-2 text-sm text-gray-700 dark:text-gray-300">
+						<li class="flex items-start gap-2">
+							<span class="text-[#57068C] font-bold flex-shrink-0">→</span>
+							<span>Define error types</span>
+						</li>
+						<li class="flex items-start gap-2">
+							<span class="text-[#57068C] font-bold flex-shrink-0">→</span>
+							<span><strong>Upload homework & answers</strong></span>
+						</li>
+						<li class="flex items-start gap-2">
+							<span class="text-[#57068C] font-bold flex-shrink-0">→</span>
+							<span>Customize prompts (optional)</span>
+						</li>
+					</ul>
+				</div>
+
+				<!-- Step 2 Details -->
+				<div class="space-y-2 pt-2">
+					<div class="flex items-center gap-2">
+						<div class="w-1 h-4 bg-[#57068C] rounded-full"></div>
+						<p class="text-xs font-bold text-gray-900 dark:text-gray-100">STEP 2: ANALYZE</p>
+					</div>
+					<ul class="space-y-2 text-sm text-gray-700 dark:text-gray-300">
+						<li class="flex items-start gap-2">
+							<span class="text-[#57068C] font-bold flex-shrink-0">→</span>
+							<span>View summary stats</span>
+						</li>
+						<li class="flex items-start gap-2">
+							<span class="text-[#57068C] font-bold flex-shrink-0">→</span>
+							<span>Explore topic errors</span>
+						</li>
+						<li class="flex items-start gap-2">
+							<span class="text-[#57068C] font-bold flex-shrink-0">→</span>
+							<span>Review student performance</span>
+						</li>
+					</ul>
+				</div>
+
+				<!-- Step 3 Details -->
+				<div class="space-y-3 pt-4">
+					<div class="flex items-center gap-2">
+						<div class="w-1 h-4 bg-[#57068C] rounded-full"></div>
+						<p class="text-xs font-bold text-gray-900 dark:text-gray-100">STEP 3: GENERATE</p>
+					</div>
+					<ul class="space-y-2 text-sm text-gray-700 dark:text-gray-300">
+						<li class="flex items-start gap-2">
+							<span class="text-[#57068C] font-bold flex-shrink-0">→</span>
+							<span>Generate practice questions</span>
+						</li>
+						<li class="flex items-start gap-2">
+							<span class="text-[#57068C] font-bold flex-shrink-0">→</span>
+							<span><strong>Review & approve</strong></span>
+						</li>
+						<li class="flex items-start gap-2">
+							<span class="text-[#57068C] font-bold flex-shrink-0">→</span>
+							<span>Send to students</span>
+						</li>
+					</ul>
+				</div>
+			</div>
+		</div>
+
+		<!-- Error Type Configuration Section -->
 		<div class="space-y-3">
 			<button
-				type="button"
-				class="flex w-full items-start justify-between gap-3 text-left"
-				on:click={() => {
-					showErrorTypeConfiguration = !showErrorTypeConfiguration;
-				}}
-			>
-				<div>
-					<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">
-						Error Type Configuration
-					</h2>
-					<div class="text-xs text-gray-400 dark:text-gray-500">
-						You can have at most 4 error types
+					type="button"
+					class="flex w-full items-start justify-between gap-3 text-left"
+					on:click={() => {
+						showErrorTypeConfiguration = !showErrorTypeConfiguration;
+					}}
+				>
+					<div>
+						<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">
+							Error Type Configuration
+						</h2>
+						<div class="text-xs text-gray-400 dark:text-gray-500">
+							You can have at most 4 error types
+						</div>
 					</div>
-				</div>
 				<div class="flex flex-col items-end gap-1">
 					<span class="pt-1 text-gray-500 dark:text-gray-400">
 						{#if showErrorTypeConfiguration}
@@ -2097,6 +2226,7 @@
 			</button>
 
 			{#if showErrorTypeConfiguration}
+			<div class="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
 				{#if errorTypeDefs.length === 0}
 					<div
 						class="rounded-lg border border-gray-200 bg-white px-4 py-6 text-sm text-gray-400 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-500"
@@ -2133,9 +2263,11 @@
 						Save
 					</button>
 				</div>
+			</div>
 			{/if}
 		</div>
 
+	<!-- Homework & Answer Files Section -->
 		<div class="space-y-2">
 			<button
 				type="button"
@@ -2161,11 +2293,12 @@
 				</span>
 			</button>
 			{#if showHomeworkAnswerFiles}
+			<div class="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
 				<div
-					class="scrollbar-hidden relative whitespace-nowrap overflow-x-auto max-w-full rounded-sm pt-0.5"
+					class="scrollbar-hidden relative overflow-x-auto max-w-full rounded-sm pt-0.5"
 				>
 					<table
-						class="w-full text-sm text-left text-gray-500 dark:text-gray-400 table-auto max-w-full rounded-sm"
+						class="text-sm text-left text-gray-500 dark:text-gray-400 rounded-sm"
 					>
 						<thead
 							class="text-xs text-gray-700 uppercase bg-gray-50 dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5"
@@ -2174,9 +2307,9 @@
 								<th class="w-[12rem] px-3 py-1.5 select-none">Homework</th>
 								<th class="px-3 py-1.5 select-none">Homework PDF</th>
 								<th class="px-3 py-1.5 select-none">Answer PDF</th>
-								<th class="px-3 py-1.5 select-none">Total Conversations</th>
+								<th class="w-[6rem] px-3 py-1.5 select-none">Conv.</th>
 								<th class="px-3 py-1.5 select-none">Status</th>
-								<th class="px-3 py-1.5 select-none">Action</th>
+								<th class="w-[7rem] px-3 py-1.5 select-none">Action</th>
 							</tr>
 						</thead>
 						<tbody>
@@ -2201,72 +2334,130 @@
 											<div class={homeworkModelNameCellClass}>{row.displayModelName}</div>
 										</td>
 										<td class="px-3 py-1">
-											<label class="cursor-pointer">
-												<input
-													type="file"
-													accept=".pdf"
-													class="hidden"
-													on:change={makeUploadHandler(row.id, 'question', row.modelId)}
-												/>
-												<span
-													class="inline-flex items-center gap-1.5 rounded-xl px-2 py-1.5 text-xs font-medium text-gray-700 transition hover:bg-black/5 dark:text-gray-300 dark:hover:bg-white/5"
-												>
-													<svg
-														xmlns="http://www.w3.org/2000/svg"
-														fill="none"
-														viewBox="0 0 24 24"
-														stroke-width="1.8"
-														stroke="currentColor"
-														class="h-3.5 w-3.5"
-													>
-														<path
-															stroke-linecap="round"
-															stroke-linejoin="round"
-															d="M12 16.5V4.5m0 0 4.5 4.5M12 4.5 7.5 9M4.5 19.5h15"
+											{#if row.questionUploaded && !uploadingMap[`${row.id}-question`]}
+												<div class="flex flex-col gap-1.5">
+													<div class="text-xs text-gray-700 dark:text-gray-400">{row.questionFileName ?? `homework_${i + 1}_questions.pdf`}</div>
+													<label class="cursor-pointer">
+														<input
+															type="file"
+															accept=".pdf"
+															class="hidden"
+															on:change={makeUploadHandler(row.id, 'question', row.modelId)}
 														/>
-													</svg>
-													{uploadingMap[`${row.id}-question`]
-														? 'Uploading…'
-														: row.questionUploaded
-															? (row.questionFileName ?? `homework_${i + 1}_questions.pdf`)
-															: 'Upload'}
-												</span>
-											</label>
+														<span
+															class="inline-flex items-center gap-1.5 rounded-xl border border-gray-300 px-2 py-1.5 text-xs font-medium text-gray-700 transition hover:bg-black/5 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-white/5"
+														>
+															<svg
+																xmlns="http://www.w3.org/2000/svg"
+																fill="none"
+																viewBox="0 0 24 24"
+																stroke-width="1.8"
+																stroke="currentColor"
+																class="h-3.5 w-3.5"
+															>
+																<path
+																	stroke-linecap="round"
+																	stroke-linejoin="round"
+																	d="M12 16.5V4.5m0 0 4.5 4.5M12 4.5 7.5 9M4.5 19.5h15"
+																/>
+															</svg>
+															Re-upload
+														</span>
+													</label>
+												</div>
+											{:else}
+												<label class="cursor-pointer">
+													<input
+														type="file"
+														accept=".pdf"
+														class="hidden"
+														on:change={makeUploadHandler(row.id, 'question', row.modelId)}
+													/>
+													<span
+														class="inline-flex items-center gap-1.5 rounded-xl border border-gray-300 px-2 py-1.5 text-xs font-medium text-gray-700 transition hover:bg-black/5 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-white/5"
+													>
+														<svg
+															xmlns="http://www.w3.org/2000/svg"
+															fill="none"
+															viewBox="0 0 24 24"
+															stroke-width="1.8"
+															stroke="currentColor"
+															class="h-3.5 w-3.5"
+														>
+															<path
+																stroke-linecap="round"
+																stroke-linejoin="round"
+																d="M12 16.5V4.5m0 0 4.5 4.5M12 4.5 7.5 9M4.5 19.5h15"
+															/>
+														</svg>
+														{uploadingMap[`${row.id}-question`] ? 'Uploading…' : 'Upload'}
+													</span>
+												</label>
+											{/if}
 										</td>
 										<td class="px-3 py-1">
-											<label class="cursor-pointer">
-												<input
-													type="file"
-													accept=".pdf"
-													class="hidden"
-													on:change={makeUploadHandler(row.id, 'answer', row.modelId)}
-												/>
-												<span
-													class="inline-flex items-center gap-1.5 rounded-xl px-2 py-1.5 text-xs font-medium text-gray-700 transition hover:bg-black/5 dark:text-gray-300 dark:hover:bg-white/5"
-												>
-													<svg
-														xmlns="http://www.w3.org/2000/svg"
-														fill="none"
-														viewBox="0 0 24 24"
-														stroke-width="1.8"
-														stroke="currentColor"
-														class="h-3.5 w-3.5"
-													>
-														<path
-															stroke-linecap="round"
-															stroke-linejoin="round"
-															d="M12 16.5V4.5m0 0 4.5 4.5M12 4.5 7.5 9M4.5 19.5h15"
+											{#if row.answerUploaded && !uploadingMap[`${row.id}-answer`]}
+												<div class="flex flex-col gap-1.5">
+													<div class="text-xs text-gray-700 dark:text-gray-400">{row.answerFileName ?? `homework_${i + 1}_answers.pdf`}</div>
+													<label class="cursor-pointer">
+														<input
+															type="file"
+															accept=".pdf"
+															class="hidden"
+															on:change={makeUploadHandler(row.id, 'answer', row.modelId)}
 														/>
-													</svg>
-													{uploadingMap[`${row.id}-answer`]
-														? 'Uploading…'
-														: row.answerUploaded
-															? (row.answerFileName ?? `homework_${i + 1}_answers.pdf`)
-															: 'Upload'}
-												</span>
-											</label>
+														<span
+															class="inline-flex items-center gap-1.5 rounded-xl border border-gray-300 px-2 py-1.5 text-xs font-medium text-gray-700 transition hover:bg-black/5 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-white/5"
+														>
+															<svg
+																xmlns="http://www.w3.org/2000/svg"
+																fill="none"
+																viewBox="0 0 24 24"
+																stroke-width="1.8"
+																stroke="currentColor"
+																class="h-3.5 w-3.5"
+															>
+																<path
+																	stroke-linecap="round"
+																	stroke-linejoin="round"
+																	d="M12 16.5V4.5m0 0 4.5 4.5M12 4.5 7.5 9M4.5 19.5h15"
+																/>
+															</svg>
+															Re-upload
+														</span>
+													</label>
+												</div>
+											{:else}
+												<label class="cursor-pointer">
+													<input
+														type="file"
+														accept=".pdf"
+														class="hidden"
+														on:change={makeUploadHandler(row.id, 'answer', row.modelId)}
+													/>
+													<span
+														class="inline-flex items-center gap-1.5 rounded-xl border border-gray-300 px-2 py-1.5 text-xs font-medium text-gray-700 transition hover:bg-black/5 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-white/5"
+													>
+														<svg
+															xmlns="http://www.w3.org/2000/svg"
+															fill="none"
+															viewBox="0 0 24 24"
+															stroke-width="1.8"
+															stroke="currentColor"
+															class="h-3.5 w-3.5"
+														>
+															<path
+																stroke-linecap="round"
+																stroke-linejoin="round"
+																d="M12 16.5V4.5m0 0 4.5 4.5M12 4.5 7.5 9M4.5 19.5h15"
+															/>
+														</svg>
+														{uploadingMap[`${row.id}-answer`] ? 'Uploading…' : 'Upload'}
+													</span>
+												</label>
+											{/if}
 										</td>
-										<td class="px-3 py-1 text-gray-700 dark:text-gray-300">
+										<td class="w-[6rem] px-3 py-1 text-gray-700 dark:text-gray-300">
 											{getConversationCountForRow(row)}
 										</td>
 										<td class="px-3 py-1 text-gray-700 dark:text-gray-300">
@@ -2285,16 +2476,15 @@
 											</div>
 										</td>
 										<td class="px-3 py-1">
-											{#if getHomeworkPrimaryActionLabel(row)}
-												<!-- in_button_style -->
-												<button
-													type="button"
-													class="rounded-lg px-2 py-1 text-sm font-semibold text-[#57068C] bg-purple-100 transition hover:bg-purple-200 disabled:cursor-not-allowed disabled:opacity-50 dark:text-purple-300 dark:bg-purple-900/30 dark:hover:bg-purple-900/50"
-													on:click={() => handleHomeworkPrimaryAction(row)}
-													disabled={isHomeworkActionBusy(row)}
-												>
-													{getHomeworkPrimaryActionLabel(row)}
-												</button>
+										{#if getHomeworkPrimaryActionLabel(row)}
+											<button
+												type="button"
+												class="px-3 py-1 text-xs font-medium text-[#57068C] transition hover:text-[#702B9D] disabled:cursor-not-allowed disabled:opacity-50 dark:text-purple-400 dark:hover:text-purple-300"
+												on:click={() => handleHomeworkPrimaryAction(row)}
+												disabled={isHomeworkActionBusy(row)}
+											>
+												{getHomeworkPrimaryActionLabel(row)}
+											</button>
 											{:else if getHomeworkActionHint(row)}
 												<div class="text-xs font-normal text-gray-400 dark:text-gray-500">
 													{getHomeworkActionHint(row)}
@@ -2322,7 +2512,7 @@
 												on:change={makeUploadHandler(null, 'question', draft.modelId, draft.uid)}
 											/>
 											<span
-												class="inline-flex items-center gap-1.5 rounded-xl px-2 py-1.5 text-xs font-medium text-gray-700 transition hover:bg-black/5 dark:text-gray-300 dark:hover:bg-white/5"
+												class="inline-flex items-center gap-1.5 rounded-xl border border-gray-300 px-2 py-1.5 text-xs font-medium text-gray-700 transition hover:bg-black/5 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-white/5"
 											>
 												<svg
 													xmlns="http://www.w3.org/2000/svg"
@@ -2351,7 +2541,7 @@
 												on:change={makeUploadHandler(null, 'answer', draft.modelId, draft.uid)}
 											/>
 											<span
-												class="inline-flex items-center gap-1.5 rounded-xl px-2 py-1.5 text-xs font-medium text-gray-700 transition hover:bg-black/5 dark:text-gray-300 dark:hover:bg-white/5"
+												class="inline-flex items-center gap-1.5 rounded-xl border border-gray-300 px-2 py-1.5 text-xs font-medium text-gray-700 transition hover:bg-black/5 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-white/5"
 											>
 												<svg
 													xmlns="http://www.w3.org/2000/svg"
@@ -2381,17 +2571,19 @@
 						</tbody>
 					</table>
 				</div>
+			</div>
 			{/if}
 		</div>
 
-				<div class="space-y-3">
-			<button
-				type="button"
-				class="flex w-full items-start justify-between gap-3 text-left"
-				on:click={() => {
-					showPromptConfiguration = !showPromptConfiguration;
-				}}
-			>
+	<!-- Prompt Configuration Section -->
+	<div class="space-y-3">
+		<button
+			type="button"
+			class="flex w-full items-start justify-between gap-3 text-left"
+			on:click={() => {
+				showPromptConfiguration = !showPromptConfiguration;
+			}}
+		>
 				<div>
 					<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">
 						Prompt Configuration
@@ -2408,12 +2600,13 @@
 						<ChevronDown className="size-4" />
 					{/if}
 				</span>
-			</button>
+		</button>
 
-			{#if showPromptConfiguration}
-				<div
-					class="scrollbar-hidden relative max-w-full overflow-x-auto whitespace-nowrap rounded-sm pt-0.5"
-				>
+		{#if showPromptConfiguration}
+		<div class="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
+			<div
+				class="scrollbar-hidden relative max-w-full overflow-x-auto whitespace-nowrap rounded-sm pt-0.5"
+			>
 					<table
 						class="max-w-full w-full table-auto rounded-sm text-left text-sm text-gray-500 dark:text-gray-400"
 					>
@@ -2450,12 +2643,13 @@
 							{/each}
 						</tbody>
 					</table>
-				</div>
-			{/if}
+			</div>
 		</div>
+		{/if}
+	</div>
 
-		<!-- Run Analysis subsection & Analysis history -->
-		<!-- <div class="space-y-3">
+	<!-- Run Analysis subsection & Analysis history -->
+	<!-- <div class="space-y-3">
 			<div class="flex items-center justify-between gap-4">
 				<div>
 					<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Run Analysis</h2>

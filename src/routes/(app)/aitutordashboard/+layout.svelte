@@ -371,6 +371,17 @@
 						class="flex gap-1 scrollbar-none overflow-x-auto w-fit text-center text-sm font-medium rounded-full bg-transparent py-1 touch-auto pointer-events-auto"
 					>
 						<a
+							class="min-w-fit rounded-full p-1.5 {$page.url.pathname.includes(
+								'/aitutordashboard/instructorsetup'
+							)
+								? 'font-semibold text-[#57068c] dark:text-white'
+								: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
+							href={buildDashboardHref('/aitutordashboard/instructorsetup')}
+						>
+							Instructor Setup
+						</a>
+
+						<a
 							class="min-w-fit rounded-full p-1.5 {$page.url.pathname === '/aitutordashboard' ||
 							$page.url.pathname === '/aitutordashboard/'
 								? 'font-semibold text-[#57068c] dark:text-white'
@@ -394,17 +405,6 @@
 
 						<a
 							class="min-w-fit rounded-full p-1.5 {$page.url.pathname.includes(
-								'/aitutordashboard/topicanalysis/reviewquestionset'
-							)
-								? 'font-semibold text-[#57068c] dark:text-white'
-								: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
-							href={buildDashboardHref('/aitutordashboard/topicanalysis/reviewquestionset')}
-						>
-							Practice Question
-						</a>
-
-						<a
-							class="min-w-fit rounded-full p-1.5 {$page.url.pathname.includes(
 								'/aitutordashboard/studentanalysis'
 							)
 								? 'font-semibold text-[#57068c] dark:text-white'
@@ -416,13 +416,13 @@
 
 						<a
 							class="min-w-fit rounded-full p-1.5 {$page.url.pathname.includes(
-								'/aitutordashboard/instructorsetup'
+								'/aitutordashboard/topicanalysis/reviewquestionset'
 							)
 								? 'font-semibold text-[#57068c] dark:text-white'
 								: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
-							href={buildDashboardHref('/aitutordashboard/instructorsetup')}
+							href={buildDashboardHref('/aitutordashboard/topicanalysis/reviewquestionset')}
 						>
-							Instructor Setup
+							Practice Question
 						</a>
 					</div>
 				</div>
