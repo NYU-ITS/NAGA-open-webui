@@ -1136,6 +1136,8 @@
 	let expandedHomework = new Set<string>();
 	let selectedTopicAnalysisHomework = 'all';
 	let selectedTopicAnalysisTopic = 'all';
+	let topicComboboxValue = 'All Topics';
+	let showTopicDropdown = false;
 	let lastTopicAnalysisFilterKey = '';
 
 	function getHomeworkModelName(homework: string) {
@@ -1183,6 +1185,7 @@
 		!topicAnalysisTopicOptions.includes(selectedTopicAnalysisTopic)
 	) {
 		selectedTopicAnalysisTopic = 'all';
+		topicComboboxValue = 'All Topics';
 	}
 	$: {
 		const nextFilterKey = `${selectedTopicAnalysisHomework}|${selectedTopicAnalysisTopic}|${filteredTopicGroupsByHomework
@@ -1247,16 +1250,40 @@
 				{/each}
 			</select>
 
-			<!-- [Selector] Topic -->
-			<select
-				bind:value={selectedTopicAnalysisTopic}
-				class="rounded-full border border-gray-300 bg-white py-1.5 pl-3 pr-3 text-xs text-gray-700 cursor-pointer focus:outline-none dark:border-gray-500 dark:bg-gray-800 dark:text-gray-200"
-			>
-				<option value="all">All Topics</option>
-				{#each topicAnalysisTopicOptions as topic}
-					<option value={topic}>{topic}</option>
-				{/each}
-			</select>
+				<!-- [Selector] Topic Search + Dropdown -->
+				<div class="relative w-52">
+					<input
+						type="text"
+						class="w-full rounded-full border border-gray-300 bg-white py-1.5 pl-3 pr-8 text-xs text-gray-700 focus:outline-none dark:border-gray-500 dark:bg-gray-800 dark:text-gray-200 placeholder:text-gray-400 dark:placeholder:text-gray-500"
+						placeholder="Search topics..."
+						bind:value={topicComboboxValue}
+						on:focus={() => showTopicDropdown = true}
+						on:blur={() => setTimeout(() => showTopicDropdown = false, 150)}
+					/>
+					<div class="absolute inset-y-0 right-0 flex items-center pr-2.5 pointer-events-none text-gray-400 dark:text-gray-500">
+						<ChevronDown className="size-3.5" />
+					</div>
+					{#if showTopicDropdown}
+						<div class="absolute top-full left-0 mt-1 w-full max-h-48 overflow-y-auto rounded-lg border border-gray-200 bg-white py-1 shadow-lg dark:border-gray-700 dark:bg-gray-800 z-50">
+							<button
+								type="button"
+								class="w-full px-3 py-1.5 text-left text-xs hover:bg-gray-100 dark:hover:bg-gray-700 {selectedTopicAnalysisTopic === 'all' ? 'bg-blue-50 dark:bg-blue-900/30 font-medium' : ''}"
+								on:click={() => { selectedTopicAnalysisTopic = 'all'; topicComboboxValue = 'All Topics'; showTopicDropdown = false; }}
+							>
+								All Topics
+							</button>
+							{#each topicAnalysisTopicOptions.filter(t => topicComboboxValue === 'All Topics' || t.toLowerCase().includes(topicComboboxValue.toLowerCase())) as topic}
+								<button
+									type="button"
+									class="w-full px-3 py-1.5 text-left text-xs hover:bg-gray-100 dark:hover:bg-gray-700 {selectedTopicAnalysisTopic === topic ? 'bg-blue-50 dark:bg-blue-900/30 font-medium' : ''}"
+									on:click={() => { selectedTopicAnalysisTopic = topic; topicComboboxValue = topic; showTopicDropdown = false; }}
+								>
+									{topic}
+								</button>
+							{/each}
+						</div>
+					{/if}
+				</div>
 			</div>
 		</div>
 

@@ -15,6 +15,7 @@
 	import ChevronUp from '$lib/components/icons/ChevronUp.svelte';
 	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
 	import Search from '$lib/components/icons/Search.svelte';
+import Tooltip from '$lib/components/common/Tooltip.svelte';
 
 	const AI_TUTOR_API_BASE = AI_TUTOR_API_BASE_URL;
 	const useFrontendTestingData = AI_TUTOR_FRONTEND_TESTING_MODE;
@@ -74,9 +75,35 @@
 		return homeworkMetaById[homework]?.label ?? homework;
 	}
 
-	function downloadStudentReport(student: StudentRow) {
+	async function downloadStudentReport(student: StudentRow) {
 		testToast(`Download Report is triggered | page=aitutordashboard - Student Analysis | student=${student.studentId}`);
-		toast.success(`Download Report for ${student.name} is not connected yet.`);
+		if (!student.id || !student.hasAnalysis) {
+			toast.error('Analysis not available for download.');
+			return;
+		}
+		try {
+			const url = `${AI_TUTOR_API_BASE}/analysis/export/${encodeURIComponent(student.id)}`;
+			const res = await fetch(url, {
+				headers: { Authorization: `Bearer ${localStorage.token}` }
+			});
+			if (!res.ok) {
+				const text = await res.text().catch(() => 'Download failed');
+				throw new Error(text);
+			}
+			const blob = await res.blob();
+			const filename = res.headers.get('content-disposition')?.match(/filename="?([^";]+)"?/)?.[1] || `${student.name}_analysis.pdf`;
+			const link = document.createElement('a');
+			link.href = URL.createObjectURL(blob);
+			link.download = filename;
+			document.body.appendChild(link);
+			link.click();
+			document.body.removeChild(link);
+			URL.revokeObjectURL(link.href);
+			toast.success(`Downloaded report for ${student.name}`);
+		} catch (e) {
+			console.error('Download report failed:', e);
+			toast.error(e instanceof Error ? e.message : 'Download report failed.');
+		}
 	}
 	const frontendTestingHomeworkOptions: HomeworkOption[] = [
 		{ id: frontendTestingHomeworkModelNames[0], label: frontendTestingHomeworkModelNames[0], group_id: 'frontend-testing-group', model_id: 'gpt-4o-mini' },
@@ -654,7 +681,11 @@ $: isFilterActive = selectedHomework !== 'All' || search.trim() !== '';
 										{student.avgAccuracy.toFixed(1)}%
 									{/if}
 								</td>
-								<td class="max-w-xs whitespace-normal px-3 py-1 text-gray-700 dark:text-gray-300">{student.topicsToImprove}</td>
+								<td class="px-3 py-1 text-gray-700 dark:text-gray-300">
+											<Tooltip content={student.topicsToImprove} placement="top">
+												<div class="max-w-[16rem] truncate cursor-default">{student.topicsToImprove}</div>
+											</Tooltip>
+										</td>
 								<td class="px-3 py-1 text-gray-700 dark:text-gray-300">
 									<!-- [Table Button: icon+name] Download Report -->
 									<button

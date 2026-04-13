@@ -182,6 +182,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 	let selectedPromptTutorId = '';
 	let selectedPromptScope: 'default' | 'override' = 'default';
 	let showPromptConfiguration = false;
+	let showAITutorWorkflow = true;
 	let showHomeworkAnswerFiles = true;
 	let showErrorTypeConfiguration = true;
 
@@ -1994,11 +1995,25 @@ import { flyAndScale } from '$lib/utils/transitions';
 
 		<!-- [Visual Guide: AI Tutor Workflow] -->
 		<div class="rounded-xl border-2 border-[#57068C]/30 bg-gradient-to-br from-[#57068C]/5 to-transparent p-4 dark:border-purple-500/20 dark:from-purple-500/10">
-			<div class="mb-2 flex flex-col items-center text-center">
-				<h3 class="text-lg font-bold text-gray-900 dark:text-gray-100">AI Tutor Workflow</h3>
-				<p class="mt-0.5 text-xs text-gray-600 dark:text-gray-400">Follow these 3 steps to analyze and support your students</p>
-			</div>
+			<button
+				type="button"
+				class="w-full flex items-center justify-between gap-2 mb-2"
+				on:click={() => showAITutorWorkflow = !showAITutorWorkflow}
+			>
+				<div class="flex flex-col items-center text-center flex-1">
+					<h3 class="text-lg font-bold text-gray-900 dark:text-gray-100">AI Tutor Workflow</h3>
+					<p class="mt-0.5 text-xs text-gray-600 dark:text-gray-400">Follow these 3 steps to analyze and support your students</p>
+				</div>
+				<span class="text-gray-500 dark:text-gray-400">
+					{#if showAITutorWorkflow}
+						<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-5 h-5"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 15.75l7.5-7.5 7.5 7.5" /></svg>
+					{:else}
+						<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-5 h-5"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" /></svg>
+					{/if}
+				</span>
+			</button>
 
+			{#if showAITutorWorkflow}
 			<!-- Flow Diagram -->
 			<div class="flex items-center justify-between px-2 py-2">
 				<!-- Step 1 Node -->
@@ -2050,7 +2065,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 			</div>
 
 			<!-- Details -->
-			<div class="grid grid-cols-3 gap-4 pt-2 border-t border-gray-200 dark:border-gray-800">
+			<div class="flex justify-between gap-4 pt-2 border-t border-gray-200 dark:border-gray-800">
 				<!-- Step 1 Details -->
 				<div class="space-y-2 pt-2">
 					<div class="flex items-center gap-2">
@@ -2096,7 +2111,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 				</div>
 
 				<!-- Step 3 Details -->
-				<div class="space-y-3 pt-4">
+				<div class="space-y-2 pt-2 h-full flex flex-col">
 					<div class="flex items-center gap-2">
 						<div class="w-1 h-4 bg-[#57068C] rounded-full"></div>
 						<p class="text-xs font-bold text-gray-900 dark:text-gray-100">STEP 3: GENERATE</p>
@@ -2117,6 +2132,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 					</ul>
 				</div>
 			</div>
+			{/if}
 		</div>
 
 		<!-- [Standard Section: Error Type Configuration] -->
@@ -2130,10 +2146,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 			>
 				<div>
 					<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200 flex items-center gap-2">
-						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-gray-500 dark:text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-							<path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-							<path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-						</svg>
+						<div class="h-2 w-2 rounded-full bg-gray-400 dark:bg-gray-500"></div>
 						1.Error Type Configuration
 					</h2>
 					<div class="text-xs text-gray-400 dark:text-gray-500">
@@ -2331,10 +2344,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 			>
 				<div>
 					<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200 flex items-center gap-2">
-						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-gray-500 dark:text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-							<path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-							<path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-						</svg>
+						<div class="h-2 w-2 rounded-full bg-gray-400 dark:bg-gray-500"></div>
 						2.Homework & Answer Files
 					</h2>
 					<div class="text-xs text-gray-400 dark:text-gray-500">
@@ -2364,7 +2374,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 								<th class="w-[12rem] px-3 py-1.5 select-none">Homework</th>
 								<th class="px-3 py-1.5 select-none">Homework PDF</th>
 								<th class="px-3 py-1.5 select-none">Answer PDF</th>
-								<th class="w-[6rem] px-3 py-1.5 select-none">Conv.</th>
+								<th class="w-[8.5rem] px-3 py-1.5 select-none">Conversations</th>
 								<th class="px-3 py-1.5 select-none">Status</th>
 								<th class="w-[7rem] px-3 py-1.5 select-none">Action</th>
 							</tr>
@@ -2639,10 +2649,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 		>
 				<div>
 					<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200 flex items-center gap-2">
-						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-gray-500 dark:text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-							<path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-							<path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-						</svg>
+						<div class="h-2 w-2 rounded-full bg-gray-400 dark:bg-gray-500"></div>
 						(Optional)Prompt Configuration
 					</h2>
 					<div class="text-xs text-gray-400 dark:text-gray-500">

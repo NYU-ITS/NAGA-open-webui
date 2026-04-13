@@ -96,6 +96,7 @@
 	let hasLoadedReviewHomeworksOnce = useFrontendTestingData;
 	let currentHomeworkIndex = 0;
 	let selectedHomework = '';
+	let showPracticeQuestionWorkflow = true;
 	let expandedGuide = false;
 	let editingQuestionIndex: number | null = null;
 	let approvingQuestionSet = false;
@@ -1424,11 +1425,25 @@
 <div class="flex flex-col space-y-20 py-4">
 	<!-- [Visual Guide: Practice Question Workflow] -->
 	<div class="rounded-xl border-2 border-[#57068C]/30 bg-gradient-to-br from-[#57068C]/5 to-transparent p-4 dark:border-purple-500/20 dark:from-purple-500/10">
-		<div class="mb-2 flex flex-col items-center text-center">
-			<h3 class="text-lg font-bold text-gray-900 dark:text-gray-100">Practice Question Workflow</h3>
-			<p class="mt-0.5 text-xs text-gray-600 dark:text-gray-400">Follow these 3 steps to generate and send practice questions</p>
-		</div>
+		<button
+			type="button"
+			class="w-full flex items-center justify-between gap-2"
+			on:click={() => showPracticeQuestionWorkflow = !showPracticeQuestionWorkflow}
+		>
+			<div class="flex flex-col items-center text-center flex-1">
+				<h3 class="text-lg font-bold text-gray-900 dark:text-gray-100">Practice Question Workflow</h3>
+				<p class="mt-0.5 text-xs text-gray-600 dark:text-gray-400">Follow these 3 steps to generate and send practice questions</p>
+			</div>
+			<span class="text-gray-500 dark:text-gray-400">
+				{#if showPracticeQuestionWorkflow}
+					<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-5 h-5"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 15.75l7.5-7.5 7.5 7.5" /></svg>
+				{:else}
+					<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-5 h-5"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" /></svg>
+				{/if}
+			</span>
+		</button>
 
+		{#if showPracticeQuestionWorkflow}
 		<!-- Flow Diagram -->
 		<div class="flex items-center justify-between px-2 py-2">
 			<!-- Step 1 Node -->
@@ -1482,7 +1497,7 @@
 		</div>
 
 		<!-- Details -->
-		<div class="grid grid-cols-3 gap-4 pt-2 border-t border-gray-200 dark:border-gray-800">
+		<div class="flex justify-between gap-4 pt-2 border-t border-gray-200 dark:border-gray-800">
 			<!-- Step 1 Details -->
 			<div class="space-y-2 pt-2">
 				<div class="flex items-center gap-2">
@@ -1520,7 +1535,7 @@
 			</div>
 
 			<!-- Step 3 Details -->
-			<div class="space-y-2 pt-2">
+			<div class="space-y-2 pt-2 h-full flex flex-col">
 				<div class="flex items-center gap-2">
 					<div class="w-1 h-4 bg-[#57068C] rounded-full"></div>
 					<p class="text-xs font-bold text-gray-900 dark:text-gray-100">STEP 3: REVIEW & SEND</p>
@@ -1553,41 +1568,42 @@
 				</div>
 			</div>
 		</div>
+		{/if}
 	</div>
 
 	<!-- [Standard Section: Practice Question Set] -->
-	<div class="space-y-3">
-		<div class="flex items-center justify-between gap-4">
+	<div class="space-y-4">
+		<div>
 			<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200 flex items-center gap-2">
-						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-gray-500 dark:text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-							<path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-							<path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-						</svg>
-						1.Practice Question Set
-					</h2>
+				<div class="h-2 w-2 rounded-full bg-gray-400 dark:bg-gray-500"></div>
+				1.Practice Question Set
+			</h2>
+			<div class="mt-1 text-xs text-gray-400 dark:text-gray-500">
+				Generate or upload a question set. Download, edit, and re-upload as needed. The system standardizes all uploads with topics and answers.
+			</div>
 		</div>
 
-		<p class="text-sm text-gray-600 dark:text-gray-400 leading-relaxed">
-			Generate or upload a question set. Download, edit, and re-upload as needed. The system standardizes all uploads with topics and answers.
-		</p>
 
-		<div class="scrollbar-hidden relative overflow-x-auto max-w-full rounded-sm pt-0.5">
-			<table class="w-full text-sm text-left text-gray-500 dark:text-gray-400 table-auto max-w-full rounded-sm">
+		<div class="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
+			<div class="scrollbar-hidden relative overflow-x-auto max-w-full rounded-sm pt-0.5">
+				<table class="w-full text-sm text-left text-gray-500 dark:text-gray-400 table-auto max-w-full rounded-sm">
 				<thead class="text-xs text-gray-700 uppercase bg-[#EEE6F3] dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5">
 					<tr>
 						<th scope="col" class="w-[18rem] px-3 py-1.5">Homework</th>
 						<th scope="col" class="flex-1 px-3 py-1.5">Status</th>
-						<th scope="col" class="w-[8rem] px-3 py-1.5 text-right">Action</th>
+						<th scope="col" class="w-[16rem] px-3 py-1.5">Action</th>
 					</tr>
 				</thead>
 				<tbody>
 					{#if practiceLoading}
 						<tr class="bg-white dark:bg-gray-900 text-xs">
-							<td colspan="3" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">Loading practice question sets...</td>
+							<td colspan="3" class="px-3 py-12 text-center text-gray-400 dark:text-gray-500">Loading practice question sets...</td>
 						</tr>
 					{:else if practiceQuestions.length === 0}
 						<tr class="bg-white dark:bg-gray-900 text-xs">
-							<td colspan="3" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">{practiceQuestionsEmptyMessage}</td>
+							<td colspan="3" class="px-3 py-12 text-center text-gray-400 dark:text-gray-500">
+												{practiceQuestionsEmptyMessage}
+											</td>
 						</tr>
 					{:else}
 						{#each practiceQuestions as practice}
@@ -1651,7 +1667,7 @@
 									</div>
 								</td>
 								<td class="px-3 py-1.5">
-									<div class="flex items-center justify-end gap-1">
+									<div class="flex items-center gap-1">
 										{#if practice.status === 'approved' || practice.status === 'ready'}
 											{#if canGeneratePractice(practice.homeworkId)}
 												<button
@@ -1687,225 +1703,200 @@
 						{/each}
 					{/if}
 				</tbody>
-			</table>
-		</div>
-	</div>
-
-	<div class="space-y-0">
-		<div class="bg-white py-2 dark:bg-gray-900">
-			<div class="flex items-end justify-between gap-4">
-				<div class="w-full">
-					<div class="flex items-center justify-between gap-3">
-						<h2 class="text-xl font-semibold text-gray-900 dark:text-gray-100 flex items-center gap-2">
-									<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-gray-500 dark:text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-										<path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-										<path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-									</svg>
-									2.Questions
-								</h2>
-						<div class="flex items-center justify-between gap-3 text-sm min-w-[26rem]">
-							<div class="flex-1">
-								<CustomDropdown
-									bind:value={selectedHomework}
-									on:change={handleHomeworkChange}
-									options={reviewHomeworks.map(hw => ({ id: hw.homeworkId, label: getHomeworkLabel(hw.homeworkId) }))}
-									width="w-full"
-								/>
-							</div>
-							<div class="ml-auto flex shrink-0 items-center gap-2">
-							<button
-								type="button"
-								on:click={goToPreviousHomework}
-								disabled={currentHomeworkIndex === 0}
-								class="text-sm font-medium text-gray-900 transition hover:text-gray-700 disabled:text-gray-400 dark:text-gray-100 dark:hover:text-gray-300 dark:disabled:text-gray-500"
-							>
-								Prev
-							</button>
-							<button
-								type="button"
-								on:click={goToNextHomework}
-								disabled={currentHomeworkIndex >= reviewHomeworks.length - 1}
-								class="text-sm font-medium text-gray-900 transition hover:text-gray-700 disabled:text-gray-400 dark:text-gray-100 dark:hover:text-gray-300 dark:disabled:text-gray-500"
-							>
-								Next
-							</button>
-							</div>
-						</div>
-					</div>
-						<div class="mt-1 flex flex-wrap items-center gap-x-3 text-xs text-gray-500 dark:text-gray-400">
-						<span>Generated on {formatAITutorTimestamp(questionData.generatedTime)}</span>
-						<span>{approvedQuestionIndexes.size}/{questionData.questions.length} approved</span>
-						{#if isEditedAfterSent}
-							<span class="inline-flex items-center gap-1 rounded-full bg-yellow-100 px-2 py-0.5 text-xs font-medium text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-300">
-								<span class="h-1.5 w-1.5 rounded-full bg-yellow-500"></span>
-								Edited — Re-send to notify students
-							</span>
-						<!-- {:else if questionData.status === 'approved' && currentPracticeQuestion?.sentAt}
-							<span class="inline-flex items-center gap-1 rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700 dark:bg-green-900/40 dark:text-green-300">
-								<span class="h-1.5 w-1.5 rounded-full bg-green-500"></span>
-								Approved &amp; Sent
-							</span> -->
-						{/if}
-						{#if groupId}
-							<span>Group: {groupId}</span>
-						{/if}
-					</div>
+					</table>
 				</div>
 			</div>
-		</div>
+	</div>
 
-		<div class="space-y-4 py-6 rounded-lg border border-gray-200 dark:border-gray-700">
-			{#if questionEditors.length === 0}
-				<div class="flex items-center justify-center py-12 text-gray-400 dark:text-gray-500">
-					No practice questions has been generated yet
+	<div class="space-y-4">
+			<div>
+			<div class="flex items-center gap-4">
+				<h2 class="text-xl font-semibold text-gray-900 dark:text-gray-100 flex items-center gap-2">
+					<div class="h-2 w-2 rounded-full bg-gray-400 dark:bg-gray-500"></div>
+					2.Questions
+				</h2>
+			</div>
+			<div class="mt-1 flex items-center justify-between gap-4 text-xs text-gray-500 dark:text-gray-400">
+				<div class="flex flex-wrap items-center gap-x-3">
+					<span>Generated on {formatAITutorTimestamp(questionData.generatedTime)}</span>
+					<span>{questionData.questions.length} question{questionData.questions.length === 1 ? '' : 's'}</span>
+					{#if isEditedAfterSent}
+						<span class="inline-flex items-center gap-1 rounded-full bg-yellow-100 px-2 py-0.5 text-xs font-medium text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-300">
+							<span class="h-1.5 w-1.5 rounded-full bg-yellow-500"></span>
+							Edited — Re-send to notify students
+						</span>
+					<!-- {:else if questionData.status === 'approved' && currentPracticeQuestion?.sentAt}
+						<span class="inline-flex items-center gap-1 rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700 dark:bg-green-900/40 dark:text-green-300">
+							<span class="h-1.5 w-1.5 rounded-full bg-green-500"></span>
+							Approved &amp; Sent
+						</span> -->
+					{/if}
+					{#if groupId}
+						<span>Group: {groupId}</span>
+					{/if}
 				</div>
-			{:else}
-			{#each questionEditors as editor, index}
-				<div class="bg-white dark:bg-gray-950 rounded-lg border border-gray-100 dark:border-gray-800 p-4">
-					<div class="mb-4 flex items-center justify-between gap-3">
-						<div class="flex items-center gap-3">
-							<div class="text-base font-semibold text-gray-800 dark:text-gray-200">
-								Q{index + 1}
-							</div>
-							{#if approvedQuestionIndexes.has(index)}
-								<span class="inline-flex items-center gap-1 rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-700 dark:bg-green-900/30 dark:text-green-300">
-									<span class="w-1.5 h-1.5 rounded-full bg-green-500"></span>
-									Approved
-								</span>
-							{/if}
-						</div>
-						<div class="flex items-center gap-3 text-sm">
-							{#if editingQuestionIndex === index}
-								<button
-									type="button"
-									on:click={() => cancelQuestionEdit(index)}
-									class="text-gray-600 transition hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200"
-								>
-									Cancel
-								</button>
-								<!-- Reset button hidden: low utility, can be restored if needed
-								<button
-									type="button"
-									on:click={() => useOriginalQuestion(index)}
-									class="text-gray-600 transition hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200"
-								>
-									Reset
-								</button>
-								-->
-								<button
-									type="button"
-									on:click={() => saveQuestionEdit(index)}
-									class="font-medium text-[#57068C] transition hover:text-[#702B9D] dark:text-purple-400 dark:hover:text-purple-300"
-								>
-									Save
-								</button>
-							{:else}
-								<button
-									type="button"
-									on:click={() => (editingQuestionIndex = index)}
-									class="text-xs font-medium text-gray-900 transition hover:text-gray-700 dark:text-gray-100 dark:hover:text-gray-300"
-								>
-									Edit
-								</button>
-							{/if}
-						</div>
+				<CustomDropdown
+					bind:value={selectedHomework}
+					on:change={handleHomeworkChange}
+					options={reviewHomeworks.map(hw => ({ id: hw.homeworkId, label: getHomeworkLabel(hw.homeworkId) }))}
+					width="w-52"
+					className="rounded-full px-4"
+				/>
+			</div>
+
+			</div>
+			<div class="space-y-4 py-6 rounded-lg border border-gray-200 dark:border-gray-700">
+				{#if questionEditors.length === 0}
+					<div class="flex items-center justify-center py-12 text-xs text-gray-400 dark:text-gray-500">
+						No practice questions has been generated yet
 					</div>
-					<div class="space-y-3">
-						<div class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide">JSON</div>
-						{#if editingQuestionIndex === index}
-							<div class="rounded-lg bg-white dark:bg-white">
-								<textarea
-									value={questionEditors[index]}
-									on:input={(event) => handleQuestionEditorInput(index, event)}
-									rows={getEditorRows(editor)}
-									class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white px-4 py-2 font-mono text-xs leading-relaxed text-gray-800 focus:outline-none focus:ring-2 focus:ring-purple-500 dark:bg-white dark:text-gray-900"
-								/>
-							</div>
-						{:else}
-							<div class="rounded-lg bg-gray-50 dark:bg-gray-800">
-								<div
-									class="w-full select-none whitespace-pre-wrap rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 px-4 py-2 font-mono text-xs leading-relaxed text-gray-800 dark:bg-gray-800 dark:text-gray-200"
-								>
-									{questionEditors[index]}
+				{:else}
+				{#each questionEditors as editor, index}
+					<div class="bg-white dark:bg-gray-950 rounded-lg border border-gray-100 dark:border-gray-800 p-4">
+						<div class="mb-4 flex items-center justify-between gap-3">
+							<div class="flex items-center gap-3">
+								<div class="text-base font-semibold text-gray-800 dark:text-gray-200">
+									Q{index + 1}
 								</div>
+								{#if approvedQuestionIndexes.has(index)}
+									<span class="inline-flex items-center gap-1 rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-700 dark:bg-green-900/30 dark:text-green-300">
+										<span class="w-1.5 h-1.5 rounded-full bg-green-500"></span>
+										Approved
+									</span>
+								{/if}
 							</div>
-						{/if}
-						<div class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide">Preview</div>
-						<div class="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-950">
-						{#if getQuestionPreviewText(questionEditors[index])}
-							<div class="markdown-prose-xs text-xs text-gray-800 dark:text-gray-200">
-								<Markdown
-									id={`question-preview-${currentReviewHomework?.homeworkId ?? 'homework'}-${index}`}
-									content={getQuestionPreviewText(questionEditors[index])}
-								/>
+							<div class="flex items-center gap-3 text-sm">
+								{#if editingQuestionIndex === index}
+									<button
+										type="button"
+										on:click={() => cancelQuestionEdit(index)}
+										class="text-gray-600 transition hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200"
+									>
+										Cancel
+									</button>
+									<!-- Reset button hidden: low utility, can be restored if needed
+									<button
+										type="button"
+										on:click={() => useOriginalQuestion(index)}
+										class="text-gray-600 transition hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200"
+									>
+										Reset
+									</button>
+									-->
+									<button
+										type="button"
+										on:click={() => saveQuestionEdit(index)}
+										class="font-medium text-[#57068C] transition hover:text-[#702B9D] dark:text-purple-400 dark:hover:text-purple-300"
+									>
+										Save
+									</button>
+								{:else}
+									<button
+										type="button"
+										on:click={() => (editingQuestionIndex = index)}
+										class="text-xs font-medium text-gray-900 transition hover:text-gray-700 dark:text-gray-100 dark:hover:text-gray-300"
+									>
+										Edit
+									</button>
+								{/if}
 							</div>
-						{:else}
-							<div class="text-xs text-gray-500 dark:text-gray-400">
-								Preview unavailable until the JSON contains a valid <span class="font-semibold">text</span> string.
-							</div>
-						{/if}
+						</div>
+						<div class="space-y-3">
+							<div class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide">JSON</div>
+							{#if editingQuestionIndex === index}
+								<div class="rounded-lg bg-white dark:bg-white">
+									<textarea
+										value={questionEditors[index]}
+										on:input={(event) => handleQuestionEditorInput(index, event)}
+										rows={getEditorRows(editor)}
+										class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white px-4 py-2 font-mono text-xs leading-relaxed text-gray-800 focus:outline-none focus:ring-2 focus:ring-purple-500 dark:bg-white dark:text-gray-900"
+									/>
+								</div>
+							{:else}
+								<div class="rounded-lg bg-gray-50 dark:bg-gray-800">
+									<div
+										class="w-full select-none whitespace-pre-wrap rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 px-4 py-2 font-mono text-xs leading-relaxed text-gray-800 dark:bg-gray-800 dark:text-gray-200"
+									>
+										{questionEditors[index]}
+									</div>
+								</div>
+							{/if}
+							<div class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide">Preview</div>
+							<div class="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-950">
+							{#if getQuestionPreviewText(questionEditors[index])}
+								<div class="markdown-prose-xs text-xs text-gray-800 dark:text-gray-200">
+									<Markdown
+										id={`question-preview-${currentReviewHomework?.homeworkId ?? 'homework'}-${index}`}
+										content={getQuestionPreviewText(questionEditors[index])}
+									/>
+								</div>
+							{:else}
+								<div class="text-xs text-gray-500 dark:text-gray-400">
+									Preview unavailable until the JSON contains a valid <span class="font-semibold">text</span> string.
+								</div>
+							{/if}
+						</div>
 					</div>
 				</div>
-			</div>
-		{/each}
-		{/if}
+			{/each}
+			{/if}
 
-		<div class="flex items-center justify-end gap-3 pt-4 pr-4">
-			<!-- [Big Button] Approve -->
-			<button
-				on:click={handleSave}
-				disabled={questionData.status === 'approved' || approvingQuestionSet || questionData.questions.length === 0}
-				class={`min-w-[5rem] rounded-full px-3 py-1.5 text-center text-xs font-semibold transition ${
-						questionData.status === 'approved'
-							? 'cursor-default bg-gray-200 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
-							: approvingQuestionSet
-								? 'cursor-wait bg-gray-600 text-white'
-								: 'bg-[#57068C] hover:bg-[#702B9D] text-white'
-					}`}
-				>
-					{questionData.status === 'approved'
-						? 'Approved'
-						: approvingQuestionSet
-							? 'Approving...'
-							: 'Approve'}
-				</button>
-			<!-- [Big Button] Send -->
-			<button
-				type="button"
-				on:click={() => currentPracticeQuestion && sendPracticeToStudents(currentPracticeQuestion)}
-				disabled={
-					questionData.questions.length === 0 ||
-					!currentPracticeQuestion?.practiceId ||
-					questionData.status !== 'approved' ||
-					(Boolean(currentPracticeQuestion?.sentAt) && !isEditedAfterSent) ||
-					Boolean(
-						currentPracticeQuestion?.practiceId &&
-							sendingPracticeById[currentPracticeQuestion.practiceId]
-					)
-				}
-				class={`min-w-[5rem] rounded-full px-3 py-1.5 text-center text-xs font-semibold transition ${
-						isEditedAfterSent
-							? 'bg-[#57068C] text-white hover:bg-[#702B9D]'
-							: currentPracticeQuestion?.sentAt
+			<div class="flex items-center justify-end gap-3 pt-4 pr-4">
+				<!-- [Big Button] Approve -->
+				<button
+					on:click={handleSave}
+					disabled={questionData.status === 'approved' || approvingQuestionSet || questionData.questions.length === 0}
+					class={`min-w-[5rem] rounded-full px-3 py-1.5 text-center text-xs font-semibold transition ${
+							questionData.status === 'approved'
 								? 'cursor-default bg-gray-200 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
-								: questionData.status !== 'approved'
+								: approvingQuestionSet || questionData.questions.length === 0
 									? 'cursor-not-allowed bg-gray-200 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
-									: 'bg-[#57068C] text-white hover:bg-[#702B9D]'
-					}`}
-				>
-					{currentPracticeQuestion?.practiceId &&
-					sendingPracticeById[currentPracticeQuestion.practiceId]
-						? 'Sending...'
-						: isEditedAfterSent
-							? 'Re-send'
-							: currentPracticeQuestion?.sentAt
-								? 'Sent'
-								: 'Send'}
-				</button>
+									: 'bg-[#57068C] hover:bg-[#702B9D] text-white'
+						}`}
+					>
+						{questionData.status === 'approved'
+							? 'Approved'
+							: approvingQuestionSet
+								? 'Approving...'
+								: 'Approve'}
+					</button>
+				<!-- [Big Button] Send -->
+				<button
+					type="button"
+					on:click={() => currentPracticeQuestion && sendPracticeToStudents(currentPracticeQuestion)}
+					disabled={
+						questionData.questions.length === 0 ||
+						!currentPracticeQuestion?.practiceId ||
+						questionData.status !== 'approved' ||
+						(Boolean(currentPracticeQuestion?.sentAt) && !isEditedAfterSent) ||
+						Boolean(
+							currentPracticeQuestion?.practiceId &&
+								sendingPracticeById[currentPracticeQuestion.practiceId]
+						)
+					}
+					class={`min-w-[5rem] rounded-full px-3 py-1.5 text-center text-xs font-semibold transition ${
+							isEditedAfterSent
+								? 'bg-[#57068C] text-white hover:bg-[#702B9D]'
+								: currentPracticeQuestion?.sentAt
+									? 'cursor-default bg-gray-200 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
+									: questionData.status !== 'approved'
+										? 'cursor-not-allowed bg-gray-200 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
+										: 'bg-[#57068C] text-white hover:bg-[#702B9D]'
+						}`}
+					>
+						{currentPracticeQuestion?.practiceId &&
+						sendingPracticeById[currentPracticeQuestion.practiceId]
+							? 'Sending...'
+							: isEditedAfterSent
+								? 'Re-send'
+								: currentPracticeQuestion?.sentAt
+									? 'Sent'
+									: 'Send'}
+					</button>
+				</div>
 			</div>
 		</div>
-	</div>
-</div>
+		</div>
 
 <!-- Bottom Spacer -->
 <div class="h-[20vh]"></div>

@@ -6,6 +6,7 @@
 	export let options: Array<{ id: string; label: string }> | string[];
 	export let width: string = 'w-40';
 	export let label: string = 'Select';
+	export let className: string = '';
 
 	const dispatch = createEventDispatcher();
 
@@ -32,7 +33,7 @@
 
 <div class="relative">
 	<button
-		class="border border-gray-300 rounded-md bg-white px-2.5 py-1.5 text-xs text-gray-700 dark:border-gray-500 dark:bg-gray-800 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-400 dark:focus:ring-blue-500 cursor-pointer flex items-center justify-between gap-2 {width}"
+		class="border border-gray-300 bg-white px-2.5 py-1.5 text-xs text-gray-700 dark:border-gray-500 dark:bg-gray-800 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-400 dark:focus:ring-blue-500 cursor-pointer flex items-center justify-between gap-2 {width} {className || 'rounded-md'}"
 		on:click={toggleOpen}
 	>
 		<span class="truncate">{getLabel(value)}</span>

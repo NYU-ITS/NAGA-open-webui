@@ -242,7 +242,10 @@ const bannerPlaceholderTime = 'TEST-TIME';
 	}
 
 	// ── SVG chart helpers ─────────────────────────────────────────────────────
-	const W = 300, H = 180, padL = 38, padR = 12, padT = 12, padB = 32;
+	let chartWidth = 0;
+	const H = 180;
+	const padL = 38, padR = 12, padT = 12, padB = 32;
+	$: W = chartWidth || 300;
 
 	function chartPoints(values: (number | null)[]) {
 		const n = values.length;
@@ -301,7 +304,8 @@ const bannerPlaceholderTime = 'TEST-TIME';
 		const pathD2 = dots2.map((p, j) => `${j === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
 		const yTicks = [yMin, Math.round((yMin + yMax) / 2), Math.round(yMax)];
 		const xLabels = values1.map((_, i) => ({ x: px(i), label: shortLabel(values1, i) }));
-		return { pathD1, pathD2, dots1, dots2, yTicks, yMin, yMax, py, plotH, xLabels };
+		const labelStep = Math.max(1, Math.ceil((xLabels.length * 85) / Math.max(1, plotW)));
+		return { pathD1, pathD2, dots1, dots2, yTicks, yMin, yMax, py, plotH, xLabels, labelStep };
 	}
 
 	$: avgSolvedChart = chartPoints(homeworkStats.map((s) => s.avgSolved));
@@ -1168,8 +1172,7 @@ let runStep = '';
 type AnalysisRecord = { contents: string; startedAt: string; completedAt: string | null; failed: boolean };
 let analysisHistory: AnalysisRecord[] = [];
 const homeworkModelNameCellClass =
-	'max-w-[12rem] overflow-hidden whitespace-normal break-words leading-4 [display:-webkit-box] [-webkit-line-clamp:3] [-webkit-box-orient:vertical]';
-
+	'whitespace-normal break-words leading-4';
 $: latestCompletedRun = analysisHistory.find((record) => !!record.completedAt && !record.failed) ?? null;
 $: lastRunStatusClass = latestCompletedRun ? 'bg-green-500' : 'bg-yellow-500';
 
@@ -1349,41 +1352,35 @@ async function runAnalysis() {
 
 		<div class="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
 			<div class="relative">
-			<!-- Scroll Left — only when content overflows and scrolled right -->
-			{#if canScrollLeft}
-				<button
-					class="absolute left-0 top-1/2 -translate-y-1/2 z-10 bg-white dark:bg-gray-800 rounded-full p-2 shadow-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition"
-					on:click={() => scrollCharts('left')}
-					aria-label="Scroll left"
-				>
-					<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-5 h-5">
-						<path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" />
-					</svg>
-				</button>
-			{/if}
-
 			<!-- Charts Container -->
-			<div
-				bind:this={chartsContainer}
-				class="flex gap-4 overflow-x-auto scrollbar-none snap-x snap-mandatory {canScrollLeft ? 'pl-10' : ''} {canScrollRight ? 'pr-10' : ''}"
-				style="scroll-behavior: smooth;"
-				on:scroll={updateScrollState}
-			>
-				<!-- Chart 1: Avg Solved -->
-				<div class="flex-none w-80 h-64 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg snap-start p-3 flex flex-col">
-					<p class="text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Average Problems Solved</p>
-					{#if avgSolvedChart}
-						<svg viewBox="0 0 {W} {H}" class="w-full flex-1" preserveAspectRatio="none">
+			<div class="w-full">
+				<div class="w-full flex flex-col">
+					<div class="flex items-center gap-4 mb-1">
+						<p class="text-xs font-medium text-gray-600 dark:text-gray-300">Average Problems Solved vs Attempted</p>
+						<div class="flex items-center gap-3 text-xs">
+							<div class="flex items-center gap-1">
+								<span class="inline-block w-3 h-0.5 rounded bg-[#7CB9E8]"></span>
+								<span class="text-gray-600 dark:text-gray-300">Solved</span>
+							</div>
+							<div class="flex items-center gap-1">
+								<span class="inline-block w-3 h-0.5 rounded bg-[#A792D0]"></span>
+								<span class="text-gray-600 dark:text-gray-300">Attempted</span>
+							</div>
+						</div>
+					</div>
+					{#if combinedChart}
+						<div class="w-full h-[180px]" bind:clientWidth={chartWidth}>
+							<svg viewBox="0 0 {W} {H}" class="w-full h-full">
 							<!-- Grid lines -->
-							{#each avgSolvedChart.yTicks as tick}
-								<line x1={padL} y1={avgSolvedChart.py(tick)} x2={W - padR} y2={avgSolvedChart.py(tick)}
+							{#each combinedChart.yTicks as tick}
+								<line x1={padL} y1={combinedChart.py(tick)} x2={W - padR} y2={combinedChart.py(tick)}
 									stroke="currentColor" stroke-width="0.5" class="text-gray-200 dark:text-gray-600" stroke-dasharray="3,3" />
-								<text x={padL - 4} y={avgSolvedChart.py(tick) + 4} text-anchor="end" font-size="9"
+								<text x={padL - 4} y={combinedChart.py(tick) + 4} text-anchor="end" font-size="9"
 									class="fill-gray-400 dark:fill-gray-500">{tick}</text>
 							{/each}
-							<!-- X-axis labels (every other one if many) -->
-							{#each avgSolvedChart.xLabels as lbl, i}
-								{#if avgSolvedChart.xLabels.length <= 6 || i % 2 === 0}
+							<!-- X-axis labels (density scales with width) -->
+							{#each combinedChart.xLabels as lbl, i}
+								{#if i % combinedChart.labelStep === 0}
 									<text x={lbl.x} y={H - padB + 14} text-anchor="middle" font-size="9"
 										class="fill-gray-400 dark:fill-gray-500">{lbl.label}</text>
 								{/if}
@@ -1391,48 +1388,22 @@ async function runAnalysis() {
 							<!-- Axes -->
 							<line x1={padL} y1={padT} x2={padL} y2={H - padB} stroke="currentColor" stroke-width="1" class="text-gray-300 dark:text-gray-600" />
 							<line x1={padL} y1={H - padB} x2={W - padR} y2={H - padB} stroke="currentColor" stroke-width="1" class="text-gray-300 dark:text-gray-600" />
-							<!-- Line -->
-							<path d={avgSolvedChart.pathD} fill="none" stroke="#7CB9E8" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
-							<!-- Dots -->
-							{#each avgSolvedChart.dots as dot}
+							<!-- Line 1: Solved -->
+							<path d={combinedChart.pathD1} fill="none" stroke="#7CB9E8" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
+							<!-- Line 2: Attempted -->
+							<path d={combinedChart.pathD2} fill="none" stroke="#A792D0" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
+							<!-- Dots 1 -->
+							{#each combinedChart.dots1 as dot}
 								<circle cx={dot.x} cy={dot.y} r="3" fill="#7CB9E8" />
 							{/each}
-						</svg>
-					{:else}
-						<div class="flex-1 flex items-center justify-center">
-							<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-12 h-12 text-gray-300 dark:text-gray-600">
-								<path stroke-linecap="round" stroke-linejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 0 1 3 19.875v-6.75ZM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V8.625ZM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V4.125Z" />
-							</svg>
-						</div>
-					{/if}
-				</div>
-
-				<!-- Chart 2: Avg Attempted -->
-				<div class="flex-none w-80 h-64 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg snap-start p-3 flex flex-col">
-					<p class="text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Average Problems Attempted</p>
-					{#if avgAttemptedChart}
-						<svg viewBox="0 0 {W} {H}" class="w-full flex-1" preserveAspectRatio="none">
-							{#each avgAttemptedChart.yTicks as tick}
-								<line x1={padL} y1={avgAttemptedChart.py(tick)} x2={W - padR} y2={avgAttemptedChart.py(tick)}
-									stroke="currentColor" stroke-width="0.5" class="text-gray-200 dark:text-gray-600" stroke-dasharray="3,3" />
-								<text x={padL - 4} y={avgAttemptedChart.py(tick) + 4} text-anchor="end" font-size="9"
-									class="fill-gray-400 dark:fill-gray-500">{tick}</text>
-							{/each}
-							{#each avgAttemptedChart.xLabels as lbl, i}
-								{#if avgAttemptedChart.xLabels.length <= 6 || i % 2 === 0}
-									<text x={lbl.x} y={H - padB + 14} text-anchor="middle" font-size="9"
-										class="fill-gray-400 dark:fill-gray-500">{lbl.label}</text>
-								{/if}
-							{/each}
-							<line x1={padL} y1={padT} x2={padL} y2={H - padB} stroke="currentColor" stroke-width="1" class="text-gray-300 dark:text-gray-600" />
-							<line x1={padL} y1={H - padB} x2={W - padR} y2={H - padB} stroke="currentColor" stroke-width="1" class="text-gray-300 dark:text-gray-600" />
-							<path d={avgAttemptedChart.pathD} fill="none" stroke="#A792D0" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
-							{#each avgAttemptedChart.dots as dot}
+							<!-- Dots 2 -->
+							{#each combinedChart.dots2 as dot}
 								<circle cx={dot.x} cy={dot.y} r="3" fill="#A792D0" />
 							{/each}
-						</svg>
+							</svg>
+						</div>
 					{:else}
-						<div class="flex-1 flex items-center justify-center">
+						<div class="w-full h-[180px] flex items-center justify-center">
 							<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-12 h-12 text-gray-300 dark:text-gray-600">
 								<path stroke-linecap="round" stroke-linejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 0 1 3 19.875v-6.75ZM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V8.625ZM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V4.125Z" />
 							</svg>
@@ -1440,19 +1411,6 @@ async function runAnalysis() {
 					{/if}
 				</div>
 			</div>
-
-			<!-- Scroll Right — only when content overflows -->
-			{#if canScrollRight}
-				<button
-					class="absolute right-0 top-1/2 -translate-y-1/2 z-10 bg-white dark:bg-gray-800 rounded-full p-2 shadow-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition"
-					on:click={() => scrollCharts('right')}
-					aria-label="Scroll right"
-				>
-					<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-5 h-5">
-						<path stroke-linecap="round" stroke-linejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
-					</svg>
-				</button>
-			{/if}
 		</div>
 		</div>
 	</div>
@@ -1468,12 +1426,12 @@ async function runAnalysis() {
 					<tr>
 						{#each [
 							{ key: 'homework',     label: 'Homework' },
-							{ key: 'totalProblems', label: 'Total' },
+							{ key: 'totalProblems', label: 'Total Number of Questions' },
 							{ key: 'avgAttempted',   label: 'Avg Attempted' },
 							{ key: 'avgSolved',      label: 'Avg Solved' },
 							{ key: 'avgErrors',      label: 'Avg Errors' }
 						] as col}
-							<th scope="col" class="px-3 py-1.5 cursor-pointer select-none {col.key === 'homework' ? 'w-[12rem]' : ''}" on:click={() => setSortKey(col.key)}>
+							<th scope="col" class="px-3 py-1.5 cursor-pointer select-none {col.key === 'homework' ? 'w-[24rem]' : 'w-[5rem]'}" on:click={() => setSortKey(col.key)}>
 								<div class="flex gap-1.5 items-center">
 									{col.label}
 									{#if sortKey === col.key}

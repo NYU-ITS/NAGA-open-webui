@@ -7,6 +7,12 @@
 	import { getGroups } from '$lib/apis/groups';
 	import { showAITutorTestToast } from '$lib/utils/aiTutorTesting';
 
+	import { DropdownMenu } from 'bits-ui';
+	import { flyAndScale } from '$lib/utils/transitions';
+	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
+	import Check from '$lib/components/icons/Check.svelte';
+	import Search from '$lib/components/icons/Search.svelte';
+
 	import MenuLines from '$lib/components/icons/MenuLines.svelte';
 
 	const i18n = getContext('i18n');
@@ -14,7 +20,8 @@
 
 	let loaded = false;
 	let showIdentityPopover = false;
-	let showGroupDropdown = false;
+	let groupDropdownOpen = false;
+	let groupSearchValue = '';
 	let isSuperAdmin = false;
 	let groups = [];
 	let createdGroups = [];
@@ -93,14 +100,12 @@
 					memberGroups = groups.filter(g => g.user_id !== $user.id && g.user_ids?.includes($user.id));
 
 					// Combine all groups with identity
-					// Super admins see every group the API returns, labelled by their actual relationship.
+					// Super admins see every group the API returns, labelled as Super Admin.
 					if (isSuperAdmin) {
 						allUserGroups = sortGroupsForDefaultSelection(
 							groups.map(g => ({
 								...g,
-								identity: g.user_id === $user.id ? 'Admin'
-										: g.user_ids?.includes($user.id) ? 'Member'
-										: 'View'
+								identity: 'Super Admin'
 							}))
 						);
 					} else {
@@ -140,24 +145,27 @@
 		showIdentityPopover = false;
 	}
 
-	function toggleGroupDropdown() {
-		showGroupDropdown = !showGroupDropdown;
-	}
-
-	function closeGroupDropdown() {
-		showGroupDropdown = false;
-	}
-
 	async function selectGroup(group) {
 		const params = new URLSearchParams($page.url.searchParams);
 		params.set('group_id', group.id);
-		showGroupDropdown = false;
 		await goto(`${$page.url.pathname}?${params.toString()}`, {
 			keepFocus: true,
 			noScroll: true,
 			replaceState: true
 		});
 	}
+
+	async function selectGroupAndClose(group) {
+		await selectGroup(group);
+		groupDropdownOpen = false;
+		groupSearchValue = '';
+	}
+
+	$: filteredGroups = groupSearchValue
+		? allUserGroups.filter((g) =>
+				g.name.toLowerCase().includes(groupSearchValue.toLowerCase())
+			)
+		: allUserGroups;
 </script>
 
 <svelte:head>
@@ -194,71 +202,89 @@
 					<div class="px-2 py-2 flex items-center justify-between">
 						<!-- [Group Select] Course Title Dropdown -->
 						<div class="relative">
-							<button
-								on:click={toggleGroupDropdown}
-								class="flex items-center gap-2 text-lg font-semibold text-gray-800 dark:text-gray-200 hover:text-gray-600 dark:hover:text-gray-400 transition"
-							>
-								<span>
-								{#if selectedGroup}
-									{selectedGroup.name}
-								{:else if loaded}
-									No Group
-								{:else}
-									Loading...
-								{/if}
-							</span>
-								<svg
-									xmlns="http://www.w3.org/2000/svg"
-									fill="none"
-									viewBox="0 0 24 24"
-									stroke-width="2"
-									stroke="currentColor"
-									class="w-5 h-5"
+							<DropdownMenu.Root bind:open={groupDropdownOpen} closeFocus={false}>
+								<DropdownMenu.Trigger
+									class="relative w-full font-primary"
+									aria-label="Select group"
 								>
-									<path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
-								</svg>
-							</button>
+									<div
+										class="flex w-full text-left px-0.5 outline-hidden bg-transparent truncate text-lg justify-between font-medium placeholder-gray-400 focus:outline-hidden text-gray-800 dark:text-gray-200 hover:text-gray-600 dark:hover:text-gray-400 transition"
+									>
+										{#if selectedGroup}
+											{selectedGroup.name}
+										{:else if loaded}
+											No Group
+										{:else}
+											Loading...
+										{/if}
+										<ChevronDown className="self-center ml-2 size-3" strokeWidth="2.5" />
+									</div>
+								</DropdownMenu.Trigger>
 
-							<!-- Group Dropdown -->
-							{#if showGroupDropdown}
-								<div
-									class="absolute left-0 mt-2 w-96 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg p-3"
-									style="z-index: 9999;"
-									role="region"
-									aria-label="Your groups"
-									on:mouseleave={closeGroupDropdown}
+								<DropdownMenu.Content
+									class="z-40 w-[22rem] max-w-[calc(100vw-1rem)] justify-start rounded-xl bg-white dark:bg-gray-850 dark:text-white shadow-lg outline-hidden"
+									transition={flyAndScale}
+									side="bottom-start"
+									sideOffset={3}
 								>
-									<h3 class="text-sm font-semibold text-gray-800 dark:text-gray-200 mb-2">
-										Your Groups
-									</h3>
-									{#if allUserGroups.length > 0}
-										<div class="space-y-1 max-h-64 overflow-y-auto">
-											{#each allUserGroups as group}
-												<button
-													type="button"
-													class="flex w-full items-center justify-between rounded bg-gray-50 px-3 py-2 text-left transition hover:bg-gray-100 dark:bg-gray-800 dark:hover:bg-gray-700"
-													on:click={() => selectGroup(group)}
-												>
-													<span class="text-sm text-gray-900 dark:text-gray-100 font-medium">
+									<div class="flex items-center gap-2.5 px-5 mt-3.5 mb-3">
+										<Search className="size-4" strokeWidth="2.5" />
+
+										<input
+											id="group-search-input"
+											type="text"
+											bind:value={groupSearchValue}
+											class="w-full text-sm bg-transparent outline-hidden"
+											placeholder="Search groups"
+											autocomplete="off"
+											on:keydown={(e) => {
+												if (e.code === 'Enter' && filteredGroups.length > 0) {
+													selectGroupAndClose(filteredGroups[0]);
+												}
+											}}
+										/>
+									</div>
+
+									<hr class="border-gray-100 dark:border-gray-700" />
+
+									<div class="px-3 my-2 max-h-64 overflow-y-auto scrollbar-hidden group">
+										{#each filteredGroups as group}
+											<button
+												type="button"
+												class="flex w-full text-left font-medium line-clamp-1 select-none items-center rounded-button py-2 pl-3 pr-1.5 text-sm text-gray-700 dark:text-gray-100 outline-hidden transition-all duration-75 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg cursor-pointer data-highlighted:bg-muted"
+												on:click={() => selectGroupAndClose(group)}
+											>
+												<div class="flex flex-1 items-center justify-between min-w-0 gap-2">
+													<span class="truncate">
 														{group.name}
 													</span>
-													<span class="px-2 py-1 text-xs font-medium rounded {group.identity === 'Admin'
-														? 'bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200'
-														: group.identity === 'Member'
-														? 'bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200'
-														: 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300'}">
+													<span
+														class="shrink-0 px-2 py-0.5 text-xs font-medium rounded {group.identity === 'Super Admin'
+															? 'bg-purple-100 dark:bg-purple-900 text-purple-800 dark:text-purple-200'
+															: group.identity === 'Admin'
+															? 'bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200'
+															: group.identity === 'Member'
+															? 'bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200'
+															: 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300'}"
+													>
 														{group.identity}
 													</span>
-												</button>
-											{/each}
-										</div>
-									{:else}
-										<p class="text-sm text-gray-500 dark:text-gray-400 py-2">
-											You are not a member of any groups
-										</p>
-									{/if}
-								</div>
-							{/if}
+												</div>
+
+												{#if selectedGroupId === group.id}
+													<div class="ml-2 pl-2 pr-2 md:pr-0 shrink-0">
+														<Check />
+													</div>
+												{/if}
+											</button>
+										{:else}
+											<div class="block px-3 py-2 text-sm text-gray-700 dark:text-gray-100">
+												No groups found
+											</div>
+										{/each}
+									</div>
+								</DropdownMenu.Content>
+							</DropdownMenu.Root>
 						</div>
 
 						<!-- Info Button -->
