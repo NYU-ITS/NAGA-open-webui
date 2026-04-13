@@ -1560,6 +1560,10 @@
 				<div class="rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 px-4 py-3 font-mono text-xs leading-relaxed text-gray-800 dark:text-gray-200 whitespace-pre-wrap overflow-x-auto">{GUIDE_JSON_EXAMPLE}</div>
 				<!-- Field Descriptions -->
 				<div class="space-y-2 text-xs text-gray-600 dark:text-gray-400 py-1">
+					<div class="flex items-center gap-2 pb-1">
+						<div class="w-1 h-4 bg-[#57068C] rounded-full"></div>
+						<p class="text-xs font-bold text-gray-900 dark:text-gray-100">How to edit your questions</p>
+					</div>
 					<div><span class="font-semibold text-gray-800 dark:text-gray-200">number</span> — Question number</div>
 					<div><span class="font-semibold text-gray-800 dark:text-gray-200">text</span> — Question content shown to students. Supports Markdown and LaTeX</div>
 					<div><span class="font-semibold text-gray-800 dark:text-gray-200">topics</span> — Topic tags. Map to topics in Topic Analysis</div>
@@ -1802,6 +1806,21 @@
 							</div>
 						</div>
 						<div class="space-y-3">
+							<div class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide">Preview</div>
+							<div class="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-950">
+							{#if getQuestionPreviewText(questionEditors[index])}
+								<div class="markdown-prose-xs text-xs text-gray-800 dark:text-gray-200">
+									<Markdown
+										id={`question-preview-${currentReviewHomework?.homeworkId ?? 'homework'}-${index}`}
+										content={getQuestionPreviewText(questionEditors[index])}
+									/>
+								</div>
+							{:else}
+								<div class="text-xs text-gray-500 dark:text-gray-400">
+									Preview unavailable until the JSON contains a valid <span class="font-semibold">text</span> string.
+								</div>
+							{/if}
+							</div>
 							<div class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide">JSON</div>
 							{#if editingQuestionIndex === index}
 								<div class="rounded-lg bg-white dark:bg-white">
@@ -1821,23 +1840,8 @@
 									</div>
 								</div>
 							{/if}
-							<div class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide">Preview</div>
-							<div class="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-950">
-							{#if getQuestionPreviewText(questionEditors[index])}
-								<div class="markdown-prose-xs text-xs text-gray-800 dark:text-gray-200">
-									<Markdown
-										id={`question-preview-${currentReviewHomework?.homeworkId ?? 'homework'}-${index}`}
-										content={getQuestionPreviewText(questionEditors[index])}
-									/>
-								</div>
-							{:else}
-								<div class="text-xs text-gray-500 dark:text-gray-400">
-									Preview unavailable until the JSON contains a valid <span class="font-semibold">text</span> string.
-								</div>
-							{/if}
 						</div>
 					</div>
-				</div>
 			{/each}
 			{/if}
 

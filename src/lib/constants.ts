@@ -2,8 +2,8 @@ import { browser, dev } from '$app/environment';
 // import { version } from '../../package.json';
 
 export const APP_NAME = 'Pilot GenAI';
-export const TESTING_AI_TUTOR = true;
-export const AI_TUTOR_FRONTEND_TESTING_MODE = true;
+export const TESTING_AI_TUTOR = false;
+export const AI_TUTOR_FRONTEND_TESTING_MODE = false;
 export const TEMP_HIDE = true;
 export const usePlaceHolder = true;
 export const AI_TUTOR_API_BASE_URL = '/api/ai-tutor';
