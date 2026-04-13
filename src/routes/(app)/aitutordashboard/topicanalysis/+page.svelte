@@ -41,7 +41,8 @@
 		'max-w-[12rem] overflow-hidden whitespace-normal break-words leading-4 [display:-webkit-box] [-webkit-line-clamp:3] [-webkit-box-orient:vertical]';
 
 	// Group ID (needed for error-types endpoints)
-	// groupId now comes from store - prevents flash of wrong group data when switching tabs
+	let groupId = '';
+	$: groupId = $aiTutorSelectedGroupId || '';
 	// Subscribe to store for group changes - prevents flash of wrong group data
 	$: if (initialized && $aiTutorSelectedGroupId && $aiTutorSelectedGroupId !== lastSyncedGroupId) {
 		lastSyncedGroupId = $aiTutorSelectedGroupId;

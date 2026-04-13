@@ -970,7 +970,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 				},
 				loader: async () => {
 					const res = await fetch(
-						`${AI_Tutor_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(groupId)}`,
+						`${AI_TUTOR_API_BASE}/analysis/error-types?group_id=${encodeURIComponent(groupId)}`,
 						{ headers: { Authorization: `Bearer ${localStorage.token}` } }
 					);
 					if (!res.ok) throw new Error('Error types fetch failed');

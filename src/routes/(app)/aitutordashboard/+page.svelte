@@ -70,7 +70,8 @@
 	let draftRows: DraftRow[] = [];
 	let _prevGroupIdForReset = '';
 	let _nextDraftUid = 0;
-	let errorTypeDefs: { type: string; color: string; description: string }[] = [];
+	let originalErrorTypeDefs: { type: string; color: string; description: string }[] = [];
+	let draftErrorTypeDefs: { type: string; color: string; description: string }[] = [];
 	const dashboardPalette = ['#EE352E', '#00933C', '#B933AD', '#0039A6', '#FF6319', '#996633'];
 	const errorTypeColors = dashboardPalette.slice(0, 4);
 	let showEditErrorTypeModal = false;

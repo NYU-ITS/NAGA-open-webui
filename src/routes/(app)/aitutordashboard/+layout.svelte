@@ -22,6 +22,7 @@
 	let showIdentityPopover = false;
 	let groupDropdownOpen = false;
 	let groupSearchValue = '';
+	let isSwitchingGroup = false;
 	let isSuperAdmin = false;
 	let groups = [];
 	let createdGroups = [];
@@ -43,8 +44,9 @@
 
 	function buildDashboardHref(pathname: string) {
 		const params = new URLSearchParams();
-		if (selectedGroupId) {
-			params.set('group_id', selectedGroupId);
+		const groupId = selectedGroupId;
+		if (groupId) {
+			params.set('group_id', groupId);
 		}
 		const query = params.toString();
 		return query ? `${pathname}?${query}` : pathname;
@@ -54,6 +56,9 @@
 		if (typeof localStorage === 'undefined') return '';
 		return localStorage.getItem(LAST_AI_TUTOR_GROUP_STORAGE_KEY) || '';
 	}
+
+	let lastSelectedGroupId = '';
+	$: selectedGroupId = lastSelectedGroupId || $page.url.searchParams.get('group_id') || getPersistedGroupId();
 
 	// Sync URL group_id to store (single source of truth for child pages)
 	$: {
@@ -65,9 +70,6 @@
 			}
 		}
 	}
-
-	// Keep selectedGroupId local variable for template usage
-	$: selectedGroupId = $aiTutorSelectedGroupId || $page.url.searchParams.get('group_id') || getPersistedGroupId();
 	$: selectedGroup =
 		allUserGroups.find((group) => group.id === selectedGroupId) || allUserGroups[0] || null;
 
@@ -146,6 +148,11 @@
 	}
 
 	async function selectGroup(group) {
+		lastSelectedGroupId = group.id;
+		if (typeof localStorage !== 'undefined') {
+			localStorage.setItem(LAST_AI_TUTOR_GROUP_STORAGE_KEY, group.id);
+		}
+		isSwitchingGroup = true;
 		const params = new URLSearchParams($page.url.searchParams);
 		params.set('group_id', group.id);
 		await goto(`${$page.url.pathname}?${params.toString()}`, {
@@ -153,6 +160,7 @@
 			noScroll: true,
 			replaceState: true
 		});
+		isSwitchingGroup = false;
 	}
 
 	async function selectGroupAndClose(group) {
@@ -414,58 +422,47 @@
 						<!-- Divider -->
 						<div class="w-px h-5 self-center bg-gray-300 dark:bg-gray-600 mx-1"></div>
 
-						<a
-							class="min-w-fit rounded-full p-1.5 {$page.url.pathname === '/aitutordashboard' ||
-							$page.url.pathname === '/aitutordashboard/'
-								? 'font-semibold text-[#57068c] dark:text-white'
-								: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
-							href={buildDashboardHref('/aitutordashboard')}
-						>
-							Summary
-						</a>
-
-						<a
-							class="w-[130px] text-center rounded-full p-1.5 {$page.url.pathname.includes(
-								'/aitutordashboard/topicanalysis'
-							) &&
-							!$page.url.pathname.includes('/aitutordashboard/topicanalysis/reviewquestionset')
-								? 'font-semibold text-[#57068c] dark:text-white'
-								: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
-							href={buildDashboardHref('/aitutordashboard/topicanalysis')}
-						>
-							Topic Analysis
-						</a>
-
-						<a
-							class="w-[130px] text-center rounded-full p-1.5 {$page.url.pathname.includes(
-								'/aitutordashboard/studentanalysis'
-							)
-								? 'font-semibold text-[#57068c] dark:text-white'
-								: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
-							href={buildDashboardHref('/aitutordashboard/studentanalysis')}
-						>
-							Student Analysis
-						</a>
-
-						<!-- Divider -->
-						<div class="w-px h-5 self-center bg-gray-300 dark:bg-gray-600 mx-1"></div>
-
-						<a
-							class="w-[140px] text-center rounded-full p-1.5 {$page.url.pathname.includes(
-								'/aitutordashboard/topicanalysis/reviewquestionset'
-							)
-								? 'font-semibold text-[#57068c] dark:text-white'
-								: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
-							href={buildDashboardHref('/aitutordashboard/topicanalysis/reviewquestionset')}
-						>
-							Practice Question
-						</a>
+						{#each [
+							{ path: '/aitutordashboard', label: 'Summary', exact: true },
+							{ path: '/aitutordashboard/topicanalysis', label: 'Topic Analysis', exclude: '/aitutordashboard/topicanalysis/reviewquestionset' },
+							{ path: '/aitutordashboard/studentanalysis', label: 'Student Analysis' },
+							{ path: '/aitutordashboard/topicanalysis/reviewquestionset', label: 'Practice Question' }
+						] as tab, i (tab.path)}
+							{#if i === 3}
+								<!-- Divider -->
+								<div class="w-px h-5 self-center bg-gray-300 dark:bg-gray-600 mx-1"></div>
+							{/if}
+							{@const active = tab.exact
+								? $page.url.pathname === tab.path || $page.url.pathname === `${tab.path}/`
+								: tab.exclude
+									? $page.url.pathname.includes(tab.path) && !$page.url.pathname.includes(tab.exclude)
+									: $page.url.pathname.includes(tab.path)}
+							<a
+								class="{tab.path === '/aitutordashboard' ? 'min-w-fit' : tab.path === '/aitutordashboard/topicanalysis/reviewquestionset' ? 'w-[140px]' : 'w-[130px]'} text-center rounded-full p-1.5 {active
+									? 'font-semibold text-[#57068c] dark:text-white'
+									: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
+								href={buildDashboardHref(tab.path)}
+								on:click|preventDefault={() => goto(buildDashboardHref(tab.path))}
+							>
+								{tab.label}
+							</a>
+						{/each}
 					</div>
 				</div>
 			</div>
 		</nav>
 
-		<div class="pb-1 px-[18px] flex-1 max-h-full overflow-y-auto" style="scrollbar-gutter: stable" id="aitutordashboard-container">
+		<div class="relative pb-1 px-[18px] flex-1 max-h-full overflow-y-auto" style="scrollbar-gutter: stable" id="aitutordashboard-container">
+			{#if isSwitchingGroup}
+				<div class="absolute inset-0 z-50 flex items-start justify-center pt-32 bg-white/60 dark:bg-gray-900/60">
+					<div class="rounded-lg border border-gray-200 bg-white px-4 py-3 shadow-lg dark:border-gray-700 dark:bg-gray-800">
+						<div class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200">
+							<svg class="h-4 w-4 animate-spin text-[#57068C]" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+							Switching group…
+						</div>
+					</div>
+				</div>
+			{/if}
 			<slot />
 		</div>
 	</div>
