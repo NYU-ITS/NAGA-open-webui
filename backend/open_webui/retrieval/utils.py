@@ -598,45 +598,106 @@ def get_single_batch_embedding_function(
         raise ValueError(f"Unknown embedding engine: {embedding_engine}")
 
 
+def _parse_multimodal_embedding_response(data: dict) -> list[list[float]]:
+    """Normalize OpenAI-style or raw Vertex-style embedding responses."""
+    if "data" in data and data["data"]:
+        return [elem["embedding"] for elem in data["data"]]
+    preds = data.get("predictions")
+    if preds:
+        out = []
+        for p in preds:
+            if isinstance(p, dict):
+                vec = p.get("imageEmbedding") or p.get("embedding")
+            else:
+                vec = None
+            if vec is not None:
+                out.append(vec)
+        if out:
+            return out
+    raise ValueError(f"Unexpected response format from image embedding API: {data}")
+
+
 def generate_image_embeddings(
     engine: str,
     model: str,
-    images: list[str],  # base64-encoded PNG strings
+    images: list[str],  # base64-encoded PNG (or JPEG) strings, no data: prefix
     url: str,
     key: str,
     user=None,
+    text_prompts: Optional[list[str]] = None,
 ) -> list[list[float]]:
     """
     Embed images using a multimodal embedding model via Portkey/OpenAI gateway.
 
-    Uses the same API infrastructure as text embeddings — same base URL,
-    same API key — but with a different model name that routes to a
-    multimodal embedding provider (e.g. CLIP).
+    Portkey → Vertex AI expects each input item as
+    ``{"text": "<caption>", "image": {"base64": "<raw b64>"}}`` (see Portkey Vertex
+    embeddings docs). OpenAI-style ``image_url`` objects are not translated and
+    typically yield Vertex ``FAILED_PRECONDITION`` / 400.
 
-    The images are sent as base64 data URIs in the embedding request input.
+    For ``gemini-embedding-2-preview``, Google recommends task-oriented text such as
+    ``title: none | text: ...`` for document-style inputs; pass via ``text_prompts``.
     """
-    # Format images as data URIs for the embedding API
-    image_inputs = [
-        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img}"}}
-        for img in images
-    ]
+    if not images:
+        return []
 
-    try:
+    if text_prompts is None:
+        text_prompts = [
+            f"title: none | text: embedded document image {i + 1}" for i in range(len(images))
+        ]
+    elif len(text_prompts) != len(images):
+        raise ValueError(
+            f"text_prompts length ({len(text_prompts)}) must match images ({len(images)})"
+        )
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {key}",
+    }
+
+    def post_embeddings(payload: dict) -> list[list[float]]:
         r = requests.post(
             f"{url}/embeddings",
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {key}",
-            },
-            json={"input": image_inputs, "model": model},
+            headers=headers,
+            json=payload,
             timeout=120,
         )
+        if not r.ok:
+            body_preview = (r.text or "")[:4000]
+            log.error(
+                "Image embedding API HTTP %s | model=%s | body=%s",
+                r.status_code,
+                model,
+                body_preview,
+            )
         r.raise_for_status()
-        data = r.json()
-        if "data" in data:
-            return [elem["embedding"] for elem in data["data"]]
-        else:
-            raise ValueError(f"Unexpected response format from image embedding API: {data}")
+        return _parse_multimodal_embedding_response(r.json())
+
+    all_vectors: list[list[float]] = []
+
+    try:
+        if engine == "portkey":
+            # Vertex multimodal predict is often **one instance per HTTP request**; some
+            # gateways map OpenAI ``input[]`` 1:1 and fail with FAILED_PRECONDITION if a
+            # single call carries multiple multimodal items. Send one image per POST.
+            for i, b64 in enumerate(images):
+                t = text_prompts[i] or "title: none | text: image"
+                image_obj = {"base64": b64, "mimeType": "image/png"}
+                payload = {
+                    "model": model,
+                    "input": [{"text": t, "image": image_obj}],
+                }
+                all_vectors.extend(post_embeddings(payload))
+            return all_vectors
+
+        if engine == "openai":
+            # OpenAI-compatible multimodal shape (if the upstream supports it)
+            image_inputs = [
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img}"}}
+                for img in images
+            ]
+            return post_embeddings({"input": image_inputs, "model": model})
+
+        raise ValueError(f"Unknown embedding engine for images: {engine}")
     except Exception as e:
         log.exception(f"Error generating image embeddings: {e}")
         raise
@@ -647,10 +708,13 @@ def get_image_embedding_function(
     embedding_model: str,
     url: str,
     key: str,
+    text_prompts: Optional[list[str]] = None,
 ):
     """
     Create an image embedding function using the same Portkey/OpenAI gateway
     as text embeddings but with a different (multimodal) model name.
+
+    ``text_prompts`` is bound when provided (one string per image, same order).
     """
     if embedding_engine in ["openai", "portkey"]:
         return lambda images, user=None: generate_image_embeddings(
@@ -660,6 +724,7 @@ def get_image_embedding_function(
             url=url,
             key=key,
             user=user,
+            text_prompts=text_prompts,
         )
     else:
         raise ValueError(

@@ -1580,16 +1580,29 @@ def save_images_to_vector_db(
         except Exception:
             pass
 
-    # Convert images to base64
+    # Convert images to base64 (raw b64; Portkey/Vertex expects ``image.base64``, not data URLs)
     image_b64_list = [base64.b64encode(img.image_bytes).decode("utf-8") for img in images]
 
+    # Gemini / Portkey multimodal embeddings expect paired text per image (document line format)
+    doc_title = (metadata or {}).get("name") or "document"
+    # page_number from PyMuPDF is 0-based; use 1-based in prompts for clarity
+    text_prompts = [
+        f"title: {doc_title} | text: figure on page {img.page_number + 1}, image {img.image_index}"
+        for img in images
+    ]
+
     # Create embedding function via Portkey (same gateway, different model)
-    embedding_engine = request.app.state.config.RAG_EMBEDDING_ENGINE
+    _eng = request.app.state.config.RAG_EMBEDDING_ENGINE
+    embedding_engine = (
+        _eng.value if hasattr(_eng, "value") else str(_eng)
+    )
+
     embedding_fn = get_image_embedding_function(
         embedding_engine=embedding_engine,
         embedding_model=image_model,
         url=base_url,
         key=owner_api_key,
+        text_prompts=text_prompts,
     )
 
     # Generate embeddings
