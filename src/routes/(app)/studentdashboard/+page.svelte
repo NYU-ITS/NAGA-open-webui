@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onDestroy, onMount } from 'svelte';
+	import { afterUpdate, onDestroy, onMount } from 'svelte';
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
 	import { toast } from 'svelte-sonner';
@@ -8,6 +8,7 @@
 	import { fetchAITutorJson } from '$lib/apis/aiTutor';
 	import { showAITutorTestToast } from '$lib/utils/aiTutorTesting';
 	import { loadWithAITutorSessionCache } from '$lib/utils/aiTutorSessionCache';
+	import Tooltip from '$lib/components/common/Tooltip.svelte';
 
 	const testToast = showAITutorTestToast;
 	const useFrontendTestingData = AI_TUTOR_FRONTEND_TESTING_MODE;
@@ -271,6 +272,26 @@
 			);
 
 		return matchesHomework && matchesTopic;
+	});
+
+	let expandedCells: Set<string> = new Set();
+	function toggleCell(key: string) {
+		const next = new Set(expandedCells);
+		if (next.has(key)) next.delete(key);
+		else next.add(key);
+		expandedCells = next;
+	}
+
+	let textRefs: Record<string, HTMLSpanElement> = {};
+	let needsExpand: Set<string> = new Set();
+	afterUpdate(() => {
+		const next = new Set<string>();
+		Object.entries(textRefs).forEach(([key, el]) => {
+			if (el && el.scrollWidth > el.clientWidth) {
+				next.add(key);
+			}
+		});
+		needsExpand = next;
 	});
 
 	let selectedConcepts: Set<string> = new Set();
@@ -809,7 +830,7 @@
 	{/if}
 
 	{#if isDashboardLoading}
-		<div class="flex items-center justify-center py-10 text-sm text-gray-400 dark:text-gray-500">
+		<div class="flex items-center justify-center py-12 text-xs text-gray-400 dark:text-gray-500">
 			<svg class="mr-2 h-4 w-4 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
 				<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
 				<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
@@ -825,58 +846,66 @@
 			<span class="text-lg font-medium text-gray-500 dark:text-gray-300">{readyHomeworkCount}</span>
 		</div>
 
-		<div class="scrollbar-hidden relative max-w-full overflow-x-auto rounded-sm pt-0.5">
-			<table
-				class="min-w-full table-auto rounded-sm text-left text-sm text-gray-500 dark:text-gray-400"
-			>
-				<thead
-					class="-translate-y-0.5 bg-gray-50 text-xs uppercase text-gray-700 dark:bg-gray-850 dark:text-gray-400"
-				>
-					<tr>
-						<th class="px-4 py-2 text-left font-semibold">Homework Mastery</th>
-						<th class="px-4 py-2 text-left font-semibold">Topic</th>
-						<th class="px-4 py-2 text-left font-semibold">Status</th>
-						<th class="px-4 py-2 text-left font-semibold">Action</th>
-					</tr>
-				</thead>
-				<tbody>
-					{#each practiceAssignments as item}
-						<tr
-							class="border-t border-gray-100 bg-white transition hover:bg-gray-50 dark:border-gray-850 dark:bg-gray-900 dark:hover:bg-gray-800 cursor-pointer"
-							on:click={() => startPracticeAssignment(item)}
-						>
-							<td class="px-4 py-3 font-medium text-gray-900 dark:text-gray-100"
-								>{item.homeworkLabel}</td
-							>
-							<td class="px-4 py-3">
-								<div class="flex flex-wrap gap-2">
-									{#each getPracticeTopics(item.topic) as topic}
-										<button
-											on:click|stopPropagation={() => highlightConceptCards(topic)}
-											class="rounded-full bg-gray-100 px-3 py-1 text-xs font-medium text-gray-700 transition hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700"
-										>
-											{topic}
-										</button>
-									{/each}
-								</div>
-							</td>
-							<td class="px-4 py-3">
-								<span class="text-sm text-gray-700 dark:text-gray-300">{item.status}</span>
-							</td>
-							<td class="px-4 py-3">
-								{#if item.status === 'Ready'}
-									<button
-										class="text-xs font-medium text-black transition hover:text-gray-700 dark:text-white dark:hover:text-gray-300"
-										on:click|stopPropagation={() => startPracticeAssignment(item)}
-									>
-										Start
-									</button>
-								{/if}
-							</td>
+		<div class="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
+			<div class="scrollbar-hidden relative overflow-x-auto max-w-full rounded-sm pt-0.5">
+				<table class="w-full text-sm text-left text-gray-500 dark:text-gray-400 table-auto max-w-full rounded-sm">
+					<thead class="text-xs text-gray-700 uppercase bg-[#EEE6F3] dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5">
+						<tr>
+							<th class="px-3 py-1.5 text-left font-semibold">Homework Mastery</th>
+							<th class="px-3 py-1.5 text-left font-semibold">Topic</th>
+							<th class="min-w-[120px] px-3 py-1.5 text-left font-semibold">Action</th>
 						</tr>
-					{/each}
-				</tbody>
-			</table>
+					</thead>
+					<tbody>
+						{#each practiceAssignments as item}
+							<tr
+								class="border-t border-gray-100 bg-white transition hover:bg-gray-50 dark:border-gray-850 dark:bg-gray-900 dark:hover:bg-gray-800 cursor-pointer"
+								on:click={() => startPracticeAssignment(item)}
+							>
+								<td class="px-3 py-1.5 font-medium text-gray-900 dark:text-gray-100">{item.homeworkLabel}</td>
+								<td class="px-3 py-1.5">
+									{#if getPracticeTopics(item.topic).length > 0}
+										{@const topicList = getPracticeTopics(item.topic)}
+										<div class="flex items-center gap-2">
+											<Tooltip content={topicList.join(', ')} placement="top">
+												<span
+													bind:this={textRefs[`pq-${item.id}`]}
+												class="text-sm text-gray-700 dark:text-gray-300 {expandedCells.has(`${item.id}-topic`) ? '' : 'line-clamp-1'}"
+												>
+													{topicList.join(', ')}
+												</span>
+											</Tooltip>
+											{#if needsExpand.has(`pq-${item.id}`)}
+												<button
+													type="button"
+													class="shrink-0 text-xs text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300"
+													on:click|stopPropagation={() => toggleCell(`${item.id}-topic`)}
+												>
+													{expandedCells.has(`${item.id}-topic`) ? 'Show Less' : 'Show All'}
+												</button>
+											{/if}
+										</div>
+									{:else}
+										<span class="text-sm text-gray-400 dark:text-gray-500">—</span>
+									{/if}
+								</td>
+								<td class="px-3 py-1.5">
+									{#if item.status === 'Ready'}
+										<button
+											class="text-xs font-medium text-black transition hover:text-gray-700 dark:text-white dark:hover:text-gray-300"
+											on:click|stopPropagation={() => startPracticeAssignment(item)}
+										>
+											Start
+										</button>
+									{:else}
+										<span class="text-xs text-gray-400 dark:text-gray-500">This homework&apos;s analysis has not been available.</span>
+									{/if}
+								</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
 		</div>
 	</div>
 	<div class="space-y-3">
@@ -890,291 +919,150 @@
 			</div>
 
 			<div class="flex gap-6">
-				<div class="relative w-full sm:w-72 flex flex-1">
-								<div class=" self-center ml-1 mr-3">
-					<svg
-						xmlns="http://www.w3.org/2000/svg"
-						viewBox="0 0 20 20"
-						fill="currentColor"
-						class="w-4 h-4"
-					>
-						<path
-							fill-rule="evenodd"
-							d="M9 3.5a5.5 5.5 0 100 11 5.5 5.5 0 000-11zM2 9a7 7 0 1112.452 4.391l3.328 3.329a.75.75 0 11-1.06 1.06l-3.329-3.328A7 7 0 012 9z"
-							clip-rule="evenodd"
-						/>
-					</svg>
-				</div>
+			<div class="flex gap-6">
+				<div class="relative w-full sm:w-72">
 					<input
 						value={topicQueryRaw}
 						on:input={handleTopicInput}
-						class="w-full bg-transparent px-2 py-1 text-sm text-gray-700 outline-hidden placeholder:text-gray-400 dark:text-gray-300 dark:placeholder:text-gray-500"
+						class="w-full rounded-full border border-gray-300 bg-white py-1.5 pl-3 pr-9 text-xs text-gray-700 outline-hidden placeholder:text-gray-400 dark:border-gray-500 dark:bg-gray-800 dark:text-gray-200 dark:placeholder:text-gray-500"
 						placeholder="Search Topics"
 					/>
+					<div class="absolute inset-y-0 right-0 flex items-center pr-3 pointer-events-none text-gray-400 dark:text-gray-500">
+						<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="size-4">
+							<path fill-rule="evenodd" d="M9 3.5a5.5 5.5 0 100 11 5.5 5.5 0 000-11zM2 9a7 7 0 1112.452 4.391l3.328 3.329a.75.75 0 11-1.06 1.06l-3.329-3.328A7 7 0 012 9z" clip-rule="evenodd" />
+						</svg>
+					</div>
 				</div>
+			</div>
 			</div>
 		</div>
 
 
-	<div class="scrollbar-hidden relative max-w-full overflow-x-auto rounded-sm pt-0.5">
-		<table
-			class="min-w-full table-auto rounded-sm text-left text-sm text-gray-500 dark:text-gray-400"
-		>
-			<thead
-				class="-translate-y-0.5 bg-gray-50 text-xs uppercase text-gray-700 dark:bg-gray-850 dark:text-gray-400"
-			>
-				<tr>
-					<th class="min-w-[140px] px-4 py-2 text-left font-semibold"> Homework </th>
-					<th class="px-4 py-2 text-left font-semibold"> Mastered </th>
-					<th class="px-4 py-2 text-left font-semibold"> Need More Practice </th>
-					<th class="px-4 py-2 text-center font-semibold whitespace-nowrap"> Total </th>
-					<th class="px-4 py-2 text-center font-semibold whitespace-nowrap"> Solved </th>
-					<th class="px-4 py-2 text-center font-semibold whitespace-nowrap"> Attempted </th>
-					<th class="px-4 py-2 text-center font-semibold whitespace-nowrap"> Errors </th>
-				</tr>
-			</thead>
-			<tbody>
-				{#each filteredHomeworkData as hw, index}
-					<tr
-						class="border-t border-gray-100 bg-white transition hover:bg-gray-50 dark:border-gray-850 dark:bg-gray-900 dark:hover:bg-gray-800"
-					>
-						<td class="min-w-[140px] px-4 py-3 font-medium text-gray-900 dark:text-gray-100">
-							{hw.homework}
-						</td>
-						{#if hw.notStarted}
-							<td
-								colspan="6"
-								class="px-4 py-3 text-center text-xs text-gray-400 dark:text-gray-500"
-							>
-								This homework&apos;s analysis has not been available.
-							</td>
-						{:else}
-							<td class="px-4 py-3">
-								<div class="flex flex-wrap gap-2">
-									{#each hw.masteredTopics as topic}
-										<button
-											on:click={() => goToConcepts(topic)}
-											class="rounded-full bg-gray-100 px-3 py-1 text-xs font-medium text-gray-700 transition hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700"
-										>
-											{topic}
-										</button>
-									{/each}
-								</div>
-							</td>
-							<td class="px-4 py-3">
-								<div class="flex flex-wrap gap-2">
-									{#each hw.needMorePractice as topic}
-										<button
-											on:click={() => goToConcepts(topic)}
-											class="rounded-full bg-gray-100 px-3 py-1 text-xs font-medium text-gray-700 transition hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700"
-										>
-											{topic}
-										</button>
-									{/each}
-								</div>
-							</td>
-							<td class="px-4 py-3 text-center text-gray-900 dark:text-gray-100">
-								{hw.totalCount}
-							</td>
-							<td class="px-4 py-3 text-center text-gray-900 dark:text-gray-100">
-								{hw.solved}
-							</td>
-							<td class="px-4 py-3 text-center text-gray-900 dark:text-gray-100">
-								{hw.attempted}
-							</td>
-							<td class="px-4 py-3 text-center text-gray-900 dark:text-gray-100">
-								{hw.errors}
-							</td>
-						{/if}
-					</tr>
-				{/each}
-				{#if filteredHomeworkData.length === 0}
-					<tr>
-						<td colspan="8" class="px-6 py-10 text-center text-sm text-gray-500 dark:text-gray-400">
-							No homework matches the current homework/topic filters.
-						</td>
-					</tr>
-				{/if}
-			</tbody>
-		</table>
-	</div>
-		</div>
-
-	{#if !TEMP_HIDE}
-		<div class="space-y-3">
-			<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Follow Up Questions</h2>
-			<div class="overflow-x-auto rounded-lg border border-gray-200 dark:border-gray-700">
-				<table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-					<thead class="bg-gray-50 dark:bg-gray-800">
+		<div class="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
+			<div class="scrollbar-hidden relative overflow-x-auto max-w-full rounded-sm pt-0.5">
+				<table class="w-full text-sm text-left text-gray-500 dark:text-gray-400 table-auto max-w-full rounded-sm">
+					<thead class="text-xs text-gray-700 uppercase bg-[#EEE6F3] dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5">
 						<tr>
-							<th
-								class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-300"
-								>Homework</th
-							>
-							<th
-								class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-300"
-								>Status</th
-							>
+							<th class="min-w-[140px] px-3 py-1.5 text-left font-semibold">Homework</th>
+							<th class="px-3 py-1.5 text-left font-semibold">Need More Practice</th>
+							<th class="px-3 py-1.5 text-center font-semibold whitespace-nowrap w-[5rem]">Total</th>
+							<th class="px-3 py-1.5 text-center font-semibold whitespace-nowrap w-[5rem]">Solved</th>
+							<th class="px-3 py-1.5 text-center font-semibold whitespace-nowrap w-[5rem]">Attempted</th>
+							<th class="px-3 py-1.5 text-center font-semibold whitespace-nowrap w-[5rem]">Errors</th>
 						</tr>
 					</thead>
-					<tbody class="divide-y divide-gray-200 bg-white dark:divide-gray-700 dark:bg-gray-900">
-						{#each followUpQuestions as item}
-							<tr class="transition hover:bg-gray-50 dark:hover:bg-gray-800">
-								<td class="px-6 py-4 text-sm font-medium text-gray-900 dark:text-gray-100"
-									>{item.homework}</td
-								>
-								<td class="px-6 py-4 text-sm">
-									<span
-										class="inline-flex rounded-full px-2.5 py-1 text-xs font-medium {item.status ===
-										'Ready'
-											? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-300'
-											: 'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300'}"
-									>
-										{item.status}
-									</span>
+					<tbody>
+						{#each filteredHomeworkData as hw, index}
+							<tr
+								class="border-t border-gray-100 bg-white transition hover:bg-gray-50 dark:border-gray-850 dark:bg-gray-900 dark:hover:bg-gray-800"
+							>
+								<td class="min-w-[140px] px-3 py-1.5 font-medium text-gray-900 dark:text-gray-100">
+									{hw.homework}
 								</td>
+								{#if hw.notStarted}
+									<td
+										colspan="5"
+										class="px-3 py-1.5 text-center text-xs text-gray-400 dark:text-gray-500"
+									>
+										This homework&apos;s analysis has not been available.
+									</td>
+								{:else}
+									<td class="px-3 py-1.5">
+										{#if hw.needMorePractice.length > 0}
+											<div class="flex items-center gap-2">
+												<Tooltip content={hw.needMorePractice.join(', ')} placement="top">
+													<span
+														bind:this={textRefs[`hw-${hw.homework || index}`]}
+												class="text-sm text-gray-700 dark:text-gray-300 {expandedCells.has(`${hw.homework || index}-practice`) ? '' : 'line-clamp-1'}"
+													>
+														{hw.needMorePractice.join(', ')}
+													</span>
+												</Tooltip>
+												{#if needsExpand.has(`hw-${hw.homework || index}`)}
+													<button
+														type="button"
+														class="shrink-0 text-xs text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300"
+														on:click={() => toggleCell(`${hw.homework || index}-practice`)}
+													>
+														{expandedCells.has(`${hw.homework || index}-practice`) ? 'Show Less' : 'Show All'}
+													</button>
+												{/if}
+											</div>
+										{:else}
+											<span class="text-sm text-gray-400 dark:text-gray-500">—</span>
+										{/if}
+									</td>
+									<td class="px-3 py-1.5 text-center text-gray-900 dark:text-gray-100">
+										{hw.totalCount}
+									</td>
+									<td class="px-3 py-1.5 text-center text-gray-900 dark:text-gray-100">
+										{hw.solved}
+									</td>
+									<td class="px-3 py-1.5 text-center text-gray-900 dark:text-gray-100">
+										{hw.attempted}
+									</td>
+									<td class="px-3 py-1.5 text-center text-gray-900 dark:text-gray-100">
+										{hw.errors}
+									</td>
+								{/if}
 							</tr>
 						{/each}
+						{#if filteredHomeworkData.length === 0}
+							<tr>
+								<td colspan="6" class="px-3 py-12 text-center text-xs text-gray-400 dark:text-gray-500">
+									No homework matches the current homework/topic filters.
+								</td>
+							</tr>
+						{/if}
 					</tbody>
 				</table>
 			</div>
 		</div>
+	</div>
+
+	{#if !TEMP_HIDE}
+		<div class="space-y-3">
+			<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Follow Up Questions</h2>
+			<div class="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
+				<div class="scrollbar-hidden relative overflow-x-auto max-w-full rounded-sm pt-0.5">
+					<table class="w-full text-sm text-left text-gray-500 dark:text-gray-400 table-auto max-w-full rounded-sm">
+						<thead class="text-xs text-gray-700 uppercase bg-[#EEE6F3] dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5">
+							<tr>
+								<th class="min-w-[140px] px-3 py-1.5 text-left font-semibold">Homework</th>
+								<th class="px-3 py-1.5 text-left font-semibold">Status</th>
+							</tr>
+						</thead>
+						<tbody>
+							{#each followUpQuestions as item}
+								<tr
+									class="border-t border-gray-100 bg-white transition hover:bg-gray-50 dark:border-gray-850 dark:bg-gray-900 dark:hover:bg-gray-800"
+								>
+									<td class="min-w-[140px] px-3 py-1.5 font-medium text-gray-900 dark:text-gray-100">
+										{item.homework}
+									</td>
+									<td class="px-3 py-1.5">
+										<span
+											class="inline-flex rounded-full px-2.5 py-1 text-xs font-medium {item.status === 'Ready'
+												? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-300'
+												: 'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300'}"
+										>
+											{item.status}
+										</span>
+									</td>
+								</tr>
+							{/each}
+							{#if followUpQuestions.length === 0}
+								<tr>
+									<td colspan="2" class="px-3 py-12 text-center text-xs text-gray-400 dark:text-gray-500">
+										No follow-up questions available.
+									</td>
+								</tr>
+							{/if}
+						</tbody>
+					</table>
+				</div>
+			</div>
+		</div>
 	{/if}
 
-	<!-- <div class="sticky top-0 z-10 space-y-4 bg-transparent py-2">
-		<div class="flex items-start justify-between gap-4 px-0.5">
-			<div class="flex items-start text-lg font-medium">
-				<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">By Topics</h2>
-				<div class="mx-2.5 flex h-6 w-[1px] self-center bg-gray-50 dark:bg-gray-850" />
-				<span class="text-lg font-medium text-gray-500 dark:text-gray-300"
-					>{filteredConcepts.length}</span
-				>
-			</div>
-			<div class="flex flex-wrap items-start justify-end gap-1.5">
-				{#each statusOrder as status}
-					<span
-						class="inline-flex rounded-full px-2.5 py-1 text-[11px] font-medium {getStatusClasses(
-							status
-						)}"
-						on:mouseenter={() => (hoveredLegendStatus = status)}
-						on:mouseleave={() => (hoveredLegendStatus = null)}
-					>
-						{status}
-					</span>
-				{/each}
-			</div>
-		</div>
-
-		<div class="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-			{#each paginatedConcepts as concept}
-				<button
-					on:click={() => selectConcept(concept.name)}
-					class="flex h-full flex-col items-stretch justify-start rounded-xl border p-5 text-left align-top transition {selectedConcepts.has(
-						concept.name
-					)
-						? 'border-[#57068c]/40 bg-[#57068c]/5 dark:border-[#57068c]/50 dark:bg-[#57068c]/10'
-						: highlightedConcepts.has(concept.name)
-							? 'border-yellow-300 bg-yellow-50 shadow-[0_0_0_3px_rgba(253,224,71,0.35)] dark:border-yellow-500/70 dark:bg-yellow-500/10'
-							: 'border-gray-200 bg-white hover:border-gray-300 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-900 dark:hover:border-gray-600 dark:hover:bg-gray-800'}"
-					disabled={TEMP_HIDE}
-				>
-					<div class="flex items-start justify-between gap-3">
-						<h3 class="select-text text-base font-semibold text-gray-900 dark:text-gray-100">
-							{concept.name}
-						</h3>
-					</div>
-					<div class="mt-1 flex flex-1 flex-col">
-						<div>
-							<div class="text-[11px] font-semibold tracking-wide text-gray-400 dark:text-gray-500">
-								{concept.testedIn.length === 1 ? 'In Homework:' : 'In Homeworks:'}
-							</div>
-							<div class="mt-2 flex flex-wrap gap-1.5">
-								{#each concept.testedIn as homework}
-									<div class="flex min-w-0 items-start gap-1.5">
-										<span
-											class="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full p-0 text-xs transition-transform duration-150 will-change-transform {getStatusClasses(
-												normalizeHomeworkStatus(concept.homeworkStatuses[homework])
-											)} {hoveredLegendStatus === normalizeHomeworkStatus(
-												concept.homeworkStatuses[homework]
-											)
-												? 'scale-110'
-												: 'scale-100'}"
-										>
-											{homework.replace('Homework ', '')}
-										</span>
-									</div>
-								{/each}
-							</div>
-						</div>
-						<div
-							class="mt-auto flex min-h-[1.5rem] items-start gap-2 pt-3 text-sm text-green-600 dark:text-green-400"
-						>
-							{#if concept.practicedDate}
-								<svg
-									xmlns="http://www.w3.org/2000/svg"
-									viewBox="0 0 20 20"
-									fill="currentColor"
-									class="h-4 w-4"
-								>
-									<path
-										fill-rule="evenodd"
-										d="M16.704 4.153a.75.75 0 0 1 .143 1.052l-8 10.5a.75.75 0 0 1-1.127.075l-4.5-4.5a.75.75 0 0 1 1.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 0 1 1.05-.143Z"
-										clip-rule="evenodd"
-									/>
-								</svg>
-								<span>Practiced on {concept.practicedDate}</span>
-							{/if}
-						</div>
-					</div>
-				</button>
-			{/each}
-		</div>
-
-		{#if filteredConcepts.length > 18}
-			<div class="flex items-center justify-center gap-2 pt-4">
-				<button
-					on:click={previousPage}
-					disabled={currentPage === 1}
-					class="rounded border border-gray-300 px-3 py-1 text-sm transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-600 dark:hover:bg-gray-800"
-				>
-					<svg
-						xmlns="http://www.w3.org/2000/svg"
-						fill="none"
-						viewBox="0 0 24 24"
-						stroke-width="2"
-						stroke="currentColor"
-						class="h-4 w-4"
-					>
-						<path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" />
-					</svg>
-				</button>
-				{#each Array.from({ length: totalPages }, (_, i) => i + 1) as pageNum}
-					<button
-						on:click={() => goToPage(pageNum)}
-						class="rounded border px-3 py-1 text-sm transition {currentPage === pageNum
-							? 'border-purple-600 bg-purple-600 text-white'
-							: 'border-gray-300 hover:bg-gray-100 dark:border-gray-600 dark:hover:bg-gray-800'}"
-					>
-						{pageNum}
-					</button>
-				{/each}
-				<button
-					on:click={nextPage}
-					disabled={currentPage === totalPages}
-					class="rounded border border-gray-300 px-3 py-1 text-sm transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-600 dark:hover:bg-gray-800"
-				>
-					<svg
-						xmlns="http://www.w3.org/2000/svg"
-						fill="none"
-						viewBox="0 0 24 24"
-						stroke-width="2"
-						stroke="currentColor"
-						class="h-4 w-4"
-					>
-						<path stroke-linecap="round" stroke-linejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
-					</svg>
-				</button>
-			</div>
-		{/if}
-	</div> -->
 </div>

@@ -377,3 +377,4 @@ TEST_RESULTS.md
 TEST_SUMMARY.md
 llm_portkey.py
 .test_otel_generators/
+.env.local-ai-tutor

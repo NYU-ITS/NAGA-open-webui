@@ -7,6 +7,11 @@
 	import { getGroups } from '$lib/apis/groups';
 	import { showAITutorTestToast } from '$lib/utils/aiTutorTesting';
 
+	import { DropdownMenu } from 'bits-ui';
+	import { flyAndScale } from '$lib/utils/transitions';
+	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
+	import Check from '$lib/components/icons/Check.svelte';
+	import Search from '$lib/components/icons/Search.svelte';
 	import MenuLines from '$lib/components/icons/MenuLines.svelte';
 
 	type GroupOption = {
@@ -14,21 +19,22 @@
 		name: string;
 		user_id?: string;
 		user_ids?: string[];
-		identity?: 'Admin' | 'Member' | 'View';
+		identity?: 'Admin' | 'Member' | 'View' | 'Super Admin';
 	};
 
 	const i18n: any = getContext('i18n');
 
 	let loaded = false;
 	let showIdentityPopover = false;
-	let showGroupDropdown = false;
+	let groupDropdownOpen = false;
+	let groupSearchValue = '';
 	let showHomeworkDropdown = false;
 	let isSuperAdmin = false;
 	let groups: GroupOption[] = [];
 	let createdGroups: GroupOption[] = [];
 	let memberGroups: GroupOption[] = [];
 	let allUserGroups: GroupOption[] = [];
-	let selectedGroupId = '';
+	let lastSelectedGroupId = '';
 	let selectedGroup: GroupOption | null = null;
 	let searchTopic = '';
 	const LAST_SELECTED_GROUP_KEY = 'student_dashboard_last_selected_group_id';
@@ -88,13 +94,17 @@
 		return (homeworkTopicMap[option] ?? []).some((topic) => topic.toLowerCase().includes(query));
 	});
 
-	$: selectedGroupId = $page.url.searchParams.get('group_id') || getPersistedGroupId() || '';
+	$: selectedGroupId = lastSelectedGroupId || $page.url.searchParams.get('group_id') || getPersistedGroupId() || '';
 	$: selectedGroup =
 		allUserGroups.find((group) => group.id === selectedGroupId) || allUserGroups[0] || null;
 
 	$: if ($page.url.searchParams.get('group_id')) {
 		persistGroupId($page.url.searchParams.get('group_id') || '');
 	}
+
+	$: filteredGroups = groupSearchValue
+		? allUserGroups.filter((g) => g.name.toLowerCase().includes(groupSearchValue.toLowerCase()))
+		: allUserGroups;
 
 	onMount(async () => {
 		loaded = true;
@@ -118,14 +128,12 @@
 					memberGroups = groups.filter(g => g.user_id !== $user.id && g.user_ids?.includes($user.id));
 
 					// Combine all groups with identity
-					// Super admins see every group the API returns, labelled by their actual relationship.
+					// Super admins see every group the API returns, labelled as Super Admin.
 					if (isSuperAdmin) {
 						allUserGroups = sortGroupsForDefaultSelection(
 							groups.map(g => ({
 								...g,
-								identity: (g.user_id === $user.id ? 'Admin'
-										: g.user_ids?.includes($user.id) ? 'Member'
-										: 'View') as 'Admin' | 'Member' | 'View'
+								identity: 'Super Admin' as const
 							}))
 						);
 					} else {
@@ -157,19 +165,13 @@
 		showIdentityPopover = false;
 	}
 
-	function toggleGroupDropdown() {
-		showGroupDropdown = !showGroupDropdown;
-	}
-
-	function closeGroupDropdown() {
-		showGroupDropdown = false;
-	}
-
 	async function selectGroup(group: GroupOption) {
+		lastSelectedGroupId = group.id;
+		persistGroupId(group.id);
+		groupDropdownOpen = false;
+		groupSearchValue = '';
 		const params = new URLSearchParams($page.url.searchParams);
 		params.set('group_id', group.id);
-		persistGroupId(group.id);
-		showGroupDropdown = false;
 		await goto(`${$page.url.pathname}?${params.toString()}`, {
 			keepFocus: true,
 			noScroll: true,
@@ -241,78 +243,70 @@
 				<div class="flex-1">
 					<!-- Course Title with Info Button -->
 					<div class="px-2 py-2 flex items-center justify-between">
-						<!-- Course Title Dropdown -->
+						<!-- Group Dropdown (bits-ui) -->
 						<div class="relative">
-							<button
-								on:click={toggleGroupDropdown}
-								class="flex items-start text-left hover:text-gray-600 dark:hover:text-gray-400 transition"
-							>
-								<div class="flex flex-col">
-									<span class="text-lg font-semibold text-gray-800 dark:text-gray-200">
-										{$user?.name || 'Student Name'}
-									</span>
-									<div class="flex items-center gap-1 text-sm font-medium text-gray-500 dark:text-gray-400">
-										<span>
-											{#if selectedGroup}
-												{selectedGroup.name} - {$user?.role === 'admin' ? 'Instructor View' : 'Student View'}
-											{:else if loaded}
-												No Group Selected
-											{:else}
-												Loading group...
-											{/if}
-										</span>
-										<svg
-											xmlns="http://www.w3.org/2000/svg"
-											fill="none"
-											viewBox="0 0 24 24"
-											stroke-width="2"
-											stroke="currentColor"
-											class="w-4 h-4 shrink-0"
-										>
-											<path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
-										</svg>
-									</div>
-								</div>
-							</button>
-
-							<!-- Group Dropdown -->
-							{#if showGroupDropdown}
-								<div
-									class="absolute left-0 mt-2 w-96 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg p-3"
-									style="z-index: 9999;"
-									on:mouseleave={closeGroupDropdown}
-								>
-									<h3 class="text-sm font-semibold text-gray-800 dark:text-gray-200 mb-2">
-										Your Groups
-									</h3>
-									{#if allUserGroups.length > 0}
-										<div class="space-y-1 max-h-64 overflow-y-auto">
-											{#each allUserGroups as group}
-												<button
-													type="button"
-													class="flex w-full items-center justify-between py-2 px-3 bg-gray-50 dark:bg-gray-800 rounded hover:bg-gray-100 dark:hover:bg-gray-700 transition"
-													on:click={() => selectGroup(group)}
-												>
-													<span class="text-sm text-gray-900 dark:text-gray-100 font-medium">
-														{group.name}
-													</span>
-													<span class="px-3 py-1 text-xs font-medium rounded {group.identity === 'Admin'
-														? 'bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200'
-														: group.identity === 'Member'
-														? 'bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200'
-														: 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300'}">
-														{group.identity}
-													</span>
-												</button>
-											{/each}
+							<DropdownMenu.Root bind:open={groupDropdownOpen} closeFocus={false}>
+								<DropdownMenu.Trigger class="relative w-full font-primary" aria-label="Select group">
+									<div class="flex w-full text-left text-lg font-semibold text-gray-800 dark:text-gray-200 justify-between items-center gap-2">
+										<div class="flex flex-col">
+											<span>{$user?.name || 'Student Name'}</span>
+											<div class="flex items-center gap-1 text-sm font-medium text-gray-500 dark:text-gray-400">
+												<span>
+													{#if selectedGroup}
+														{selectedGroup.name} - {$user?.role === 'admin' ? 'Instructor View' : 'Student View'}
+													{:else if loaded}
+														No Group Selected
+													{:else}
+														Loading group...
+													{/if}
+												</span>
+												<ChevronDown className="self-center size-3" strokeWidth="2.5" />
+											</div>
 										</div>
-									{:else}
-										<p class="text-sm text-gray-500 dark:text-gray-400 py-2">
-											You are not a member of any groups
-										</p>
-									{/if}
-								</div>
-							{/if}
+									</div>
+								</DropdownMenu.Trigger>
+								<DropdownMenu.Content
+									class="z-40 w-[22rem] rounded-xl border border-gray-200 bg-white px-0 py-2 shadow-xl dark:border-gray-700 dark:bg-gray-850"
+									sideOffset={8}
+									transition={flyAndScale}
+								>
+									<div class="flex items-center gap-2.5 px-5 mt-3.5 mb-3">
+										<Search className="size-4" strokeWidth="2.5" />
+										<input
+											id="group-search-input"
+											type="text"
+											bind:value={groupSearchValue}
+											class="w-full text-sm bg-transparent outline-hidden"
+											placeholder="Search groups"
+											autocomplete="off"
+											on:keydown={(e) => e.code === 'Enter' && filteredGroups.length > 0 && selectGroup(filteredGroups[0])}
+										/>
+									</div>
+									<hr class="border-gray-100 dark:border-gray-700" />
+									<div class="px-3 my-2 max-h-64 overflow-y-auto scrollbar-hidden group">
+										{#each filteredGroups as group}
+											<button
+												on:click={() => selectGroup(group)}
+												class="flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-sm text-gray-700 transition hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-700"
+											>
+												<span class="truncate">{group.name}</span>
+												<span class="shrink-0 px-2 py-0.5 text-xs font-medium rounded {group.identity === 'Admin'
+													? 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200'
+													: group.identity === 'Member'
+													? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
+													: group.identity === 'Super Admin'
+													? 'bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200'
+													: 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300'}">
+													{group.identity}
+												</span>
+												{#if selectedGroupId === group.id}
+													<Check className="ml-2 size-4 text-[#57068C]" strokeWidth="2.5" />
+												{/if}
+											</button>
+										{/each}
+									</div>
+								</DropdownMenu.Content>
+							</DropdownMenu.Root>
 						</div>
 
 						<!-- Info Button -->
@@ -425,7 +419,7 @@
 			</div>
 		</nav>
 
-		<div class="pb-1 px-[18px] flex-1 max-h-full overflow-y-auto" id="studentdashboard-container">
+		<div class="pb-1 px-[18px] flex-1 max-h-full overflow-y-auto" style="scrollbar-gutter: stable" id="studentdashboard-container">
 			<slot />
 		</div>
 	</div>
