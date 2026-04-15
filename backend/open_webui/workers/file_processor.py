@@ -197,9 +197,7 @@ def get_worker_config():
             _worker_config.ENABLE_RAG_HYBRID_SEARCH = ENABLE_RAG_HYBRID_SEARCH  # Used in retrieval queries
             _worker_config.RAG_FULL_CONTEXT = RAG_FULL_CONTEXT  # Used in config endpoints
             _worker_config.RELEVANCE_THRESHOLD = RAG_RELEVANCE_THRESHOLD  # PersistentConfig, used in retrieval
-            # CRITICAL: Force PDF_EXTRACT_IMAGES to False to prevent hangs (image extraction causes 2+ minute slowdowns)
-            # First assign the PersistentConfig object (like main.py does), then override its value
-            PDF_EXTRACT_IMAGES.value = False
+            # Respect configured PDF image extraction setting (defaults to False).
             _worker_config.PDF_EXTRACT_IMAGES = PDF_EXTRACT_IMAGES
             _worker_config.DOCUMENT_INTELLIGENCE_ENDPOINT = DOCUMENT_INTELLIGENCE_ENDPOINT
             _worker_config.DOCUMENT_INTELLIGENCE_KEY = DOCUMENT_INTELLIGENCE_KEY
@@ -296,6 +294,8 @@ class MockState:
         
         # EMBEDDING_FUNCTION will be initialized per-job with the correct per-user API key
         self.EMBEDDING_FUNCTION = None
+        self.FUNCTIONS = {}
+        self.OPENAI_MODELS = {}
     
     def initialize_embedding_function(self, embedding_api_key: Optional[str] = None, embedding_model: Optional[str] = None):
         """
@@ -437,8 +437,7 @@ class _FallbackConfig:
         self.RAG_OLLAMA_API_KEY = os.environ.get("RAG_OLLAMA_API_KEY", "")
         self.CONTENT_EXTRACTION_ENGINE = os.environ.get("CONTENT_EXTRACTION_ENGINE", "auto")
         self.TIKA_SERVER_URL = os.environ.get("TIKA_SERVER_URL", "")
-        # CRITICAL: Force extract_images=False to prevent hangs (image extraction causes 2+ minute slowdowns)
-        self.PDF_EXTRACT_IMAGES = False
+        self.PDF_EXTRACT_IMAGES = os.environ.get("PDF_EXTRACT_IMAGES", "False").lower() == "true"
         self.TEXT_SPLITTER = os.environ.get("RAG_TEXT_SPLITTER", "recursive")
         # UserScopedConfig objects - use MockUserScopedConfig for compatibility
         # These are used in save_docs_to_vector_db and other worker code paths
@@ -778,10 +777,17 @@ def process_file_job(
                                                 file_size = os.path.getsize(file_path)
                                                 log.info(f"[FILE] id={file.id} | name={file.filename} | size={file_size}B | path={file_path}")
                                                 extraction_engine_val = ""  # Force PyPDF for PDFs (OpenShift requirement)
-                                                # CRITICAL: Force extract_images=False to prevent hangs (image extraction causes 2+ minute slowdowns)
-                                                pdf_extract_images_val = False
-                                                log.info(f"[EXTRACT] START | file_id={file.id} | engine=PyPDF (forced) | extract_images={pdf_extract_images_val} (FORCED TO FALSE)")
-                                                loader = Loader(engine=extraction_engine_val, PDF_EXTRACT_IMAGES=pdf_extract_images_val)
+                                                pdf_extract_images_val = request.app.state.config.PDF_EXTRACT_IMAGES
+                                                log.info(
+                                                    f"[EXTRACT] START | file_id={file.id} | engine=PDF default | "
+                                                    f"extract_images={pdf_extract_images_val}"
+                                                )
+                                                loader = Loader(
+                                                    engine=extraction_engine_val,
+                                                    PDF_EXTRACT_IMAGES=pdf_extract_images_val,
+                                                    REQUEST=request,
+                                                    USER=user,
+                                                )
                                                 try:
                                                     print(f"[DEBUG] About to call loader.load() for file_id={file.id} | extract_images={pdf_extract_images_val}", flush=True)
                                                     log.info(f"[DEBUG] About to call loader.load() for file_id={file.id} | extract_images={pdf_extract_images_val}")
@@ -886,10 +892,17 @@ def process_file_job(
                                             file_size = os.path.getsize(file_path)
                                             log.info(f"[FILE] id={file.id} | name={file.filename} | size={file_size}B | path={file_path}")
                                             extraction_engine_val = ""  # Force PyPDF for PDFs (OpenShift requirement)
-                                            # CRITICAL: Force extract_images=False to prevent hangs (image extraction causes 2+ minute slowdowns)
-                                            pdf_extract_images_val = False
-                                            log.info(f"[EXTRACT] START | file_id={file.id} | engine=PyPDF (forced) | extract_images={pdf_extract_images_val} (FORCED TO FALSE)")
-                                            loader = Loader(engine=extraction_engine_val, PDF_EXTRACT_IMAGES=pdf_extract_images_val)
+                                            pdf_extract_images_val = request.app.state.config.PDF_EXTRACT_IMAGES
+                                            log.info(
+                                                f"[EXTRACT] START | file_id={file.id} | engine=PDF default | "
+                                                f"extract_images={pdf_extract_images_val}"
+                                            )
+                                            loader = Loader(
+                                                engine=extraction_engine_val,
+                                                PDF_EXTRACT_IMAGES=pdf_extract_images_val,
+                                                REQUEST=request,
+                                                USER=user,
+                                            )
                                             try:
                                                 print(f"[DEBUG] About to call loader.load() for file_id={file.id} | extract_images={pdf_extract_images_val}", flush=True)
                                                 log.info(f"[DEBUG] About to call loader.load() for file_id={file.id} | extract_images={pdf_extract_images_val}")
@@ -973,11 +986,18 @@ def process_file_job(
                                         file_size = os.path.getsize(file_path)
                                         log.info(f"[FILE] id={file.id} | name={file.filename} | size={file_size}B | path={file_path}")
                                         extraction_engine_val = ""  # Force PyPDF for PDFs (OpenShift requirement)
-                                        # CRITICAL: Force extract_images=False to prevent hangs (image extraction causes 2+ minute slowdowns)
-                                        pdf_extract_images_val = False
+                                        pdf_extract_images_val = request.app.state.config.PDF_EXTRACT_IMAGES
                                         extract_start = time.time()
-                                        log.info(f"[EXTRACT] START | file_id={file.id} | engine=PyPDF (forced) | extract_images={pdf_extract_images_val} (FORCED TO FALSE) | timestamp={extract_start:.3f}")
-                                        loader = Loader(engine=extraction_engine_val, PDF_EXTRACT_IMAGES=pdf_extract_images_val)
+                                        log.info(
+                                            f"[EXTRACT] START | file_id={file.id} | engine=PDF default | "
+                                            f"extract_images={pdf_extract_images_val} | timestamp={extract_start:.3f}"
+                                        )
+                                        loader = Loader(
+                                            engine=extraction_engine_val,
+                                            PDF_EXTRACT_IMAGES=pdf_extract_images_val,
+                                            REQUEST=request,
+                                            USER=user,
+                                        )
                                         try:
                                             print(f"[DEBUG] About to call loader.load() for file_id={file.id} | extract_images={pdf_extract_images_val} | timestamp={extract_start:.3f}", flush=True)
                                             log.info(f"[DEBUG] About to call loader.load() for file_id={file.id} | extract_images={pdf_extract_images_val}")
@@ -1311,4 +1331,3 @@ def process_file_job(
                     log.debug(f"Detached trace context for job: file_id={file_id}")
                 except Exception as detach_error:
                     log.debug(f"Failed to detach trace context: {detach_error}")
-

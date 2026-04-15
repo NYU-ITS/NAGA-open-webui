@@ -2182,13 +2182,15 @@ def _process_file_sync(
                         f"content_type={file.meta.get('content_type')} | engine={extraction_engine}"
                     )
                     
-                    # CRITICAL: Force PDF_EXTRACT_IMAGES=False to prevent hangs (image extraction causes 2+ minute slowdowns)
+                    # Respect runtime PDF image extraction setting.
                     loader = Loader(
                         engine=request.app.state.config.CONTENT_EXTRACTION_ENGINE,
                         TIKA_SERVER_URL=request.app.state.config.TIKA_SERVER_URL,
-                        PDF_EXTRACT_IMAGES=False,  # FORCED TO FALSE - image extraction causes hangs
+                        PDF_EXTRACT_IMAGES=request.app.state.config.PDF_EXTRACT_IMAGES,
                         DOCUMENT_INTELLIGENCE_ENDPOINT=request.app.state.config.DOCUMENT_INTELLIGENCE_ENDPOINT,
                         DOCUMENT_INTELLIGENCE_KEY=request.app.state.config.DOCUMENT_INTELLIGENCE_KEY,
+                        REQUEST=request,
+                        USER=user,
                     )
                     docs = loader.load(
                         file.filename, file.meta.get("content_type"), file_path
@@ -2662,15 +2664,16 @@ def process_file(
                         """),
                         {"file_id": form_data.file_id}
                     )
-                db.commit()
                 
                 # Check if update actually happened (row was updated)
                 # For SQLite, check rowcount; for PostgreSQL, check RETURNING result
                 if is_postgresql:
+                    # Read RETURNING row before commit; psycopg2 may close cursor on commit.
                     updated_row = result.fetchone()
                     update_succeeded = updated_row is not None
                 else:
                     update_succeeded = result.rowcount > 0
+                db.commit()
                 
                 if not update_succeeded:
                     # Another request already set status to pending/processing
