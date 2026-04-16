@@ -312,6 +312,29 @@
 		replaceReviewHomework(reloadedHomework);
 	}
 
+	function normalizeReviewHomework(hw: any): ReviewHomework {
+		const questions = Array.isArray(hw?.questionData?.questions) ? hw.questionData.questions : [];
+		let approvedQuestionIndexes: Set<number>;
+		if (hw.approvedQuestionIndexes instanceof Set) {
+			approvedQuestionIndexes = hw.approvedQuestionIndexes;
+		} else if (Array.isArray(hw.approvedQuestionIndexes)) {
+			approvedQuestionIndexes = new Set(hw.approvedQuestionIndexes);
+		} else {
+			approvedQuestionIndexes =
+				hw.questionData?.status === 'approved'
+					? new Set(questions.map((_: any, i: number) => i))
+					: new Set<number>();
+		}
+		return {
+			...hw,
+			approvedQuestionIndexes,
+			questionData: {
+				...hw.questionData,
+				questions
+			}
+		};
+	}
+
 	async function loadReviewHomeworkCollection(currentGroupId: string, requestedHomeworkId = '') {
 		if (!currentGroupId || homeworkOptions.length === 0) return;
 
@@ -319,7 +342,7 @@
 			reviewHomeworks: ReviewHomework[];
 			requestedHomeworkId: string;
 		}) => {
-			reviewHomeworks = snapshot.reviewHomeworks;
+			reviewHomeworks = (snapshot.reviewHomeworks ?? []).map(normalizeReviewHomework);
 			hasLoadedReviewHomeworksOnce = true;
 			const requestedIndex = reviewHomeworks.findIndex(
 				(homework) => homework.homeworkId === snapshot.requestedHomeworkId
@@ -1749,7 +1772,7 @@
 			</div>
 
 			</div>
-			<div class="space-y-4 py-6 rounded-lg border border-gray-200 dark:border-gray-700">
+			<div class="space-y-4 py-6 px-6 rounded-lg border border-gray-200 dark:border-gray-700">
 				{#if questionEditors.length === 0}
 					<div class="flex items-center justify-center py-12 text-xs text-gray-400 dark:text-gray-500">
 						No practice questions has been generated yet
@@ -1845,7 +1868,7 @@
 			{/each}
 			{/if}
 
-			<div class="flex items-center justify-end gap-3 pt-4 pr-4">
+			<div class="flex items-center justify-end gap-3 pt-4">
 				<!-- [Big Button] Approve -->
 				<button
 					on:click={handleSave}
