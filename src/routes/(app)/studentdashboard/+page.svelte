@@ -274,6 +274,8 @@
 		return matchesHomework && matchesTopic;
 	});
 
+	$: availableHomeworkCount = filteredHomeworkData.filter((hw) => !hw.notStarted).length;
+
 	let expandedCells: Set<string> = new Set();
 	function toggleCell(key: string) {
 		const next = new Set(expandedCells);
@@ -857,52 +859,57 @@
 						</tr>
 					</thead>
 					<tbody>
-						{#each practiceAssignments as item}
-							<tr
-								class="border-t border-gray-100 bg-white transition hover:bg-gray-50 dark:border-gray-850 dark:bg-gray-900 dark:hover:bg-gray-800 cursor-pointer"
-								on:click={() => startPracticeAssignment(item)}
-							>
-								<td class="px-3 py-1.5 font-medium text-gray-900 dark:text-gray-100">{item.homeworkLabel}</td>
-								<td class="px-3 py-1.5">
-									{#if getPracticeTopics(item.topic).length > 0}
-										{@const topicList = getPracticeTopics(item.topic)}
-										<div class="flex items-center gap-2">
-											<Tooltip content={topicList.join(', ')} placement="top">
-												<span
-													bind:this={textRefs[`pq-${item.id}`]}
-												class="text-sm text-gray-700 dark:text-gray-300 {expandedCells.has(`${item.id}-topic`) ? '' : 'line-clamp-1'}"
-												>
-													{topicList.join(', ')}
-												</span>
-											</Tooltip>
-											{#if needsExpand.has(`pq-${item.id}`)}
-												<button
-													type="button"
-													class="shrink-0 text-xs text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300"
-													on:click|stopPropagation={() => toggleCell(`${item.id}-topic`)}
-												>
-													{expandedCells.has(`${item.id}-topic`) ? 'Show Less' : 'Show All'}
-												</button>
-											{/if}
-										</div>
-									{:else}
-										<span class="text-sm text-gray-400 dark:text-gray-500">—</span>
-									{/if}
-								</td>
-								<td class="px-3 py-1.5">
+							{#each practiceAssignments as item}
+								<tr
+									class="border-t border-gray-100 bg-white transition hover:bg-gray-50 dark:border-gray-850 dark:bg-gray-900 dark:hover:bg-gray-800 cursor-pointer"
+									on:click={() => startPracticeAssignment(item)}
+								>
+									<td class="px-3 py-1.5 font-medium text-gray-900 dark:text-gray-100">{item.homeworkLabel}</td>
 									{#if item.status === 'Ready'}
-										<button
-											class="text-xs font-medium text-black transition hover:text-gray-700 dark:text-white dark:hover:text-gray-300"
-											on:click|stopPropagation={() => startPracticeAssignment(item)}
-										>
-											Start
-										</button>
+										<td class="px-3 py-1.5">
+											{#if getPracticeTopics(item.topic).length > 0}
+												{@const topicList = getPracticeTopics(item.topic)}
+												<div class="flex items-center gap-2">
+													<Tooltip content={topicList.join(', ')} placement="top">
+														<span
+															bind:this={textRefs[`pq-${item.id}`]}
+														class="text-sm text-gray-700 dark:text-gray-300 {expandedCells.has(`${item.id}-topic`) ? '' : 'line-clamp-1'}"
+														>
+															{topicList.join(', ')}
+														</span>
+													</Tooltip>
+													{#if needsExpand.has(`pq-${item.id}`)}
+														<button
+															type="button"
+															class="shrink-0 text-xs text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300"
+															on:click|stopPropagation={() => toggleCell(`${item.id}-topic`)}
+														>
+															{expandedCells.has(`${item.id}-topic`) ? 'Show Less' : 'Show All'}
+														</button>
+													{/if}
+												</div>
+											{:else}
+												<span class="text-sm text-gray-400 dark:text-gray-500">—</span>
+											{/if}
+										</td>
+										<td class="px-3 py-1.5">
+											<button
+												class="text-xs font-medium text-black transition hover:text-gray-700 dark:text-white dark:hover:text-gray-300"
+												on:click|stopPropagation={() => startPracticeAssignment(item)}
+											>
+												Start
+											</button>
+										</td>
 									{:else}
-										<span class="text-xs text-gray-400 dark:text-gray-500">This homework&apos;s analysis has not been available.</span>
+										<td
+											colspan="2"
+											class="px-3 py-1.5 text-center text-xs text-gray-400 dark:text-gray-500"
+										>
+											This homework&apos;s analysis has not been available.
+										</td>
 									{/if}
-								</td>
-							</tr>
-						{/each}
+								</tr>
+							{/each}
 					</tbody>
 				</table>
 			</div>
@@ -914,8 +921,7 @@
 				<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">By Homework</h2>
 				<div class="flex self-center w-[1px] h-6 mx-2.5 bg-gray-50 dark:bg-gray-850" />
 				<span class="text-lg font-medium text-gray-500 dark:text-gray-300"
-					>{filteredHomeworkData.length}</span
-				>
+					>{availableHomeworkCount}</span>
 			</div>
 
 			<div class="flex gap-6">
