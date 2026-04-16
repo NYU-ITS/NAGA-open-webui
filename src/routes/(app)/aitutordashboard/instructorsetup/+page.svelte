@@ -1,7 +1,7 @@
 <script lang="ts">
-	import { onMount, tick } from 'svelte';
+	import { onMount, onDestroy, tick } from 'svelte';
 	import { page } from '$app/stores';
-	import { aiTutorSelectedGroupId } from '$lib/stores';
+	import { aiTutorSelectedGroupId, user } from '$lib/stores';
 	import { toast } from 'svelte-sonner';
 	import {
 		AI_TUTOR_API_BASE_URL,
@@ -13,6 +13,7 @@
 import { DropdownMenu } from 'bits-ui';
 	import { showAITutorTestToast } from '$lib/utils/aiTutorTesting';
 	import {
+		clearAITutorSessionCache,
 		clearAITutorSessionCacheByPrefix,
 		loadWithAITutorSessionCache,
 		writeAITutorSessionCache
@@ -87,6 +88,8 @@ import { flyAndScale } from '$lib/utils/transitions';
 		name: string;
 		preset: boolean;
 		base_model_id: string | null;
+		access_control?: { read?: { group_ids?: string[] } };
+		user_id?: string;
 	}[] = [];
 	let convCountByModelId: Record<string, number> = {};
 	let uploadingMap: Record<string, boolean> = {};
@@ -378,8 +381,17 @@ import { flyAndScale } from '$lib/utils/transitions';
 	}
 
 	function buildHomeworkFileRows(
-		models: { id: string; name: string; preset: boolean; base_model_id: string | null }[],
-		rows: HomeworkRow[]
+		models: {
+			id: string;
+			name: string;
+			preset: boolean;
+			base_model_id: string | null;
+			access_control?: { read?: { group_ids?: string[] } };
+			user_id?: string;
+		}[],
+		rows: HomeworkRow[],
+		currentGroupId: string,
+		currentUserId: string | undefined
 	): HomeworkFileRow[] {
 		// Business rule for AI Tutor:
 		// only workspace models should appear in 2.2.Homework & Answer Files.
@@ -413,6 +425,16 @@ import { flyAndScale } from '$lib/utils/transitions';
 			}
 		}
 
+		function modelBelongsToCurrentGroup(model: typeof workspaceModels[number]): boolean {
+			const groupIds = model.access_control?.read?.group_ids ?? [];
+			if (groupIds.length > 0) {
+				return groupIds.includes(currentGroupId);
+			}
+			// Fallback: if no group assignment is recorded, allow the creator to see it
+			// as a placeholder so they can still upload homework for their own model.
+			return model.user_id === currentUserId;
+		}
+
 		const mergedRows: HomeworkFileRow[] = workspaceModels
 			.slice()
 			.sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id))
@@ -430,6 +452,12 @@ import { flyAndScale } from '$lib/utils/transitions';
 				// Page: AI Tutor Dashboard > Instructor Setup
 				// Purpose: show every accessible workspace model even before AI Tutor
 				// creates a /homework row for the selected group + model_id pair.
+				// For multi-group admins/superadmins, suppress placeholders that clearly
+				// belong to another group.
+				if (!modelBelongsToCurrentGroup(model)) {
+					return null;
+				}
+
 				return {
 					id: `model:${model.id}`,
 					modelId: model.id,
@@ -442,7 +470,8 @@ import { flyAndScale } from '$lib/utils/transitions';
 					displayModelName: model.name ?? model.id,
 					isPlaceholder: true
 				};
-			});
+			})
+			.filter((row): row is HomeworkFileRow => row !== null);
 
 		for (const row of rows) {
 			if (usedRowIds.has(row.id)) continue;
@@ -456,7 +485,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 		return mergedRows;
 	}
 
-	$: homeworkFileRows = buildHomeworkFileRows(availableModels, homeworkRows);
+	$: homeworkFileRows = buildHomeworkFileRows(availableModels, homeworkRows, $aiTutorSelectedGroupId, $user?.id);
 
 	function readPersistedJobs(): PersistedInstructorJob[] {
 		if (typeof localStorage === 'undefined') return [];
@@ -633,6 +662,15 @@ import { flyAndScale } from '$lib/utils/transitions';
 		void resumePersistedJobs($aiTutorSelectedGroupId);
 	}
 
+	function handleVisibilityChange() {
+		if (document.visibilityState === 'visible' && !useFrontendTestingData && $aiTutorSelectedGroupId) {
+			clearAITutorSessionCache(
+				getInstructorSetupCacheKey('conversation-counts', $aiTutorSelectedGroupId)
+			);
+			void loadConversationCounts($aiTutorSelectedGroupId);
+		}
+	}
+
 	// ── Data fetching ─────────────────────────────────────────────────────────
 	onMount(async () => {
 		// Page: AI Tutor Dashboard > Instructor Setup
@@ -646,13 +684,17 @@ import { flyAndScale } from '$lib/utils/transitions';
 			groupId: $aiTutorSelectedGroupId,
 			groupIdFromUrl: $page.url.searchParams.get('group_id') || ''
 		});
+		document.addEventListener('visibilitychange', handleVisibilityChange);
 		await loadModels();
 		if (useFrontendTestingData) {
 			seedDummyDashboard($aiTutorSelectedGroupId);
 			await tick();
 			updateScrollState();
-			return;
 		}
+	});
+
+	onDestroy(() => {
+		document.removeEventListener('visibilitychange', handleVisibilityChange);
 	});
 
 	// Reset per-homework action state whenever the selected group changes so that
@@ -881,7 +923,9 @@ import { flyAndScale } from '$lib/utils/transitions';
 									id: m.id,
 									name: m.name ?? m.id,
 									preset: m.preset === true,
-									base_model_id: m.info?.base_model_id ?? m.base_model_id ?? null
+									base_model_id: m.info?.base_model_id ?? m.base_model_id ?? null,
+									access_control: m.access_control,
+									user_id: m.user_id
 								}))
 								.filter((model: { id: string; name: string }) => {
 									if (!(model.name ?? model.id).toLowerCase().includes('homework')) {
@@ -2376,7 +2420,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 								<th class="px-3 py-1.5 select-none">Answer PDF</th>
 								<th class="w-[8.5rem] px-3 py-1.5 select-none">Conversations</th>
 								<th class="px-3 py-1.5 select-none">Status</th>
-								<th class="w-[7rem] px-3 py-1.5 select-none">Action</th>
+								<th class="w-[9rem] px-3 py-1.5 select-none">Action</th>
 							</tr>
 						</thead>
 						<tbody>
