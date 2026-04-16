@@ -664,9 +664,6 @@ import { flyAndScale } from '$lib/utils/transitions';
 
 	function handleVisibilityChange() {
 		if (document.visibilityState === 'visible' && !useFrontendTestingData && $aiTutorSelectedGroupId) {
-			clearAITutorSessionCache(
-				getInstructorSetupCacheKey('conversation-counts', $aiTutorSelectedGroupId)
-			);
 			void loadConversationCounts($aiTutorSelectedGroupId);
 		}
 	}
@@ -952,41 +949,33 @@ import { flyAndScale } from '$lib/utils/transitions';
 		}
 		if (!groupId) return;
 		try {
-			const counts = await loadWithAITutorSessionCache<Record<string, number>>({
-				key: getInstructorSetupCacheKey('conversation-counts', groupId),
-				ttlMs: CACHE_TTL_MS,
-				loader: async () => {
-					// Page: AI Tutor Dashboard > Instructor Setup
-					// Endpoint: POST /api/v1/chats/filter/meta
-					// Purpose: count Open WebUI conversations for the selected group and bucket them by model_id/model_name.
-					const res = await fetch('/api/v1/chats/filter/meta', {
-						method: 'POST',
-						headers: {
-							Authorization: `Bearer ${localStorage.token}`,
-							'Content-Type': 'application/json'
-						},
-						body: JSON.stringify({ group_id: groupId, skip: 0, limit: 1000 })
-					});
-					if (!res.ok) throw new Error('Conv count fetch failed');
-					const data = await res.json();
-					const nextCounts: Record<string, number> = {};
-					if (Array.isArray(data)) {
-						for (const chat of data) {
-							const modelKeys = [
-								chat?.meta?.model_id,
-								chat?.meta?.model_name,
-								chat?.meta?.base_model_name
-							].filter((value) => typeof value === 'string' && value.length > 0);
-							for (const modelKey of new Set(modelKeys)) {
-								nextCounts[modelKey] = (nextCounts[modelKey] ?? 0) + 1;
-							}
-						}
-					}
-					return nextCounts;
-				}
+			// Real-time fetch without session cache so the count always matches
+			// what the admin panel Conversation History modal shows.
+			const res = await fetch('/api/v1/chats/filter/meta', {
+				method: 'POST',
+				headers: {
+					Authorization: `Bearer ${localStorage.token}`,
+					'Content-Type': 'application/json'
+				},
+				body: JSON.stringify({ group_id: groupId, skip: 0, limit: 1000 })
 			});
+			if (!res.ok) throw new Error('Conv count fetch failed');
+			const data = await res.json();
+			const nextCounts: Record<string, number> = {};
+			if (Array.isArray(data)) {
+				for (const chat of data) {
+					const modelKeys = [
+						chat?.meta?.model_id,
+						chat?.meta?.model_name,
+						chat?.meta?.base_model_name
+					].filter((value) => typeof value === 'string' && value.length > 0);
+					for (const modelKey of new Set(modelKeys)) {
+						nextCounts[modelKey] = (nextCounts[modelKey] ?? 0) + 1;
+					}
+				}
+			}
 			if ($aiTutorSelectedGroupId !== groupId) return; // stale
-			convCountByModelId = counts;
+			convCountByModelId = nextCounts;
 		} catch (e) {
 			console.error('Conversation count fetch failed:', e);
 		}
@@ -1304,6 +1293,8 @@ import { flyAndScale } from '$lib/utils/transitions';
 				return false;
 			}
 			toast.success(`Conversation history exported for ${exportedStudents} student${exportedStudents === 1 ? '' : 's'}.`);
+			// Refresh counts immediately so the displayed number matches the exported snapshot.
+			void loadConversationCounts($aiTutorSelectedGroupId);
 			return true;
 		} catch (error) {
 			toast.error(error instanceof Error ? error.message : 'Conversation export failed.');
