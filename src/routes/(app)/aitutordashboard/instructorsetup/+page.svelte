@@ -22,6 +22,8 @@ import { DropdownMenu } from 'bits-ui';
 	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
 	import EllipsisHorizontal from '$lib/components/icons/EllipsisHorizontal.svelte';
 	import Pencil from '$lib/components/icons/Pencil.svelte';
+import ArrowPath from '$lib/components/icons/ArrowPath.svelte';
+import Hourglass from '$lib/components/icons/Hourglass.svelte';
 import Dropdown from '$lib/components/common/Dropdown.svelte';
 import { flyAndScale } from '$lib/utils/transitions';
 
@@ -92,6 +94,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 		user_id?: string;
 	}[] = [];
 	let convCountByModelId: Record<string, number> = {};
+	let isRefreshingConversationCounts = false;
 	let uploadingMap: Record<string, boolean> = {};
 	let exportingConversationMap: Record<string, boolean> = {};
 	let runningAnalysisByHomeworkId: Record<string, boolean> = {};
@@ -942,6 +945,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 	}
 
 	async function loadConversationCounts(groupId: string) {
+		console.log('[ConversationCounts] refresh triggered for group:', groupId);
 		testToast(`Instructor Setup fetch: conversations group=${groupId || 'none'}`);
 		if (useFrontendTestingData) {
 			convCountByModelId = groupId ? frontendTestingConversationCounts : {};
@@ -976,8 +980,11 @@ import { flyAndScale } from '$lib/utils/transitions';
 			}
 			if ($aiTutorSelectedGroupId !== groupId) return; // stale
 			convCountByModelId = nextCounts;
+			console.log('[ConversationCounts] refresh completed, counts:', nextCounts);
 		} catch (e) {
 			console.error('Conversation count fetch failed:', e);
+		} finally {
+			isRefreshingConversationCounts = false;
 		}
 	}
 
@@ -2558,7 +2565,25 @@ import { flyAndScale } from '$lib/utils/transitions';
 											{/if}
 										</td>
 										<td class="w-[6rem] px-3 py-1 text-gray-700 dark:text-gray-300">
-											{getConversationCountForRow(row)}
+											<div class="flex items-center gap-1.5">
+												<span>{getConversationCountForRow(row)}</span>
+												<button
+													type="button"
+													disabled={isRefreshingConversationCounts}
+													on:click|stopPropagation={() => {
+														isRefreshingConversationCounts = true;
+														loadConversationCounts($aiTutorSelectedGroupId);
+													}}
+													class="text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+													title={isRefreshingConversationCounts ? 'Refreshing...' : 'Refresh conversation counts'}
+												>
+													{#if isRefreshingConversationCounts}
+														<Hourglass className="size-3.5" />
+													{:else}
+														<ArrowPath className="size-3.5" />
+													{/if}
+												</button>
+											</div>
 										</td>
 										<td class="px-3 py-1 font-normal text-gray-400 dark:text-gray-500">
 											<div class="max-w-[12rem] whitespace-normal break-words leading-4">
