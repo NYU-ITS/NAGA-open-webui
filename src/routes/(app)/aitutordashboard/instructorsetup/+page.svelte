@@ -1998,6 +1998,8 @@ import { flyAndScale } from '$lib/utils/transitions';
 				testToast('Instructor Setup run analysis request submitted');
 				toast.success('Analysis started successfully.');
 				await monitorPersistedJob(persistedJob);
+				clearAITutorSessionCacheByPrefix(getInstructorSetupCacheKey('homework-stats', $aiTutorSelectedGroupId));
+				await loadHomeworkStats($aiTutorSelectedGroupId);
 				analysisHistory = [
 					{ contents, startedAt, completedAt: new Date().toLocaleTimeString(), failed: false },
 					...analysisHistory
@@ -2383,7 +2385,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 						2.Homework & Answer Files
 					</h2>
 					<div class="text-xs text-gray-400 dark:text-gray-500">
-						Upload the PDF files here before starting the analysis
+						Upload the PDF files here before starting the analysis. Workspace model name must include "homework".
 					</div>
 				</div>
 				<span class="pt-1 text-gray-500 dark:text-gray-400">
