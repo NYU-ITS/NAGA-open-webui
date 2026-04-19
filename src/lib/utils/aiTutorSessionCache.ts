@@ -57,6 +57,22 @@ export function clearAITutorSessionCacheByPrefix(prefix: string) {
 	}
 }
 
+/**
+ * Clear all AI Tutor session cache entries that contain the given groupId.
+ * This ensures cross-page consistency when any page mutates group-scoped data.
+ */
+export function clearAITutorSessionCacheByGroup(groupId: string) {
+	if (typeof sessionStorage === 'undefined' || !groupId) return;
+
+	const prefix = getStorageKey('');
+	for (let i = sessionStorage.length - 1; i >= 0; i -= 1) {
+		const storageKey = sessionStorage.key(i);
+		if (storageKey && storageKey.startsWith(prefix) && storageKey.includes(groupId)) {
+			sessionStorage.removeItem(storageKey);
+		}
+	}
+}
+
 const inflightSessionCacheLoads = new Map<string, Promise<unknown>>();
 
 async function loadFreshAndPersist<T>(key: string, loader: () => Promise<T>) {

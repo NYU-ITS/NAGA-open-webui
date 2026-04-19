@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
 	import { aiTutorSelectedGroupId } from '$lib/stores';
+	import { aiTutorAllowedModelIds } from '$lib/stores/aiTutorWorkspaceModels';
 	import { toast } from 'svelte-sonner';
 	import { createNewModel, getModelById, updateModelById } from '$lib/apis/models';
 	import {
@@ -485,7 +486,11 @@
 						topicMapped: hw?.topic_mapped ?? false
 					}))
 				: [];
-					const homeworkIds = new Set(nextHomeworkRows.map((row) => row.id));
+					const allowedIds = $aiTutorAllowedModelIds;
+					const filteredHomeworkRows = nextHomeworkRows.filter(
+						(row) => row.modelId && allowedIds.has(row.modelId)
+					);
+					const homeworkIds = new Set(filteredHomeworkRows.map((row) => row.id));
 
 			// Page: AI Tutor Dashboard > Topic Analysis
 			// Endpoint: GET /analysis
@@ -574,14 +579,14 @@
 						});
 						testToast('Topic Analysis loaded /analysis data');
 						return {
-							homeworkRows: nextHomeworkRows,
+							homeworkRows: filteredHomeworkRows,
 							topicGroupsByHomework: nextTopicGroupsByHomework,
 							homeworkIdsWithAnalysis: Array.from(nextHomeworkIdsWithAnalysis)
 						};
 					}
 
 					return {
-						homeworkRows: nextHomeworkRows,
+						homeworkRows: filteredHomeworkRows,
 						topicGroupsByHomework: [],
 						homeworkIdsWithAnalysis: []
 					};

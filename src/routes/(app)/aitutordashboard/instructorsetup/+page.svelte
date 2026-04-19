@@ -2,6 +2,10 @@
 	import { onMount, onDestroy, tick } from 'svelte';
 	import { page } from '$app/stores';
 	import { aiTutorSelectedGroupId, user } from '$lib/stores';
+	import {
+		aiTutorWorkspaceModels,
+		aiTutorAllowedModelIds
+	} from '$lib/stores/aiTutorWorkspaceModels';
 	import { toast } from 'svelte-sonner';
 	import {
 		AI_TUTOR_API_BASE_URL,
@@ -15,6 +19,7 @@ import { DropdownMenu } from 'bits-ui';
 	import {
 		clearAITutorSessionCache,
 		clearAITutorSessionCacheByPrefix,
+		clearAITutorSessionCacheByGroup,
 		loadWithAITutorSessionCache,
 		writeAITutorSessionCache
 	} from '$lib/utils/aiTutorSessionCache';
@@ -96,11 +101,16 @@ import { flyAndScale } from '$lib/utils/transitions';
 	let convCountByModelId: Record<string, number> = {};
 	let isRefreshingConversationCounts = false;
 	let uploadingMap: Record<string, boolean> = {};
+	let hasLoadedHomework = false;
 	let exportingConversationMap: Record<string, boolean> = {};
 	let runningAnalysisByHomeworkId: Record<string, boolean> = {};
 	let homeworkJobStepByModelId: Record<string, string> = {};
 	const ACTIVE_JOB_STORAGE_KEY = 'ai_tutor_instructor_setup_jobs';
 	const activeJobIds = new Set<string>();
+	// AbortControllers for cancellable async operations (group switch, unmount)
+	let loadHomeworkAbortController: AbortController | null = null;
+	const pollAbortControllers = new Map<string, AbortController>();
+	const POLL_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes max polling
 	type DraftRow = { uid: number; modelId: string };
 	let draftRows: DraftRow[] = [];
 	let _prevGroupIdForReset = '';
@@ -380,40 +390,19 @@ import { flyAndScale } from '$lib/utils/transitions';
 	}
 
 	function invalidateInstructorSetupCache(groupId?: string) {
-		clearAITutorSessionCacheByPrefix(getInstructorSetupCacheKey('', groupId));
+		clearAITutorSessionCacheByGroup(groupId || $aiTutorSelectedGroupId);
 	}
 
 	function buildHomeworkFileRows(
-		models: {
+		allowedModels: {
 			id: string;
 			name: string;
-			preset: boolean;
 			base_model_id: string | null;
 			access_control?: { read?: { group_ids?: string[] } };
-			user_id?: string;
 		}[],
-		rows: HomeworkRow[],
-		currentGroupId: string,
-		currentUserId: string | undefined
+		rows: HomeworkRow[]
 	): HomeworkFileRow[] {
-		// Business rule for AI Tutor:
-		// only workspace models should appear in 2.2.Homework & Answer Files.
-		// This relies on the current Open WebUI hierarchy where a base model does
-		// not have a more-base parent, and derived workspace models are returned
-		// as presets with a non-null base_model_id in their stored model info.
-		const workspaceModels = models.filter(
-			(model) =>
-				model.preset === true &&
-				model.base_model_id != null &&
-				(model.name ?? model.id).toLowerCase().includes('homework') &&
-				// Mastery-prefixed workspace models are reserved for student practice chat
-				// and should not reappear as instructor homework upload candidates.
-				!(model.name ?? model.id).startsWith('Mastery')
-		);
-
 		const rowsByModelId = new Map<string, HomeworkRow>();
-		const rowsByModelName = new Map<string, HomeworkRow>();
-		const usedRowIds = new Set<string>();
 
 		for (const row of rows) {
 			if (row.modelId && !rowsByModelId.has(row.modelId)) {
@@ -421,44 +410,17 @@ import { flyAndScale } from '$lib/utils/transitions';
 			}
 		}
 
-		for (const model of models) {
-			if (!rowsByModelName.has(model.name)) {
-				const row = rows.find((item) => item.modelId === model.name);
-				if (row) rowsByModelName.set(model.name, row);
-			}
-		}
-
-		function modelBelongsToCurrentGroup(model: typeof workspaceModels[number]): boolean {
-			const groupIds = model.access_control?.read?.group_ids ?? [];
-			if (groupIds.length > 0) {
-				return groupIds.includes(currentGroupId);
-			}
-			// Fallback: if no group assignment is recorded, allow the creator to see it
-			// as a placeholder so they can still upload homework for their own model.
-			return model.user_id === currentUserId;
-		}
-
-		const mergedRows: HomeworkFileRow[] = workspaceModels
+		const mergedRows: HomeworkFileRow[] = allowedModels
 			.slice()
 			.sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id))
 			.map((model) => {
-				const matchingRow = rowsByModelId.get(model.id) ?? rowsByModelName.get(model.name);
+				const matchingRow = rowsByModelId.get(model.id) ?? rowsByModelId.get(model.name);
 				if (matchingRow) {
-					usedRowIds.add(matchingRow.id);
 					return {
 						...matchingRow,
 						displayModelName: model.name ?? model.id,
 						isPlaceholder: false
 					};
-				}
-
-				// Page: AI Tutor Dashboard > Instructor Setup
-				// Purpose: show every accessible workspace model even before AI Tutor
-				// creates a /homework row for the selected group + model_id pair.
-				// For multi-group admins/superadmins, suppress placeholders that clearly
-				// belong to another group.
-				if (!modelBelongsToCurrentGroup(model)) {
-					return null;
 				}
 
 				return {
@@ -473,22 +435,21 @@ import { flyAndScale } from '$lib/utils/transitions';
 					displayModelName: model.name ?? model.id,
 					isPlaceholder: true
 				};
-			})
-			.filter((row): row is HomeworkFileRow => row !== null);
-
-		for (const row of rows) {
-			if (usedRowIds.has(row.id)) continue;
-			mergedRows.push({
-				...row,
-				displayModelName: row.modelId ?? row.id,
-				isPlaceholder: false
 			});
-		}
 
+		console.log(
+			'[buildHomeworkFileRows] result rows:',
+			mergedRows.map((r) => r.modelId)
+		);
 		return mergedRows;
 	}
 
-	$: homeworkFileRows = buildHomeworkFileRows(availableModels, homeworkRows, $aiTutorSelectedGroupId, $user?.id);
+	$: allowedModelsForGroup = $aiTutorWorkspaceModels.filter((model) => {
+		const groupIds = model.access_control?.read?.group_ids ?? [];
+		return groupIds.includes($aiTutorSelectedGroupId);
+	});
+
+	$: homeworkFileRows = buildHomeworkFileRows(allowedModelsForGroup, homeworkRows);
 
 	function readPersistedJobs(): PersistedInstructorJob[] {
 		if (typeof localStorage === 'undefined') return [];
@@ -655,15 +616,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 
 	$: avgSolvedChart = chartPoints(homeworkStats.map((s) => s.avgSolved));
 	$: avgAttemptedChart = chartPoints(homeworkStats.map((s) => s.avgAttempted));
-	// Subscribe to store for group changes - prevents flash of wrong group data
-	$: if ($aiTutorSelectedGroupId && $aiTutorSelectedGroupId !== lastSyncedGroupId) {
-		lastSyncedGroupId = $aiTutorSelectedGroupId;
-		void loadHomeworkStats($aiTutorSelectedGroupId);
-		void loadConversationCounts($aiTutorSelectedGroupId);
-		void loadErrorTypes($aiTutorSelectedGroupId);
-		void loadPrompts($aiTutorSelectedGroupId);
-		void resumePersistedJobs($aiTutorSelectedGroupId);
-	}
+	// Group-change data loading is now handled by the _prevGroupIdForReset reactive block below.
 
 	function handleVisibilityChange() {
 		if (document.visibilityState === 'visible' && !useFrontendTestingData && $aiTutorSelectedGroupId) {
@@ -695,17 +648,44 @@ import { flyAndScale } from '$lib/utils/transitions';
 
 	onDestroy(() => {
 		document.removeEventListener('visibilitychange', handleVisibilityChange);
+		// Cancel any in-flight homework load
+		loadHomeworkAbortController?.abort();
+		// Cancel all active poll loops
+		for (const [, ctrl] of pollAbortControllers) {
+			ctrl.abort();
+		}
+		pollAbortControllers.clear();
 	});
 
 	// Reset per-homework action state whenever the selected group changes so that
 	// in-progress indicators from a previous group never bleed into the new one.
-	$: if ($aiTutorSelectedGroupId && $aiTutorSelectedGroupId !== _prevGroupIdForReset) {
+	$: if ($aiTutorSelectedGroupId !== _prevGroupIdForReset) {
 		_prevGroupIdForReset = $aiTutorSelectedGroupId;
+		// Cancel any in-flight load for the previous group
+		loadHomeworkAbortController?.abort();
+		// Cancel all active poll loops so they don't mutate state for the wrong group
+		for (const [, ctrl] of pollAbortControllers) {
+			ctrl.abort();
+		}
+		pollAbortControllers.clear();
+		activeJobIds.clear();
 		uploadingMap = {};
 		exportingConversationMap = {};
 		runningAnalysisByHomeworkId = {};
 		homeworkJobStepByModelId = {};
 		draftRows = [];
+		homeworkRows = [];
+		homeworkStats = [];
+		hasLoadedHomework = false;
+		// When switching to a non-empty group, trigger data loads.
+		// When switching to empty/no group, the cleared state above is sufficient.
+		if ($aiTutorSelectedGroupId) {
+			void loadHomeworkStats($aiTutorSelectedGroupId);
+			void loadConversationCounts($aiTutorSelectedGroupId);
+			void loadErrorTypes($aiTutorSelectedGroupId);
+			void loadPrompts($aiTutorSelectedGroupId);
+			void resumePersistedJobs($aiTutorSelectedGroupId);
+		}
 	}
 
 	async function loadHomeworkStats(groupId: string) {
@@ -721,6 +701,11 @@ import { flyAndScale } from '$lib/utils/transitions';
 			updateScrollState();
 			return;
 		}
+
+		// Cancel any previous in-flight load for this page
+		loadHomeworkAbortController?.abort();
+		const controller = new AbortController();
+		loadHomeworkAbortController = controller;
 
 		type CachedHomeworkStatsPayload = {
 			homeworkRows: HomeworkRow[];
@@ -744,7 +729,8 @@ import { flyAndScale } from '$lib/utils/transitions';
 						`${AI_TUTOR_API_BASE}/homework/?group_id=${encodeURIComponent(groupId)}`,
 						{
 							method: 'GET',
-							headers: { Authorization: `Bearer ${localStorage.token}` }
+							headers: { Authorization: `Bearer ${localStorage.token}` },
+							signal: controller.signal
 						}
 					);
 					if (!hwResponse.ok) throw new Error('Homework fetch failed');
@@ -792,7 +778,8 @@ import { flyAndScale } from '$lib/utils/transitions';
 							`${AI_TUTOR_API_BASE}/analysis/?homework_id=${encodeURIComponent(homeworkId)}`,
 							{
 								method: 'GET',
-								headers: { Authorization: `Bearer ${localStorage.token}` }
+								headers: { Authorization: `Bearer ${localStorage.token}` },
+								signal: controller.signal
 							}
 						);
 						if (!analysisResponse.ok) throw new Error(`Analysis fetch failed for ${homeworkId}`);
@@ -882,7 +869,13 @@ import { flyAndScale } from '$lib/utils/transitions';
 			if ($aiTutorSelectedGroupId !== groupId) return; // stale — group changed while loading
 			homeworkRows = cached.homeworkRows;
 			homeworkStats = cached.homeworkStats;
+			hasLoadedHomework = true;
+			console.log('[loadHomeworkStats] loaded for group', groupId, { homeworkCount: homeworkRows.length, modelIds: homeworkRows.map((r) => r.modelId) });
 		} catch (error) {
+			if ((error as Error)?.name === 'AbortError') {
+				console.log('[loadHomeworkStats] aborted for group', groupId);
+				return;
+			}
 			testToast('Instructor Setup failed loading /homework data');
 			console.error('Homework fetch failed:', error);
 		}
@@ -924,7 +917,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 									name: m.name ?? m.id,
 									preset: m.preset === true,
 									base_model_id: m.info?.base_model_id ?? m.base_model_id ?? null,
-									access_control: m.access_control,
+									access_control: m.access_control ?? m.info?.access_control ?? null,
 									user_id: m.user_id
 								}))
 								.filter((model: { id: string; name: string }) => {
@@ -1130,13 +1123,23 @@ import { flyAndScale } from '$lib/utils/transitions';
 		jobId: string,
 		intervalMs: number,
 		label: string,
-		onProgress?: (data: any) => void
+		onProgress?: (data: any) => void,
+		signal?: AbortSignal
 	) {
+		const startTime = Date.now();
 		while (true) {
+			if (signal?.aborted) {
+				throw new Error('Polling aborted');
+			}
+			// Timeout guard: if polling exceeds max duration, abort
+			if (Date.now() - startTime > POLL_TIMEOUT_MS) {
+				throw new Error(`${label} timed out after ${POLL_TIMEOUT_MS / 60000} minutes.`);
+			}
 			// Shared async job polling helper.
 			// Endpoint: GET /pipeline/status/{job_id}
 			const res = await fetch(`${AI_TUTOR_API_BASE}/pipeline/status/${encodeURIComponent(jobId)}`, {
-				headers: { Authorization: `Bearer ${localStorage.token}` }
+				headers: { Authorization: `Bearer ${localStorage.token}` },
+				signal
 			});
 			if (!res.ok) {
 				throw new Error(await parseErrorDetail(res));
@@ -1156,6 +1159,9 @@ import { flyAndScale } from '$lib/utils/transitions';
 		if (activeJobIds.has(job.jobId)) return;
 		activeJobIds.add(job.jobId);
 		markPersistedJobActive(job, true);
+		// Create an AbortController for this poll so group-switch / unmount can cancel it
+		const controller = new AbortController();
+		pollAbortControllers.set(job.jobId, controller);
 		console.info('[AI Tutor][Instructor Setup] monitor job start', {
 			jobId: job.jobId,
 			type: job.type,
@@ -1182,7 +1188,8 @@ import { flyAndScale } from '$lib/utils/transitions';
 					// Keep a refresh-safe step message per model so the status column
 					// shows which backend step is currently running.
 					setJobStep(job.modelId, data?.step ? `Step: ${data.step}` : null);
-				}
+				},
+				controller.signal
 			);
 			console.info('[AI Tutor][Instructor Setup] monitor job done', {
 				jobId: job.jobId,
@@ -1233,6 +1240,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 			markPersistedJobActive(job, false);
 			removePersistedJob(job.jobId);
 			activeJobIds.delete(job.jobId);
+			pollAbortControllers.delete(job.jobId);
 		}
 	}
 
@@ -1249,6 +1257,35 @@ import { flyAndScale } from '$lib/utils/transitions';
 			}))
 		});
 		for (const job of jobs) {
+			// Before restoring the spinner, quickly check if the job already finished
+			// while the user was on another tab/group. If so, clean it up and skip monitoring.
+			try {
+				const checkRes = await fetch(
+					`${AI_TUTOR_API_BASE}/pipeline/status/${encodeURIComponent(job.jobId)}`,
+					{ headers: { Authorization: `Bearer ${localStorage.token}` } }
+				);
+				if (checkRes.ok) {
+					const checkData = await checkRes.json();
+					if (checkData?.status === 'done' || checkData?.status === 'failed') {
+						console.info('[resumePersistedJobs] job already finished, skipping monitor', {
+							jobId: job.jobId,
+							status: checkData.status
+						});
+						removePersistedJob(job.jobId);
+						// If it was an upload, still refresh data so the UI shows the result
+						if (job.groupId === $aiTutorSelectedGroupId && (job.type === 'question-upload' || job.type === 'answer-upload')) {
+							await loadHomeworkStats(job.groupId);
+						}
+						continue;
+					}
+				}
+			} catch {
+				// Network hiccup — fall through to normal monitoring
+			}
+			if ((job.type === 'question-upload' || job.type === 'answer-upload') && job.homeworkId) {
+				const docType = job.type === 'question-upload' ? 'question' : 'answer';
+				uploadingMap = { ...uploadingMap, [`${job.homeworkId}-${docType}`]: true };
+			}
 			void monitorPersistedJob(job);
 		}
 	}
@@ -1388,7 +1425,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 					})
 				});
 			}
-			clearAITutorSessionCacheByPrefix(getInstructorSetupCacheKey('prompts', $aiTutorSelectedGroupId));
+			clearAITutorSessionCacheByGroup($aiTutorSelectedGroupId);
 			await loadPrompts($aiTutorSelectedGroupId);
 			showPromptModal = false;
 			testToast('Instructor Setup saved prompt override');
@@ -1422,7 +1459,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 				},
 				body: JSON.stringify({ is_active: false })
 			});
-			clearAITutorSessionCacheByPrefix(getInstructorSetupCacheKey('prompts', $aiTutorSelectedGroupId));
+			clearAITutorSessionCacheByGroup($aiTutorSelectedGroupId);
 			await loadPrompts($aiTutorSelectedGroupId);
 			showPromptModal = false;
 			testToast('Instructor Setup reset prompt to default');
@@ -1591,6 +1628,11 @@ import { flyAndScale } from '$lib/utils/transitions';
 			return;
 		}
 		const key = hwId ? `${hwId}-${docType}` : `draft-${draftUid ?? 0}-${docType}`;
+		// Guard against double-click / concurrent upload for the same homework+docType
+		if (uploadingMap[key]) {
+			console.log('[uploadPdf] already uploading, ignoring duplicate', key);
+			return;
+		}
 		uploadingMap = { ...uploadingMap, [key]: true };
 		if (useFrontendTestingData) {
 			await new Promise((resolve) => setTimeout(resolve, 400));
@@ -1692,7 +1734,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 				homeworkId: hwId,
 				fileName: file.name
 			};
-			clearAITutorSessionCacheByPrefix(getInstructorSetupCacheKey('homework-stats', $aiTutorSelectedGroupId));
+			clearAITutorSessionCacheByGroup($aiTutorSelectedGroupId);
 			upsertPersistedJob(persistedJob);
 			toast.success(`${docType === 'question' ? 'Homework' : 'Answer'} upload started.`);
 			await monitorPersistedJob(persistedJob);
@@ -1732,7 +1774,6 @@ import { flyAndScale } from '$lib/utils/transitions';
 	let runOnlyUpdatedHomeworks = false;
 	let showRunHomeworkDropdown = false;
 	let selectedRunHomeworks = new Set<string>();
-	let runningAnalysis = false;
 	let runStep = '';
 	type AnalysisRecord = {
 		contents: string;
@@ -1942,7 +1983,6 @@ import { flyAndScale } from '$lib/utils/transitions';
 			toast.error('Select a homework before running analysis.');
 			return;
 		}
-		runningAnalysis = true;
 		runningAnalysisByHomeworkId = { ...runningAnalysisByHomeworkId, [targetHomeworkId]: true };
 		const startedAt = new Date().toLocaleTimeString();
 		const steps = ['Started', 'Collecting conversation history', 'PDF converting', 'Analysing'];
@@ -1956,7 +1996,6 @@ import { flyAndScale } from '$lib/utils/transitions';
 			await new Promise((resolve) => setTimeout(resolve, 900));
 			clearInterval(stepTimer);
 			runStep = '';
-			runningAnalysis = false;
 			analysisHistory = [
 				{
 					contents,
@@ -2000,12 +2039,12 @@ import { flyAndScale } from '$lib/utils/transitions';
 					modelId: row?.modelId ?? targetHomeworkId,
 					homeworkId: targetHomeworkId
 				};
-				clearAITutorSessionCacheByPrefix(getInstructorSetupCacheKey('homework-stats', $aiTutorSelectedGroupId));
+				clearAITutorSessionCacheByGroup($aiTutorSelectedGroupId);
 				upsertPersistedJob(persistedJob);
 				testToast('Instructor Setup run analysis request submitted');
 				toast.success('Analysis started successfully.');
 				await monitorPersistedJob(persistedJob);
-				clearAITutorSessionCacheByPrefix(getInstructorSetupCacheKey('homework-stats', $aiTutorSelectedGroupId));
+				clearAITutorSessionCacheByGroup($aiTutorSelectedGroupId);
 				await loadHomeworkStats($aiTutorSelectedGroupId);
 				analysisHistory = [
 					{ contents, startedAt, completedAt: new Date().toLocaleTimeString(), failed: false },
@@ -2028,7 +2067,6 @@ import { flyAndScale } from '$lib/utils/transitions';
 		} finally {
 			clearInterval(stepTimer);
 			runStep = '';
-			runningAnalysis = false;
 			runningAnalysisByHomeworkId = { ...runningAnalysisByHomeworkId, [targetHomeworkId]: false };
 		}
 	}
@@ -2208,6 +2246,14 @@ import { flyAndScale } from '$lib/utils/transitions';
 
 			{#if showErrorTypeConfiguration}
 			<div class="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
+				{#if hasLoadedHomework && homeworkFileRows.length === 0}
+					<div class="flex items-center justify-center min-h-[10rem]">
+						<p class="text-sm text-gray-400 dark:text-gray-500 text-center">
+							It seems like there's no homework model for this group yet.<br />
+							Please prepare your homework model first.
+						</p>
+					</div>
+				{:else}
 				<!-- Action Buttons Row -->
 				<div class="flex flex-wrap items-center justify-end gap-2 mb-4">
 					<!-- [Big Button] Add -->
@@ -2373,6 +2419,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 						{justSavedErrorTypes ? 'Saved' : 'Save'}
 					</button>
 				</div>
+				{/if}
 			</div>
 			{/if}
 		</div>
@@ -2431,6 +2478,13 @@ import { flyAndScale } from '$lib/utils/transitions';
 									</td>
 								</tr>
 							{:else}
+							{#if homeworkFileRows.length === 0}
+								<tr class="bg-white dark:bg-gray-900 text-xs">
+									<td colspan="6" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">
+										No homework models are found for this group.
+									</td>
+								</tr>
+							{:else}
 								{#each homeworkFileRows as row, i (row.id)}
 									<tr
 										class="bg-white dark:bg-gray-900 text-xs border-t border-gray-100 dark:border-gray-850 hover:bg-gray-50 dark:hover:bg-gray-800 transition"
@@ -2445,37 +2499,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 											<div class={homeworkModelNameCellClass}>{row.displayModelName}</div>
 										</td>
 										<td class="px-3 py-1">
-											{#if row.questionUploaded && !uploadingMap[`${row.id}-question`]}
-												<div class="flex items-center gap-1.5">
-													<label class="cursor-pointer">
-														<input
-															type="file"
-															accept=".pdf"
-															class="hidden"
-															on:change={makeUploadHandler(row.id, 'question', row.modelId)}
-														/>
-														<span
-															class="inline-flex items-center justify-center rounded-full border border-[#57068C]/40 p-1 text-[#57068C] transition hover:bg-purple-50 dark:border-purple-700 dark:text-purple-400 dark:hover:bg-purple-900/20"
-														>
-															<svg
-																xmlns="http://www.w3.org/2000/svg"
-																fill="none"
-																viewBox="0 0 24 24"
-																stroke-width="1.8"
-																stroke="currentColor"
-																class="h-3.5 w-3.5"
-															>
-																<path
-																	stroke-linecap="round"
-																	stroke-linejoin="round"
-																	d="M12 16.5V4.5m0 0 4.5 4.5M12 4.5 7.5 9M4.5 19.5h15"
-																/>
-															</svg>
-														</span>
-													</label>
-													<div class="max-w-[8rem] truncate text-xs text-gray-500 dark:text-gray-400">{row.questionFileName ?? `homework_${i + 1}_questions.pdf`}</div>
-												</div>
-											{:else}
+											<div class="flex items-center gap-1.5">
 												<label class="cursor-pointer">
 													<input
 														type="file"
@@ -2502,40 +2526,15 @@ import { flyAndScale } from '$lib/utils/transitions';
 														</svg>
 													</span>
 												</label>
-											{/if}
+												{#if uploadingMap[`${row.id}-question`]}
+													<Hourglass className="size-3.5 text-gray-400 dark:text-gray-500" />
+												{:else if row.questionUploaded}
+													<span class="text-xs text-gray-500 dark:text-gray-400">Uploaded</span>
+												{/if}
+											</div>
 										</td>
 										<td class="px-3 py-1">
-											{#if row.answerUploaded && !uploadingMap[`${row.id}-answer`]}
-												<div class="flex items-center gap-1.5">
-													<label class="cursor-pointer">
-														<input
-															type="file"
-															accept=".pdf"
-															class="hidden"
-															on:change={makeUploadHandler(row.id, 'answer', row.modelId)}
-														/>
-														<span
-															class="inline-flex items-center justify-center rounded-full border border-[#57068C]/40 p-1 text-[#57068C] transition hover:bg-purple-50 dark:border-purple-700 dark:text-purple-400 dark:hover:bg-purple-900/20"
-														>
-															<svg
-																xmlns="http://www.w3.org/2000/svg"
-																fill="none"
-																viewBox="0 0 24 24"
-																stroke-width="1.8"
-																stroke="currentColor"
-																class="h-3.5 w-3.5"
-															>
-																<path
-																	stroke-linecap="round"
-																	stroke-linejoin="round"
-																	d="M12 16.5V4.5m0 0 4.5 4.5M12 4.5 7.5 9M4.5 19.5h15"
-																/>
-															</svg>
-														</span>
-													</label>
-													<div class="max-w-[8rem] truncate text-xs text-gray-500 dark:text-gray-400">{row.answerFileName ?? `homework_${i + 1}_answers.pdf`}</div>
-												</div>
-											{:else}
+											<div class="flex items-center gap-1.5">
 												<label class="cursor-pointer">
 													<input
 														type="file"
@@ -2562,7 +2561,16 @@ import { flyAndScale } from '$lib/utils/transitions';
 														</svg>
 													</span>
 												</label>
-											{/if}
+												{#if uploadingMap[`${row.id}-answer`]}
+													<Hourglass className="size-3.5 text-gray-400 dark:text-gray-500" />
+												{:else if row.answerUploaded}
+													{#if row.answerSource === 'ai_generated'}
+														<span class="text-xs text-gray-500 dark:text-gray-400">Generated</span>
+													{:else}
+														<span class="text-xs text-gray-500 dark:text-gray-400">Uploaded</span>
+													{/if}
+												{/if}
+											</div>
 										</td>
 										<td class="w-[6rem] px-3 py-1 text-gray-700 dark:text-gray-300">
 											<div class="flex items-center gap-1.5">
@@ -2620,6 +2628,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 										</td>
 									</tr>
 								{/each}
+							{/if}
 							{/if}
 
 							<!-- Draft rows (always rendered, outside group conditional) -->
@@ -2833,11 +2842,11 @@ import { flyAndScale } from '$lib/utils/transitions';
 					</div>
 					<button
 						on:click={runAnalysis}
-						disabled={selectedRunHomeworks.size === 0 || runningAnalysis}
+						disabled={selectedRunHomeworks.size === 0 || Object.values(runningAnalysisByHomeworkId).some(Boolean)}
 						class="rounded-full border border-gray-300 px-3 py-1.5 text-left text-xs font-semibold text-gray-800 transition hover:border-gray-400 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-gray-600 dark:text-gray-200 dark:hover:border-gray-500 dark:hover:bg-gray-800"
 					>
 						<div class="flex items-center gap-2">
-							<span>{runningAnalysis ? 'Running…' : 'Run'}</span>
+							<span>{Object.values(runningAnalysisByHomeworkId).some(Boolean) ? 'Running…' : 'Run'}</span>
 						</div>
 						{#if runStep}
 							<div class="mt-1.5 text-xs text-gray-400 dark:text-gray-500 flex items-center gap-1">

@@ -6,6 +6,7 @@
 	import { checkIfSuperAdmin } from '$lib/apis/users';
 	import { getGroups } from '$lib/apis/groups';
 	import { showAITutorTestToast } from '$lib/utils/aiTutorTesting';
+	import { loadWorkspaceModels } from '$lib/stores/aiTutorWorkspaceModels';
 
 	import { DropdownMenu } from 'bits-ui';
 	import { flyAndScale } from '$lib/utils/transitions';
@@ -44,7 +45,7 @@
 
 	function buildDashboardHref(pathname: string) {
 		const params = new URLSearchParams();
-		const groupId = selectedGroupId;
+		const groupId = $aiTutorSelectedGroupId || selectedGroupId;
 		if (groupId) {
 			params.set('group_id', groupId);
 		}
@@ -135,6 +136,13 @@
 			} catch (error) {
 				showAITutorTestToast('aitutordashboard layout failed loading groups');
 				console.error('Error loading groups:', error);
+			}
+
+			// Load workspace models for unified homework filtering across all tabs
+			try {
+				await loadWorkspaceModels(localStorage.token);
+			} catch (error) {
+				console.error('Error loading workspace models:', error);
 			}
 		}
 	});
@@ -442,7 +450,6 @@
 									? 'font-semibold text-[#57068c] dark:text-white'
 									: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
 								href={buildDashboardHref(tab.path)}
-								on:click|preventDefault={() => goto(buildDashboardHref(tab.path))}
 							>
 								{tab.label}
 							</a>

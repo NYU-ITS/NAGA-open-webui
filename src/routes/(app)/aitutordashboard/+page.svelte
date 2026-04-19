@@ -2,6 +2,7 @@
 	import { onMount, tick } from 'svelte';
 	import { page } from '$app/stores';
 	import { aiTutorSelectedGroupId } from '$lib/stores';
+	import { aiTutorAllowedModelIds } from '$lib/stores/aiTutorWorkspaceModels';
 	import { toast } from 'svelte-sonner';
 	import {
 		AI_TUTOR_API_BASE_URL,
@@ -13,6 +14,7 @@
 	import { showAITutorTestToast } from '$lib/utils/aiTutorTesting';
 	import {
 		clearAITutorSessionCacheByPrefix,
+		clearAITutorSessionCacheByGroup,
 		loadWithAITutorSessionCache
 	} from '$lib/utils/aiTutorSessionCache';
 	import ChevronUp from '$lib/components/icons/ChevronUp.svelte';
@@ -61,7 +63,12 @@
 	};
 
 	let homeworkRows: HomeworkRow[] = [];
-	let availableModels: { id: string; name: string }[] = [];
+	let availableModels: {
+		id: string;
+		name: string;
+		access_control?: { read?: { group_ids?: string[] } };
+		user_id?: string;
+	}[] = [];
 	let convCountByModelId: Record<string, number> = {};
 	let uploadingMap: Record<string, boolean> = {};
 	let exportingConversationMap: Record<string, boolean> = {};
@@ -312,15 +319,6 @@ const bannerPlaceholderTime = 'TEST-TIME';
 	$: avgSolvedChart = chartPoints(homeworkStats.map((s) => s.avgSolved));
 	$: avgAttemptedChart = chartPoints(homeworkStats.map((s) => s.avgAttempted));
 	$: combinedChart = combinedChartPoints(homeworkStats.map((s) => s.avgSolved), homeworkStats.map((s) => s.avgAttempted));
-	// Subscribe to store for group changes - prevents flash of wrong group data
-	$: if ($aiTutorSelectedGroupId && $aiTutorSelectedGroupId !== lastSyncedGroupId) {
-		lastSyncedGroupId = $aiTutorSelectedGroupId;
-		void loadHomeworkStats($aiTutorSelectedGroupId);
-		void loadConversationCounts($aiTutorSelectedGroupId);
-		void loadErrorTypes($aiTutorSelectedGroupId);
-		void loadPrompts($aiTutorSelectedGroupId);
-	}
-
 	// ── Data fetching ─────────────────────────────────────────────────────────
 	onMount(async () => {
 		// Page: AI Tutor Dashboard Summary
@@ -345,12 +343,21 @@ const bannerPlaceholderTime = 'TEST-TIME';
 
 	// Reset per-homework action state whenever the selected group changes so that
 	// in-progress indicators from a previous group never bleed into the new one.
-	$: if ($aiTutorSelectedGroupId && $aiTutorSelectedGroupId !== _prevGroupIdForReset) {
+	$: if ($aiTutorSelectedGroupId !== _prevGroupIdForReset) {
 		_prevGroupIdForReset = $aiTutorSelectedGroupId;
 		uploadingMap = {};
 		exportingConversationMap = {};
 		runningAnalysisByHomeworkId = {};
 		draftRows = [];
+		homeworkRows = [];
+		homeworkStats = [];
+		// When switching to a non-empty group, trigger data loads.
+		if ($aiTutorSelectedGroupId) {
+			void loadHomeworkStats($aiTutorSelectedGroupId);
+			void loadConversationCounts($aiTutorSelectedGroupId);
+			void loadErrorTypes($aiTutorSelectedGroupId);
+			void loadPrompts($aiTutorSelectedGroupId);
+		}
 	}
 
 async function loadHomeworkStats(groupId: string) {
@@ -371,8 +378,16 @@ async function loadHomeworkStats(groupId: string) {
 			homeworkStats: HomeworkStat[];
 			homeworkRows: HomeworkRow[];
 		}) => {
-			homeworkStats = snapshot.homeworkStats;
-			homeworkRows = snapshot.homeworkRows;
+			const allowedIds = $aiTutorAllowedModelIds;
+			const filteredRows = snapshot.homeworkRows.filter(
+				(row) => row.modelId && allowedIds.has(row.modelId)
+			);
+			const filteredStats = snapshot.homeworkStats.filter((stat) => {
+				const row = snapshot.homeworkRows.find((r) => r.id === stat.homework);
+				return row?.modelId && allowedIds.has(row.modelId);
+			});
+			homeworkStats = filteredStats;
+			homeworkRows = filteredRows;
 			if (homeworkStats.length > 0 && selectedRunHomeworks.size === 0) {
 				selectedRunHomeworks = new Set(homeworkStats.map((stat) => stat.homework));
 				syncRunSelectionFlags();
@@ -519,6 +534,7 @@ async function loadHomeworkStats(groupId: string) {
 				}
 			});
 			if ($aiTutorSelectedGroupId !== groupId) return; // stale — group changed while loading
+			console.log('[Summary loadHomeworkStats] loaded for group', groupId, { homeworkCount: snapshot.homeworkRows.length, modelIds: snapshot.homeworkRows.map((r) => r.modelId) });
 			applySummarySnapshot(snapshot);
 		} catch (error) {
 			testToast('Summary failed loading /homework data');
@@ -544,11 +560,28 @@ async function loadModels() {
 		const data = await res.json();
 		availableModels = Array.isArray(data?.data)
 			? data.data
-					.map((m: any) => ({ id: m.id, name: m.name ?? m.id }))
-					.filter((model: { id: string; name: string }) => {
+					.map((m: any) => ({
+						id: m.id,
+						name: m.name ?? m.id,
+						base_model_id: m.info?.base_model_id ?? m.base_model_id ?? null,
+						access_control: m.access_control ?? m.info?.access_control ?? null,
+						user_id: m.user_id
+					}))
+					.filter((model) => {
+						// Only workspace models (derived from a base model) are homework candidates.
+						if (model.base_model_id == null) return false;
+						// Homework workspace models only.
+						if (!(model.name ?? model.id).toLowerCase().includes('homework')) return false;
 						// Mastery-prefixed workspace models are generated practice-chat clones
 						// and should stay out of the instructor homework candidate list.
-						return !(model.name ?? model.id).startsWith('Mastery');
+						if ((model.name ?? model.id).startsWith('Mastery')) return false;
+						// Group-scoped filtering: only show models explicitly assigned to
+						// the current group. Unassigned (PRIVATE) models are hidden everywhere.
+						const groupIds = model.access_control?.read?.group_ids ?? [];
+						if (groupIds.length > 0) {
+							return groupIds.includes($aiTutorSelectedGroupId);
+						}
+						return false;
 					})
 			: [];
 
@@ -743,21 +776,28 @@ async function parseErrorDetail(response: Response) {
 	return `Request failed: ${response.status}`;
 }
 
-async function pollPipelineJob(jobId: string, intervalMs: number, label: string) {
-	while (true) {
-		// Shared async job polling helper.
-		// Endpoint: GET /pipeline/status/{job_id}
-		const res = await fetch(`${AI_TUTOR_API_BASE}/pipeline/status/${encodeURIComponent(jobId)}`, {
-			headers: { Authorization: `Bearer ${localStorage.token}` }
-		});
-		if (!res.ok) throw new Error(await parseErrorDetail(res));
-		const data = await res.json();
-		testToast(`${label} check | job=${jobId} | status=${data?.status ?? 'unknown'} | step=${data?.step ?? 'unknown'}`);
-		if (data?.status === 'done') return data;
-		if (data?.status === 'failed') throw new Error(data?.error || `${label} failed.`);
-		await sleep(intervalMs);
+	const POLL_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes max polling
+
+	async function pollPipelineJob(jobId: string, intervalMs: number, label: string) {
+		const startTime = Date.now();
+		while (true) {
+			// Timeout guard: if polling exceeds max duration, abort
+			if (Date.now() - startTime > POLL_TIMEOUT_MS) {
+				throw new Error(`${label} timed out after ${POLL_TIMEOUT_MS / 60000} minutes.`);
+			}
+			// Shared async job polling helper.
+			// Endpoint: GET /pipeline/status/{job_id}
+			const res = await fetch(`${AI_TUTOR_API_BASE}/pipeline/status/${encodeURIComponent(jobId)}`, {
+				headers: { Authorization: `Bearer ${localStorage.token}` }
+			});
+			if (!res.ok) throw new Error(await parseErrorDetail(res));
+			const data = await res.json();
+			testToast(`${label} check | job=${jobId} | status=${data?.status ?? 'unknown'} | step=${data?.step ?? 'unknown'}`);
+			if (data?.status === 'done') return data;
+			if (data?.status === 'failed') throw new Error(data?.error || `${label} failed.`);
+			await sleep(intervalMs);
+		}
 	}
-}
 
 async function ensureConversationsExported(homeworkId: string, modelId: string | null) {
 	if (useFrontendTestingData) return true;
@@ -891,7 +931,7 @@ async function savePromptOverride() {
 				})
 			});
 		}
-		clearAITutorSessionCacheByPrefix(`summary:${$aiTutorSelectedGroupId}:tutor-prompts`);
+		clearAITutorSessionCacheByGroup($aiTutorSelectedGroupId);
 		await loadPrompts($aiTutorSelectedGroupId);
 		showPromptModal = false;
 		testToast('Summary saved prompt override');
@@ -925,7 +965,7 @@ async function useDefaultPrompt() {
 			},
 			body: JSON.stringify({ is_active: false })
 		});
-		clearAITutorSessionCacheByPrefix(`summary:${$aiTutorSelectedGroupId}:tutor-prompts`);
+		clearAITutorSessionCacheByGroup($aiTutorSelectedGroupId);
 		await loadPrompts($aiTutorSelectedGroupId);
 		showPromptModal = false;
 		testToast('Summary reset prompt to default');
@@ -969,7 +1009,7 @@ async function persistErrorTypes() {
 			saved = res.ok;
 		}
 		if (saved) {
-			clearAITutorSessionCacheByPrefix(`summary:${$aiTutorSelectedGroupId}:error-types`);
+			clearAITutorSessionCacheByGroup($aiTutorSelectedGroupId);
 			originalErrorTypeDefs = draftErrorTypeDefs;
 			justSavedErrorTypes = true;
 			if (saveSuccessTimeout) clearTimeout(saveSuccessTimeout);
@@ -1053,6 +1093,11 @@ async function uploadPdf(hwId: string | null, docType: 'question' | 'answer', mo
 		return;
 	}
 	const key = hwId ? `${hwId}-${docType}` : `draft-${draftUid ?? 0}-${docType}`;
+	// Guard against double-click / concurrent upload for the same homework+docType
+	if (uploadingMap[key]) {
+		console.log('[uploadPdf] already uploading, ignoring duplicate', key);
+		return;
+	}
 	uploadingMap = { ...uploadingMap, [key]: true };
 	if (useFrontendTestingData) {
 		await new Promise((resolve) => setTimeout(resolve, 400));
@@ -1139,7 +1184,7 @@ async function uploadPdf(hwId: string | null, docType: 'question' | 'answer', mo
 		await pollPipelineJob(jobId, 3000, `${docType} upload`);
 		toast.success(`${docType === 'question' ? 'Homework' : 'Answer'} upload completed.`);
 		if (hwId === null && draftUid !== undefined) draftRows = draftRows.filter(d => d.uid !== draftUid);
-		clearAITutorSessionCacheByPrefix(`summary:${$aiTutorSelectedGroupId}:homework-stats`);
+		clearAITutorSessionCacheByGroup($aiTutorSelectedGroupId);
 		await loadHomeworkStats($aiTutorSelectedGroupId);
 	} catch (e) {
 		toast.error(e instanceof Error ? e.message : 'Upload failed.');
@@ -1314,7 +1359,7 @@ async function runAnalysis() {
 			await pollPipelineJob(jobId, 10000, 'analysis run');
 			toast.success('Analysis completed.');
 			analysisHistory = [{ contents, startedAt, completedAt: new Date().toLocaleTimeString(), failed: false }, ...analysisHistory];
-			clearAITutorSessionCacheByPrefix(`summary:${$aiTutorSelectedGroupId}:homework-stats`);
+			clearAITutorSessionCacheByGroup($aiTutorSelectedGroupId);
 			await loadHomeworkStats($aiTutorSelectedGroupId);
 		} else {
 			toast.error(await parseErrorDetail(res));

@@ -3,6 +3,7 @@
 	import { toast } from 'svelte-sonner';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
+	import { aiTutorAllowedModelIds } from '$lib/stores/aiTutorWorkspaceModels';
 	import { createNewModel, getModelById, updateModelById } from '$lib/apis/models/index';
 	import {
 		addFileToKnowledgeById,
@@ -982,7 +983,7 @@
 			throw new Error('Homework fetch failed');
 		}
 		const data = await response.json();
-		homeworkRows = Array.isArray(data)
+		const nextHomeworkRows = Array.isArray(data)
 			? data.map((hw: any) => ({
 					id: hw.id,
 					modelId: hw.model_id ?? null,
@@ -991,9 +992,13 @@
 					topicMapped: hw.topic_mapped ?? false
 				}))
 			: [];
+		const allowedIds = $aiTutorAllowedModelIds;
+		homeworkRows = nextHomeworkRows.filter(
+			(row) => row.modelId && allowedIds.has(row.modelId)
+		);
 		homeworkOptions = homeworkRows.map((row) => row.id);
 		homeworkLabelsById = Object.fromEntries(
-			(Array.isArray(data) ? data : []).map((hw: any) => [hw.id, hw.model_id ?? hw.id])
+			homeworkRows.map((row) => [row.id, row.modelId ?? row.id])
 		);
 		const nextHomeworkIdsWithAnalysis = new Set<string>();
 		await Promise.all(

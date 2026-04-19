@@ -1,7 +1,8 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, onDestroy } from 'svelte';
 	import { page } from '$app/stores';
 	import { aiTutorSelectedGroupId } from '$lib/stores';
+	import { aiTutorAllowedModelIds } from '$lib/stores/aiTutorWorkspaceModels';
 	import { toast } from 'svelte-sonner';
 	import {
 		AI_TUTOR_API_BASE_URL,
@@ -11,7 +12,10 @@
 	import { getUsers } from '$lib/apis/users';
 	import { getGroupById } from '$lib/apis/groups';
 	import { showAITutorTestToast } from '$lib/utils/aiTutorTesting';
-	import { loadWithAITutorSessionCache } from '$lib/utils/aiTutorSessionCache';
+	import {
+		clearAITutorSessionCacheByGroup,
+		loadWithAITutorSessionCache
+	} from '$lib/utils/aiTutorSessionCache';
 	import ChevronUp from '$lib/components/icons/ChevronUp.svelte';
 	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
 	import Search from '$lib/components/icons/Search.svelte';
@@ -157,9 +161,16 @@ import Tooltip from '$lib/components/common/Tooltip.svelte';
 $: isFilterActive = selectedHomework !== 'All' || search.trim() !== '';
 
 	// Subscribe to store for group changes - prevents flash of wrong group data
-	$: if (initialized && $aiTutorSelectedGroupId && $aiTutorSelectedGroupId !== lastSyncedGroupId) {
+	$: if (initialized && $aiTutorSelectedGroupId !== lastSyncedGroupId) {
 		lastSyncedGroupId = $aiTutorSelectedGroupId;
-		void syncStudentAnalysisData($aiTutorSelectedGroupId);
+		// Clear group-scoped data when switching away so stale rows don't persist
+		homeworkOptions = [];
+		homeworkMetaById = {};
+		studentData = [];
+		selectedGroupUserIds = [];
+		if ($aiTutorSelectedGroupId) {
+			void syncStudentAnalysisData($aiTutorSelectedGroupId);
+		}
 	}
 
 	onMount(async () => {
@@ -183,7 +194,21 @@ $: isFilterActive = selectedHomework !== 'All' || search.trim() !== '';
 			selectedGroupUserIds = frontendTestingStudentRows.map((row) => row.studentId);
 			return;
 		}
+		document.addEventListener('visibilitychange', handleVisibilityChange);
 	});
+
+	onDestroy(() => {
+		document.removeEventListener('visibilitychange', handleVisibilityChange);
+	});
+
+	function handleVisibilityChange() {
+		if (document.visibilityState === 'visible' && !useFrontendTestingData && $aiTutorSelectedGroupId) {
+			// When returning to this tab, invalidate cache and force refresh
+			// so that changes made on other pages (Instructor Setup / Summary) are visible.
+			clearAITutorSessionCacheByGroup($aiTutorSelectedGroupId);
+			void syncStudentAnalysisData($aiTutorSelectedGroupId);
+		}
+	}
 
 
 
@@ -303,8 +328,13 @@ $: isFilterActive = selectedHomework !== 'All' || search.trim() !== '';
 						}))
 					: [];
 
+				const allowedIds = $aiTutorAllowedModelIds;
+				const filteredOptions = nextOptions.filter(
+					(opt) => opt.model_id && allowedIds.has(opt.model_id)
+				);
+
 				testToast('Student Analysis loaded homework list');
-				return nextOptions;
+				return filteredOptions;
 			}
 		});
 	}
@@ -674,30 +704,31 @@ $: isFilterActive = selectedHomework !== 'All' || search.trim() !== '';
 								<td class="px-3 py-1 text-gray-700 dark:text-gray-300">
 									<div class={homeworkModelNameCellClass}>{getHomeworkModelName(student.homeworkId)}</div>
 								</td>
-								<td class="px-3 py-1 text-gray-700 dark:text-gray-300">
-									{#if student.avgAccuracy == null}
-										Analysis Unavailable
-									{:else}
+								{#if !student.hasAnalysis}
+									<td colspan="3" class="px-3 py-1 text-center text-gray-400 dark:text-gray-500">
+										The analysis of this student&apos;s homework hasn&apos;t been available
+									</td>
+								{:else}
+									<td class="px-3 py-1 text-gray-700 dark:text-gray-300">
 										{student.avgAccuracy.toFixed(1)}%
-									{/if}
-								</td>
-								<td class="px-3 py-1 text-gray-700 dark:text-gray-300">
-											<Tooltip content={student.topicsToImprove} placement="top">
-												<div class="max-w-[16rem] truncate cursor-default">{student.topicsToImprove}</div>
-											</Tooltip>
-										</td>
-								<td class="px-3 py-1 text-gray-700 dark:text-gray-300">
-									<!-- [Table Button: icon+name] Download Report -->
-									<button
-										type="button"
-										class="inline-flex items-center gap-1 rounded-full border border-gray-300 px-2.5 py-1 text-xs font-bold text-gray-600 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-600 dark:text-gray-400 dark:hover:bg-gray-800"
-										disabled={!student.hasAnalysis}
-										on:click={() => downloadStudentReport(student)}
-									>
-										<svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5m0 0l5-5m-5 5V4" /></svg>
-										Download Report
-									</button>
-								</td>
+									</td>
+									<td class="px-3 py-1 text-gray-700 dark:text-gray-300">
+										<Tooltip content={student.topicsToImprove} placement="top">
+											<div class="max-w-[16rem] truncate cursor-default">{student.topicsToImprove}</div>
+										</Tooltip>
+									</td>
+									<td class="px-3 py-1 text-gray-700 dark:text-gray-300">
+										<!-- [Table Button: icon+name] Download Report -->
+										<button
+											type="button"
+											class="inline-flex items-center gap-1 rounded-full border border-gray-300 px-2.5 py-1 text-xs font-bold text-gray-600 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-600 dark:text-gray-400 dark:hover:bg-gray-800"
+											on:click={() => downloadStudentReport(student)}
+										>
+											<svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5m0 0l5-5m-5 5V4" /></svg>
+											Download Report
+										</button>
+									</td>
+								{/if}
 							</tr>
 						{/each}
 					{/if}
