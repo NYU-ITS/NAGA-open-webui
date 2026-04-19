@@ -4,6 +4,7 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { aiTutorAllowedModelIds } from '$lib/stores/aiTutorWorkspaceModels';
+	import { aiTutorSelectedGroupId } from '$lib/stores';
 	import { createNewModel, getModelById, updateModelById } from '$lib/apis/models/index';
 	import {
 		addFileToKnowledgeById,
@@ -68,6 +69,7 @@
 	const fallbackStudents = ['Alice Chen', 'Marco Patel', 'Nina Johnson', 'Leo Garcia'];
 
 	let groupId = '';
+	let _prevGroupIdForReset = '';
 	let homeworkOptions: string[] = [];
 	let homeworkLabelsById: Record<string, string> = {};
 	let homeworkRows: {
@@ -1397,6 +1399,28 @@
 			}))
 		});
 	});
+
+	// Reload data when the selected group changes
+	$: if (!useFrontendTestingData && $aiTutorSelectedGroupId && $aiTutorSelectedGroupId !== _prevGroupIdForReset) {
+		_prevGroupIdForReset = $aiTutorSelectedGroupId;
+		// Reset per-group state so data from a previous group never bleeds into the new one
+		hasLoadedPracticeOnce = false;
+		hasLoadedReviewHomeworksOnce = false;
+		homeworkRows = [];
+		homeworkOptions = [];
+		homeworkLabelsById = {};
+		homeworkIdsWithAnalysis = new Set();
+		practiceQuestions = [];
+		reviewHomeworks = [];
+		currentHomeworkIndex = 0;
+		// Load data for the new group
+		void (async () => {
+			await loadHomeworkPipelineData($aiTutorSelectedGroupId);
+			await loadPracticeQuestionData();
+			const requestedHomeworkId = $page.url.searchParams.get('homework_id') ?? homeworkOptions[0] ?? '';
+			await loadReviewHomeworkCollection($aiTutorSelectedGroupId, requestedHomeworkId);
+		})();
+	}
 
 	$: if (!useFrontendTestingData && groupId) {
 		restorePersistedPracticeJobs();

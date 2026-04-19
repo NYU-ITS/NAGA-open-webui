@@ -44,13 +44,9 @@
 	}
 
 	function buildDashboardHref(pathname: string) {
-		const params = new URLSearchParams();
-		const groupId = $aiTutorSelectedGroupId || selectedGroupId;
-		if (groupId) {
-			params.set('group_id', groupId);
-		}
-		const query = params.toString();
-		return query ? `${pathname}?${query}` : pathname;
+		const url = new URL($page.url);
+		url.pathname = pathname;
+		return url.toString();
 	}
 
 	function getPersistedGroupId() {
@@ -157,6 +153,7 @@
 
 	async function selectGroup(group) {
 		lastSelectedGroupId = group.id;
+		aiTutorSelectedGroupId.set(group.id);
 		if (typeof localStorage !== 'undefined') {
 			localStorage.setItem(LAST_AI_TUTOR_GROUP_STORAGE_KEY, group.id);
 		}
@@ -423,6 +420,7 @@
 								? 'font-semibold text-[#57068c] dark:text-white'
 								: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
 							href={buildDashboardHref('/aitutordashboard/instructorsetup')}
+							on:click|preventDefault={() => goto(buildDashboardHref('/aitutordashboard/instructorsetup'))}
 						>
 							Instructor Setup
 						</a>
@@ -450,6 +448,7 @@
 									? 'font-semibold text-[#57068c] dark:text-white'
 									: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
 								href={buildDashboardHref(tab.path)}
+								on:click|preventDefault={() => goto(buildDashboardHref(tab.path))}
 							>
 								{tab.label}
 							</a>
