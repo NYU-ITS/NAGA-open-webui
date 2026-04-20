@@ -22,8 +22,9 @@ This document explains how the new complex PDF pipeline works in NAGA/Open WebUI
   - table blocks (as markdown),
   - image crops (in-memory, base64 PNG).
 6. Image crops are passed to `describe_images_with_task_model(...)`, which calls chat completion with multimodal payload.
-7. Figure descriptions are inserted into page content as `[Figure N | Page M] ...`.
-8. Combined page content is saved to `file.data.content`, chunked, embedded, and written to vector collections.
+7. Each image crop carries a nearby-text snippet from the same page so the vision model can use document terminology from surrounding text while staying grounded in the visible crop.
+8. Figure descriptions are inserted into page content as `[Figure N | Page M] ...`.
+9. Combined page content is saved to `file.data.content`, chunked, embedded, and written to vector collections.
 
 ## Code Entry Points
 
@@ -57,7 +58,7 @@ Configured in:
 Extracted PDF images are **not persisted as separate files** by the complex parser.
 
 - They are held in-memory as `PageImage` objects:
-  - `image_id`, `top_norm`, `width`, `height`, `png_base64`.
+  - `image_id`, `top_norm`, `width`, `height`, `png_base64`, `context_text`.
 - `png_base64` is inserted directly into the LLM request as `data:image/png;base64,...`.
 
 This happens in:
@@ -78,6 +79,7 @@ Important behavior:
 - Per-page image cap: `max_images_per_page` (default 6).
 - Per-document image budget: `max_images_per_document` (default 80).
 - Blocks are merged in top-to-bottom order (`top_norm`) across text/tables/images.
+- Each extracted image now gets a nearby text window from the same page before description generation.
 - Page metadata includes:
   - `table_count`
   - `image_count`
@@ -98,22 +100,29 @@ If description is missing for an image, fallback text is inserted:
 Then it:
 
 - checks vision capability metadata if present,
-- builds a multimodal chat payload (`text` + multiple `image_url` data URLs),
+- builds a multimodal chat payload that pairs each image with nearby page text context,
 - calls `generate_chat_completion(...)`,
 - expects JSON array output, with text fallback parsing if needed.
 
 Operational log line to verify usage:
 
-- `PDF image description request | user=... | page=... | model=... | images=...`
+- `PDF image description request | user=... | page=... | model=... | images=... | context_chars=...`
 
 ## Current Image Description Prompt Location
 
 The exact prompt used for PDF image description is hardcoded in:
 
 - `backend/open_webui/retrieval/loaders/pdf_complex.py`
-- variable: `prompt` inside `describe_images_with_task_model(...)`
+- helper: `_build_image_description_content(...)`
 
 This is the place to edit if you want different description style/length/format.
+
+Current prompt behavior:
+
+- explicitly tells the model to stay grounded in visible evidence,
+- uses nearby page text for terminology and topic grounding,
+- tells the model not to invent hands/people/extra objects unless clearly visible,
+- tells the model not to guess a different instrument when the crop is ambiguous.
 
 ## Fallback and Routing Behavior
 
@@ -210,4 +219,3 @@ If descriptions are missing, also check for:
 - `PDF image description returned empty result`
 - `image description failed`
 - placeholder text in embedding samples: `"Image content could not be described."`
-

@@ -337,18 +337,14 @@ test_frameworks/
 # Documentation fixes (not for version control)
 .documentations_fixes/
 
-# Cursor IDE files
+# Coding Agents
 .cursor/
-.cursorignore
-
-# Claude IDE files
+.codex/
 .claude/
 CLAUDE.md
+AGENTS.md
+.cursorignore
 .claudeignore
-
-# Codex IDE files
-.codex/
-.codexignore
 
 # Kubernetes manifests with hardcoded secrets (OpenShift-specific, keep local only)
 kubernetes/manifest/base/rq-worker-deployment-openshift.yaml

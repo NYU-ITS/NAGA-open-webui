@@ -22,6 +22,7 @@ class PageImage:
     width: float
     height: float
     png_base64: str
+    context_text: str = ""
 
 
 def _strip_code_fence_wrappers(text: str) -> str:
@@ -170,6 +171,93 @@ def _words_to_text(words: list[dict], tolerance: float = 3.0) -> list[tuple[floa
     return output
 
 
+def _normalize_context_line(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "")).strip()
+
+
+def _build_image_context(
+    text_blocks: list[tuple[float, str]],
+    image_top_norm: float,
+    max_lines_before: int = 6,
+    max_lines_after: int = 4,
+    max_chars: int = 1200,
+) -> str:
+    normalized_blocks = []
+    for top_norm, text in text_blocks:
+        normalized_text = _normalize_context_line(text)
+        if normalized_text:
+            normalized_blocks.append((top_norm, normalized_text))
+
+    if not normalized_blocks:
+        return ""
+
+    insertion_index = 0
+    while (
+        insertion_index < len(normalized_blocks)
+        and normalized_blocks[insertion_index][0] <= image_top_norm
+    ):
+        insertion_index += 1
+
+    start = max(0, insertion_index - max_lines_before)
+    end = min(len(normalized_blocks), insertion_index + max_lines_after)
+    selected_lines = [text for _, text in normalized_blocks[start:end]]
+
+    if not selected_lines:
+        return ""
+
+    context = "\n".join(selected_lines).strip()
+    if len(context) <= max_chars:
+        return context
+
+    trimmed_lines: list[str] = []
+    current_chars = 0
+    for line in reversed(selected_lines):
+        added_chars = len(line) + (1 if trimmed_lines else 0)
+        if trimmed_lines and current_chars + added_chars > max_chars:
+            break
+        if not trimmed_lines and len(line) > max_chars:
+            trimmed_lines.append(line[:max_chars].rstrip())
+            break
+        trimmed_lines.append(line)
+        current_chars += added_chars
+
+    return "\n".join(reversed(trimmed_lines)).strip()
+
+
+def _build_image_description_content(page_number: int, images: list[PageImage]) -> list[dict[str, Any]]:
+    instruction_text = (
+        f"You are describing {len(images)} cropped figures extracted from page {page_number} of a PDF for retrieval. "
+        f"Return ONLY a JSON array with {len(images)} strings in the same order as the images.\n\n"
+        "Ground each description in what is actually visible in the crop. Use the surrounding text context to choose the correct document terminology when it matches the image, "
+        "but do not invent details that are not visible.\n\n"
+        "Rules:\n"
+        "- Prefer factual, neutral descriptions over exhaustive guessing.\n"
+        "- Do not mention hands, people, background objects, colors, or extra tools unless they are clearly visible.\n"
+        "- If the crop is a line drawing, diagram, or annotated instructional image, say so.\n"
+        "- If the context names an instrument or concept and the image is consistent with that context, use that terminology.\n"
+        "- If the image itself is ambiguous, do not guess a different instrument; use neutral wording or qualify it with the surrounding text."
+    )
+
+    content: list[dict[str, Any]] = [{"type": "text", "text": instruction_text}]
+
+    for idx, image in enumerate(images, start=1):
+        context_text = image.context_text.strip() or "No nearby page text was available for this image."
+        content.append(
+            {
+                "type": "text",
+                "text": f"Image {idx} nearby text context:\n{context_text}",
+            }
+        )
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{image.png_base64}"},
+            }
+        )
+
+    return content
+
+
 class ComplexPDFLoader:
     def __init__(
         self,
@@ -278,6 +366,9 @@ class ComplexPDFLoader:
                     page_images = page_images[:image_budget]
 
                 image_budget -= len(page_images)
+
+                for image in page_images:
+                    image.context_text = _build_image_context(text_blocks, image.top_norm)
 
                 image_blocks: list[tuple[float, str]] = []
                 if page_images and self.image_describer is not None:
@@ -402,21 +493,7 @@ def describe_images_with_task_model(
                     )
                     return []
 
-            prompt = (
-                "For each image, provide a very descriptive, detailed, and accurate account including every important and minor detail visible. "
-                "Describe all elements, objects, people, backgrounds, colors, shapes, layout, and any text or annotations present on the image. "
-                "Be exhaustive and ensure no significant visual detail is omitted. "
-                "Return ONLY a JSON array of strings describing the images in the same order as provided."
-            )
-       
-            content = [{"type": "text", "text": f"Page {page_number}. {prompt}"}]
-            for image in images:
-                content.append(
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{image.png_base64}"},
-                    }
-                )
+            content = _build_image_description_content(page_number=page_number, images=images)
 
             payload = {
                 "model": task_model_id,
@@ -429,11 +506,12 @@ def describe_images_with_task_model(
             }
 
             log.info(
-                "PDF image description request | user=%s | page=%s | model=%s | images=%s",
+                "PDF image description request | user=%s | page=%s | model=%s | images=%s | context_chars=%s",
                 user.email,
                 page_number,
                 task_model_id,
                 len(images),
+                sum(len(image.context_text or "") for image in images),
             )
             response = await generate_chat_completion(request, form_data=payload, user=user)
             response_text = (
