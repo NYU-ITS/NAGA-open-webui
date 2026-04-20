@@ -437,10 +437,15 @@ import { flyAndScale } from '$lib/utils/transitions';
 				};
 			});
 
-		console.log(
-			'[buildHomeworkFileRows] result rows:',
-			mergedRows.map((r) => r.modelId)
-		);
+		const allModelNames = allowedModels.map((m) => m.name ?? m.id);
+		const selectedRows = mergedRows.filter((r) => !r.isPlaceholder);
+		const excludedRows = mergedRows.filter((r) => r.isPlaceholder);
+		console.log('[HomeworkFilter]-[InstructorSetup]-[BuildRows]:', {
+			allModels: allModelNames,
+			selected: selectedRows.map((r) => r.displayModelName),
+			excluded: excludedRows.map((r) => ({ name: r.displayModelName, reason: 'no homework record yet' }))
+		});
+		console.log('[aitutordashboard]-[InstructorSetup]-[HomeworkRowsBuilt]:', mergedRows.map((r) => r.modelId));
 		return mergedRows;
 	}
 
@@ -632,7 +637,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 		testToast(
 			`loading aitutordashboard - Instructor Setup | group=${$aiTutorSelectedGroupId || 'pending'} | frontend_testing=${String(useFrontendTestingData)}`
 		);
-		console.log('AI Tutor Dashboard - Instructor Setup mount', {
+		console.log('[aitutordashboard]-[InstructorSetup]-[Mount]:', {
 			pathname: $page.url.pathname,
 			groupId: $aiTutorSelectedGroupId,
 			groupIdFromUrl: $page.url.searchParams.get('group_id') || ''
@@ -841,7 +846,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 						topicMapped: topicMappedByHomeworkId.get(row.id) ?? row.topicMapped ?? false
 					}));
 
-					console.log('AI Tutor Dashboard - Instructor Setup homework loaded', {
+					console.log('[aitutordashboard]-[InstructorSetup]-[HomeworkLoaded]:', {
 						groupId,
 						homeworkRows: fetchedHomeworkRows.map((row) => ({
 							id: row.id,
@@ -870,10 +875,10 @@ import { flyAndScale } from '$lib/utils/transitions';
 			homeworkRows = cached.homeworkRows;
 			homeworkStats = cached.homeworkStats;
 			hasLoadedHomework = true;
-			console.log('[loadHomeworkStats] loaded for group', groupId, { homeworkCount: homeworkRows.length, modelIds: homeworkRows.map((r) => r.modelId) });
+			console.log('[aitutordashboard]-[InstructorSetup]-[HomeworkStatsLoaded]: group=' + groupId, { homeworkCount: homeworkRows.length, modelIds: homeworkRows.map((r) => r.modelId) });
 		} catch (error) {
 			if ((error as Error)?.name === 'AbortError') {
-				console.log('[loadHomeworkStats] aborted for group', groupId);
+				console.log('[aitutordashboard]-[InstructorSetup]-[LoadAborted]: group=' + groupId);
 				return;
 			}
 			testToast('Instructor Setup failed loading /homework data');
@@ -910,25 +915,34 @@ import { flyAndScale } from '$lib/utils/transitions';
 					});
 					if (!res.ok) throw new Error('Models fetch failed');
 					const data = await res.json();
-					return Array.isArray(data?.data)
-						? data.data
-								.map((m: any) => ({
-									id: m.id,
-									name: m.name ?? m.id,
-									preset: m.preset === true,
-									base_model_id: m.info?.base_model_id ?? m.base_model_id ?? null,
-									access_control: m.access_control ?? m.info?.access_control ?? null,
-									user_id: m.user_id
-								}))
-								.filter((model: { id: string; name: string }) => {
-									if (!(model.name ?? model.id).toLowerCase().includes('homework')) {
-										return false;
-									}
-									// Mastery workspace models are generated practice-chat clones and
-									// should not be offered back as instructor homework candidates.
-									return !(model.name ?? model.id).startsWith('Mastery');
-								})
+					const allMapped = Array.isArray(data?.data)
+						? data.data.map((m: any) => ({
+								id: m.id,
+								name: m.name ?? m.id,
+								preset: m.preset === true,
+								base_model_id: m.info?.base_model_id ?? m.base_model_id ?? null,
+								access_control: m.access_control ?? m.info?.access_control ?? null,
+								user_id: m.user_id
+							}))
 						: [];
+					const excludedModels: { name: string; reason: string }[] = [];
+					const result = allMapped.filter((model: { id: string; name: string }) => {
+						if (!(model.name ?? model.id).toLowerCase().includes('homework')) {
+							excludedModels.push({ name: model.name ?? model.id, reason: 'name missing homework' });
+							return false;
+						}
+						if ((model.name ?? model.id).startsWith('Mastery')) {
+							excludedModels.push({ name: model.name ?? model.id, reason: 'Mastery prefix' });
+							return false;
+						}
+						return true;
+					});
+					console.log('[HomeworkFilter]-[InstructorSetup]-[LoadModels]:', {
+						all: allMapped.map((m) => m.name ?? m.id),
+						selected: result.map((m) => m.name ?? m.id),
+						excluded: excludedModels
+					});
+					return result;
 				}
 			});
 			availableModels = models;
@@ -938,7 +952,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 	}
 
 	async function loadConversationCounts(groupId: string) {
-		console.log('[ConversationCounts] refresh triggered for group:', groupId);
+		console.log('[aitutordashboard]-[InstructorSetup]-[ConversationCountsRefreshTriggered]: group=' + groupId);
 		testToast(`Instructor Setup fetch: conversations group=${groupId || 'none'}`);
 		if (useFrontendTestingData) {
 			convCountByModelId = groupId ? frontendTestingConversationCounts : {};
@@ -973,7 +987,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 			}
 			if ($aiTutorSelectedGroupId !== groupId) return; // stale
 			convCountByModelId = nextCounts;
-			console.log('[ConversationCounts] refresh completed, counts:', nextCounts);
+			console.log('[aitutordashboard]-[InstructorSetup]-[ConversationCountsRefreshCompleted]:', nextCounts);
 		} catch (e) {
 			console.error('Conversation count fetch failed:', e);
 		} finally {
@@ -1246,7 +1260,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 
 	async function resumePersistedJobs(groupId: string) {
 		const jobs = readPersistedJobs().filter((item) => item.groupId === groupId);
-		console.log('AI Tutor Dashboard - Instructor Setup restored jobs', {
+		console.log('[aitutordashboard]-[InstructorSetup]-[JobsRestored]:', {
 			groupId,
 			jobs: jobs.map((job) => ({
 				jobId: job.jobId,
@@ -1630,7 +1644,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 		const key = hwId ? `${hwId}-${docType}` : `draft-${draftUid ?? 0}-${docType}`;
 		// Guard against double-click / concurrent upload for the same homework+docType
 		if (uploadingMap[key]) {
-			console.log('[uploadPdf] already uploading, ignoring duplicate', key);
+			console.log('[UPLOAD]-[' + key + ']-[Skipped]: already uploading, ignoring duplicate');
 			return;
 		}
 		uploadingMap = { ...uploadingMap, [key]: true };
@@ -1753,7 +1767,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 		const nextHomeworkNumber = homeworkRows.length + draftRows.length + 1;
 		const nextHomeworkModelName = `Homework${nextHomeworkNumber}-MATH-Code-Section-Semester`;
 		draftRows = [...draftRows, { uid: _nextDraftUid++, modelId: nextHomeworkModelName }];
-		console.log('[addDraftRow] draftRows now:', draftRows);
+		console.log('[aitutordashboard]-[InstructorSetup]-[DraftRowAdded]:', draftRows);
 	}
 
 	function makeUploadHandler(

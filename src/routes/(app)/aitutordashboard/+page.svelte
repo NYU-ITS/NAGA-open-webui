@@ -327,7 +327,7 @@ const bannerPlaceholderTime = 'TEST-TIME';
 		testToast(
 			`loading aitutordashboard - Summary | group=${$aiTutorSelectedGroupId || 'pending'} | frontend_testing=${String(useFrontendTestingData)}`
 		);
-		console.log('AI Tutor Dashboard - Summary mount', {
+		console.log('[aitutordashboard]-[Summary]-[Mount]:', {
 			pathname: $page.url.pathname,
 			groupId: $aiTutorSelectedGroupId,
 			groupIdFromUrl: $page.url.searchParams.get('group_id') || ''
@@ -379,9 +379,22 @@ async function loadHomeworkStats(groupId: string) {
 			homeworkRows: HomeworkRow[];
 		}) => {
 			const allowedIds = $aiTutorAllowedModelIds;
-			const filteredRows = snapshot.homeworkRows.filter(
+			const allRows = snapshot.homeworkRows;
+			const filteredRows = allRows.filter(
 				(row) => row.modelId && allowedIds.has(row.modelId)
 			);
+			const excludedRows = allRows.filter(
+				(row) => !row.modelId || !allowedIds.has(row.modelId)
+			);
+			console.log('[HomeworkFilter]-[Summary]-[ApplySnapshot]:', {
+				all: allRows.map((r) => ({ id: r.id, modelId: r.modelId })),
+				selected: filteredRows.map((r) => ({ id: r.id, modelId: r.modelId })),
+				excluded: excludedRows.map((r) => ({
+					id: r.id,
+					modelId: r.modelId,
+					reason: r.modelId ? 'model not in allowed set for current group' : 'missing modelId'
+				}))
+			});
 			const filteredStats = snapshot.homeworkStats.filter((stat) => {
 				const row = snapshot.homeworkRows.find((r) => r.id === stat.homework);
 				return row?.modelId && allowedIds.has(row.modelId);
@@ -512,7 +525,7 @@ async function loadHomeworkStats(groupId: string) {
 					});
 					merged.sort((a, b) => a.homework.localeCompare(b.homework));
 
-					console.log('AI Tutor Dashboard - Summary data loaded', {
+					console.log('[aitutordashboard]-[Summary]-[DataLoaded]:', {
 						groupId,
 						homeworkCount: merged.length,
 						homeworks: merged.map((stat) => ({
@@ -534,7 +547,7 @@ async function loadHomeworkStats(groupId: string) {
 				}
 			});
 			if ($aiTutorSelectedGroupId !== groupId) return; // stale — group changed while loading
-			console.log('[Summary loadHomeworkStats] loaded for group', groupId, { homeworkCount: snapshot.homeworkRows.length, modelIds: snapshot.homeworkRows.map((r) => r.modelId) });
+			console.log('[aitutordashboard]-[Summary]-[HomeworkStatsLoaded]: group=' + groupId, { homeworkCount: snapshot.homeworkRows.length, modelIds: snapshot.homeworkRows.map((r) => r.modelId) });
 			applySummarySnapshot(snapshot);
 		} catch (error) {
 			testToast('Summary failed loading /homework data');
@@ -558,33 +571,41 @@ async function loadModels() {
 		});
 		if (!res.ok) throw new Error('Models fetch failed');
 		const data = await res.json();
-		availableModels = Array.isArray(data?.data)
-			? data.data
-					.map((m: any) => ({
-						id: m.id,
-						name: m.name ?? m.id,
-						base_model_id: m.info?.base_model_id ?? m.base_model_id ?? null,
-						access_control: m.access_control ?? m.info?.access_control ?? null,
-						user_id: m.user_id
-					}))
-					.filter((model) => {
-						// Only workspace models (derived from a base model) are homework candidates.
-						if (model.base_model_id == null) return false;
-						// Homework workspace models only.
-						if (!(model.name ?? model.id).toLowerCase().includes('homework')) return false;
-						// Mastery-prefixed workspace models are generated practice-chat clones
-						// and should stay out of the instructor homework candidate list.
-						if ((model.name ?? model.id).startsWith('Mastery')) return false;
-						// Group-scoped filtering: only show models explicitly assigned to
-						// the current group. Unassigned (PRIVATE) models are hidden everywhere.
-						const groupIds = model.access_control?.read?.group_ids ?? [];
-						if (groupIds.length > 0) {
-							return groupIds.includes($aiTutorSelectedGroupId);
-						}
-						return false;
-					})
+		const allMappedModels = Array.isArray(data?.data)
+			? data.data.map((m: any) => ({
+					id: m.id,
+					name: m.name ?? m.id,
+					base_model_id: m.info?.base_model_id ?? m.base_model_id ?? null,
+					access_control: m.access_control ?? m.info?.access_control ?? null,
+					user_id: m.user_id
+				}))
 			: [];
-
+		const excludedModels: { name: string; reason: string }[] = [];
+		availableModels = allMappedModels.filter((model) => {
+			if (model.base_model_id == null) {
+				excludedModels.push({ name: model.name ?? model.id, reason: 'no base_model_id' });
+				return false;
+			}
+			if (!(model.name ?? model.id).toLowerCase().includes('homework')) {
+				excludedModels.push({ name: model.name ?? model.id, reason: 'name missing homework' });
+				return false;
+			}
+			if ((model.name ?? model.id).startsWith('Mastery')) {
+				excludedModels.push({ name: model.name ?? model.id, reason: 'Mastery prefix' });
+				return false;
+			}
+			const groupIds = model.access_control?.read?.group_ids ?? [];
+			if (groupIds.length > 0 && groupIds.includes($aiTutorSelectedGroupId)) {
+				return true;
+			}
+			excludedModels.push({ name: model.name ?? model.id, reason: 'not assigned to current group' });
+			return false;
+		});
+		console.log('[HomeworkFilter]-[Summary]-[LoadModels]:', {
+			all: allMappedModels.map((m) => m.name ?? m.id),
+			selected: availableModels.map((m) => m.name ?? m.id),
+			excluded: excludedModels
+		});
 	} catch (e) {
 		availableModels = [];
 		console.error('Models fetch failed:', e);
@@ -1095,7 +1116,7 @@ async function uploadPdf(hwId: string | null, docType: 'question' | 'answer', mo
 	const key = hwId ? `${hwId}-${docType}` : `draft-${draftUid ?? 0}-${docType}`;
 	// Guard against double-click / concurrent upload for the same homework+docType
 	if (uploadingMap[key]) {
-		console.log('[uploadPdf] already uploading, ignoring duplicate', key);
+		console.log('[UPLOAD]-[' + key + ']-[Skipped]: already uploading, ignoring duplicate');
 		return;
 	}
 	uploadingMap = { ...uploadingMap, [key]: true };
@@ -1197,7 +1218,7 @@ async function uploadPdf(hwId: string | null, docType: 'question' | 'answer', mo
 // ── Upload event handler factory ─────────────────────────────────────
 function addDraftRow() {
 	draftRows = [...draftRows, { uid: _nextDraftUid++, modelId: availableModels[0]?.id ?? '' }];
-	console.log('[addDraftRow] draftRows now:', draftRows);
+	console.log('[aitutordashboard]-[Summary]-[DraftRowAdded]:', draftRows);
 }
 
 function makeUploadHandler(hwId: string | null, docType: 'question' | 'answer', modelId: string | null, draftUid?: number) {

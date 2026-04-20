@@ -733,7 +733,7 @@
 
 		generatingPracticeJobsByHomeworkId = nextJobs;
 		generatingPracticeByHomeworkId = nextGeneratingFlags;
-		console.log('AI Tutor Dashboard - Practice Question restored practice jobs', {
+		console.log('[aitutordashboard]-[PracticeQuestion]-[JobsRestored]:', {
 			groupId,
 			jobs: Object.entries(nextJobs).map(([homeworkId, job]) => ({
 				homeworkId,
@@ -995,9 +995,22 @@
 				}))
 			: [];
 		const allowedIds = $aiTutorAllowedModelIds;
-		homeworkRows = nextHomeworkRows.filter(
+		const filteredRows = nextHomeworkRows.filter(
 			(row) => row.modelId && allowedIds.has(row.modelId)
 		);
+		const excludedRows = nextHomeworkRows.filter(
+			(row) => !row.modelId || !allowedIds.has(row.modelId)
+		);
+		console.log('[HomeworkFilter]-[PracticeQuestion]-[LoadHomeworkRows]:', {
+			all: nextHomeworkRows.map((r) => ({ id: r.id, modelId: r.modelId })),
+			selected: filteredRows.map((r) => ({ id: r.id, modelId: r.modelId })),
+			excluded: excludedRows.map((r) => ({
+				id: r.id,
+				modelId: r.modelId,
+				reason: r.modelId ? 'model not in allowed set for current group' : 'missing modelId'
+			}))
+		});
+		homeworkRows = filteredRows;
 		homeworkOptions = homeworkRows.map((row) => row.id);
 		homeworkLabelsById = Object.fromEntries(
 			homeworkRows.map((row) => [row.id, row.modelId ?? row.id])
@@ -1020,7 +1033,7 @@
 			})
 		);
 		homeworkIdsWithAnalysis = nextHomeworkIdsWithAnalysis;
-		console.log('AI Tutor Dashboard - Practice Question homework pipeline loaded', {
+		console.log('[aitutordashboard]-[PracticeQuestion]-[PipelineLoaded]:', {
 			groupId: currentGroupId,
 			homeworks: homeworkRows.map((row) => ({
 				id: row.id,
@@ -1090,7 +1103,7 @@
 								if (!assignmentResponse.ok) return;
 								const assignments = await assignmentResponse.json();
 								if (Array.isArray(assignments) && assignments.length > 0) {
-									console.log('AI Tutor Dashboard - Practice Question assignment detail', {
+									console.log('[aitutordashboard]-[PracticeQuestion]-[AssignmentDetail]:', {
 										groupId,
 										practiceId,
 										assignments: assignments.map((assignment) => ({
@@ -1172,7 +1185,7 @@
 				}
 			});
 			applyPracticeSnapshot(snapshot);
-			console.log('AI Tutor Dashboard - Practice Question set loaded', {
+			console.log('[aitutordashboard]-[PracticeQuestion]-[SetLoaded]:', {
 				groupId,
 				practiceQuestions: practiceQuestions.map((practice) => ({
 					homeworkId: practice.homeworkId ?? '',
@@ -1371,7 +1384,7 @@
 
 	onMount(async () => {
 		testToast(`loading aitutordashboard - Practice Question | group=${groupId || 'pending'}`);
-		console.log('AI Tutor Dashboard - Practice Question mount', {
+		console.log('[aitutordashboard]-[PracticeQuestion]-[Mount]:', {
 			pathname: $page.url.pathname,
 			groupId,
 			groupIdFromUrl: $page.url.searchParams.get('group_id') || '',
@@ -1386,7 +1399,7 @@
 		const requestedHomeworkId =
 			$page.url.searchParams.get('homework_id') ?? homeworkOptions[0] ?? '';
 		await loadReviewHomeworkCollection(groupId, requestedHomeworkId);
-		console.log('AI Tutor Dashboard - Practice Question review loaded', {
+		console.log('[aitutordashboard]-[PracticeQuestion]-[ReviewLoaded]:', {
 			groupId,
 			requestedHomeworkId,
 			currentHomeworkIndex,

@@ -4,7 +4,7 @@
 	import { TEMP_HIDE } from '$lib/constants';
 
 	onMount(() => {
-		console.log('Student Dashboard - Concepts loaded');
+		console.log('[studentdashboard]-[Concepts]-[Loaded]');
 
 		// Check if there's a topic in URL query params
 		const urlParams = new URLSearchParams(window.location.search);

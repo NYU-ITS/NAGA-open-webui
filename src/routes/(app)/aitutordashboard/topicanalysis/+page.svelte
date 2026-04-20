@@ -216,7 +216,7 @@
 
 		generatingPracticeJobsByHomeworkId = nextJobs;
 		generatingPracticeByHomeworkId = nextGeneratingFlags;
-		console.log('AI Tutor Dashboard - Topic Analysis restored practice jobs', {
+		console.log('[aitutordashboard]-[TopicAnalysis]-[JobsRestored]:', {
 			groupId: $aiTutorSelectedGroupId,
 			jobs: Object.entries(nextJobs).map(([homeworkId, job]) => ({
 				homeworkId,
@@ -594,7 +594,7 @@
 			});
 			if ($aiTutorSelectedGroupId !== calledForGroupId) return; // stale — group changed while loading
 			applyTopicAnalysisSnapshot(snapshot);
-			console.log('AI Tutor Dashboard - Topic Analysis data loaded', {
+			console.log('[aitutordashboard]-[TopicAnalysis]-[DataLoaded]:', {
 				groupId: calledForGroupId,
 				homeworks: homeworkRows.map((row) => ({
 					id: row.id,
@@ -767,7 +767,7 @@
 			});
 			if ($aiTutorSelectedGroupId !== calledForGroupId) return; // stale — group changed while loading
 			applyPracticeSnapshot(snapshot);
-			console.log('AI Tutor Dashboard - Topic Analysis practice loaded', {
+			console.log('[aitutordashboard]-[TopicAnalysis]-[PracticeLoaded]:', {
 				groupId: calledForGroupId,
 				practiceQuestions: practiceQuestions.map((practice) => ({
 					homeworkId: practice.homeworkId ?? '',
@@ -975,7 +975,7 @@
 		testToast(
 			`loading aitutordashboard - Topic Analysis | group=${$aiTutorSelectedGroupId || 'pending'} | frontend_testing=${String(useFrontendTestingData)}`
 		);
-		console.log('AI Tutor Dashboard - Topic Analysis mount', {
+		console.log('[aitutordashboard]-[TopicAnalysis]-[Mount]:', {
 			pathname: $page.url.pathname,
 			groupId: $aiTutorSelectedGroupId,
 			groupIdFromUrl: $page.url.searchParams.get('group_id') || ''

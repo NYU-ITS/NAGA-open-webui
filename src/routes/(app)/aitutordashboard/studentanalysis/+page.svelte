@@ -181,7 +181,7 @@ $: isFilterActive = selectedHomework !== 'All' || search.trim() !== '';
 			`loading aitutordashboard - Student Analysis | group=${$aiTutorSelectedGroupId || 'pending'} | frontend_testing=${String(useFrontendTestingData)}`
 		);
 		initialized = true;
-		console.log('AI Tutor Dashboard - Student Analysis mount', {
+		console.log('[aitutordashboard]-[StudentAnalysis]-[Mount]:', {
 			pathname: $page.url.pathname,
 			groupId: $aiTutorSelectedGroupId,
 			groupIdFromUrl: $page.url.searchParams.get('group_id') || '',
@@ -259,7 +259,7 @@ $: isFilterActive = selectedHomework !== 'All' || search.trim() !== '';
 			studentData = buildStudentRowsForHomeworks(nextHomeworks, analysesByHomeworkId, users, groupUserIds);
 			hasLoadedOnce = true;
 			testToast('Student Analysis loaded all homework analyses');
-			console.log('AI Tutor Dashboard - Student Analysis data loaded', {
+			console.log('[aitutordashboard]-[StudentAnalysis]-[DataLoaded]:', {
 				groupId,
 				selectedHomework,
 				homeworks: nextHomeworks.map((homework) => ({
@@ -332,6 +332,18 @@ $: isFilterActive = selectedHomework !== 'All' || search.trim() !== '';
 				const filteredOptions = nextOptions.filter(
 					(opt) => opt.model_id && allowedIds.has(opt.model_id)
 				);
+				const excludedOptions = nextOptions.filter(
+					(opt) => !opt.model_id || !allowedIds.has(opt.model_id)
+				);
+				console.log('[HomeworkFilter]-[StudentAnalysis]-[LoadHomeworks]:', {
+					all: nextOptions.map((o) => ({ id: o.id, model_id: o.model_id })),
+					selected: filteredOptions.map((o) => ({ id: o.id, model_id: o.model_id })),
+					excluded: excludedOptions.map((o) => ({
+						id: o.id,
+						model_id: o.model_id,
+						reason: o.model_id ? 'model not in allowed set for current group' : 'missing model_id'
+					}))
+				});
 
 				testToast('Student Analysis loaded homework list');
 				return filteredOptions;

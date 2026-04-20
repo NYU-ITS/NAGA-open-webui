@@ -60,7 +60,7 @@
 
 	onMount(() => {
 		testToast('loading studentdashboard - Summary');
-		console.log('Student Dashboard - Summary loaded');
+		console.log('[studentdashboard]-[Summary]-[Loaded]');
 	});
 
 	// TODO(student-dashboard-backend): Replace this placeholder summary with student-level
@@ -216,7 +216,7 @@
 			sessionStorage.selectedModels = JSON.stringify([buildMasteryModelId(item.modelId)]);
 		}
 
-		console.log('[PracticeAssignment] navigating to chat with right-side questions trigger', {
+		console.log('[studentdashboard]-[Summary]-[PracticeAssignmentNavigate]:', {
 			assignmentId: item.id,
 			topic: item.topic
 		});
@@ -581,7 +581,7 @@
 						query: { student_id: $user.id }
 					});
 
-					console.log('Student Dashboard - raw assignments response', {
+					console.log('[studentdashboard]-[Summary]-[RawAssignments]:', {
 						groupId: selectedGroupId,
 						assignmentCount: assignments.length,
 						assignments: assignments.map((assignment) => ({
@@ -679,7 +679,7 @@
 						};
 					});
 
-					console.log('Student Dashboard - assignment sync detail', {
+					console.log('[studentdashboard]-[Summary]-[AssignmentSyncDetail]:', {
 						groupId: selectedGroupId,
 						assignments: nextPracticeAssignments.map((item) => {
 							const assignment = assignments.find((entry) => entry.homework_id === item.homeworkId);
@@ -805,7 +805,7 @@
 	}
 
 	$: if (!useFrontendTestingData && !selectedGroupId) {
-		console.log('[StudentDashboard] waiting for selected group before syncing', {
+		console.log('[studentdashboard]-[Summary]-[WaitingForGroup]:', {
 			lastLoadedGroupId,
 			pathname: $page.url.pathname,
 			search: $page.url.search

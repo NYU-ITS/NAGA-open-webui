@@ -73,7 +73,7 @@
 	onMount(async () => {
 		loaded = true;
 		showAITutorTestToast('loading aitutordashboard - Layout');
-		console.log('AI Tutor Dashboard - Layout mount', {
+		console.log('[aitutordashboard]-[Layout]-[Mount]:', {
 			pathname: $page.url.pathname,
 			groupIdFromUrl: $page.url.searchParams.get('group_id') || '',
 			persistedGroupId: getPersistedGroupId()
@@ -113,7 +113,7 @@
 							...memberGroups.map(g => ({ ...g, identity: 'Member' }))
 						]);
 					}
-					console.log('AI Tutor Dashboard - Layout groups resolved', {
+					console.log('[aitutordashboard]-[Layout]-[GroupsResolved]:', {
 						selectedGroupId,
 						selectedGroupName: selectedGroup?.name ?? '',
 						groupCount: allUserGroups.length,
