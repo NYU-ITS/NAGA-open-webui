@@ -252,9 +252,20 @@ const bannerPlaceholderTime = 'TEST-TIME';
 
 	// ── SVG chart helpers ─────────────────────────────────────────────────────
 	let chartWidth = 0;
-	const H = 180;
-	const padL = 38, padR = 12, padT = 12, padB = 32;
+	const H = 200;
+	const padL = 44, padR = 16, padT = 16, padB = 44;
 	$: W = chartWidth || 300;
+
+	// Chart tooltip state
+	let chartTooltip = {
+		visible: false,
+		x: 0,
+		y: 0,
+		align: 'center' as 'left' | 'center' | 'right',
+		label: '',
+		solved: null as number | null,
+		attempted: null as number | null
+	};
 
 	function chartPoints(values: (number | null)[]) {
 		const n = values.length;
@@ -357,7 +368,7 @@ const bannerPlaceholderTime = 'TEST-TIME';
 		const yTicks = [yMin, Math.round((yMin + yMax) / 2), Math.round(yMax)];
 		const xLabels = values1.map((_, i) => ({ x: px(i), label: shortLabel(values1, i) }));
 		const labelStep = Math.max(1, Math.ceil((xLabels.length * 85) / Math.max(1, plotW)));
-		return { pathD1, pathD2, dots1, dots2, yTicks, yMin, yMax, py, plotH, xLabels, labelStep };
+		return { pathD1, pathD2, dots1, dots2, yTicks, yMin, yMax, py, plotH, xLabels, labelStep, px, slotCount };
 	}
 
 	$: avgSolvedChart = chartPoints(homeworkStats.map((s) => s.avgSolved));
@@ -1507,46 +1518,118 @@ async function runAnalysis() {
 							</div>
 						</div>
 					</div>
-					{#if combinedChart}
-						<div class="w-full h-[180px]" bind:clientWidth={chartWidth}>
-							<svg viewBox="0 0 {W} {H}" class="w-full h-full">
-							<!-- Grid lines -->
-							{#each combinedChart.yTicks as tick}
-								<line x1={padL} y1={combinedChart.py(tick)} x2={W - padR} y2={combinedChart.py(tick)}
-									stroke="currentColor" stroke-width="0.5" class="text-gray-200 dark:text-gray-600" stroke-dasharray="3,3" />
-								<text x={padL - 4} y={combinedChart.py(tick) + 4} text-anchor="end" font-size="9"
-									class="fill-gray-400 dark:fill-gray-500">{tick}</text>
-							{/each}
-							<!-- X-axis labels (density scales with width) -->
-							{#each combinedChart.xLabels as lbl, i}
-								{#if i % combinedChart.labelStep === 0}
-									<text x={lbl.x} y={H - padB + 10} text-anchor="middle" font-size="9"
-										class="fill-gray-400 dark:fill-gray-500">
-										{#each lbl.label.split('\n') as line, lineIndex}
-											<tspan x={lbl.x} dy={lineIndex === 0 ? 0 : 11}>{line}</tspan>
-										{/each}
-									</text>
+						{#if combinedChart}
+							<div
+								class="relative w-full h-[200px] my-2"
+								bind:clientWidth={chartWidth}
+								on:mousemove={(e) => {
+									if (!combinedChart) return;
+									const rect = e.currentTarget.getBoundingClientRect();
+									const mouseX = e.clientX - rect.left;
+									const mouseY = e.clientY - rect.top;
+									const svgX = (mouseX / rect.width) * W;
+									const n = homeworkStats.length;
+									if (n === 0) return;
+									let nearestIndex = -1;
+									let minDist = Infinity;
+									for (let i = 0; i < n; i++) {
+										const slotX = combinedChart.px(i);
+										const dist = Math.abs(slotX - svgX);
+										if (dist < minDist) {
+											minDist = dist;
+											nearestIndex = i;
+										}
+									}
+									const slotWidth = (W - padL - padR) / Math.max(1, combinedChart.slotCount - 1);
+									if (nearestIndex >= 0 && minDist < slotWidth * 0.6) {
+										const stat = homeworkStats[nearestIndex];
+										const slotXPixel = (combinedChart.px(nearestIndex) / W) * rect.width;
+										const dot1 = combinedChart.dots1.find((d) => Math.abs(d.x - combinedChart.px(nearestIndex)) < 0.5);
+										const dot2 = combinedChart.dots2.find((d) => Math.abs(d.x - combinedChart.px(nearestIndex)) < 0.5);
+										const tooltipWidth = 160;
+										let align = 'center';
+										if (slotXPixel < tooltipWidth / 2) align = 'left';
+										else if (slotXPixel > rect.width - tooltipWidth / 2) align = 'right';
+										chartTooltip = {
+											visible: true,
+											x: slotXPixel,
+											y: mouseY,
+											align,
+											label: stat ? getHomeworkModelName(stat.homework) : '',
+											solved: dot1?.v ?? null,
+											attempted: dot2?.v ?? null
+										};
+									} else {
+										chartTooltip.visible = false;
+									}
+								}}
+								on:mouseleave={() => chartTooltip.visible = false}
+							>
+								{#if chartTooltip.visible}
+									<div
+										class="absolute z-50 pointer-events-none"
+										style:left="{chartTooltip.x}px" style:top="{chartTooltip.y}px" style:transform="{chartTooltip.align === `left` ? `translate(0%, -110%)` : chartTooltip.align === `right` ? `translate(-100%, -110%)` : `translate(-50%, -110%)`}"
+									>
+										<div class="rounded-lg border border-gray-200 bg-white px-3 py-2 shadow-lg dark:border-gray-700 dark:bg-gray-800 min-w-[10rem]">
+											<div class="text-xs font-semibold text-gray-800 dark:text-gray-100 mb-1.5 truncate max-w-[12rem]">{chartTooltip.label}</div>
+											<div class="flex items-center gap-2 text-xs mb-0.5">
+												<span class="inline-block w-2 h-2 rounded-full bg-[#7CB9E8]"></span>
+												<span class="text-gray-600 dark:text-gray-300">Solved: {chartTooltip.solved !== null ? chartTooltip.solved : '-'}</span>
+											</div>
+											<div class="flex items-center gap-2 text-xs">
+												<span class="inline-block w-2 h-2 rounded-full bg-[#A792D0]"></span>
+												<span class="text-gray-600 dark:text-gray-300">Attempted: {chartTooltip.attempted !== null ? chartTooltip.attempted : '-'}</span>
+											</div>
+										</div>
+									</div>
 								{/if}
-							{/each}
-							<!-- Axes -->
-							<line x1={padL} y1={padT} x2={padL} y2={H - padB} stroke="currentColor" stroke-width="1" class="text-gray-300 dark:text-gray-600" />
-							<line x1={padL} y1={H - padB} x2={W - padR} y2={H - padB} stroke="currentColor" stroke-width="1" class="text-gray-300 dark:text-gray-600" />
-							<!-- Line 1: Solved -->
-							<path d={combinedChart.pathD1} fill="none" stroke="#7CB9E8" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
-							<!-- Line 2: Attempted -->
-							<path d={combinedChart.pathD2} fill="none" stroke="#A792D0" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
-							<!-- Dots 1 -->
-							{#each combinedChart.dots1 as dot}
-								<circle cx={dot.x} cy={dot.y} r="3" fill="#7CB9E8" />
-							{/each}
-							<!-- Dots 2 -->
-							{#each combinedChart.dots2 as dot}
-								<circle cx={dot.x} cy={dot.y} r="3" fill="#A792D0" />
-							{/each}
-							</svg>
-						</div>
+								<svg viewBox="0 0 {W} {H}" class="w-full h-full">
+								<!-- Plot area background -->
+								<rect x={padL} y={padT} width={W - padL - padR} height={H - padT - padB} rx="4" class="text-gray-50 dark:text-gray-850" fill="currentColor" />
+								<!-- Horizontal grid lines -->
+								{#each combinedChart.yTicks as tick}
+									<line x1={padL} y1={combinedChart.py(tick)} x2={W - padR} y2={combinedChart.py(tick)}
+										stroke="currentColor" stroke-width="0.5" class="text-gray-200 dark:text-gray-700" />
+								{/each}
+								<!-- X-axis labels -->
+								{#each combinedChart.xLabels as lbl, i}
+									{#if i % combinedChart.labelStep === 0}
+										<text x={lbl.x} y={H - padB + 14} text-anchor="middle" font-size="9" class="fill-gray-500 dark:fill-gray-400">
+											{#each lbl.label.split('\n') as line, lineIndex}
+												<tspan x={lbl.x} dy={lineIndex === 0 ? 0 : 11}>{line}</tspan>
+											{/each}
+										</text>
+									{/if}
+								{/each}
+								<!-- Y-axis labels -->
+								{#each combinedChart.yTicks as tick}
+									<text x={padL - 8} y={combinedChart.py(tick) + 3} text-anchor="end" font-size="9"
+										class="fill-gray-500 dark:fill-gray-400">{tick}</text>
+								{/each}
+								<!-- Axes -->
+								<line x1={padL} y1={padT} x2={padL} y2={H - padB} stroke="currentColor" stroke-width="1.5" class="text-gray-400 dark:text-gray-500" />
+								<line x1={padL} y1={H - padB} x2={W - padR} y2={H - padB} stroke="currentColor" stroke-width="1.5" class="text-gray-400 dark:text-gray-500" />
+								<!-- Y-axis label -->
+								<text x={14} y={H / 2} text-anchor="middle" font-size="9" font-weight="500" class="fill-gray-500 dark:fill-gray-400"
+									transform="rotate(-90, 14, {H / 2})">Problems</text>
+								<!-- X-axis label -->
+								<text x={(padL + W - padR) / 2} y={H - 4} text-anchor="middle" font-size="9" font-weight="500" class="fill-gray-500 dark:fill-gray-400">Homework</text>
+								<!-- Line 1: Solved -->
+								<path d={combinedChart.pathD1} fill="none" stroke="#7CB9E8" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" />
+								<!-- Line 2: Attempted -->
+								<path d={combinedChart.pathD2} fill="none" stroke="#A792D0" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" />
+								<!-- Dots 1 -->
+								{#each combinedChart.dots1 as dot}
+									<circle cx={dot.x} cy={dot.y} r="4" fill="white" stroke="#7CB9E8" stroke-width="2" />
+								{/each}
+								<!-- Dots 2 -->
+								{#each combinedChart.dots2 as dot}
+									<circle cx={dot.x} cy={dot.y} r="4" fill="white" stroke="#A792D0" stroke-width="2" />
+								{/each}
+								</svg>
+							</div>
 					{:else}
-						<div class="w-full h-[180px] flex items-center justify-center">
+						<div class="w-full h-[200px] flex items-center justify-center">
 							<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-12 h-12 text-gray-300 dark:text-gray-600">
 								<path stroke-linecap="round" stroke-linejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 0 1 3 19.875v-6.75ZM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V8.625ZM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V4.125Z" />
 							</svg>

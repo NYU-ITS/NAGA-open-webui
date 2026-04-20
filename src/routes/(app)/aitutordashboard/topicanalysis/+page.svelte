@@ -1281,6 +1281,8 @@ import Selector from '$lib/components/common/Selector.svelte';
 
 				<!-- [Selector] Topic -->
 				<Selector
+					size="sm"
+					triggerClass="w-auto rounded-full border border-gray-300 bg-white py-1.5 pl-3 pr-8 text-xs text-gray-700 cursor-pointer focus:outline-none dark:border-gray-500 dark:bg-gray-800 dark:text-gray-200"
 					value={selectedTopicAnalysisTopic}
 					placeholder="All Topics"
 					searchEnabled={true}
@@ -1291,8 +1293,8 @@ import Selector from '$lib/components/common/Selector.svelte';
 					]}
 					on:change={(e) => { selectedTopicAnalysisTopic = e.detail.value; }}
 				/>
+				</div>
 			</div>
-		</div>
 
 		<!-- Table Card Container -->
 		<div class="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
@@ -1300,10 +1302,10 @@ import Selector from '$lib/components/common/Selector.svelte';
 			<table class="w-full min-w-[800px] table-fixed rounded-sm text-left text-sm text-gray-500 dark:text-gray-400">
 				<thead class="sticky top-0 text-xs text-gray-700 uppercase bg-[#EEE6F3] dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5 z-10">
 					<tr>
-						<th scope="col" class="w-[24%] px-3 py-1.5">Homework</th>
-						<th scope="col" class="w-[12%] whitespace-nowrap px-3 py-1.5">Questions in Topic</th>
-						<th scope="col" class="w-[14%] whitespace-nowrap px-3 py-1.5">Students with Errors</th>
-						<th scope="col" class="w-[44%] px-3 py-1.5">Error Type Analysis</th>
+						<th scope="col" class="w-[24%] overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5">Homework</th>
+						<th scope="col" class="w-[12%] overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5">Questions in Topic</th>
+						<th scope="col" class="w-[14%] overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5">Students with Errors</th>
+						<th scope="col" class="w-[44%] overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5">Error Type Analysis</th>
 					</tr>
 				</thead>
 				<tbody>

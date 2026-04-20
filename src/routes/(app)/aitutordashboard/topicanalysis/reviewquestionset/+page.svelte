@@ -1758,30 +1758,31 @@
 	</div>
 
 	<div class="space-y-4">
-			<div>
-			<div class="flex items-center gap-4">
-				<h2 class="text-xl font-semibold text-gray-900 dark:text-gray-100 flex items-center gap-2">
-					2.Questions
-				</h2>
-			</div>
-			<div class="mt-1 flex items-center justify-between gap-4 text-xs text-gray-900 dark:text-gray-100">
-				<div class="flex flex-wrap items-center gap-x-3">
-					<span>Generated on {formatAITutorTimestamp(questionData.generatedTime)}</span>
-					<span>{questionData.questions.length} question{questionData.questions.length === 1 ? '' : 's'}</span>
-					{#if isEditedAfterSent}
-						<span class="inline-flex items-center gap-1 rounded-full bg-yellow-100 px-2 py-0.5 text-xs font-medium text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-300">
-							<span class="h-1.5 w-1.5 rounded-full bg-yellow-500"></span>
-							Edited — Re-send to notify students
-						</span>
-					<!-- {:else if questionData.status === 'approved' && currentPracticeQuestion?.sentAt}
-						<span class="inline-flex items-center gap-1 rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700 dark:bg-green-900/40 dark:text-green-300">
-							<span class="h-1.5 w-1.5 rounded-full bg-green-500"></span>
-							Approved &amp; Sent
-						</span> -->
-					{/if}
-					{#if groupId}
-						<span>Group: {groupId}</span>
-					{/if}
+			<div class="flex items-start justify-between gap-4">
+				<div>
+					<h2 class="text-xl font-semibold text-gray-900 dark:text-gray-100 flex items-center gap-2">
+						2.Questions
+					</h2>
+					<div class="mt-1 text-xs text-gray-900 dark:text-gray-100">
+						<div class="flex flex-wrap items-center gap-x-3">
+							<span>Generated on {formatAITutorTimestamp(questionData.generatedTime)}</span>
+							<span>{questionData.questions.length} question{questionData.questions.length === 1 ? '' : 's'}</span>
+							{#if isEditedAfterSent}
+								<span class="inline-flex items-center gap-1 rounded-full bg-yellow-100 px-2 py-0.5 text-xs font-medium text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-300">
+									<span class="h-1.5 w-1.5 rounded-full bg-yellow-500"></span>
+									Edited — Re-send to notify students
+								</span>
+							<!-- {:else if questionData.status === 'approved' && currentPracticeQuestion?.sentAt}
+									<span class="inline-flex items-center gap-1 rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700 dark:bg-green-900/40 dark:text-green-300">
+										<span class="h-1.5 w-1.5 rounded-full bg-green-500"></span>
+										Approved &amp; Sent
+									</span> -->
+							{/if}
+							{#if groupId}
+								<span>Group: {groupId}</span>
+							{/if}
+						</div>
+					</div>
 				</div>
 				<CustomDropdown
 					bind:value={selectedHomework}
@@ -1790,8 +1791,6 @@
 					width="w-52"
 					className="rounded-full px-4"
 				/>
-			</div>
-
 			</div>
 			<div class="space-y-4 py-6 px-6 rounded-lg border border-gray-200 dark:border-gray-700">
 				{#if questionEditors.length === 0}
@@ -1818,7 +1817,7 @@
 									<button
 										type="button"
 										on:click={() => cancelQuestionEdit(index)}
-										class="text-gray-600 transition hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200"
+										class="text-xs font-medium text-gray-600 transition hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200"
 									>
 										Cancel
 									</button>
@@ -1826,7 +1825,7 @@
 									<button
 										type="button"
 										on:click={() => useOriginalQuestion(index)}
-										class="text-gray-600 transition hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200"
+										class="text-xs font-medium text-gray-600 transition hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200"
 									>
 										Reset
 									</button>
@@ -1834,7 +1833,7 @@
 									<button
 										type="button"
 										on:click={() => saveQuestionEdit(index)}
-										class="font-medium text-[#57068C] transition hover:text-[#702B9D] dark:text-purple-400 dark:hover:text-purple-300"
+										class="text-xs font-medium text-[#57068C] transition hover:text-[#702B9D] dark:text-purple-400 dark:hover:text-purple-300"
 									>
 										Save
 									</button>

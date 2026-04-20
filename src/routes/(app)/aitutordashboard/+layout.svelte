@@ -235,19 +235,18 @@
 								</DropdownMenu.Trigger>
 
 								<DropdownMenu.Content
-									class="z-40 w-[22rem] max-w-[calc(100vw-1rem)] justify-start rounded-xl bg-white dark:bg-gray-850 dark:text-white shadow-lg outline-hidden"
+									class="z-[1001] w-[22rem] rounded-xl border border-gray-200 bg-white px-0 py-2 shadow-xl dark:border-gray-700 dark:bg-gray-850"
 									transition={flyAndScale}
-									side="bottom-start"
-									sideOffset={3}
+									sideOffset={8}
 								>
-									<div class="flex items-center gap-2.5 px-5 mt-3.5 mb-3">
+									<div class="flex items-center gap-2.5 px-5 mt-3.5 mb-3" style="background-color: white !important;">
 										<Search className="size-4" strokeWidth="2.5" />
 
 										<input
 											id="group-search-input"
 											type="text"
 											bind:value={groupSearchValue}
-											class="w-full text-sm bg-transparent outline-hidden text-gray-800 dark:text-gray-200 placeholder-gray-400 dark:placeholder-gray-500"
+											class="w-full text-sm outline-hidden text-gray-800 dark:text-gray-200 placeholder-gray-400 dark:placeholder-gray-500" style="background-color: white !important; color: black !important; border: 1px solid #d1d5db !important; padding: 4px 8px !important; border-radius: 6px !important;"
 											placeholder="Search groups"
 											autocomplete="off"
 											on:keydown={(e) => {

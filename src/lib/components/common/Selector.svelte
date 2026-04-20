@@ -22,6 +22,8 @@
 		{ value: 'pineapple', label: 'Pineapple' },
 		{ value: 'orange', label: 'Orange' }
 	];
+	export let triggerClass = '';
+	export let size: 'sm' | 'md' | 'lg' = 'md';
 
 	let searchValue = '';
 
@@ -41,15 +43,15 @@
 		dispatch('change', { value: selectedItem.value });
 	}}
 >
-	<Select.Trigger class="relative w-full" aria-label={placeholder}>
+	<Select.Trigger class="relative w-full {triggerClass}" aria-label={placeholder}>
 		<Select.Value
-			class="inline-flex h-input px-0.5 w-full outline-hidden bg-transparent truncate text-lg font-semibold placeholder-gray-400  focus:outline-hidden"
+			class="inline-flex px-0.5 w-full outline-hidden bg-transparent truncate placeholder-gray-400 focus:outline-hidden {size === 'sm' ? 'text-xs font-medium' : size === 'lg' ? 'h-11 text-xl font-bold' : 'h-input text-lg font-semibold'}"
 			{placeholder}
 		/>
 		<ChevronDown className="absolute end-2 top-1/2 -translate-y-[45%] size-3.5" strokeWidth="2.5" />
 	</Select.Trigger>
 	<Select.Content
-		class="w-full rounded-lg  bg-white dark:bg-gray-900 dark:text-white shadow-lg border border-gray-300/30 dark:border-gray-700/40  outline-hidden"
+		class="w-full z-50 rounded-lg bg-white dark:bg-gray-900 dark:text-white shadow-lg border border-gray-300/30 dark:border-gray-700/40 outline-hidden"
 		transition={flyAndScale}
 		sideOffset={4}
 	>

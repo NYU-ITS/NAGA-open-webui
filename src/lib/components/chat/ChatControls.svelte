@@ -195,7 +195,7 @@
 						<div
 							class=" h-full max-h-[100dvh] bg-white text-gray-700 dark:bg-black dark:text-gray-300 flex justify-center"
 						>
-							<RightsideQuestions {submitPrompt} />
+							<RightsideQuestions {submitPrompt} {chatId} />
 						</div>
 					{:else if $showArtifacts}
 						<Artifacts {history} />
@@ -319,7 +319,7 @@
 							</div>
 						{:else if $showRightsideQuestions}
 							<div class="w-full flex-1 min-h-0 flex flex-col">
-								<RightsideQuestions {submitPrompt} />
+								<RightsideQuestions {submitPrompt} {chatId} />
 							</div>
 						{:else if $showArtifacts}
 							<Artifacts {history} overlay={dragged} />

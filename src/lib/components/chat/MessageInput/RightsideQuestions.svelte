@@ -275,7 +275,6 @@
 		try {
 			sendingQuestionId = question.id;
 			await submitPrompt(question.question);
-			toast.success('Question sent to chat.');
 		} catch (error) {
 			toast.error('Failed to send question to chat.');
 		} finally {
@@ -328,24 +327,7 @@
 								{/each}
 							</select>
 						</div>
-						<div class="ml-auto flex shrink-0 items-center gap-2">
-							<button
-								type="button"
-								class="text-sm font-medium text-gray-900 transition hover:text-gray-700 disabled:text-gray-400 dark:text-gray-100 dark:hover:text-gray-300 dark:disabled:text-gray-500"
-								on:click={goToPreviousHomework}
-								disabled={started || getSelectedHomeworkIndex(selectedHomework) === 0}
-							>
-								Prev
-							</button>
-							<button
-								type="button"
-								class="text-sm font-medium text-gray-900 transition hover:text-gray-700 disabled:text-gray-400 dark:text-gray-100 dark:hover:text-gray-300 dark:disabled:text-gray-500"
-								on:click={goToNextHomework}
-								disabled={started || getSelectedHomeworkIndex(selectedHomework) === homeworkOptions.length - 1}
-							>
-								Next
-							</button>
-						</div>
+
 					</div>
 					<!-- <div class="flex items-center justify-between gap-3 pt-1 text-xs">
 						<div class="flex items-center gap-3">
@@ -381,7 +363,7 @@
 				<!-- {!started ? 'text-gray-400 dark:text-gray-500' : 'text-gray-900 dark:text-gray-100'} -->
 				<div class="space-y-3 text-gray-900 dark:text-gray-100">
 					{#each filteredQuestions as question}
-						<article class="space-y-1">
+						<article class="space-y-1 rounded-lg border border-gray-200 p-4 dark:border-gray-700">
 							<div class="mt-6 mb-1 markdown-prose-xs text-sm leading-6 text-gray-900 dark:text-gray-100">
 								<Markdown
 									id={`practice-question-${assignmentId ?? 'fallback'}-${question.id}`}

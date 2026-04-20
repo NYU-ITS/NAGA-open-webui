@@ -18,6 +18,7 @@
 	type HomeworkSummaryRow = {
 		homework: string;
 		homeworkId?: string;
+		modelId?: string;
 		masteredTopics: string[];
 		needMorePractice: string[];
 		totalCount: number | null;
@@ -194,19 +195,26 @@
 			return;
 		}
 
+		const assignmentPayload = {
+			assignmentId: item.assignmentId ?? item.id,
+			practiceProblemId: item.practiceProblemId ?? null,
+			homeworkId: item.homeworkId,
+			homeworkLabel: item.homeworkLabel,
+			assignedItems: item.assignedItems ?? [],
+			topic: item.topic,
+			modelId: item.modelId ?? null,
+			startedAt: new Date().toISOString()
+		};
 		if (typeof sessionStorage !== 'undefined') {
-			sessionStorage.setItem(
-				'aiTutorActivePracticeAssignment',
-				JSON.stringify({
-					assignmentId: item.assignmentId ?? item.id,
-					practiceProblemId: item.practiceProblemId ?? null,
-					homeworkId: item.homeworkId,
-					homeworkLabel: item.homeworkLabel,
-					assignedItems: item.assignedItems ?? [],
-					topic: item.topic,
-					startedAt: new Date().toISOString()
-				})
-			);
+			sessionStorage.setItem('aiTutorActivePracticeAssignment', JSON.stringify(assignmentPayload));
+		}
+		if (typeof localStorage !== 'undefined') {
+			localStorage.setItem('aiTutorPracticeAssignmentPending', JSON.stringify(assignmentPayload));
+			console.log('[studentdashboard]-[StartPractice]-[Persisted]:', {
+				assignmentId: assignmentPayload.assignmentId,
+				session: true,
+				localPending: true
+			});
 		}
 
 		// Planned Mastery-model flow:
@@ -264,16 +272,24 @@
 	$: topicQueryRaw = $page.url.searchParams.get('topic') || '';
 	$: topicQuery = topicQueryRaw.trim().toLowerCase();
 	$: homeworkOptions = ['All', ...homeworkData.map((hw) => hw.homework)];
-	$: filteredHomeworkData = homeworkData.filter((hw) => {
-		const matchesHomework = selectedHomework === 'All' || hw.homework === selectedHomework;
-		const matchesTopic =
-			topicQuery === '' ||
-			[...hw.masteredTopics, ...hw.needMorePractice].some((topic) =>
-				topic.toLowerCase().includes(topicQuery)
-			);
+	$: filteredHomeworkData = (() => {
+		// Re-apply workspace model filtering in case it wasn't ready during loader
+		const allowedIds = $aiTutorAllowedModelIds;
+		const modelFiltered =
+			allowedIds.size > 0
+				? homeworkData.filter((hw) => !hw.modelId || allowedIds.has(hw.modelId))
+				: homeworkData;
 
-		return matchesHomework && matchesTopic;
-	});
+		return modelFiltered.filter((hw) => {
+			const matchesHomework = selectedHomework === 'All' || hw.homework === selectedHomework;
+			const matchesTopic =
+				topicQuery === '' ||
+				[...hw.masteredTopics, ...hw.needMorePractice].some((topic) =>
+					topic.toLowerCase().includes(topicQuery)
+				);
+			return matchesHomework && matchesTopic;
+		});
+	})();
 
 	$: availableHomeworkCount = filteredHomeworkData.filter((hw) => !hw.notStarted).length;
 
@@ -578,16 +594,23 @@
 					]);
 
 						// Filter homeworks by allowed workspace models (same logic as aitutordashboard)
+						// If workspace models haven't loaded yet, defer filtering to the reactive block
 						const allowedIds = $aiTutorAllowedModelIds;
-						const homeworkRows = rawHomeworkRows.filter(
-							(row) => row.model_id && allowedIds.has(row.model_id)
-						);
+						const homeworkRows =
+							allowedIds.size > 0
+								? rawHomeworkRows.filter((row) => row.model_id && allowedIds.has(row.model_id))
+								: rawHomeworkRows;
 						console.log('[studentdashboard]-[Summary]-[HomeworkFilter]:', {
 							allCount: rawHomeworkRows.length,
 							filteredCount: homeworkRows.length,
-							excluded: rawHomeworkRows
-								.filter((row) => !row.model_id || !allowedIds.has(row.model_id))
-								.map((r) => ({ id: r.id, modelId: r.model_id }))
+							allowedIdsSize: allowedIds.size,
+							deferred: allowedIds.size === 0,
+							excluded:
+								allowedIds.size > 0
+									? rawHomeworkRows
+											.filter((row) => !row.model_id || !allowedIds.has(row.model_id))
+											.map((r) => ({ id: r.id, modelId: r.model_id }))
+									: []
 						});
 
 						const assignments = await fetchAITutorJson<any[]>('/assignment/', {
@@ -645,6 +668,7 @@
 						return {
 							homework: label,
 							homeworkId: homework.id,
+							modelId: homework.model_id ?? undefined,
 							masteredTopics,
 							needMorePractice,
 							totalCount: analysis?.total_question ?? null,
@@ -855,11 +879,15 @@
 		</div>
 	{/if}
 
-	<div class="space-y-3">
-		<div class="flex items-center text-lg font-medium px-0.5">
-			<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Practice Questions</h2>
-			<div class="flex self-center w-[1px] h-6 mx-2.5 bg-gray-50 dark:bg-gray-850" />
-			<span class="text-lg font-medium text-gray-500 dark:text-gray-300">{readyHomeworkCount}</span>
+	<div class="space-y-4">
+		<div>
+			<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200 flex items-center gap-2">
+				Practice Questions
+				<span class="text-lg font-medium text-gray-500 dark:text-gray-300">{readyHomeworkCount}</span>
+			</h2>
+			<div class="mt-1 text-xs text-gray-900 dark:text-gray-100">
+				Select a homework to start practicing. Each set contains topic-mapped questions tailored to your progress.
+			</div>
 		</div>
 
 		<div class="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
@@ -867,9 +895,9 @@
 				<table class="w-full text-sm text-left text-gray-500 dark:text-gray-400 table-auto max-w-full rounded-sm">
 					<thead class="text-xs text-gray-700 uppercase bg-[#EEE6F3] dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5">
 						<tr>
-							<th class="min-w-[140px] px-3 py-1.5 text-left font-semibold">Homework Mastery</th>
-							<th class="px-3 py-1.5 text-left font-semibold">Topic</th>
-							<th class="min-w-[120px] px-3 py-1.5 text-left font-semibold">Action</th>
+							<th class="min-w-[140px] overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-left font-semibold">Homework Mastery</th>
+							<th class="overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-left font-semibold">Topic</th>
+							<th class="min-w-[120px] overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-left font-semibold">Action</th>
 						</tr>
 					</thead>
 					<tbody>
@@ -908,7 +936,7 @@
 										</td>
 										<td class="px-3 py-1.5">
 											<button
-												class="text-xs font-medium text-black transition hover:text-gray-700 dark:text-white dark:hover:text-gray-300"
+												class="inline-flex items-center gap-1 rounded-full border border-[#57068C]/40 px-3 py-1 text-xs font-bold text-[#57068C] transition hover:bg-purple-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-purple-700 dark:text-purple-400 dark:hover:bg-purple-900/20"
 												on:click|stopPropagation={() => startPracticeAssignment(item)}
 											>
 												Start
@@ -963,12 +991,12 @@
 				<table class="w-full text-sm text-left text-gray-500 dark:text-gray-400 table-auto max-w-full rounded-sm">
 					<thead class="text-xs text-gray-700 uppercase bg-[#EEE6F3] dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5">
 						<tr>
-							<th class="min-w-[140px] px-3 py-1.5 text-left font-semibold">Homework</th>
-							<th class="px-3 py-1.5 text-left font-semibold">Need More Practice</th>
-							<th class="px-3 py-1.5 text-center font-semibold whitespace-nowrap w-[5rem]">Total</th>
-							<th class="px-3 py-1.5 text-center font-semibold whitespace-nowrap w-[5rem]">Solved</th>
-							<th class="px-3 py-1.5 text-center font-semibold whitespace-nowrap w-[5rem]">Attempted</th>
-							<th class="px-3 py-1.5 text-center font-semibold whitespace-nowrap w-[5rem]">Errors</th>
+							<th class="min-w-[140px] overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-left font-semibold">Homework</th>
+							<th class="overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-left font-semibold">Need More Practice</th>
+							<th class="overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-center font-semibold whitespace-nowrap w-[5rem]">Total</th>
+							<th class="overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-center font-semibold whitespace-nowrap w-[5rem]">Solved</th>
+							<th class="overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-center font-semibold whitespace-nowrap w-[5rem]">Attempted</th>
+							<th class="overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-center font-semibold whitespace-nowrap w-[5rem]">Errors</th>
 						</tr>
 					</thead>
 					<tbody>
@@ -1048,8 +1076,8 @@
 					<table class="w-full text-sm text-left text-gray-500 dark:text-gray-400 table-auto max-w-full rounded-sm">
 						<thead class="text-xs text-gray-700 uppercase bg-[#EEE6F3] dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5">
 							<tr>
-								<th class="min-w-[140px] px-3 py-1.5 text-left font-semibold">Homework</th>
-								<th class="px-3 py-1.5 text-left font-semibold">Status</th>
+								<th class="min-w-[140px] overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-left font-semibold">Homework</th>
+								<th class="overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-left font-semibold">Status</th>
 							</tr>
 						</thead>
 						<tbody>

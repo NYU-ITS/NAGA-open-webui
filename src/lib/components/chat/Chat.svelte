@@ -28,6 +28,7 @@
 		user,
 		socket,
 		showControls,
+		showRightsideQuestions,
 		showCallOverlay,
 		currentChatPage,
 		temporaryChatEnabled,
@@ -785,6 +786,24 @@
 			tags = await getTagsById(localStorage.token, $chatId).catch(async (error) => {
 				return [];
 			});
+
+			// Auto-restore practice panel if this chat has a bound practice assignment
+			try {
+				const chatBoundRaw = localStorage.getItem(`aiTutorPracticeAssignment-${$chatId}`);
+				if (chatBoundRaw) {
+					const parsed = JSON.parse(chatBoundRaw);
+					if (parsed?.assignmentId) {
+						showRightsideQuestions.set(true);
+						showControls.set(true);
+						console.log('[Chat]-[LoadChat]-[AutoRestoredPractice]:', {
+							chatId: $chatId,
+							assignmentId: parsed.assignmentId
+						});
+					}
+				}
+			} catch (e) {
+				console.error('[Chat]-[LoadChat]-[AutoRestoreError]:', e);
+			}
 
 			const chatContent = chat.chat;
 
@@ -1839,6 +1858,21 @@
 
 			_chatId = chat.id;
 			await chatId.set(_chatId);
+
+			// Migrate pending practice assignment from localStorage to chat-bound key
+			try {
+				const pendingRaw = localStorage.getItem('aiTutorPracticeAssignmentPending');
+				if (pendingRaw) {
+					localStorage.setItem(`aiTutorPracticeAssignment-${_chatId}`, pendingRaw);
+					localStorage.removeItem('aiTutorPracticeAssignmentPending');
+					console.log('[Chat]-[InitChat]-[MigratedPracticeAssignment]:', {
+						chatId: _chatId,
+						pendingCleared: true
+					});
+				}
+			} catch (e) {
+				console.error('[Chat]-[InitChat]-[MigrateError]:', e);
+			}
 
 			await chats.set(await getChatList(localStorage.token, $currentChatPage));
 			currentChatPage.set(1);
