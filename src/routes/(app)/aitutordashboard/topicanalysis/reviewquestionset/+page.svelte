@@ -103,6 +103,8 @@
 	let expandedGuide = false;
 	let editingQuestionIndex: number | null = null;
 	let approvingQuestionSet = false;
+	let showGenerateConfirmModal = false;
+	let pendingGenerateHomeworkId = '';
 
 	function getPersistedGroupId() {
 		if (typeof localStorage === 'undefined') return '';
@@ -753,13 +755,16 @@
 		if (!value) return '';
 		const parsed = new Date(value);
 		if (Number.isNaN(parsed.getTime())) return value;
-		return parsed.toLocaleString([], {
-			year: 'numeric',
-			month: 'short',
-			day: 'numeric',
-			hour: 'numeric',
-			minute: '2-digit'
-		});
+		return (
+			parsed.toLocaleString('en-US', {
+				timeZone: 'America/New_York',
+				year: 'numeric',
+				month: 'short',
+				day: 'numeric',
+				hour: 'numeric',
+				minute: '2-digit'
+			}) + ' EST'
+		);
 	}
 
 	function goToPreviousHomework() {
@@ -1243,7 +1248,16 @@
 		}
 	}
 
-	async function generatePractice(homeworkId: string) {
+	async function generatePractice(homeworkId: string, isRegenerate = false) {
+		if (isRegenerate) {
+			pendingGenerateHomeworkId = homeworkId;
+			showGenerateConfirmModal = true;
+			return;
+		}
+		await doGeneratePractice(homeworkId);
+	}
+
+	async function doGeneratePractice(homeworkId: string) {
 		if (!canGeneratePractice(homeworkId)) {
 			toast.error('Practice generation requires completed analysis data for this homework.');
 			return;
@@ -1497,7 +1511,7 @@
 		>
 			<div class="flex flex-col items-center text-center flex-1">
 				<h3 class="text-lg font-bold text-gray-900 dark:text-gray-100">Practice Question Workflow</h3>
-				<p class="mt-0.5 text-xs text-gray-600 dark:text-gray-400">Follow these 3 steps to generate and send practice questions</p>
+				<p class="mt-0.5 text-xs text-gray-600 dark:text-gray-400">Follow these 2 steps to generate and send practice questions</p>
 			</div>
 			<span class="text-gray-500 dark:text-gray-400">
 				{#if showPracticeQuestionWorkflow}
@@ -1514,12 +1528,12 @@
 			<!-- Step 1 Node -->
 			<div class="flex flex-col items-center gap-1.5 min-h-[60px]">
 				<div class="flex items-center justify-center w-12 h-12 rounded-full border-3 border-[#57068C] bg-white dark:bg-gray-900">
-					<!-- Checklist icon — Prepare -->
-					<svg class="w-6 h-6 text-[#57068C]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+					<!-- Lightning bolt icon — Generate -->
+					<svg class="w-8 h-8 text-[#57068C]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
 					</svg>
 				</div>
-				<p class="text-xs font-semibold text-gray-900 dark:text-gray-100 text-center">Prepare</p>
+				<p class="text-xs font-semibold text-gray-900 dark:text-gray-100 text-center">Generate</p>
 			</div>
 
 			<!-- Arrow 1 -->
@@ -1531,25 +1545,6 @@
 			</div>
 
 			<!-- Step 2 Node -->
-			<div class="flex flex-col items-center gap-1.5 min-h-[60px]">
-				<div class="flex items-center justify-center w-12 h-12 rounded-full border-3 border-[#57068C] bg-white dark:bg-gray-900">
-					<!-- Lightning bolt icon — Generate -->
-					<svg class="w-6 h-6 text-[#57068C]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-					</svg>
-				</div>
-				<p class="text-xs font-semibold text-gray-900 dark:text-gray-100 text-center">Generate</p>
-			</div>
-
-			<!-- Arrow 2 -->
-			<div class="flex items-center gap-2 flex-1 mx-3">
-				<svg class="w-5 h-5 text-[#57068C]/50 dark:text-purple-500/40 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-					<path fill-rule="evenodd" d="M10.293 3.293a1 1 0 011.414 0l6 6a1 1 0 010 1.414l-6 6a1 1 0 01-1.414-1.414L14.586 10l-4.293-4.293a1 1 0 010-1.414z" clip-rule="evenodd" />
-				</svg>
-				<div class="flex-1 h-1 bg-gradient-to-r from-[#57068C]/20 to-[#57068C]/40 dark:from-purple-500/10 dark:to-purple-500/30"></div>
-			</div>
-
-			<!-- Step 3 Node -->
 			<div class="flex flex-col items-center gap-1.5">
 				<div class="flex items-center justify-center w-12 h-12 rounded-full border-3 border-[#57068C] bg-white dark:bg-gray-900">
 					<!-- Paper plane icon — Review & Send -->
@@ -1567,25 +1562,7 @@
 			<div class="space-y-2 pt-2">
 				<div class="flex items-center gap-2">
 					<div class="w-1 h-4 bg-[#57068C] rounded-full"></div>
-					<p class="text-xs font-bold text-gray-900 dark:text-gray-100">STEP 1: PREPARE</p>
-				</div>
-				<ul class="space-y-2 text-sm text-gray-700 dark:text-gray-300">
-					<li class="flex items-start gap-2">
-						<span class="text-[#57068C] font-bold flex-shrink-0">→</span>
-						<span>Complete analysis in <strong>Topic Analysis</strong></span>
-					</li>
-					<li class="flex items-start gap-2">
-						<span class="text-[#57068C] font-bold flex-shrink-0">→</span>
-						<span>Select the homework set here</span>
-					</li>
-				</ul>
-			</div>
-
-			<!-- Step 2 Details -->
-			<div class="space-y-2 pt-2">
-				<div class="flex items-center gap-2">
-					<div class="w-1 h-4 bg-[#57068C] rounded-full"></div>
-					<p class="text-xs font-bold text-gray-900 dark:text-gray-100">STEP 2: GENERATE</p>
+					<p class="text-xs font-bold text-gray-900 dark:text-gray-100">STEP 1: GENERATE</p>
 				</div>
 				<ul class="space-y-2 text-sm text-gray-700 dark:text-gray-300">
 					<li class="flex items-start gap-2">
@@ -1599,11 +1576,11 @@
 				</ul>
 			</div>
 
-			<!-- Step 3 Details -->
+			<!-- Step 2 Details -->
 			<div class="space-y-2 pt-2 h-full flex flex-col">
 				<div class="flex items-center gap-2">
 					<div class="w-1 h-4 bg-[#57068C] rounded-full"></div>
-					<p class="text-xs font-bold text-gray-900 dark:text-gray-100">STEP 3: REVIEW & SEND</p>
+					<p class="text-xs font-bold text-gray-900 dark:text-gray-100">STEP 2: REVIEW & SEND</p>
 				</div>
 				<ul class="space-y-2 text-sm text-gray-700 dark:text-gray-300">
 					<li class="flex items-start gap-2">
@@ -1626,8 +1603,12 @@
 				<!-- Field Descriptions -->
 				<div class="space-y-2 text-xs text-gray-600 dark:text-gray-400 py-1">
 					<div class="flex items-center gap-2 pb-1">
-						<div class="w-1 h-4 bg-[#57068C] rounded-full"></div>
-						<p class="text-xs font-bold text-gray-900 dark:text-gray-100">How to edit your questions</p>
+								<div class="flex items-center justify-center w-12 h-12 rounded-full border-3 border-[#57068C] bg-white dark:bg-gray-900 flex-shrink-0">
+									<svg class="w-6 h-6 text-[#57068C]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.879 7.519c1.171-1.025 3.071-1.025 4.242 0 1.172 1.025 1.172 2.687 0 3.712-.203.179-.43.326-.67.442-.745.361-1.45.999-1.45 1.827v.75M12 17.25h.008v.008H12v-.008z" />
+									</svg>
+								</div>
+						<p class="text-base font-bold text-gray-900 dark:text-gray-100">How to edit your questions</p>
 					</div>
 					<div><span class="font-semibold text-gray-800 dark:text-gray-200">number</span> — Question number</div>
 					<div><span class="font-semibold text-gray-800 dark:text-gray-200">text</span> — Question content shown to students. Supports Markdown and LaTeX</div>
@@ -1644,10 +1625,9 @@
 	<div class="space-y-4">
 		<div>
 			<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200 flex items-center gap-2">
-				<div class="h-2 w-2 rounded-full bg-gray-400 dark:bg-gray-500"></div>
 				1.Practice Question Set
 			</h2>
-			<div class="mt-1 text-xs text-gray-400 dark:text-gray-500">
+			<div class="mt-1 text-xs text-gray-900 dark:text-gray-100">
 				Generate or upload a question set. Download, edit, and re-upload as needed. The system standardizes all uploads with topics and answers.
 			</div>
 		</div>
@@ -1742,7 +1722,7 @@
 												<button
 													type="button"
 													class="inline-flex items-center gap-1 self-center w-fit whitespace-nowrap rounded-full border border-[#57068C]/40 px-3 py-1.5 text-xs font-bold text-[#57068C] transition hover:bg-purple-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-purple-700 dark:text-purple-400 dark:hover:bg-purple-900/20"
-													on:click={() => generatePractice(practice.homeworkId)}
+													on:click={() => generatePractice(practice.homeworkId, true)}
 													disabled={generatingPracticeByHomeworkId[practice.homeworkId]}
 												>
 													<!-- [Table Button: icon+name] Re-generate -->
@@ -1781,11 +1761,10 @@
 			<div>
 			<div class="flex items-center gap-4">
 				<h2 class="text-xl font-semibold text-gray-900 dark:text-gray-100 flex items-center gap-2">
-					<div class="h-2 w-2 rounded-full bg-gray-400 dark:bg-gray-500"></div>
 					2.Questions
 				</h2>
 			</div>
-			<div class="mt-1 flex items-center justify-between gap-4 text-xs text-gray-500 dark:text-gray-400">
+			<div class="mt-1 flex items-center justify-between gap-4 text-xs text-gray-900 dark:text-gray-100">
 				<div class="flex flex-wrap items-center gap-x-3">
 					<span>Generated on {formatAITutorTimestamp(questionData.generatedTime)}</span>
 					<span>{questionData.questions.length} question{questionData.questions.length === 1 ? '' : 's'}</span>
@@ -1967,5 +1946,41 @@
 		</div>
 		</div>
 
+{#if showGenerateConfirmModal}
+	<div
+		class="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+		on:click|self={() => (showGenerateConfirmModal = false)}
+		role="dialog"
+		aria-modal="true"
+	>
+		<div class="w-[420px] max-w-[90vw] rounded-xl bg-white p-6 shadow-2xl dark:bg-gray-900">
+			<div class="text-base font-semibold text-gray-900 dark:text-gray-100">
+				Re-generate practice questions?
+			</div>
+			<p class="mt-3 text-sm text-gray-500 dark:text-gray-400">
+				This will overwrite the existing practice question set. Are you sure?
+			</p>
+			<div class="mt-6 flex justify-end gap-2">
+				<button
+					class="px-3 py-1.5 text-sm text-gray-600 transition hover:text-gray-900 dark:text-gray-300 dark:hover:text-white"
+					on:click={() => (showGenerateConfirmModal = false)}
+				>
+					Cancel
+				</button>
+				<button
+					class="px-3 py-1.5 text-sm font-medium text-gray-900 transition hover:text-black dark:text-gray-100 dark:hover:text-white"
+					on:click={() => {
+						showGenerateConfirmModal = false;
+						const hwId = pendingGenerateHomeworkId;
+						pendingGenerateHomeworkId = '';
+						void doGeneratePractice(hwId);
+					}}
+				>
+					Confirm
+				</button>
+			</div>
+		</div>
+	</div>
+{/if}
 <!-- Bottom Spacer -->
 <div class="h-[20vh]"></div>

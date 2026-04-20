@@ -49,6 +49,7 @@
 		avgSolved: number | null;
 		avgErrors: number | null;
 	};
+	type ConversationCount = { studentCount: number; chatCount: number };
 
 	// ── Homework rows (raw API data) ─────────────────────────────────────────
 	type HomeworkRow = {
@@ -69,7 +70,7 @@
 		access_control?: { read?: { group_ids?: string[] } };
 		user_id?: string;
 	}[] = [];
-	let convCountByModelId: Record<string, number> = {};
+	let convCountByModelId: Record<string, ConversationCount> = {};
 	let uploadingMap: Record<string, boolean> = {};
 	let exportingConversationMap: Record<string, boolean> = {};
 	let runningAnalysisByHomeworkId: Record<string, boolean> = {};
@@ -160,11 +161,11 @@
 		}
 	];
 	const frontendTestingModels = frontendTestingHomeworkModelNames.map((name) => ({ id: name, name }));
-	const frontendTestingConversationCounts: Record<string, number> = {
-		[frontendTestingHomeworkModelNames[0]]: 42,
-		[frontendTestingHomeworkModelNames[1]]: 27,
-		[frontendTestingHomeworkModelNames[2]]: 11,
-		[frontendTestingHomeworkModelNames[3]]: 18
+	const frontendTestingConversationCounts: Record<string, ConversationCount> = {
+		[frontendTestingHomeworkModelNames[0]]: { studentCount: 3, chatCount: 42 },
+		[frontendTestingHomeworkModelNames[1]]: { studentCount: 2, chatCount: 27 },
+		[frontendTestingHomeworkModelNames[2]]: { studentCount: 1, chatCount: 11 },
+		[frontendTestingHomeworkModelNames[3]]: { studentCount: 2, chatCount: 18 }
 	};
 	const frontendTestingGeneralPrompts = [
 		{ id: 'gp-1', name: 'pdf_to_markdown', prompt: 'Convert the uploaded PDF into clean markdown while preserving numbering and math.', is_active: true },
@@ -265,7 +266,8 @@ const bannerPlaceholderTime = 'TEST-TIME';
 		const yMin = 0;
 		const plotW = W - padL - padR;
 		const plotH = H - padT - padB;
-		const px = (i: number) => padL + (n <= 1 ? plotW / 2 : (i / (n - 1)) * plotW);
+		const slotCount = Math.max(n, 14);
+		const px = (i: number) => padL + (slotCount <= 1 ? plotW / 2 : (i / (slotCount - 1)) * plotW);
 		const py = (v: number) =>
 			yMax === yMin ? padT + plotH / 2 : padT + plotH - ((v - yMin) / (yMax - yMin)) * plotH;
 		const dots = values
@@ -283,7 +285,48 @@ const bannerPlaceholderTime = 'TEST-TIME';
 		const stat = homeworkStats[i];
 		if (!stat) return `${i + 1}`;
 		const homeworkLabel = getHomeworkModelName(stat.homework);
-		return homeworkLabel.length > 10 ? `${homeworkLabel.slice(0, 10)}...` : homeworkLabel;
+
+		// Rule 3: if the name contains a homework number pattern (hw1, homework 2, etc.),
+		// prefer to keep that identifier and drop the rest.
+		const hwMatch = homeworkLabel.match(/(homework|hw)\s*[_—\-]?\s*(\d+)/i);
+		if (hwMatch) {
+			const allMatches = homeworkLabel.match(/(homework|hw)\s*[_—\-]?\s*(\d+)/gi);
+			if (allMatches && allMatches.length === 1) {
+				return hwMatch[0];
+			}
+		}
+
+		// Rule 1 & 2: show full name when possible; wrap to two lines if needed.
+		if (homeworkLabel.length <= 20) return homeworkLabel;
+
+		// Try to split into two lines at a natural breakpoint near the middle.
+		const mid = Math.floor(homeworkLabel.length / 2);
+		let splitIndex = -1;
+		for (let j = mid; j < homeworkLabel.length; j++) {
+			if (homeworkLabel[j] === ' ' || homeworkLabel[j] === '-') {
+				splitIndex = j;
+				break;
+			}
+		}
+		if (splitIndex === -1) {
+			for (let j = mid; j >= 0; j--) {
+				if (homeworkLabel[j] === ' ' || homeworkLabel[j] === '-') {
+					splitIndex = j;
+					break;
+				}
+			}
+		}
+		if (splitIndex > 0) {
+			const line1 = homeworkLabel.slice(0, splitIndex).trim();
+			const line2 = homeworkLabel.slice(splitIndex + 1).trim();
+			// Only use two lines if each line is reasonably short (won't overlap).
+			if (line1.length <= 16 && line2.length <= 16) {
+				return `${line1}\n${line2}`;
+			}
+		}
+
+		// Fallback: natural truncation.
+		return `${homeworkLabel.slice(0, 18)}...`;
 	}
 
 	function combinedChartPoints(values1: (number | null)[], values2: (number | null)[]) {
@@ -299,7 +342,8 @@ const bannerPlaceholderTime = 'TEST-TIME';
 		const yMin = 0;
 		const plotW = W - padL - padR;
 		const plotH = H - padT - padB;
-		const px = (i: number) => padL + (n <= 1 ? plotW / 2 : (i / (n - 1)) * plotW);
+			const slotCount = Math.max(n, 14);
+		const px = (i: number) => padL + (slotCount <= 1 ? plotW / 2 : (i / (slotCount - 1)) * plotW);
 		const py = (v: number) =>
 			yMax === yMin ? padT + plotH / 2 : padT + plotH - ((v - yMin) / (yMax - yMin)) * plotH;
 		const dots1 = values1
@@ -351,6 +395,7 @@ const bannerPlaceholderTime = 'TEST-TIME';
 		draftRows = [];
 		homeworkRows = [];
 		homeworkStats = [];
+		convCountByModelId = {};
 		// When switching to a non-empty group, trigger data loads.
 		if ($aiTutorSelectedGroupId) {
 			void loadHomeworkStats($aiTutorSelectedGroupId);
@@ -633,15 +678,22 @@ async function loadConversationCounts(groupId: string) {
 		});
 		if (!res.ok) throw new Error('Conv count fetch failed');
 		const data = await res.json();
-		const counts: Record<string, number> = {};
+		const studentsByModel: Record<string, Set<string>> = {};
+		const nextCounts: Record<string, ConversationCount> = {};
 		if (Array.isArray(data)) {
 			for (const chat of data) {
-				const modelId = chat?.meta?.model_name ?? chat?.meta?.model_id ?? '';
-				if (modelId) counts[modelId] = (counts[modelId] ?? 0) + 1;
+				const modelKey = chat?.meta?.model_name ?? chat?.meta?.model_id ?? '';
+				if (!modelKey) continue;
+				if (!studentsByModel[modelKey]) studentsByModel[modelKey] = new Set();
+				if (chat.user_id) studentsByModel[modelKey].add(chat.user_id);
+				nextCounts[modelKey] = {
+					studentCount: studentsByModel[modelKey].size,
+					chatCount: (nextCounts[modelKey]?.chatCount ?? 0) + 1
+				};
 			}
 		}
 		if ($aiTutorSelectedGroupId !== groupId) return; // stale
-		convCountByModelId = counts;
+		convCountByModelId = nextCounts;
 	} catch (e) {
 		console.error('Conversation count fetch failed:', e);
 	}
@@ -1256,6 +1308,26 @@ function getHomeworkModelName(homework: string) {
 	return matchingModel?.name ?? modelId;
 }
 
+function getConversationCountDisplay(homeworkId: string) {
+	const row = homeworkRows.find((r) => r.id === homeworkId);
+	if (!row?.modelId) return '0';
+	const keys = new Set<string>();
+	keys.add(row.modelId);
+	const matchedModel = availableModels.find((model) => model.id === row.modelId);
+	if (matchedModel?.name) keys.add(matchedModel.name);
+	let maxStudentCount = 0;
+	let maxChatCount = 0;
+	for (const key of keys) {
+		const count = convCountByModelId[key];
+		if (count && count.studentCount > maxStudentCount) {
+			maxStudentCount = count.studentCount;
+			maxChatCount = count.chatCount;
+		}
+	}
+	if (maxStudentCount === 0) return '0';
+	return `${maxStudentCount} (${maxChatCount} chats)`;
+}
+
 function getUpdatedHomeworkIds() {
 	return homeworkRows
 		.filter((row) => row.questionUploaded || row.answerUploaded)
@@ -1448,8 +1520,12 @@ async function runAnalysis() {
 							<!-- X-axis labels (density scales with width) -->
 							{#each combinedChart.xLabels as lbl, i}
 								{#if i % combinedChart.labelStep === 0}
-									<text x={lbl.x} y={H - padB + 14} text-anchor="middle" font-size="9"
-										class="fill-gray-400 dark:fill-gray-500">{lbl.label}</text>
+									<text x={lbl.x} y={H - padB + 10} text-anchor="middle" font-size="9"
+										class="fill-gray-400 dark:fill-gray-500">
+										{#each lbl.label.split('\n') as line, lineIndex}
+											<tspan x={lbl.x} dy={lineIndex === 0 ? 0 : 11}>{line}</tspan>
+										{/each}
+									</text>
 								{/if}
 							{/each}
 							<!-- Axes -->
@@ -1492,16 +1568,17 @@ async function runAnalysis() {
 				<thead class="text-xs text-gray-700 uppercase bg-[#EEE6F3] dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5">
 					<tr>
 						{#each [
-							{ key: 'homework',     label: 'Homework' },
-							{ key: 'totalProblems', label: 'Total Number of Questions' },
-							{ key: 'avgAttempted',   label: 'Avg Attempted' },
-							{ key: 'avgSolved',      label: 'Avg Solved' },
-							{ key: 'avgErrors',      label: 'Avg Errors' }
+							{ key: 'homework',     label: 'Homework', sortable: true },
+							{ key: null,           label: 'Students Interacted', sortable: false },
+							{ key: 'totalProblems', label: 'Total Number of Questions', sortable: true },
+							{ key: 'avgAttempted',   label: 'Avg Attempted', sortable: true },
+							{ key: 'avgSolved',      label: 'Avg Solved', sortable: true },
+							{ key: 'avgErrors',      label: 'Avg Errors', sortable: true }
 						] as col}
-							<th scope="col" class="px-3 py-1.5 cursor-pointer select-none {col.key === 'homework' ? 'w-[24rem]' : 'w-[5rem]'}" on:click={() => setSortKey(col.key)}>
+							<th scope="col" class="px-3 py-1.5 select-none {col.key === 'homework' ? 'w-[24rem]' : col.key === null ? 'w-[10rem]' : 'w-[5rem]'} {col.sortable ? 'cursor-pointer' : ''}" on:click={col.sortable ? () => setSortKey(col.key) : undefined}>
 								<div class="flex gap-1.5 items-center">
 									{col.label}
-									{#if sortKey === col.key}
+									{#if col.sortable && sortKey === col.key}
 										<span class="font-normal">
 											{#if sortOrder === 'asc'}<ChevronUp className="size-2" />{:else}<ChevronDown className="size-2" />{/if}
 										</span>
@@ -1516,7 +1593,7 @@ async function runAnalysis() {
 				<tbody>
 					{#if sortedStats.length === 0}
 						<tr class="bg-white dark:bg-gray-900 text-xs">
-							<td colspan="5" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">
+							<td colspan="6" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">
 								No data available
 							</td>
 						</tr>
@@ -1526,6 +1603,7 @@ async function runAnalysis() {
 								<td class="px-3 py-1 font-medium text-gray-900 dark:text-white">
 									<div class={homeworkModelNameCellClass}>{getHomeworkModelName(stat.homework)}</div>
 								</td>
+								<td class="px-3 py-1">{getConversationCountDisplay(stat.homework)}</td>
 								<td class="px-3 py-1">{stat.totalProblems ?? 'N/A'}</td>
 								<td class="px-3 py-1">{stat.avgAttempted != null ? stat.avgAttempted.toFixed(1) : 'N/A'}</td>
 								<td class="px-3 py-1">{stat.avgSolved != null ? stat.avgSolved.toFixed(1) : 'N/A'}</td>

@@ -23,6 +23,7 @@
 	} from '$lib/utils/aiTutorSessionCache';
 	import ChevronUp from '$lib/components/icons/ChevronUp.svelte';
 	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
+import Selector from '$lib/components/common/Selector.svelte';
 
 	const AI_TUTOR_API_BASE = AI_TUTOR_API_BASE_URL;
 	const useFrontendTestingData = AI_TUTOR_FRONTEND_TESTING_MODE;
@@ -516,6 +517,9 @@
 						{
 							questionSet: Set<string>;
 							studentsWithError: Set<string>;
+							studentsMastered: Set<string>;
+							studentsNotAttempted: Set<string>;
+							studentsMixed: Set<string>;
 							errorTypeCount: Map<string, number>;
 						}
 					>
@@ -534,20 +538,42 @@
 							topicMap.set(topicName, {
 								questionSet: new Set(),
 								studentsWithError: new Set(),
+								studentsMastered: new Set(),
+								studentsNotAttempted: new Set(),
+								studentsMixed: new Set(),
 								errorTypeCount: new Map()
 							});
 						}
 						const bucket = topicMap.get(topicName)!;
 						const details: string = tp?.details ?? '';
+						const studentId = row?.student_id ?? row?.student_email ?? 'unknown';
 
 						for (const match of details.matchAll(/Q(\d+):/g)) {
 							bucket.questionSet.add(`Q${match[1]}`);
 						}
 
-						for (const match of details.matchAll(/\(([^)]+)\)/g)) {
-							const et = match[1] || 'Others';
-							bucket.errorTypeCount.set(et, (bucket.errorTypeCount.get(et) ?? 0) + 1);
-							bucket.studentsWithError.add(row?.student_id ?? row?.student_email ?? 'unknown');
+						// Parse per-question status to classify student state
+						const statuses: string[] = [];
+						for (const match of details.matchAll(/Q\d+:\s*(Solved|Attempted|Not Attempted)/g)) {
+							statuses.push(match[1]);
+						}
+						const allSolved = statuses.length > 0 && statuses.every((s) => s === 'Solved');
+						const allNotAttempted = statuses.length > 0 && statuses.every((s) => s === 'Not Attempted');
+						const hasError = statuses.some((s) => s === 'Attempted');
+
+						if (allSolved) {
+							bucket.studentsMastered.add(studentId);
+						} else if (allNotAttempted) {
+							bucket.studentsNotAttempted.add(studentId);
+						} else if (hasError) {
+							bucket.studentsWithError.add(studentId);
+							for (const match of details.matchAll(/\(([^)]+)\)/g)) {
+								const et = match[1] || 'Others';
+								if (et === 'Not Attempted') continue;
+								bucket.errorTypeCount.set(et, (bucket.errorTypeCount.get(et) ?? 0) + 1);
+							}
+						} else {
+							bucket.studentsMixed.add(studentId);
 						}
 					}
 				}
@@ -567,6 +593,9 @@
 							questions: Array.from(bucket.questionSet).sort().join(', '),
 							questionCount: bucket.questionSet.size,
 							studentsWithError: bucket.studentsWithError.size,
+							studentsMastered: bucket.studentsMastered.size,
+							studentsNotAttempted: bucket.studentsNotAttempted.size,
+							studentsMixed: bucket.studentsMixed.size,
 							errorTypes
 						};
 					});
@@ -1131,10 +1160,6 @@
 			return [...orderedDefinedErrorTypes, ...fallbackErrorTypes];
 		}
 
-		if (displayErrorTypes.length) {
-			return displayErrorTypes;
-		}
-
 		return [];
 	}
 
@@ -1142,8 +1167,7 @@
 	let expandedHomework = new Set<string>();
 	let selectedTopicAnalysisHomework = 'all';
 	let selectedTopicAnalysisTopic = 'all';
-	let topicComboboxValue = 'All Topics';
-	let showTopicDropdown = false;
+
 	let lastTopicAnalysisFilterKey = '';
 
 	function getHomeworkModelName(homework: string) {
@@ -1191,7 +1215,6 @@
 		!topicAnalysisTopicOptions.includes(selectedTopicAnalysisTopic)
 	) {
 		selectedTopicAnalysisTopic = 'all';
-		topicComboboxValue = 'All Topics';
 	}
 	$: {
 		const nextFilterKey = `${selectedTopicAnalysisHomework}|${selectedTopicAnalysisTopic}|${filteredTopicGroupsByHomework
@@ -1256,40 +1279,18 @@
 				{/each}
 			</select>
 
-				<!-- [Selector] Topic Search + Dropdown -->
-				<div class="relative w-52">
-					<input
-						type="text"
-						class="w-full rounded-full border border-gray-300 bg-white py-1.5 pl-3 pr-8 text-xs text-gray-700 focus:outline-none dark:border-gray-500 dark:bg-gray-800 dark:text-gray-200 placeholder:text-gray-400 dark:placeholder:text-gray-500"
-						placeholder="Search topics..."
-						bind:value={topicComboboxValue}
-						on:focus={() => showTopicDropdown = true}
-						on:blur={() => setTimeout(() => showTopicDropdown = false, 150)}
-					/>
-					<div class="absolute inset-y-0 right-0 flex items-center pr-2.5 pointer-events-none text-gray-400 dark:text-gray-500">
-						<ChevronDown className="size-3.5" />
-					</div>
-					{#if showTopicDropdown}
-						<div class="absolute top-full left-0 mt-1 w-full max-h-48 overflow-y-auto rounded-lg border border-gray-200 bg-white py-1 shadow-lg dark:border-gray-700 dark:bg-gray-800 z-50">
-							<button
-								type="button"
-								class="w-full px-3 py-1.5 text-left text-xs hover:bg-gray-100 dark:hover:bg-gray-700 {selectedTopicAnalysisTopic === 'all' ? 'bg-blue-50 dark:bg-blue-900/30 font-medium' : ''}"
-								on:click={() => { selectedTopicAnalysisTopic = 'all'; topicComboboxValue = 'All Topics'; showTopicDropdown = false; }}
-							>
-								All Topics
-							</button>
-							{#each topicAnalysisTopicOptions.filter(t => topicComboboxValue === 'All Topics' || t.toLowerCase().includes(topicComboboxValue.toLowerCase())) as topic}
-								<button
-									type="button"
-									class="w-full px-3 py-1.5 text-left text-xs hover:bg-gray-100 dark:hover:bg-gray-700 {selectedTopicAnalysisTopic === topic ? 'bg-blue-50 dark:bg-blue-900/30 font-medium' : ''}"
-									on:click={() => { selectedTopicAnalysisTopic = topic; topicComboboxValue = topic; showTopicDropdown = false; }}
-								>
-									{topic}
-								</button>
-							{/each}
-						</div>
-					{/if}
-				</div>
+				<!-- [Selector] Topic -->
+				<Selector
+					value={selectedTopicAnalysisTopic}
+					placeholder="All Topics"
+					searchEnabled={true}
+					searchPlaceholder="Search topics"
+					items={[
+						{ value: 'all', label: 'All Topics' },
+						...topicAnalysisTopicOptions.map((t) => ({ value: t, label: t }))
+					]}
+					on:change={(e) => { selectedTopicAnalysisTopic = e.detail.value; }}
+				/>
 			</div>
 		</div>
 
@@ -1299,9 +1300,9 @@
 			<table class="w-full min-w-[800px] table-fixed rounded-sm text-left text-sm text-gray-500 dark:text-gray-400">
 				<thead class="sticky top-0 text-xs text-gray-700 uppercase bg-[#EEE6F3] dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5 z-10">
 					<tr>
-						<th scope="col" class="w-[28%] px-3 py-1.5">Homework</th>
-						<th scope="col" class="w-[14%] whitespace-nowrap px-3 py-1.5">Questions in Topic</th>
-						<th scope="col" class="w-[14%] whitespace-nowrap px-3 py-1.5">Students with Error</th>
+						<th scope="col" class="w-[24%] px-3 py-1.5">Homework</th>
+						<th scope="col" class="w-[12%] whitespace-nowrap px-3 py-1.5">Questions in Topic</th>
+						<th scope="col" class="w-[14%] whitespace-nowrap px-3 py-1.5">Students with Errors</th>
 						<th scope="col" class="w-[44%] px-3 py-1.5">Error Type Analysis</th>
 					</tr>
 				</thead>
@@ -1355,14 +1356,33 @@
 									</td>
 									<td class="px-3 py-1.5">
 										{#if getTopicDisplayErrorTypes(topic.errorTypes).length === 0}
-											<div class="flex items-center gap-2">
-												<span class="text-gray-400 dark:text-gray-500 italic">Please add new error types</span>
-												<button
-													class="flex items-center justify-center w-4 h-4 rounded-full bg-gray-200 hover:bg-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-600 dark:text-gray-300 leading-none text-base flex-shrink-0"
-													on:click|stopPropagation={addErrorType}
-													title="Add error type"
-												>+</button>
-											</div>
+											{#if errorTypeDefs.length === 0}
+												<div class="flex items-center gap-2">
+													<span class="text-gray-400 dark:text-gray-500 italic">Please add new error types</span>
+													<button
+														class="flex items-center justify-center w-4 h-4 rounded-full bg-gray-200 hover:bg-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-600 dark:text-gray-300 leading-none text-base flex-shrink-0"
+														on:click|stopPropagation={addErrorType}
+														title="Add error type"
+													>+</button>
+												</div>
+									{:else if topic.studentsMastered > 0 && topic.studentsWithError === 0 && topic.studentsNotAttempted === 0 && topic.studentsMixed === 0}
+										<span class="inline-flex items-center gap-1 rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-700 dark:bg-green-900/30 dark:text-green-300">
+											<span class="w-1.5 h-1.5 rounded-full bg-green-500"></span>
+											All mastered
+										</span>
+									{:else if topic.studentsNotAttempted > 0 && topic.studentsWithError === 0 && topic.studentsMastered === 0 && topic.studentsMixed === 0}
+										<span class="inline-flex items-center gap-1 rounded-full bg-yellow-100 px-2.5 py-0.5 text-xs font-medium text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-300">
+											<span class="w-1.5 h-1.5 rounded-full bg-yellow-500"></span>
+											No attempts
+										</span>
+									{:else if topic.studentsWithError === 0 && (topic.studentsMastered > 0 || topic.studentsNotAttempted > 0 || topic.studentsMixed > 0)}
+										<span class="inline-flex items-center gap-1 rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-700 dark:bg-green-900/30 dark:text-green-300">
+											<span class="w-1.5 h-1.5 rounded-full bg-green-500"></span>
+											No errors
+										</span>
+											{:else}
+												<span class="text-gray-400 dark:text-gray-500">—</span>
+											{/if}
 										{:else}
 											<!-- Display the full-width color bar plus a readable percentage legend. -->
 											<div class="flex items-center gap-2">

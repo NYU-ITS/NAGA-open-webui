@@ -247,7 +247,7 @@
 											id="group-search-input"
 											type="text"
 											bind:value={groupSearchValue}
-											class="w-full text-sm bg-transparent outline-hidden"
+											class="w-full text-sm bg-transparent outline-hidden text-gray-800 dark:text-gray-200 placeholder-gray-400 dark:placeholder-gray-500"
 											placeholder="Search groups"
 											autocomplete="off"
 											on:keydown={(e) => {

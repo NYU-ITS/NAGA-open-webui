@@ -98,7 +98,8 @@ import { flyAndScale } from '$lib/utils/transitions';
 		access_control?: { read?: { group_ids?: string[] } };
 		user_id?: string;
 	}[] = [];
-	let convCountByModelId: Record<string, number> = {};
+	type ConversationCount = { studentCount: number; chatCount: number };
+	let convCountByModelId: Record<string, ConversationCount> = {};
 	let isRefreshingConversationCounts = false;
 	let uploadingMap: Record<string, boolean> = {};
 	let hasLoadedHomework = false;
@@ -109,6 +110,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 	const activeJobIds = new Set<string>();
 	// AbortControllers for cancellable async operations (group switch, unmount)
 	let loadHomeworkAbortController: AbortController | null = null;
+	let loadConversationCountsAbortController: AbortController | null = null;
 	const pollAbortControllers = new Map<string, AbortController>();
 	const POLL_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes max polling
 	type DraftRow = { uid: number; modelId: string };
@@ -130,6 +132,8 @@ import { flyAndScale } from '$lib/utils/transitions';
 	let showEditErrorTypeModal = false;
 	let showResetDefaultsModal = false;
 	let resetDefaultsModalMode: 'default' | 'delete' = 'default';
+	let showRunConfirmModal = false;
+	let pendingRunRow: HomeworkRow | null = null;
 
 	function errorTypesSavedAtKey(gid: string): string {
 		return `ai_tutor_error_types_saved_at_${gid}`;
@@ -159,6 +163,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 	let editErrorTypeName = '';
 	let editErrorTypeDescription = '';
 	let showErrorTypeMenuOpen: Record<number, boolean> = {};
+	let isEditingErrorTypes = false;
 
 	// Computed: derive errorTypeDefs from draft for display
 	$: errorTypeDefs = draftErrorTypeDefs;
@@ -329,11 +334,11 @@ import { flyAndScale } from '$lib/utils/transitions';
 		}
 	];
 	const frontendTestingModels = frontendTestingHomeworkModelNames.map((name) => ({ id: name, name }));
-	const frontendTestingConversationCounts: Record<string, number> = {
-		[frontendTestingHomeworkModelNames[0]]: 42,
-		[frontendTestingHomeworkModelNames[1]]: 27,
-		[frontendTestingHomeworkModelNames[2]]: 11,
-		[frontendTestingHomeworkModelNames[3]]: 18
+	const frontendTestingConversationCounts: Record<string, ConversationCount> = {
+		[frontendTestingHomeworkModelNames[0]]: { studentCount: 3, chatCount: 42 },
+		[frontendTestingHomeworkModelNames[1]]: { studentCount: 2, chatCount: 27 },
+		[frontendTestingHomeworkModelNames[2]]: { studentCount: 1, chatCount: 11 },
+		[frontendTestingHomeworkModelNames[3]]: { studentCount: 2, chatCount: 18 }
 	};
 	const frontendTestingGeneralPrompts = [
 		{
@@ -655,6 +660,8 @@ import { flyAndScale } from '$lib/utils/transitions';
 		document.removeEventListener('visibilitychange', handleVisibilityChange);
 		// Cancel any in-flight homework load
 		loadHomeworkAbortController?.abort();
+		// Cancel any in-flight conversation counts load
+		loadConversationCountsAbortController?.abort();
 		// Cancel all active poll loops
 		for (const [, ctrl] of pollAbortControllers) {
 			ctrl.abort();
@@ -668,6 +675,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 		_prevGroupIdForReset = $aiTutorSelectedGroupId;
 		// Cancel any in-flight load for the previous group
 		loadHomeworkAbortController?.abort();
+		loadConversationCountsAbortController?.abort();
 		// Cancel all active poll loops so they don't mutate state for the wrong group
 		for (const [, ctrl] of pollAbortControllers) {
 			ctrl.abort();
@@ -681,6 +689,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 		draftRows = [];
 		homeworkRows = [];
 		homeworkStats = [];
+		convCountByModelId = {};
 		hasLoadedHomework = false;
 		// When switching to a non-empty group, trigger data loads.
 		// When switching to empty/no group, the cleared state above is sufficient.
@@ -741,6 +750,8 @@ import { flyAndScale } from '$lib/utils/transitions';
 					if (!hwResponse.ok) throw new Error('Homework fetch failed');
 					const hwData = await hwResponse.json();
 					if (Array.isArray(hwData)) {
+						// Preserve frontend-known filenames since backend does not store them.
+						const existingFileNames = new Map(homeworkRows.map(r => [r.id, { q: r.questionFileName, a: r.answerFileName }]));
 						fetchedHomeworkRows = hwData.map((hw: any) => ({
 							id: hw.id,
 							modelId: hw.model_id ?? null,
@@ -748,8 +759,8 @@ import { flyAndScale } from '$lib/utils/transitions';
 							answerUploaded: hw.answer_uploaded ?? false,
 							topicMapped: hw.topic_mapped ?? false,
 							answerSource: hw.answer_source ?? null,
-							questionFileName: hw.question_filename ?? null,
-							answerFileName: hw.answer_filename ?? null
+							questionFileName: hw.question_filename ?? existingFileNames.get(hw.id)?.q ?? null,
+							answerFileName: hw.answer_filename ?? existingFileNames.get(hw.id)?.a ?? null
 						}));
 						for (const hw of hwData) {
 							topicMappedByHomeworkId.set(hw.id, hw.topic_mapped ?? false);
@@ -959,6 +970,10 @@ import { flyAndScale } from '$lib/utils/transitions';
 			return;
 		}
 		if (!groupId) return;
+		// Cancel any previous in-flight request
+		loadConversationCountsAbortController?.abort();
+		const controller = new AbortController();
+		loadConversationCountsAbortController = controller;
 		try {
 			// Real-time fetch without session cache so the count always matches
 			// what the admin panel Conversation History modal shows.
@@ -968,11 +983,13 @@ import { flyAndScale } from '$lib/utils/transitions';
 					Authorization: `Bearer ${localStorage.token}`,
 					'Content-Type': 'application/json'
 				},
-				body: JSON.stringify({ group_id: groupId, skip: 0, limit: 1000 })
+				body: JSON.stringify({ group_id: groupId, skip: 0, limit: 1000 }),
+				signal: controller.signal
 			});
 			if (!res.ok) throw new Error('Conv count fetch failed');
 			const data = await res.json();
-			const nextCounts: Record<string, number> = {};
+			const nextCounts: Record<string, ConversationCount> = {};
+			const studentsByModel: Record<string, Set<string>> = {};
 			if (Array.isArray(data)) {
 				for (const chat of data) {
 					const modelKeys = [
@@ -981,7 +998,14 @@ import { flyAndScale } from '$lib/utils/transitions';
 						chat?.meta?.base_model_name
 					].filter((value) => typeof value === 'string' && value.length > 0);
 					for (const modelKey of new Set(modelKeys)) {
-						nextCounts[modelKey] = (nextCounts[modelKey] ?? 0) + 1;
+						if (!studentsByModel[modelKey]) {
+							studentsByModel[modelKey] = new Set();
+						}
+						studentsByModel[modelKey].add(chat.user_id);
+						nextCounts[modelKey] = {
+							studentCount: studentsByModel[modelKey].size,
+							chatCount: (nextCounts[modelKey]?.chatCount ?? 0) + 1
+						};
 					}
 				}
 			}
@@ -989,6 +1013,10 @@ import { flyAndScale } from '$lib/utils/transitions';
 			convCountByModelId = nextCounts;
 			console.log('[aitutordashboard]-[InstructorSetup]-[ConversationCountsRefreshCompleted]:', nextCounts);
 		} catch (e) {
+			if (e instanceof Error && e.name === 'AbortError') {
+				console.log('[aitutordashboard]-[InstructorSetup]-[ConversationCountsAborted]: group=' + groupId);
+				return;
+			}
 			console.error('Conversation count fetch failed:', e);
 		} finally {
 			isRefreshingConversationCounts = false;
@@ -1106,7 +1134,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 		const generalPrompt = generalPrompts.find((p) => p.name === name && p.is_active !== false);
 		if (tutorPrompt) {
 			return {
-				scope: 'Class Override',
+				scope: 'Set by User',
 				prompt: tutorPrompt.prompt ?? '',
 				tutorId: tutorPrompt.id ?? '',
 				scopeType: 'override' as const
@@ -1255,9 +1283,13 @@ import { flyAndScale } from '$lib/utils/transitions';
 			removePersistedJob(job.jobId);
 			activeJobIds.delete(job.jobId);
 			pollAbortControllers.delete(job.jobId);
+			// Ensure upload spinner is cleared when a background upload job finishes or fails.
+			if ((job.type === "question-upload" || job.type === "answer-upload") && job.homeworkId) {
+				const docType = job.type === "question-upload" ? "question" : "answer";
+				uploadingMap = { ...uploadingMap, [`${job.homeworkId}-${docType}`]: false };
+			}
 		}
 	}
-
 	async function resumePersistedJobs(groupId: string) {
 		const jobs = readPersistedJobs().filter((item) => item.groupId === groupId);
 		console.log('[aitutordashboard]-[InstructorSetup]-[JobsRestored]:', {
@@ -1286,9 +1318,15 @@ import { flyAndScale } from '$lib/utils/transitions';
 							status: checkData.status
 						});
 						removePersistedJob(job.jobId);
-						// If it was an upload, still refresh data so the UI shows the result
-						if (job.groupId === $aiTutorSelectedGroupId && (job.type === 'question-upload' || job.type === 'answer-upload')) {
-							await loadHomeworkStats(job.groupId);
+						// If it was an upload, clear any stale spinner and refresh data so the UI shows the result
+						if (job.type === 'question-upload' || job.type === 'answer-upload') {
+							if (job.homeworkId) {
+								const docType = job.type === 'question-upload' ? 'question' : 'answer';
+								uploadingMap = { ...uploadingMap, [`${job.homeworkId}-${docType}`]: false };
+							}
+							if (job.groupId === $aiTutorSelectedGroupId) {
+								await loadHomeworkStats(job.groupId);
+							}
 						}
 						continue;
 					}
@@ -1489,6 +1527,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 			toast.success('Frontend testing error types saved.');
 			aiTutorFrontendTestingErrorTypes.set(draftErrorTypeDefs);
 			originalErrorTypeDefs = draftErrorTypeDefs;
+			isEditingErrorTypes = false;
 			const ts = new Date().toISOString();
 			if (typeof localStorage !== 'undefined')
 				localStorage.setItem(errorTypesSavedAtKey($aiTutorSelectedGroupId), ts);
@@ -1544,6 +1583,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 				// Sync original to match draft after successful save
 				originalErrorTypeDefs = draftErrorTypeDefs;
 				// Show "Saved" state briefly
+				isEditingErrorTypes = false;
 				justSavedErrorTypes = true;
 				if (saveSuccessTimeout) clearTimeout(saveSuccessTimeout);
 				saveSuccessTimeout = setTimeout(() => { justSavedErrorTypes = false; }, 2000);
@@ -1751,13 +1791,27 @@ import { flyAndScale } from '$lib/utils/transitions';
 			clearAITutorSessionCacheByGroup($aiTutorSelectedGroupId);
 			upsertPersistedJob(persistedJob);
 			toast.success(`${docType === 'question' ? 'Homework' : 'Answer'} upload started.`);
+			// Immediately reflect the file name so the Homework PDF column shows it
+			// even while the background pipeline job is still running.
+			if (hwId) {
+				homeworkRows = homeworkRows.map((row) => {
+					if (row.id !== hwId) return row;
+					return {
+						...row,
+						questionFileName: docType === 'question' ? file.name : row.questionFileName,
+						answerFileName: docType === 'answer' ? file.name : row.answerFileName
+					};
+				});
+			}
+			// Upload is done; reset the spinner immediately so it only covers the HTTP upload,
+			// not the entire background pipeline job.
+			uploadingMap = { ...uploadingMap, [key]: false };
 			await monitorPersistedJob(persistedJob);
 			if (hwId === null && draftUid !== undefined)
 				draftRows = draftRows.filter((d) => d.uid !== draftUid);
 		} catch (e) {
 			toast.error(e instanceof Error ? e.message : 'Upload failed.');
 			console.error('PDF upload failed:', e);
-		} finally {
 			uploadingMap = { ...uploadingMap, [key]: false };
 		}
 	}
@@ -1818,7 +1872,10 @@ import { flyAndScale } from '$lib/utils/transitions';
 			return 'Collecting Conversations';
 		}
 		if (runningAnalysisByHomeworkId[row.id]) {
-			return 'Analysis Running';
+			return 'Processing…';
+		}
+		if (homeworkJobStepByModelId[row.modelId ?? '']) {
+			return 'Processing…';
 		}
 		if (Boolean(stat?.status) && row.questionUploaded) {
 			return 'Analysis Completed';
@@ -1850,7 +1907,8 @@ import { flyAndScale } from '$lib/utils/transitions';
 			uploadingMap[`${row.id}-question`] ||
 				uploadingMap[`${row.id}-answer`] ||
 				exportingConversationMap[row.id] ||
-				runningAnalysisByHomeworkId[row.id]
+				runningAnalysisByHomeworkId[row.id] ||
+				homeworkJobStepByModelId[row.modelId ?? '']
 		);
 	}
 
@@ -1882,11 +1940,31 @@ import { flyAndScale } from '$lib/utils/transitions';
 		const matchedModel = availableModels.find((model) => model.id === row.modelId);
 		if (matchedModel?.name) keys.add(matchedModel.name);
 
-		let maxCount = 0;
+		let maxStudentCount = 0;
 		for (const key of keys) {
-			maxCount = Math.max(maxCount, convCountByModelId[key] ?? 0);
+			maxStudentCount = Math.max(maxStudentCount, convCountByModelId[key]?.studentCount ?? 0);
 		}
-		return maxCount;
+		return maxStudentCount;
+	}
+
+	function getConversationCountDisplay(row: HomeworkRow) {
+		const keys = new Set<string>();
+		if (row.modelId) keys.add(row.modelId);
+
+		const matchedModel = availableModels.find((model) => model.id === row.modelId);
+		if (matchedModel?.name) keys.add(matchedModel.name);
+
+		let maxStudentCount = 0;
+		let maxChatCount = 0;
+		for (const key of keys) {
+			const count = convCountByModelId[key];
+			if (count && count.studentCount > maxStudentCount) {
+				maxStudentCount = count.studentCount;
+				maxChatCount = count.chatCount;
+			}
+		}
+		if (maxStudentCount === 0) return '0';
+		return `${maxStudentCount} (${maxChatCount} chats)`;
 	}
 
 	function getHomeworkPrimaryActionLabel(row: HomeworkRow) {
@@ -1906,6 +1984,11 @@ import { flyAndScale } from '$lib/utils/transitions';
 	async function handleHomeworkPrimaryAction(row: HomeworkRow) {
 		const action = getHomeworkPrimaryActionLabel(row);
 		if (action === 'Run' || action === 'Re-run') {
+			if (action === 'Re-run') {
+				pendingRunRow = row;
+				showRunConfirmModal = true;
+				return;
+			}
 			const ready = await validateRunPrerequisites(row);
 			if (!ready) return;
 			selectedHwForRun = row.id;
@@ -1913,6 +1996,19 @@ import { flyAndScale } from '$lib/utils/transitions';
 			syncRunSelectionFlags();
 			await runAnalysis(row);
 		}
+	}
+
+	async function confirmRunAnalysis() {
+		showRunConfirmModal = false;
+		const row = pendingRunRow;
+		pendingRunRow = null;
+		if (!row) return;
+		const ready = await validateRunPrerequisites(row);
+		if (!ready) return;
+		selectedHwForRun = row.id;
+		selectedRunHomeworks = new Set([row.id]);
+		syncRunSelectionFlags();
+		await runAnalysis(row);
 	}
 
 	function getUpdatedHomeworkIds() {
@@ -2242,10 +2338,9 @@ import { flyAndScale } from '$lib/utils/transitions';
 			>
 				<div>
 					<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200 flex items-center gap-2">
-						<div class="h-2 w-2 rounded-full bg-gray-400 dark:bg-gray-500"></div>
 						1.Error Type Configuration
 					</h2>
-					<div class="text-xs text-gray-400 dark:text-gray-500">
+					<div class="text-xs text-gray-900 dark:text-gray-100">
 						You can have at most 4 error types
 					</div>
 				</div>
@@ -2270,50 +2365,26 @@ import { flyAndScale } from '$lib/utils/transitions';
 				{:else}
 				<!-- Action Buttons Row -->
 				<div class="flex flex-wrap items-center justify-end gap-2 mb-4">
-					<!-- [Big Button] Add -->
-					<button
-						class={`flex items-center gap-1 rounded-full border px-3 py-1.5 text-xs font-semibold transition ${
-							errorTypeDefs.length < 4
-								? 'border-[#57068C] text-[#57068C] hover:border-[#702B9D] hover:bg-purple-50 dark:border-purple-400 dark:text-purple-400 dark:hover:border-purple-300 dark:hover:bg-purple-900/20'
-								: 'cursor-not-allowed border-gray-200 text-gray-400 dark:border-gray-700 dark:text-gray-500'
-							}`}
-						on:click={addErrorType}
-						disabled={errorTypeDefs.length >= 4}
-					>
-						<span>Add</span>
-						<svg
-							xmlns="http://www.w3.org/2000/svg"
-							fill="none"
-							viewBox="0 0 24 24"
-							stroke-width="2"
-							stroke="currentColor"
-							class="w-3 h-3"
-						>
-							<path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
-						</svg>
-					</button>
-					<!-- [Big Button] Use Default -->
-					<button
-						type="button"
-						class="rounded-full border border-gray-300 px-3 py-1.5 text-xs font-semibold text-gray-700 transition hover:border-gray-400 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:border-gray-500 dark:hover:bg-gray-800"
-						on:click={() => {
-							resetDefaultsModalMode = 'default';
-							showResetDefaultsModal = true;
-						}}
-					>
-						Use default
-					</button>
-					{#if errorTypeDefs.length > 0}
-						<!-- [Big Button] Delete All -->
+					{#if !isEditingErrorTypes}
 						<button
 							type="button"
-							class="flex items-center gap-1 rounded-full border border-red-200 px-3 py-1.5 text-xs font-semibold text-red-600 transition hover:border-red-300 hover:bg-red-50 dark:border-red-900/70 dark:text-red-300 dark:hover:border-red-800 dark:hover:bg-red-950/40"
-							on:click={() => {
-								resetDefaultsModalMode = 'delete';
-								showResetDefaultsModal = true;
-							}}
+							class="rounded-full border border-gray-300 px-3 py-1.5 text-xs font-semibold text-gray-700 transition hover:border-gray-400 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:border-gray-500 dark:hover:bg-gray-800"
+							on:click={() => isEditingErrorTypes = true}
 						>
-							<span>Delete All</span>
+							Edit
+						</button>
+					{:else}
+						<!-- [Big Button] Add -->
+						<button
+							class={`flex items-center gap-1 rounded-full border px-3 py-1.5 text-xs font-semibold transition ${
+								errorTypeDefs.length < 4
+									? 'border-[#57068C] text-[#57068C] hover:border-[#702B9D] hover:bg-purple-50 dark:border-purple-400 dark:text-purple-400 dark:hover:border-purple-300 dark:hover:bg-purple-900/20'
+									: 'cursor-not-allowed border-gray-200 text-gray-400 dark:border-gray-700 dark:text-gray-500'
+								}`}
+							on:click={addErrorType}
+							disabled={errorTypeDefs.length >= 4}
+						>
+							<span>Add</span>
 							<svg
 								xmlns="http://www.w3.org/2000/svg"
 								fill="none"
@@ -2322,13 +2393,47 @@ import { flyAndScale } from '$lib/utils/transitions';
 								stroke="currentColor"
 								class="w-3 h-3"
 							>
-								<path
-									stroke-linecap="round"
-									stroke-linejoin="round"
-									d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0"
-								/>
+								<path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
 							</svg>
 						</button>
+						<!-- [Big Button] Reset to Default -->
+						<button
+							type="button"
+							class="rounded-full border border-gray-300 px-3 py-1.5 text-xs font-semibold text-gray-700 transition hover:border-gray-400 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:border-gray-500 dark:hover:bg-gray-800"
+							on:click={() => {
+								resetDefaultsModalMode = 'default';
+								showResetDefaultsModal = true;
+							}}
+						>
+							Reset to Default
+						</button>
+						{#if errorTypeDefs.length > 0}
+							<!-- [Big Button] Delete All -->
+							<button
+								type="button"
+								class="flex items-center gap-1 rounded-full border border-red-200 px-3 py-1.5 text-xs font-semibold text-red-600 transition hover:border-red-300 hover:bg-red-50 dark:border-red-900/70 dark:text-red-300 dark:hover:border-red-800 dark:hover:bg-red-950/40"
+								on:click={() => {
+									resetDefaultsModalMode = 'delete';
+									showResetDefaultsModal = true;
+								}}
+							>
+								<span>Delete All</span>
+								<svg
+									xmlns="http://www.w3.org/2000/svg"
+									fill="none"
+									viewBox="0 0 24 24"
+									stroke-width="2"
+									stroke="currentColor"
+									class="w-3 h-3"
+								>
+									<path
+										stroke-linecap="round"
+										stroke-linejoin="round"
+										d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0"
+									/>
+								</svg>
+							</button>
+						{/if}
 					{/if}
 				</div>
 
@@ -2402,7 +2507,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 										</Dropdown>
 									</div>
 								</div>
-								<p class="mt-1 text-xs text-gray-500 dark:text-gray-400 line-clamp-2">
+								<p class="mt-1 text-xs text-gray-600 dark:text-gray-300 line-clamp-2">
 									{def.description || 'No description yet.'}
 								</p>
 							</div>
@@ -2414,8 +2519,8 @@ import { flyAndScale } from '$lib/utils/transitions';
 						class="rounded-full px-3 py-1.5 text-xs font-medium text-gray-600 transition hover:text-gray-900 dark:text-gray-300 dark:hover:text-white"
 						on:click={() => {
 							draftErrorTypeDefs = originalErrorTypeDefs;
+							isEditingErrorTypes = false;
 						}}
-						disabled={!hasUnsavedErrorTypeChanges}
 					>
 						Cancel
 					</button>
@@ -2449,10 +2554,9 @@ import { flyAndScale } from '$lib/utils/transitions';
 			>
 				<div>
 					<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200 flex items-center gap-2">
-						<div class="h-2 w-2 rounded-full bg-gray-400 dark:bg-gray-500"></div>
 						2.Homework & Answer Files
 					</h2>
-					<div class="text-xs text-gray-400 dark:text-gray-500">
+					<div class="text-xs text-gray-900 dark:text-gray-100">
 						Upload the PDF files here before starting the analysis. Workspace model name must include "homework".
 					</div>
 				</div>
@@ -2476,12 +2580,12 @@ import { flyAndScale } from '$lib/utils/transitions';
 							class="text-xs text-gray-700 uppercase bg-[#EEE6F3] dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5"
 						>
 							<tr>
-								<th class="w-[12rem] px-3 py-1.5 select-none">Homework</th>
-								<th class="px-3 py-1.5 select-none">Homework PDF</th>
-								<th class="px-3 py-1.5 select-none">Answer PDF</th>
-								<th class="w-[8.5rem] px-3 py-1.5 select-none">Conversations</th>
-								<th class="px-3 py-1.5 select-none">Status</th>
-								<th class="w-[9rem] px-3 py-1.5 select-none">Action</th>
+								<th class="w-[16.666%] px-3 py-1.5 select-none">Homework</th>
+								<th class="w-[16.666%] px-3 py-1.5 select-none">Homework PDF</th>
+								<th class="w-[16.666%] px-3 py-1.5 select-none">Answer PDF</th>
+								<th class="w-[16.666%] px-3 py-1.5 select-none">Students Interacted</th>
+								<th class="w-[16.666%] px-3 py-1.5 select-none">Status</th>
+								<th class="w-[16.666%] px-3 py-1.5 select-none">Action</th>
 							</tr>
 						</thead>
 						<tbody>
@@ -2540,12 +2644,15 @@ import { flyAndScale } from '$lib/utils/transitions';
 														</svg>
 													</span>
 												</label>
-												{#if uploadingMap[`${row.id}-question`]}
-													<Hourglass className="size-3.5 text-gray-400 dark:text-gray-500" />
-												{:else if row.questionUploaded}
-													<span class="text-xs text-gray-500 dark:text-gray-400">Uploaded</span>
-												{/if}
-											</div>
+														{#if uploadingMap[`${row.id}-question`]}
+															<span class="text-xs text-gray-500 dark:text-gray-400">Uploading</span>
+														{:else if homeworkJobStepByModelId[row.modelId ?? '']}
+															<span class="text-xs text-gray-500 dark:text-gray-400">{homeworkJobStepByModelId[row.modelId ?? '']}</span>
+														{:else if row.questionFileName}
+															<span class="text-xs {row.questionUploaded ? 'font-bold text-gray-900 dark:text-gray-100' : 'text-gray-500 dark:text-gray-400'}">{row.questionFileName}</span>
+														{:else if row.questionUploaded}
+															<span class="text-xs text-gray-500 dark:text-gray-400">Uploaded</span>
+														{/if}
 										</td>
 										<td class="px-3 py-1">
 											<div class="flex items-center gap-1.5">
@@ -2576,19 +2683,20 @@ import { flyAndScale } from '$lib/utils/transitions';
 													</span>
 												</label>
 												{#if uploadingMap[`${row.id}-answer`]}
-													<Hourglass className="size-3.5 text-gray-400 dark:text-gray-500" />
+													<span class="text-xs text-gray-500 dark:text-gray-400">Uploading</span>
 												{:else if row.answerUploaded}
-													{#if row.answerSource === 'ai_generated'}
-														<span class="text-xs text-gray-500 dark:text-gray-400">Generated</span>
-													{:else}
-														<span class="text-xs text-gray-500 dark:text-gray-400">Uploaded</span>
-													{/if}
+														{#if row.answerSource === 'ai_generated'}
+															<span class="text-xs font-bold text-gray-900 dark:text-gray-100">Generated</span>
+														{:else if row.answerFileName}
+															<span class="text-xs font-bold text-gray-900 dark:text-gray-100">{row.answerFileName}</span>
+														{:else}
+															<span class="text-xs text-gray-500 dark:text-gray-400">Uploaded</span>
+														{/if}
 												{/if}
-											</div>
 										</td>
-										<td class="w-[6rem] px-3 py-1 text-gray-700 dark:text-gray-300">
+										<td class="px-3 py-1 text-gray-700 dark:text-gray-300">
 											<div class="flex items-center gap-1.5">
-												<span>{getConversationCountForRow(row)}</span>
+												<span>{getConversationCountDisplay(row)}</span>
 												<button
 													type="button"
 													disabled={isRefreshingConversationCounts}
@@ -2607,19 +2715,24 @@ import { flyAndScale } from '$lib/utils/transitions';
 												</button>
 											</div>
 										</td>
-										<td class="px-3 py-1 font-normal text-gray-400 dark:text-gray-500">
+										<td class="px-3 py-1">
 											<div class="max-w-[12rem] whitespace-normal break-words leading-4">
-												<div>{getHomeworkAnalysisState(row)}</div>
+												<div class="text-xs font-medium text-gray-900 dark:text-gray-100">{getHomeworkAnalysisState(row)}</div>
 												{#if getHomeworkAnalysisStep(row)}
-													<div class="mt-0.5 text-[11px] text-gray-500 dark:text-gray-400">
+													<div class="mt-0.5 text-xs font-medium text-gray-900 dark:text-gray-100">
 														{getHomeworkAnalysisStep(row)}
 													</div>
 												{/if}
 												{#if getHomeworkStaleNote(row)}
-													<div class="mt-0.5 text-[11px] text-gray-500 dark:text-gray-400">
+													<div class="mt-0.5 text-xs font-medium text-gray-900 dark:text-gray-100">
 														{getHomeworkStaleNote(row)}
 													</div>
 												{/if}
+															{#if getHomeworkActionHint(row)}
+																<div class="mt-0.5 text-xs font-medium text-gray-900 dark:text-gray-100">
+																	{getHomeworkActionHint(row)}
+																</div>
+															{/if}
 											</div>
 										</td>
 										<td class="px-3 py-1">
@@ -2634,11 +2747,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 												<svg class="h-3 w-3 flex-shrink-0" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
 												{getHomeworkPrimaryActionLabel(row)}
 											</button>
-											{:else if getHomeworkActionHint(row)}
-												<div class="text-xs font-normal text-gray-400 dark:text-gray-500">
-													{getHomeworkActionHint(row)}
-												</div>
-											{/if}
+														{/if}
 										</td>
 									</tr>
 								{/each}
@@ -2734,10 +2843,9 @@ import { flyAndScale } from '$lib/utils/transitions';
 		>
 				<div>
 					<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200 flex items-center gap-2">
-						<div class="h-2 w-2 rounded-full bg-gray-400 dark:bg-gray-500"></div>
 						(Optional)Prompt Configuration
 					</h2>
-					<div class="text-xs text-gray-400 dark:text-gray-500">
+					<div class="text-xs text-gray-900 dark:text-gray-100">
 						These prompts control how AI Tutor converts homework, analyzes students, and generates
 						practice.
 					</div>
@@ -2773,7 +2881,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 							{#each promptDefinitions as def}
 								{@const promptSummary = getPromptSummary(def.name)}
 								<tr
-									class="border-t border-gray-100 bg-white text-xs dark:border-gray-850 dark:bg-gray-900"
+									class="border-t border-gray-100 bg-white text-xs dark:border-gray-850 dark:bg-gray-900 hover:bg-gray-50 dark:hover:bg-gray-800 transition"
 								>
 									<td class="px-3 py-1.5 font-medium text-gray-900 dark:text-white">{def.label}</td>
 									<td class="px-3 py-1.5 text-gray-700 dark:text-gray-300">{def.usedFor}</td>
@@ -2782,9 +2890,10 @@ import { flyAndScale } from '$lib/utils/transitions';
 									<td class="px-3 py-1.5">
 										<!-- in_button_style -->
 										<button
-											class="rounded-lg p-1 text-sm font-medium text-[#57068C] transition hover:bg-purple-50 dark:text-purple-400 dark:hover:bg-purple-900/20"
+											class="inline-flex items-center gap-1 rounded-full border border-[#57068C]/40 px-2.5 py-0.5 text-xs font-bold text-[#57068C] transition hover:bg-purple-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-purple-700 dark:text-purple-400 dark:hover:bg-purple-900/20"
 											on:click={() => openPromptModal(def)}
 										>
+											<Pencil className="size-3" />
 											Edit
 										</button>
 									</td>
@@ -2936,6 +3045,37 @@ import { flyAndScale } from '$lib/utils/transitions';
 		</div>
 	</div>
 {/if}
+{#if showRunConfirmModal}
+	<div
+		class="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+		on:click|self={() => (showRunConfirmModal = false)}
+		role="dialog"
+		aria-modal="true"
+	>
+		<div class="w-[420px] max-w-[90vw] rounded-xl bg-white p-6 shadow-2xl dark:bg-gray-900">
+			<div class="text-base font-semibold text-gray-900 dark:text-gray-100">
+				Re-run analysis?
+			</div>
+			<p class="mt-3 text-sm text-gray-500 dark:text-gray-400">
+				This will overwrite the existing analysis results. Are you sure?
+			</p>
+			<div class="mt-6 flex justify-end gap-2">
+				<button
+					class="px-3 py-1.5 text-sm text-gray-600 transition hover:text-gray-900 dark:text-gray-300 dark:hover:text-white"
+					on:click={() => (showRunConfirmModal = false)}
+				>
+					Cancel
+				</button>
+				<button
+					class="px-3 py-1.5 text-sm font-medium text-gray-900 transition hover:text-black dark:text-gray-100 dark:hover:text-white"
+					on:click={confirmRunAnalysis}
+				>
+					Confirm
+				</button>
+			</div>
+		</div>
+	</div>
+{/if}
 {#if showPromptModal}
 	<div
 		class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4 py-6"
@@ -2978,7 +3118,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 				<span
 					class="rounded px-2 py-1 bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300"
 				>
-					{selectedPromptScope === 'override' ? 'Class Override' : 'Default'}
+					{selectedPromptScope === 'override' ? 'Set by User' : 'System Default'}
 				</span>
 			</div>
 
@@ -3070,6 +3210,14 @@ import { flyAndScale } from '$lib/utils/transitions';
 					bind:value={editErrorTypeDescription}
 					placeholder="Describe this error type..."
 				></textarea>
+			</div>
+
+			<div class="mb-6">
+				<label class="text-xs font-medium text-gray-600 dark:text-gray-400 block mb-1.5">Example</label>
+				<div class="rounded-lg bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 p-3 text-xs text-gray-700 dark:text-gray-300">
+					<div class="font-semibold mb-0.5">Conceptual Error</div>
+					<div>Student misunderstood the core concept or applied the wrong formula to solve the problem.</div>
+				</div>
 			</div>
 
 			<div class="flex justify-between items-center">

@@ -6,6 +6,7 @@
 	import { checkIfSuperAdmin } from '$lib/apis/users';
 	import { getGroups } from '$lib/apis/groups';
 	import { showAITutorTestToast } from '$lib/utils/aiTutorTesting';
+	import { loadWorkspaceModels } from '$lib/stores/aiTutorWorkspaceModels';
 
 	import { DropdownMenu } from 'bits-ui';
 	import { flyAndScale } from '$lib/utils/transitions';
@@ -151,6 +152,13 @@
 			} catch (error) {
 				console.error('Error loading groups:', error);
 			}
+
+			// Load workspace models for unified homework filtering
+			try {
+				await loadWorkspaceModels(localStorage.token);
+			} catch (error) {
+				console.error('Error loading workspace models:', error);
+			}
 		}
 
 		selectedHomework = $page.url.searchParams.get('homework') || 'All';
@@ -276,7 +284,7 @@
 											id="group-search-input"
 											type="text"
 											bind:value={groupSearchValue}
-											class="w-full text-sm bg-transparent outline-hidden"
+											class="w-full text-sm bg-transparent outline-hidden text-gray-800 dark:text-gray-200 placeholder-gray-400 dark:placeholder-gray-500"
 											placeholder="Search groups"
 											autocomplete="off"
 											on:keydown={(e) => e.code === 'Enter' && filteredGroups.length > 0 && selectGroup(filteredGroups[0])}
@@ -309,7 +317,8 @@
 							</DropdownMenu.Root>
 						</div>
 
-						<!-- Info Button -->
+						<!-- Info Button (temporarily hidden) -->
+						{#if false}
 						<div class="relative">
 							<button
 								on:click={toggleIdentityPopover}
@@ -414,6 +423,7 @@
 								</div>
 							{/if}
 						</div>
+						{/if}
 					</div>
 				</div>
 			</div>

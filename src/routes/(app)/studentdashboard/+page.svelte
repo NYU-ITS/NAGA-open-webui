@@ -5,6 +5,7 @@
 	import { toast } from 'svelte-sonner';
 	import { TEMP_HIDE, AI_TUTOR_FRONTEND_TESTING_MODE } from '$lib/constants';
 	import { user } from '$lib/stores';
+	import { aiTutorAllowedModelIds } from '$lib/stores/aiTutorWorkspaceModels';
 	import { fetchAITutorJson } from '$lib/apis/aiTutor';
 	import { showAITutorTestToast } from '$lib/utils/aiTutorTesting';
 	import { loadWithAITutorSessionCache } from '$lib/utils/aiTutorSessionCache';
@@ -565,7 +566,7 @@
 					// Student Dashboard summary sync:
 					// - Student access should not depend on the admin-only group detail endpoint.
 					// - AI Tutor endpoints below are scoped to the selected group, and assignment/analysis rows are filtered by the current student.
-					const [homeworkRows, practiceRows] = await Promise.all([
+					const [rawHomeworkRows, practiceRows] = await Promise.all([
 						fetchAITutorJson<any[]>('/homework/', {
 							token: localStorage.token,
 							query: { group_id: selectedGroupId }
@@ -576,10 +577,23 @@
 						})
 					]);
 
-					const assignments = await fetchAITutorJson<any[]>('/assignment/', {
-						token: localStorage.token,
-						query: { student_id: $user.id }
-					});
+						// Filter homeworks by allowed workspace models (same logic as aitutordashboard)
+						const allowedIds = $aiTutorAllowedModelIds;
+						const homeworkRows = rawHomeworkRows.filter(
+							(row) => row.model_id && allowedIds.has(row.model_id)
+						);
+						console.log('[studentdashboard]-[Summary]-[HomeworkFilter]:', {
+							allCount: rawHomeworkRows.length,
+							filteredCount: homeworkRows.length,
+							excluded: rawHomeworkRows
+								.filter((row) => !row.model_id || !allowedIds.has(row.model_id))
+								.map((r) => ({ id: r.id, modelId: r.model_id }))
+						});
+
+						const assignments = await fetchAITutorJson<any[]>('/assignment/', {
+							token: localStorage.token,
+							query: { student_id: $user.id }
+						});
 
 					console.log('[studentdashboard]-[Summary]-[RawAssignments]:', {
 						groupId: selectedGroupId,
@@ -853,7 +867,7 @@
 				<table class="w-full text-sm text-left text-gray-500 dark:text-gray-400 table-auto max-w-full rounded-sm">
 					<thead class="text-xs text-gray-700 uppercase bg-[#EEE6F3] dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5">
 						<tr>
-							<th class="px-3 py-1.5 text-left font-semibold">Homework Mastery</th>
+							<th class="min-w-[140px] px-3 py-1.5 text-left font-semibold">Homework Mastery</th>
 							<th class="px-3 py-1.5 text-left font-semibold">Topic</th>
 							<th class="min-w-[120px] px-3 py-1.5 text-left font-semibold">Action</th>
 						</tr>
@@ -864,7 +878,7 @@
 									class="border-t border-gray-100 bg-white transition hover:bg-gray-50 dark:border-gray-850 dark:bg-gray-900 dark:hover:bg-gray-800 cursor-pointer"
 									on:click={() => startPracticeAssignment(item)}
 								>
-									<td class="px-3 py-1.5 font-medium text-gray-900 dark:text-gray-100">{item.homeworkLabel}</td>
+									<td class="min-w-[140px] px-3 py-1.5 font-medium text-gray-900 dark:text-gray-100">{item.homeworkLabel}</td>
 									{#if item.status === 'Ready'}
 										<td class="px-3 py-1.5">
 											{#if getPracticeTopics(item.topic).length > 0}

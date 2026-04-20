@@ -38,6 +38,7 @@
 	selected={items.find((item) => item.value === value)}
 	onSelectedChange={(selectedItem) => {
 		value = selectedItem.value;
+		dispatch('change', { value: selectedItem.value });
 	}}
 >
 	<Select.Trigger class="relative w-full" aria-label={placeholder}>
