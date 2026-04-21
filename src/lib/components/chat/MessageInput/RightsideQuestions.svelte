@@ -67,7 +67,6 @@
 
 	let groupName = fallbackGroupName;
 	let homeworkOptions = fallbackHomeworkOptions;
-	let topicOptions = fallbackTopicOptions;
 	let questions: PracticeQuestion[] = fallbackQuestions;
 
 	$: practicing = $page.url.searchParams.get('practicing');
@@ -77,78 +76,80 @@
 		practicingValue && homeworkOptions[Number(practicingValue) - 1]
 			? homeworkOptions[Number(practicingValue) - 1]
 			: homeworkOptions[0];
-	$: initialTopics = getTopicsForHomework(initialHomework);
 
 	let selectedHomework = initialHomework;
-	let selectedTopics = new Set<string>(topicOptions);
 	let started = false;
-	let lastPracticing: string | null = null;
+	let practiceContextKey = '';
+	let lastPracticeContextKey = '';
 	let sendingQuestionId: string | null = null;
 
 	export let submitPrompt: Function | null = null;
+	export let chatId: string | null = null;
 
-	$: if (practicingValue !== lastPracticing) {
-		lastPracticing = practicingValue;
+	$: practiceContextKey = `${chatId ?? ''}::${practicingValue ?? ''}::${assignmentId ?? ''}`;
+	$: if (practiceContextKey !== lastPracticeContextKey) {
+		lastPracticeContextKey = practiceContextKey;
 		const nextContext = loadAssignmentPracticeContext();
 		selectedHomework = nextContext.initialHomework;
-		selectedTopics = new Set(nextContext.initialTopics);
 		started = false;
+	}
+
+	function getChatBoundPracticeKey() {
+		if (!chatId) return '';
+		return `aiTutorPracticeAssignment-${chatId}`;
+	}
+
+	function readPracticeAssignmentRaw() {
+		if (typeof localStorage === 'undefined' || typeof sessionStorage === 'undefined') return null;
+		const chatBoundKey = getChatBoundPracticeKey();
+		if (chatBoundKey) {
+			return localStorage.getItem(chatBoundKey);
+		}
+		return (
+			sessionStorage.getItem('aiTutorActivePracticeAssignment') ||
+			localStorage.getItem('aiTutorPracticeAssignmentPending')
+		);
 	}
 
 	function loadAssignmentPracticeContext() {
 		if (typeof sessionStorage === 'undefined') {
 			groupName = fallbackGroupName;
 			homeworkOptions = fallbackHomeworkOptions;
-			topicOptions = fallbackTopicOptions;
 			questions = fallbackQuestions;
 			const fallbackInitialHomework = fallbackHomeworkOptions[0];
 			return {
-				initialHomework: fallbackInitialHomework,
-				initialTopics: getTopicsForHomework(fallbackInitialHomework)
+				initialHomework: fallbackInitialHomework
 			};
 		}
 
-		const raw = sessionStorage.getItem('aiTutorActivePracticeAssignment');
+		const raw = readPracticeAssignmentRaw();
 		if (!raw) {
 			groupName = fallbackGroupName;
 			homeworkOptions = fallbackHomeworkOptions;
-			topicOptions = fallbackTopicOptions;
 			questions = fallbackQuestions;
 			const fallbackInitialHomework = fallbackHomeworkOptions[0];
 			return {
-				initialHomework: fallbackInitialHomework,
-				initialTopics: getTopicsForHomework(fallbackInitialHomework)
+				initialHomework: fallbackInitialHomework
 			};
 		}
 
 		try {
 			const payload = JSON.parse(raw);
-			if (assignmentId && payload?.assignmentId && payload.assignmentId !== assignmentId) {
+			if (!chatId && assignmentId && payload?.assignmentId && payload.assignmentId !== assignmentId) {
 				groupName = fallbackGroupName;
 				homeworkOptions = fallbackHomeworkOptions;
-				topicOptions = fallbackTopicOptions;
 				questions = fallbackQuestions;
 				const fallbackInitialHomework = fallbackHomeworkOptions[0];
 				return {
-					initialHomework: fallbackInitialHomework,
-					initialTopics: getTopicsForHomework(fallbackInitialHomework)
+					initialHomework: fallbackInitialHomework
 				};
 			}
 
 			const assignmentQuestions = Array.isArray(payload?.assignedItems) ? payload.assignedItems : [];
-			const homeworkLabel = payload?.homeworkLabel || fallbackHomeworkOptions[0];
-			const derivedTopicOptions = Array.from(
-				new Set(
-					assignmentQuestions
-						.flatMap((item: any) => (Array.isArray(item?.topics) ? item.topics : []))
-						.map((topic: any) => String(topic).trim())
-						.filter(Boolean)
-				)
-			);
+			const homeworkLabel = String(payload?.homeworkLabel || fallbackHomeworkOptions[0]);
 
 			groupName = 'Assigned Practice Questions';
 			homeworkOptions = [homeworkLabel];
-			topicOptions = derivedTopicOptions.length > 0 ? derivedTopicOptions : ['General Practice'];
 			questions =
 				assignmentQuestions.length > 0
 					? assignmentQuestions.map((item: any, index: number) => ({
@@ -162,23 +163,19 @@
 							question: String(
 								item?.question ?? item?.prompt ?? item?.text ?? 'Practice question'
 							),
-							completed: false
-						}))
-					: fallbackQuestions;
+								completed: false
+							}))
+						: fallbackQuestions;
 			return {
-				initialHomework: homeworkLabel,
-				initialTopics:
-					derivedTopicOptions.length > 0 ? derivedTopicOptions : getTopicsForHomework(homeworkLabel)
+				initialHomework: homeworkLabel
 			};
 		} catch {
 			groupName = fallbackGroupName;
 			homeworkOptions = fallbackHomeworkOptions;
-			topicOptions = fallbackTopicOptions;
 			questions = fallbackQuestions;
 			const fallbackInitialHomework = fallbackHomeworkOptions[0];
 			return {
-				initialHomework: fallbackInitialHomework,
-				initialTopics: getTopicsForHomework(fallbackInitialHomework)
+				initialHomework: fallbackInitialHomework
 			};
 		}
 	}
@@ -186,56 +183,14 @@
 	function resetFilters() {
 		started = false;
 		selectedHomework = initialHomework;
-		selectedTopics = new Set(initialTopics);
 	}
 
 	function startSelection() {
 		started = true;
 	}
 
-	function getTopicsForHomework(homework: string) {
-		return topicOptions.filter((topic) =>
-			questions.some((question) => question.homework === homework && question.topics.includes(topic))
-		);
-	}
-
-	function getSelectedHomeworkIndex(homework: string) {
-		return Math.max(
-			0,
-			homeworkOptions.findIndex((option) => option === homework)
-		);
-	}
-
-	function setSelectedHomework(homework: string) {
-		selectedHomework = homework;
-		selectedTopics = new Set(getTopicsForHomework(homework));
-		started = false;
-	}
-
-	function goToPreviousHomework() {
-		const nextIndex = getSelectedHomeworkIndex(selectedHomework) - 1;
-		if (nextIndex >= 0) {
-			setSelectedHomework(homeworkOptions[nextIndex]);
-		}
-	}
-
-	function goToNextHomework() {
-		const nextIndex = getSelectedHomeworkIndex(selectedHomework) + 1;
-		if (nextIndex < homeworkOptions.length) {
-			setSelectedHomework(homeworkOptions[nextIndex]);
-		}
-	}
-
-	function handleHomeworkChange(event: Event) {
-		setSelectedHomework((event.currentTarget as HTMLSelectElement).value);
-	}
-
 	$: filteredQuestions = questions.filter((question) => {
-		const matchesHomework = question.homework === selectedHomework;
-		const matchesTopic =
-			selectedTopics.size === 0 || question.topics.some((topic) => selectedTopics.has(topic));
-
-		return matchesHomework && matchesTopic;
+		return question.homework === selectedHomework;
 	});
 
 	$: completedCount = filteredQuestions.filter((question) => question.completed).length;
@@ -309,26 +264,20 @@
 
 	<div class="flex-1 overflow-y-auto px-5 py-4" style:scrollbar-gutter="stable">
 		<div class="space-y-6">
-			<section>
-				<!-- {started ? 'text-gray-400 dark:text-gray-500' : 'text-gray-900 dark:text-gray-100'} -->
-				<div class="space-y-3 text-gray-900 dark:text-gray-100">
-					<div class="flex items-center justify-between gap-3 text-sm">
-						<div class="relative min-w-0 flex-1">
-							<select
-								bind:value={selectedHomework}
-								on:change={handleHomeworkChange}
-								disabled={started}
-								class="block w-full truncate appearance-none bg-transparent pr-5 text-sm text-gray-700 outline-hidden disabled:cursor-default dark:text-gray-300"
-								title={selectedHomework}
-								aria-label="Select homework practice question set"
-							>
-								{#each homeworkOptions as homework}
-									<option value={homework}>{homework}</option>
-								{/each}
-							</select>
-						</div>
+				<section>
+					<!-- {started ? 'text-gray-400 dark:text-gray-500' : 'text-gray-900 dark:text-gray-100'} -->
+					<div class="space-y-3 text-gray-900 dark:text-gray-100">
+						<div class="flex items-center justify-between gap-3 text-sm">
+							<div class="relative min-w-0 flex-1">
+								<div
+									class="block w-full truncate bg-transparent pr-5 text-sm font-medium text-gray-700 dark:text-gray-300"
+									title={selectedHomework}
+								>
+									{selectedHomework}
+								</div>
+							</div>
 
-					</div>
+						</div>
 					<!-- <div class="flex items-center justify-between gap-3 pt-1 text-xs">
 						<div class="flex items-center gap-3">
 							<button
@@ -390,13 +339,13 @@
 						</article>
 					{/each}
 
-					{#if filteredQuestions.length === 0}
-						<div class="py-8 text-center text-sm text-gray-500 dark:text-gray-400">
-							No questions match the selected homework and topics.
-						</div>
-					{/if}
-				</div>
-			</section>
+						{#if filteredQuestions.length === 0}
+							<div class="py-8 text-center text-sm text-gray-500 dark:text-gray-400">
+								No practice questions available for this chat.
+							</div>
+						{/if}
+					</div>
+				</section>
 		</div>
 	</div>
 </div>

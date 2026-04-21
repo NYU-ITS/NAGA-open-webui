@@ -14,8 +14,6 @@
 		if (!$showControls) {
 			showControls.set(true);
 		}
-	} else if ($showRightsideQuestions) {
-		showRightsideQuestions.set(false);
 	}
 </script>
 

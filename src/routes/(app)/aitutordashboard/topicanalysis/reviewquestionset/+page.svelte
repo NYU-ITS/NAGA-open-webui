@@ -753,7 +753,13 @@
 
 	function formatAITutorTimestamp(value: string | null | undefined) {
 		if (!value) return '';
-		const parsed = new Date(value);
+		const trimmed = String(value).trim();
+		if (!trimmed) return '';
+		const normalized = trimmed.includes(' ') && !trimmed.includes('T')
+			? trimmed.replace(' ', 'T')
+			: trimmed;
+		const hasExplicitTimezone = /[zZ]$|[+-]\d{2}:?\d{2}$/.test(normalized);
+		const parsed = new Date(hasExplicitTimezone ? normalized : `${normalized}Z`);
 		if (Number.isNaN(parsed.getTime())) return value;
 		return (
 			parsed.toLocaleString('en-US', {
