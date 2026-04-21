@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { Popover } from 'bits-ui';
 	import { page } from '$app/stores';
 	import { aiTutorSelectedGroupId } from '$lib/stores';
 	import { aiTutorAllowedModelIds } from '$lib/stores/aiTutorWorkspaceModels';
@@ -23,7 +24,8 @@
 	} from '$lib/utils/aiTutorSessionCache';
 	import ChevronUp from '$lib/components/icons/ChevronUp.svelte';
 	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
-import Selector from '$lib/components/common/Selector.svelte';
+	import EllipsisHorizontal from '$lib/components/icons/EllipsisHorizontal.svelte';
+	import Selector from '$lib/components/common/Selector.svelte';
 
 	const AI_TUTOR_API_BASE = AI_TUTOR_API_BASE_URL;
 	const useFrontendTestingData = AI_TUTOR_FRONTEND_TESTING_MODE;
@@ -1349,8 +1351,27 @@ import Selector from '$lib/components/common/Selector.svelte';
 									</td>
 									<td class="px-3 py-1.5">
 										<div class="text-gray-900 dark:text-gray-100">{topic.questionCount}</div>
-										<div class="mt-0.5 truncate text-gray-500 dark:text-gray-400">
-											[{topic.questions}]
+										<div class="mt-0.5 inline-flex max-w-full items-center gap-1 align-middle text-gray-500 dark:text-gray-400">
+											<span class="truncate">[{topic.questions}]</span>
+											{#if topic.questions}
+												<Popover.Root>
+													<Popover.Trigger
+														type="button"
+														class="inline-flex items-center text-gray-400 transition-colors hover:text-gray-500 dark:text-gray-500 dark:hover:text-gray-400"
+														aria-label="View full question list"
+													>
+														<EllipsisHorizontal className="h-4 w-4" />
+													</Popover.Trigger>
+													<Popover.Content
+														side="top"
+														align="start"
+														sideOffset={6}
+														class="z-50 max-w-[18rem] rounded-lg border border-gray-200 bg-white p-3 text-xs text-gray-700 shadow-lg dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300"
+													>
+														<p class="whitespace-normal break-words leading-relaxed">[{topic.questions}]</p>
+													</Popover.Content>
+												</Popover.Root>
+											{/if}
 										</div>
 									</td>
 									<td class="px-3 py-1.5">

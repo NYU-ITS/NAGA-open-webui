@@ -1,5 +1,6 @@
 <script lang="ts">
-	import { afterUpdate, onDestroy, onMount } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
+	import { Popover } from 'bits-ui';
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
 	import { toast } from 'svelte-sonner';
@@ -9,7 +10,7 @@
 	import { fetchAITutorJson } from '$lib/apis/aiTutor';
 	import { showAITutorTestToast } from '$lib/utils/aiTutorTesting';
 	import { loadWithAITutorSessionCache } from '$lib/utils/aiTutorSessionCache';
-	import Tooltip from '$lib/components/common/Tooltip.svelte';
+	import EllipsisHorizontal from '$lib/components/icons/EllipsisHorizontal.svelte';
 
 	const testToast = showAITutorTestToast;
 	const useFrontendTestingData = AI_TUTOR_FRONTEND_TESTING_MODE;
@@ -292,26 +293,6 @@
 	})();
 
 	$: availableHomeworkCount = filteredHomeworkData.filter((hw) => !hw.notStarted).length;
-
-	let expandedCells: Set<string> = new Set();
-	function toggleCell(key: string) {
-		const next = new Set(expandedCells);
-		if (next.has(key)) next.delete(key);
-		else next.add(key);
-		expandedCells = next;
-	}
-
-	let textRefs: Record<string, HTMLSpanElement> = {};
-	let needsExpand: Set<string> = new Set();
-	afterUpdate(() => {
-		const next = new Set<string>();
-		Object.entries(textRefs).forEach(([key, el]) => {
-			if (el && el.scrollWidth > el.clientWidth) {
-				next.add(key);
-			}
-		});
-		needsExpand = next;
-	});
 
 	let selectedConcepts: Set<string> = new Set();
 	let hoveredLegendStatus: string | null = null;
@@ -911,24 +892,28 @@
 										<td class="px-3 py-1.5">
 											{#if getPracticeTopics(item.topic).length > 0}
 												{@const topicList = getPracticeTopics(item.topic)}
-												<div class="flex items-center gap-2">
-													<Tooltip content={topicList.join(', ')} placement="top">
-														<span
-															bind:this={textRefs[`pq-${item.id}`]}
-														class="text-sm text-gray-700 dark:text-gray-300 {expandedCells.has(`${item.id}-topic`) ? '' : 'line-clamp-1'}"
-														>
-															{topicList.join(', ')}
-														</span>
-													</Tooltip>
-													{#if needsExpand.has(`pq-${item.id}`)}
-														<button
+												<div class="inline-flex max-w-[26rem] items-center gap-1 align-middle">
+													<span class="truncate text-sm text-gray-700 dark:text-gray-300">
+														{topicList.join(', ')}
+													</span>
+													<Popover.Root>
+														<Popover.Trigger
 															type="button"
-															class="shrink-0 text-xs text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300"
-															on:click|stopPropagation={() => toggleCell(`${item.id}-topic`)}
+															class="inline-flex items-center text-gray-400 transition-colors hover:text-gray-500 dark:text-gray-500 dark:hover:text-gray-400"
+															aria-label="View full topics list"
+															on:click={(e) => e.stopPropagation()}
 														>
-															{expandedCells.has(`${item.id}-topic`) ? 'Show Less' : 'Show All'}
-														</button>
-													{/if}
+															<EllipsisHorizontal className="h-4 w-4" />
+														</Popover.Trigger>
+														<Popover.Content
+															side="top"
+															align="start"
+															sideOffset={6}
+															class="z-50 max-w-[20rem] rounded-lg border border-gray-200 bg-white p-3 text-xs text-gray-700 shadow-lg dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300"
+														>
+															<p class="whitespace-normal break-words leading-relaxed">{topicList.join(', ')}</p>
+														</Popover.Content>
+													</Popover.Root>
 												</div>
 											{:else}
 												<span class="text-sm text-gray-400 dark:text-gray-500">—</span>
@@ -1000,7 +985,7 @@
 						</tr>
 					</thead>
 					<tbody>
-						{#each filteredHomeworkData as hw, index}
+							{#each filteredHomeworkData as hw}
 							<tr
 								class="border-t border-gray-100 bg-white transition hover:bg-gray-50 dark:border-gray-850 dark:bg-gray-900 dark:hover:bg-gray-800"
 							>
@@ -1014,31 +999,34 @@
 									>
 										This homework&apos;s analysis has not been available.
 									</td>
-								{:else}
-									<td class="px-3 py-1.5">
-										{#if hw.needMorePractice.length > 0}
-											<div class="flex items-center gap-2">
-												<Tooltip content={hw.needMorePractice.join(', ')} placement="top">
-													<span
-														bind:this={textRefs[`hw-${hw.homework || index}`]}
-												class="text-sm text-gray-700 dark:text-gray-300 {expandedCells.has(`${hw.homework || index}-practice`) ? '' : 'line-clamp-1'}"
-													>
+									{:else}
+										<td class="px-3 py-1.5">
+											{#if hw.needMorePractice.length > 0}
+												<div class="inline-flex max-w-[26rem] items-center gap-1 align-middle">
+													<span class="truncate text-sm text-gray-700 dark:text-gray-300">
 														{hw.needMorePractice.join(', ')}
 													</span>
-												</Tooltip>
-												{#if needsExpand.has(`hw-${hw.homework || index}`)}
-													<button
-														type="button"
-														class="shrink-0 text-xs text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300"
-														on:click={() => toggleCell(`${hw.homework || index}-practice`)}
-													>
-														{expandedCells.has(`${hw.homework || index}-practice`) ? 'Show Less' : 'Show All'}
-													</button>
-												{/if}
-											</div>
-										{:else}
-											<span class="text-sm text-gray-400 dark:text-gray-500">—</span>
-										{/if}
+													<Popover.Root>
+														<Popover.Trigger
+															type="button"
+															class="inline-flex items-center text-gray-400 transition-colors hover:text-gray-500 dark:text-gray-500 dark:hover:text-gray-400"
+															aria-label="View full topics list"
+														>
+															<EllipsisHorizontal className="h-4 w-4" />
+														</Popover.Trigger>
+														<Popover.Content
+															side="top"
+															align="start"
+															sideOffset={6}
+															class="z-50 max-w-[20rem] rounded-lg border border-gray-200 bg-white p-3 text-xs text-gray-700 shadow-lg dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300"
+														>
+															<p class="whitespace-normal break-words leading-relaxed">{hw.needMorePractice.join(', ')}</p>
+														</Popover.Content>
+													</Popover.Root>
+												</div>
+											{:else}
+												<span class="text-sm text-gray-400 dark:text-gray-500">—</span>
+											{/if}
 									</td>
 									<td class="px-3 py-1.5 text-center text-gray-900 dark:text-gray-100">
 										{hw.totalCount}

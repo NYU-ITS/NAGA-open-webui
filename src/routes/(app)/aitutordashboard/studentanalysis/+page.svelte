@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
+	import { Popover } from 'bits-ui';
 	import { page } from '$app/stores';
 	import { aiTutorSelectedGroupId } from '$lib/stores';
 	import { aiTutorAllowedModelIds } from '$lib/stores/aiTutorWorkspaceModels';
@@ -19,7 +20,7 @@
 	import ChevronUp from '$lib/components/icons/ChevronUp.svelte';
 	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
 	import Search from '$lib/components/icons/Search.svelte';
-import Tooltip from '$lib/components/common/Tooltip.svelte';
+	import EllipsisHorizontal from '$lib/components/icons/EllipsisHorizontal.svelte';
 
 	const AI_TUTOR_API_BASE = AI_TUTOR_API_BASE_URL;
 	const useFrontendTestingData = AI_TUTOR_FRONTEND_TESTING_MODE;
@@ -725,9 +726,28 @@ $: isFilterActive = selectedHomework !== 'All' || search.trim() !== '';
 										{student.avgAccuracy.toFixed(1)}%
 									</td>
 									<td class="px-3 py-1 text-gray-700 dark:text-gray-300">
-										<Tooltip content={student.topicsToImprove} placement="top">
-											<div class="max-w-[16rem] truncate cursor-default">{student.topicsToImprove}</div>
-										</Tooltip>
+										<div class="inline-flex max-w-[16rem] items-center gap-1 align-middle">
+											<span class="truncate">{student.topicsToImprove}</span>
+											{#if student.topicsToImprove && student.topicsToImprove !== 'None'}
+												<Popover.Root>
+													<Popover.Trigger
+														type="button"
+														class="inline-flex items-center text-gray-400 transition-colors hover:text-gray-500 dark:text-gray-500 dark:hover:text-gray-400"
+														aria-label="View full topics list"
+													>
+														<EllipsisHorizontal className="h-4 w-4" />
+													</Popover.Trigger>
+													<Popover.Content
+														side="top"
+														align="start"
+														sideOffset={6}
+														class="z-50 max-w-[20rem] rounded-lg border border-gray-200 bg-white p-3 text-xs text-gray-700 shadow-lg dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300"
+													>
+														<p class="whitespace-normal break-words leading-relaxed">{student.topicsToImprove}</p>
+													</Popover.Content>
+												</Popover.Root>
+											{/if}
+										</div>
 									</td>
 									<td class="px-3 py-1 text-gray-700 dark:text-gray-300">
 										<!-- [Table Button: icon+name] Download Report -->
