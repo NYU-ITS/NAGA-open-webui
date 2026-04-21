@@ -638,6 +638,11 @@ import { flyAndScale } from '$lib/utils/transitions';
 		pdfJobStepByKey = setStringMapValue(pdfJobStepByKey, key, step);
 	}
 
+	function setAnalysisProcessingByHomeworkId(homeworkId: string, active: boolean) {
+		if (!homeworkId) return;
+		runningAnalysisByHomeworkId = setBooleanMapValue(runningAnalysisByHomeworkId, homeworkId, active);
+	}
+
 	function getRowDocUploading(row: HomeworkRow, docType: HomeworkDocType): boolean {
 		return getRowDocProgressKeys(row, docType).some((key) => Boolean(uploadingMap[key]));
 	}
@@ -672,10 +677,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 
 	function markPersistedJobActive(job: PersistedInstructorJob, active: boolean) {
 		if (job.type === 'analysis' && job.homeworkId) {
-			runningAnalysisByHomeworkId = {
-				...runningAnalysisByHomeworkId,
-				[job.homeworkId]: active
-			};
+			setAnalysisProcessingByHomeworkId(job.homeworkId, active);
 			return;
 		}
 
@@ -2207,8 +2209,12 @@ import { flyAndScale } from '$lib/utils/transitions';
 			showRunConfirmModal = true;
 			return;
 		}
+		setAnalysisProcessingByHomeworkId(row.id, true);
 		const ready = await validateRunPrerequisites(row);
-		if (!ready) return;
+		if (!ready) {
+			setAnalysisProcessingByHomeworkId(row.id, false);
+			return;
+		}
 		selectedHwForRun = row.id;
 		selectedRunHomeworks = new Set([row.id]);
 		syncRunSelectionFlags();
@@ -2220,8 +2226,12 @@ import { flyAndScale } from '$lib/utils/transitions';
 		const row = pendingRunRow;
 		pendingRunRow = null;
 		if (!row) return;
+		setAnalysisProcessingByHomeworkId(row.id, true);
 		const ready = await validateRunPrerequisites(row);
-		if (!ready) return;
+		if (!ready) {
+			setAnalysisProcessingByHomeworkId(row.id, false);
+			return;
+		}
 		selectedHwForRun = row.id;
 		selectedRunHomeworks = new Set([row.id]);
 		syncRunSelectionFlags();
@@ -2310,7 +2320,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 			toast.error('Select a homework before running analysis.');
 			return;
 		}
-		runningAnalysisByHomeworkId = { ...runningAnalysisByHomeworkId, [targetHomeworkId]: true };
+		setAnalysisProcessingByHomeworkId(targetHomeworkId, true);
 		const startedAt = new Date().toLocaleTimeString();
 		const steps = ['Started', 'Collecting conversation history', 'PDF converting', 'Analysing'];
 		let stepIdx = 0;
@@ -2394,7 +2404,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 		} finally {
 			clearInterval(stepTimer);
 			runStep = '';
-			runningAnalysisByHomeworkId = { ...runningAnalysisByHomeworkId, [targetHomeworkId]: false };
+			setAnalysisProcessingByHomeworkId(targetHomeworkId, false);
 		}
 	}
 </script>
@@ -2871,7 +2881,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 													{:else if row.questionFileName}
 														<span class="text-xs {row.questionUploaded ? 'font-bold text-gray-900 dark:text-gray-100' : 'text-gray-500 dark:text-gray-400'}">{row.questionFileName}</span>
 													{:else if row.questionUploaded}
-														<span class="text-xs text-gray-500 dark:text-gray-400">Uploaded</span>
+														<span class="text-xs font-bold text-gray-900">Uploaded</span>
 													{/if}
 												</div>
 											</td>
@@ -2913,11 +2923,11 @@ import { flyAndScale } from '$lib/utils/transitions';
 													{:else if row.answerUploaded}
 															{#if row.answerSource === 'ai_generated'}
 																<span class="text-xs font-bold text-gray-900 dark:text-gray-100">(Auto-Generated)</span>
-															{:else if row.answerFileName}
-																<span class="text-xs font-bold text-gray-900 dark:text-gray-100">{row.answerFileName}</span>
-																{:else}
-																<span class="text-xs text-gray-500 dark:text-gray-400">Uploaded</span>
-															{/if}
+														{:else if row.answerFileName}
+															<span class="text-xs font-bold text-gray-900 dark:text-gray-100">{row.answerFileName}</span>
+														{:else}
+															<span class="text-xs font-bold text-gray-900">Uploaded</span>
+														{/if}
 													{/if}
 												</div>
 											</td>
@@ -2944,10 +2954,10 @@ import { flyAndScale } from '$lib/utils/transitions';
 										</td>
 										<td class="px-3 py-1">
 												<div class="max-w-[12rem] whitespace-normal break-words leading-4">
-														<div class="flex items-center gap-1.5">
-																<div class="text-xs font-medium text-gray-900 dark:text-gray-100">{getHomeworkAnalysisState(row)}</div>
-																
-															{#if shouldShowStaleInfo(row)}
+															<div class="flex items-center gap-1.5">
+																	<div class="text-xs font-medium text-gray-900 dark:text-gray-100">{getHomeworkAnalysisState(row)}</div>
+																	
+																{#if shouldShowStaleInfo(row)}
 																				<Popover.Root>
 																					<Popover.Trigger
 																						type="button"
@@ -2977,10 +2987,15 @@ import { flyAndScale } from '$lib/utils/transitions';
 																					{/each}
 																				</Popover.Content>
 																			</Popover.Root>
-																		{/if}
-													</div>
-											</div>
-											</td>
+																				{/if}
+														</div>
+														{#if getHomeworkAnalysisState(row) === 'Processing'}
+															<div class="mt-0.5 text-[11px] text-gray-500 dark:text-gray-400">
+																Estimated 1 minute per student
+															</div>
+														{/if}
+												</div>
+												</td>
 											<td class="px-3 py-1">
 												<div class="flex items-center gap-1.5">
 													{#each getHomeworkActionButtons(row) as action}
