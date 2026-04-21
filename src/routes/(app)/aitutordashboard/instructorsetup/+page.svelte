@@ -29,7 +29,6 @@ import { DropdownMenu, Popover } from 'bits-ui';
 	import Pencil from '$lib/components/icons/Pencil.svelte';
 import ArrowPath from '$lib/components/icons/ArrowPath.svelte';
 import Hourglass from '$lib/components/icons/Hourglass.svelte';
-import InformationCircle from '$lib/components/icons/InformationCircle.svelte';
 import Dropdown from '$lib/components/common/Dropdown.svelte';
 import { flyAndScale } from '$lib/utils/transitions';
 
@@ -281,9 +280,18 @@ import { flyAndScale } from '$lib/utils/transitions';
 	let selectedPromptTutorId = '';
 	let selectedPromptScope: 'default' | 'override' = 'default';
 	let showPromptConfiguration = false;
+	let promptConfigurationSectionEl: HTMLDivElement | null = null;
 	let showAITutorWorkflow = true;
 	let showHomeworkAnswerFiles = true;
 	let showErrorTypeConfiguration = true;
+
+	async function togglePromptConfigurationSection() {
+		showPromptConfiguration = !showPromptConfiguration;
+		if (showPromptConfiguration) {
+			await tick();
+			promptConfigurationSectionEl?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+		}
+	}
 
 	// ── Placeholder data ──────────────────────────────────────────────────────
 	const placeholderStats: HomeworkStat[] = [
@@ -2391,7 +2399,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 	}
 </script>
 
-<div class="flex flex-col space-y-24 py-4">
+<div class="flex flex-col space-y-24 pt-4 pb-12">
 	<div class="space-y-24">
 
 		<!-- [Visual Guide: AI Tutor Workflow] -->
@@ -2945,8 +2953,19 @@ import { flyAndScale } from '$lib/utils/transitions';
 																						type="button"
 																					class="inline-block hover:text-[#57068C] transition-colors"
 																				>
-																					<InformationCircle className="h-5 w-5 text-gray-400 dark:text-gray-500" />
-																				</Popover.Trigger>
+																						<svg
+																							xmlns="http://www.w3.org/2000/svg"
+																							viewBox="0 0 20 20"
+																							fill="currentColor"
+																							class="h-5 w-5 text-gray-400 dark:text-gray-500"
+																						>
+																							<path
+																								fill-rule="evenodd"
+																								d="M18 10A8 8 0 1 1 2 10a8 8 0 0 1 16 0ZM9 9a1 1 0 1 0 0 2v3a1 1 0 1 0 2 0v-3a1 1 0 1 0-2-2Zm1-4a1.25 1.25 0 1 0 0 2.5A1.25 1.25 0 0 0 10 5Z"
+																								clip-rule="evenodd"
+																							/>
+																						</svg>
+																					</Popover.Trigger>
 																				<Popover.Content
 																					side="top"
 																					align="start"
@@ -3092,23 +3111,20 @@ import { flyAndScale } from '$lib/utils/transitions';
 		</div>
 
 	<!-- (Optional)(Optional)Prompt Configuration Section -->
-	<div class="space-y-4">
+	<div class="space-y-4" bind:this={promptConfigurationSectionEl}>
 		<button
 			type="button"
 			class="flex w-full items-start justify-between gap-3 text-left"
-			on:click={() => {
-				showPromptConfiguration = !showPromptConfiguration;
-			}}
+			on:click={togglePromptConfigurationSection}
 		>
-				<div>
-					<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200 flex items-center gap-2">
-						(Optional)Prompt Configuration
-					</h2>
-					<div class="text-xs text-gray-900 dark:text-gray-100">
-						These prompts control how AI Tutor converts homework, analyzes students, and generates
-						practice.
+					<div>
+						<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200 flex items-center gap-2">
+							(Optional)Prompt Configuration
+						</h2>
+						<div class="text-xs text-gray-900 dark:text-gray-100">
+							These prompts define how the AI processes homework, extracts topics, evaluates student responses, and generates practice problems. You can customize them to control accuracy, tone, and behavior.
+						</div>
 					</div>
-				</div>
 				<span class="pt-1 text-gray-500 dark:text-gray-400">
 					{#if showPromptConfiguration}
 						<ChevronUp className="size-4" />
