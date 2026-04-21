@@ -14,7 +14,7 @@
 		TESTING_AI_TUTOR
 	} from '$lib/constants';
 	import { aiTutorFrontendTestingErrorTypes } from '$lib/stores';
-import { DropdownMenu } from 'bits-ui';
+import { DropdownMenu, Popover } from 'bits-ui';
 	import { showAITutorTestToast } from '$lib/utils/aiTutorTesting';
 	import {
 		clearAITutorSessionCache,
@@ -29,6 +29,7 @@ import { DropdownMenu } from 'bits-ui';
 	import Pencil from '$lib/components/icons/Pencil.svelte';
 import ArrowPath from '$lib/components/icons/ArrowPath.svelte';
 import Hourglass from '$lib/components/icons/Hourglass.svelte';
+import InformationCircle from '$lib/components/icons/InformationCircle.svelte';
 import Dropdown from '$lib/components/common/Dropdown.svelte';
 import { flyAndScale } from '$lib/utils/transitions';
 
@@ -73,6 +74,8 @@ import { flyAndScale } from '$lib/utils/transitions';
 		answerSource?: string | null;
 		questionFileName?: string | null;
 		answerFileName?: string | null;
+		questionUploadedAt?: string | null;
+		answerUploadedAt?: string | null;
 	};
 
 	type HomeworkFileRow = HomeworkRow & {
@@ -156,6 +159,28 @@ import { flyAndScale } from '$lib/utils/transitions';
 			return 'Error type definition is newer than the analysis';
 		}
 		return '';
+	}
+
+	function getHomeworkFileStaleNote(row: HomeworkRow): string {
+		const stat = homeworkStats.find((item) => item.homework === row.id);
+		if (!stat?.latestAnalysisAt) return '';
+		const analysisTs = new Date(stat.latestAnalysisAt).getTime();
+		const qTs = row.questionUploadedAt ? new Date(row.questionUploadedAt).getTime() : 0;
+		const aTs = row.answerUploadedAt ? new Date(row.answerUploadedAt).getTime() : 0;
+		const maxPdfTs = Math.max(qTs, aTs);
+		if (maxPdfTs > analysisTs) {
+			return 'Your file is newer than the analysis.';
+		}
+		return '';
+	}
+
+	function getHomeworkStaleTooltip(row: HomeworkRow): string {
+		const notes: string[] = [];
+		const fileNote = getHomeworkFileStaleNote(row);
+		const errorNote = getHomeworkStaleNote(row);
+		if (fileNote) notes.push(fileNote);
+		if (errorNote) notes.push(errorNote);
+		return notes.join('\n');
 	}
 	let showPromptSection = false;
 	let editingErrorTypeIndex: number | null = null;
@@ -1865,35 +1890,17 @@ import { flyAndScale } from '$lib/utils/transitions';
 
 	function getHomeworkAnalysisState(row: HomeworkRow) {
 		const stat = homeworkStats.find((item) => item.homework === row.id);
-		if (uploadingMap[`${row.id}-question`] || uploadingMap[`${row.id}-answer`]) {
-			return 'Uploading PDF';
-		}
-		if (exportingConversationMap[row.id]) {
-			return 'Collecting Conversations';
-		}
-		if (runningAnalysisByHomeworkId[row.id]) {
-			return 'Processing…';
-		}
-		if (homeworkJobStepByModelId[row.modelId ?? '']) {
+		if (isHomeworkActionBusy(row)) {
 			return 'Processing…';
 		}
 		if (Boolean(stat?.status) && row.questionUploaded) {
-			return 'Analysis Completed';
-		}
-		if (!row.questionUploaded && !row.answerUploaded) {
-			return 'Please Upload Homework & Answer';
-		}
-		if (!row.questionUploaded) {
-			return 'Please Upload Homework';
+			return 'Completed';
 		}
 		if (!row.topicMapped) {
 			return 'Preparing Topics';
 		}
-		if (getConversationCountForRow(row) === 0) {
-			return 'No Conversations Found';
-		}
 		if (row.questionUploaded) {
-			return 'Ready for Analysis';
+			return 'Ready';
 		}
 		return '';
 	}
@@ -1969,16 +1976,16 @@ import { flyAndScale } from '$lib/utils/transitions';
 
 	function getHomeworkPrimaryActionLabel(row: HomeworkRow) {
 		if (isHomeworkActionBusy(row)) {
-			return 'In Progress';
+			return 'Processing…';
 		}
-		const status = getHomeworkAnalysisState(row);
-		if (status === 'Analysis Completed') {
+		const stat = homeworkStats.find((item) => item.homework === row.id);
+		if (Boolean(stat?.status) && row.questionUploaded) {
 			return 'Re-run';
 		}
-		if (status === 'Ready for Analysis') {
-			return 'Run';
+		if (!row.questionUploaded) {
+			return 'Upload Homework';
 		}
-		return '';
+		return 'Run';
 	}
 
 	async function handleHomeworkPrimaryAction(row: HomeworkRow) {
@@ -2717,38 +2724,42 @@ import { flyAndScale } from '$lib/utils/transitions';
 										</td>
 										<td class="px-3 py-1">
 											<div class="max-w-[12rem] whitespace-normal break-words leading-4">
-												<div class="text-xs font-medium text-gray-900 dark:text-gray-100">{getHomeworkAnalysisState(row)}</div>
-												{#if getHomeworkAnalysisStep(row)}
-													<div class="mt-0.5 text-xs font-medium text-gray-900 dark:text-gray-100">
-														{getHomeworkAnalysisStep(row)}
+													<div class="flex items-center gap-1.5">
+															<div class="text-xs font-medium text-gray-900 dark:text-gray-100">{getHomeworkAnalysisState(row)}</div>
+															
+														{#if getHomeworkStaleTooltip(row)}
+																			<Popover.Root>
+																				<Popover.Trigger
+																					type="button"
+																					class="inline-block hover:text-[#57068C] transition-colors"
+																				>
+																					<InformationCircle className="h-5 w-5 text-gray-400 dark:text-gray-500" />
+																				</Popover.Trigger>
+																				<Popover.Content
+																					side="top"
+																					align="start"
+																					sideOffset={6}
+																					class="z-50 max-w-[16rem] rounded-lg border border-gray-200 bg-white p-3 text-xs text-gray-700 shadow-lg dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300"
+																				>
+																					{#each getHomeworkStaleTooltip(row).split('\n').filter(Boolean) as line}
+																						<p class="leading-relaxed">{line}</p>
+																					{/each}
+																				</Popover.Content>
+																			</Popover.Root>
+																		{/if}
 													</div>
-												{/if}
-												{#if getHomeworkStaleNote(row)}
-													<div class="mt-0.5 text-xs font-medium text-gray-900 dark:text-gray-100">
-														{getHomeworkStaleNote(row)}
-													</div>
-												{/if}
-															{#if getHomeworkActionHint(row)}
-																<div class="mt-0.5 text-xs font-medium text-gray-900 dark:text-gray-100">
-																	{getHomeworkActionHint(row)}
-																</div>
-															{/if}
 											</div>
 										</td>
 										<td class="px-3 py-1">
-										{#if getHomeworkPrimaryActionLabel(row)}
-											<!-- [Table Button: icon+name] Run / Re-run -->
-											<button
-												type="button"
-												class="inline-flex items-center gap-1 rounded-full border border-[#57068C]/40 px-3 py-1 text-xs font-bold text-[#57068C] transition hover:bg-purple-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-purple-700 dark:text-purple-400 dark:hover:bg-purple-900/20"
-												on:click={() => handleHomeworkPrimaryAction(row)}
-												disabled={isHomeworkActionBusy(row)}
-											>
-												<svg class="h-3 w-3 flex-shrink-0" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
-												{getHomeworkPrimaryActionLabel(row)}
-											</button>
-														{/if}
-										</td>
+										<button
+													type="button"
+													class="inline-flex items-center gap-1 rounded-full border px-3 py-1 text-xs font-bold transition disabled:cursor-not-allowed disabled:opacity-50 {getHomeworkPrimaryActionLabel(row) === 'Upload Homework' || getHomeworkPrimaryActionLabel(row) === 'Processing…' ? 'border-gray-300 text-gray-500 dark:border-gray-600 dark:text-gray-400' : 'border-[#57068C]/40 text-[#57068C] hover:bg-purple-50 dark:border-purple-700 dark:text-purple-400 dark:hover:bg-purple-900/20'}"
+													on:click={() => handleHomeworkPrimaryAction(row)}
+													disabled={isHomeworkActionBusy(row) || getHomeworkPrimaryActionLabel(row) === 'Upload Homework'}
+												>
+														<svg class="h-3 w-3 flex-shrink-0" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+														{getHomeworkPrimaryActionLabel(row)}
+													</button>
 									</tr>
 								{/each}
 							{/if}
