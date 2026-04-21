@@ -23,6 +23,7 @@ import inspect
 from open_webui.env import (
     DATA_DIR,
     DATABASE_URL,
+    DEFAULT_TASK_MODEL_ID,
     ENV,
     FRONTEND_BUILD_DIR,
     OFFLINE_MODE,
@@ -1546,6 +1547,12 @@ TASK_MODEL = PersistentConfig(
 TASK_MODEL_EXTERNAL = UserScopedConfig(
     "task.model.external",
     os.environ.get("TASK_MODEL_EXTERNAL", ""),
+)
+
+PDF_IMAGE_DESCRIPTION_MODEL = PersistentConfig(
+    "PDF_IMAGE_DESCRIPTION_MODEL",
+    "task.pdf_image_description.model",
+    os.environ.get("PDF_IMAGE_DESCRIPTION_MODEL", DEFAULT_TASK_MODEL_ID),
 )
 
 TITLE_GENERATION_PROMPT_TEMPLATE = PersistentConfig(

@@ -226,16 +226,25 @@ def _build_image_context(
 
 def _build_image_description_content(page_number: int, images: list[PageImage]) -> list[dict[str, Any]]:
     instruction_text = (
-        f"You are describing {len(images)} cropped figures extracted from page {page_number} of a PDF for retrieval. "
-        f"Return ONLY a JSON array with {len(images)} strings in the same order as the images.\n\n"
-        "Ground each description in what is actually visible in the crop. Use the surrounding text context to choose the correct document terminology when it matches the image, "
-        "but do not invent details that are not visible.\n\n"
-        "Rules:\n"
-        "- Prefer factual, neutral descriptions over exhaustive guessing.\n"
-        "- Do not mention hands, people, background objects, colors, or extra tools unless they are clearly visible.\n"
-        "- If the crop is a line drawing, diagram, or annotated instructional image, say so.\n"
-        "- If the context names an instrument or concept and the image is consistent with that context, use that terminology.\n"
-        "- If the image itself is ambiguous, do not guess a different instrument; use neutral wording or qualify it with the surrounding text."
+        f"You are writing searchable text for {len(images)} figure crops from PDF page {page_number}. "
+        "These strings will be embedded for semantic retrieval: optimize for terms and facts a user might query, "
+        "not for exhaustive visual narration.\n\n"
+        f"Return ONLY a JSON array with {len(images)} strings, same order as the images.\n\n"
+        "For each string, write information-dense prose: no fixed length—use as much text as needed for that crop. "
+        "Simple figures can be short; busy diagrams, multi-panel figures, tables, or label-heavy plots often need more lines so every legible label and relationship is captured for search. "
+        "Still avoid padding: every sentence should add retrievable facts or quoted text. "
+        "Lead with the figure kind and main topic (e.g. flowchart, schematic, photo, plot, table excerpt, UI screenshot, map). "
+        "Then cover, in priority order:\n"
+        "- Any readable text, labels, axis titles, units, legends, or annotations—quote short strings verbatim when legible.\n"
+        "- Named parts, components, variables, relationships, and direction of flow or comparison (only if visible).\n"
+        "- Quantities, ranges, or categories shown on charts or tables (only if readable).\n"
+        "- One line on layout or structure only when it disambiguates the figure type or reading order.\n\n"
+        "Retrieval quality rules:\n"
+        "- Prefer distinctive domain terms and concrete nouns over generic filler; avoid long lists of colors, textures, or minor décor unless they are the subject.\n"
+        "- Do not hedge with vague stock phrases; state what is shown or say it is unclear.\n"
+        "- Ground everything in the crop; use nearby text context to pick correct terminology when it clearly matches—never invent facts, numbers, or labels not visible.\n"
+        "- If something is ambiguous, describe it neutrally or tie wording to the surrounding context; do not substitute a different concept.\n"
+        "- If the crop is a line drawing, diagram, or instructional figure, say so explicitly."
     )
 
     content: list[dict[str, Any]] = [{"type": "text", "text": instruction_text}]
@@ -256,6 +265,30 @@ def _build_image_description_content(page_number: int, images: list[PageImage]) 
         )
 
     return content
+
+
+def _resolve_configured_model_name(configured_value: Any) -> str:
+    if configured_value is None:
+        return ""
+    if hasattr(configured_value, "value"):
+        configured_value = configured_value.value
+    return str(configured_value).strip()
+
+
+def _select_pdf_image_description_model_id(app_config: Any, models: dict[str, Any]) -> str | None:
+    configured_model_id = _resolve_configured_model_name(
+        getattr(app_config, "PDF_IMAGE_DESCRIPTION_MODEL", "")
+    )
+    if not configured_model_id:
+        return None
+    if configured_model_id in models:
+        return configured_model_id
+
+    log.warning(
+        "PDF image description configured model is unavailable: %s",
+        configured_model_id,
+    )
+    return None
 
 
 class ComplexPDFLoader:
@@ -420,7 +453,6 @@ def describe_images_with_task_model(
 
         from open_webui.utils.models import get_models_for_user
         from open_webui.utils.chat import generate_chat_completion
-        from open_webui.utils.task import get_task_model_id
 
         def _guess_vision_model_id(models: dict) -> str | None:
             if not models:
@@ -452,13 +484,11 @@ def describe_images_with_task_model(
 
         async def _run() -> list[str]:
             models = await get_models_for_user(request, user)
-            task_model_id = get_task_model_id(
-                model_id="",
-                task_model=request.app.state.config.TASK_MODEL,
-                task_model_external=request.app.state.config.TASK_MODEL_EXTERNAL.get(user.email),
+            task_model_id = _select_pdf_image_description_model_id(
+                app_config=request.app.state.config,
                 models=models,
             )
-            if not task_model_id or task_model_id not in models:
+            if not task_model_id:
                 task_model_id = _guess_vision_model_id(models)
                 if task_model_id:
                     log.info(

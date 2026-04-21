@@ -93,9 +93,8 @@ If description is missing for an image, fallback text is inserted:
 
 `describe_images_with_task_model(...)` chooses model in this order:
 
-1. `TASK_MODEL_EXTERNAL` for the current admin/user (if set and accessible),
-2. `TASK_MODEL` (global),
-3. fallback guess from accessible models using keywords (`gpt-4o`, `gemini`, `claude`, `vision`, `multimodal`), excluding embedding/rerank models.
+1. `PDF_IMAGE_DESCRIPTION_MODEL` (env-configured dedicated model for PDF image descriptions),
+2. fallback guess from accessible models using keywords (`gpt-4o`, `gemini`, `claude`, `vision`, `multimodal`), excluding embedding/rerank models.
 
 Then it:
 
@@ -123,6 +122,10 @@ Current prompt behavior:
 - uses nearby page text for terminology and topic grounding,
 - tells the model not to invent hands/people/extra objects unless clearly visible,
 - tells the model not to guess a different instrument when the crop is ambiguous.
+
+Current deployment default:
+
+- `docker-compose.yaml` sets `PDF_IMAGE_DESCRIPTION_MODEL` to `@vertexai/gemini-2.5-flash-lite` unless you override it.
 
 ## Fallback and Routing Behavior
 
@@ -167,8 +170,9 @@ Important worker note:
 
 ### Image-description model selection
 
-- `TASK_MODEL` (global task model)
-- `TASK_MODEL_EXTERNAL` (user/admin-scoped task model)
+- `PDF_IMAGE_DESCRIPTION_MODEL` (dedicated env-configured model for PDF image descriptions)
+  - Default in `docker-compose.yaml`: `@vertexai/gemini-2.5-flash-lite`
+  - This path no longer depends on `TASK_MODEL` / `TASK_MODEL_EXTERNAL`
 
 ### Ingestion execution and locking
 
@@ -200,7 +204,7 @@ These are important behavior changes in this branch:
 1. `PDF_EXTRACT_IMAGES` is now respected end-to-end (no forced disable at app startup).
 2. Retrieval + worker loader calls now pass `PDF_EXTRACT_IMAGES` from runtime config.
 3. `PyPDFLoader` fallback path now honors `PDF_EXTRACT_IMAGES`.
-4. Complex parser image description path includes model fallback logic (vision-model guess) and better logging.
+4. Complex parser image description path now uses a dedicated `PDF_IMAGE_DESCRIPTION_MODEL` env var instead of inheriting the generic task model.
 5. Parsing robustness improved for non-JSON model responses when mapping descriptions.
 6. PostgreSQL cursor ordering issue in file-processing flow was fixed (`fetchone()` before commit).
 

@@ -74,6 +74,7 @@ from open_webui.config import (
     ENABLE_RAG_HYBRID_SEARCH,  # Used in retrieval queries
     RAG_FULL_CONTEXT,  # Used in config endpoints
     RAG_RELEVANCE_THRESHOLD,  # PersistentConfig, used in retrieval
+    PDF_IMAGE_DESCRIPTION_MODEL,
 )
 from open_webui.retrieval.utils import get_embedding_function
 
@@ -199,6 +200,7 @@ def get_worker_config():
             _worker_config.RELEVANCE_THRESHOLD = RAG_RELEVANCE_THRESHOLD  # PersistentConfig, used in retrieval
             # Respect configured PDF image extraction setting (defaults to False).
             _worker_config.PDF_EXTRACT_IMAGES = PDF_EXTRACT_IMAGES
+            _worker_config.PDF_IMAGE_DESCRIPTION_MODEL = PDF_IMAGE_DESCRIPTION_MODEL
             _worker_config.DOCUMENT_INTELLIGENCE_ENDPOINT = DOCUMENT_INTELLIGENCE_ENDPOINT
             _worker_config.DOCUMENT_INTELLIGENCE_KEY = DOCUMENT_INTELLIGENCE_KEY
             _worker_config.BYPASS_EMBEDDING_AND_RETRIEVAL = BYPASS_EMBEDDING_AND_RETRIEVAL
