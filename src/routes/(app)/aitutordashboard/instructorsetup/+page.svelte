@@ -103,8 +103,11 @@ import { flyAndScale } from '$lib/utils/transitions';
 	}[] = [];
 	type ConversationCount = { studentCount: number; chatCount: number };
 	let convCountByModelId: Record<string, ConversationCount> = {};
+	let convLatestActivityByModelId: Record<string, number> = {};
 	let isRefreshingConversationCounts = false;
 	let uploadingMap: Record<string, boolean> = {};
+	let pdfProcessingMap: Record<string, boolean> = {};
+	let pdfJobStepByKey: Record<string, string> = {};
 	let hasLoadedHomework = false;
 	let exportingConversationMap: Record<string, boolean> = {};
 	let runningAnalysisByHomeworkId: Record<string, boolean> = {};
@@ -150,36 +153,86 @@ import { flyAndScale } from '$lib/utils/transitions';
 		return localStorage.getItem(errorTypesSavedAtKey($aiTutorSelectedGroupId)) ?? null;
 	}
 
-	function getHomeworkStaleNote(row: HomeworkRow): string {
+	function normalizeEpochToMs(value: number): number {
+		if (!Number.isFinite(value) || value <= 0) return 0;
+		return value > 1_000_000_000_000 ? value : value * 1000;
+	}
+
+	function parseTimestampToMs(value: unknown): number {
+		if (typeof value === 'number') return normalizeEpochToMs(value);
+		if (typeof value === 'string' && value) {
+			const parsedDate = Date.parse(value);
+			if (!Number.isNaN(parsedDate)) return parsedDate;
+			const parsedNumber = Number(value);
+			if (Number.isFinite(parsedNumber)) return normalizeEpochToMs(parsedNumber);
+		}
+		return 0;
+	}
+
+	function getAnalysisTimestampMs(row: HomeworkRow): number {
 		const stat = homeworkStats.find((item) => item.homework === row.id);
-		if (!stat?.latestAnalysisAt) return '';
+		return stat?.latestAnalysisAt ? parseTimestampToMs(stat.latestAnalysisAt) : 0;
+	}
+
+	function getHomeworkStaleNote(row: HomeworkRow): string {
+		const analysisTs = getAnalysisTimestampMs(row);
+		if (!analysisTs) return '';
 		const effectiveTs = getEffectiveErrorTypeTimestamp();
 		if (!effectiveTs) return '';
-		if (effectiveTs > stat.latestAnalysisAt) {
-			return 'Error type definition is newer than the analysis';
+		const errorTypeTs = parseTimestampToMs(effectiveTs);
+		if (errorTypeTs > analysisTs) {
+			return 'Error Type is newer than the analysis';
 		}
 		return '';
 	}
 
-	function getHomeworkFileStaleNote(row: HomeworkRow): string {
-		const stat = homeworkStats.find((item) => item.homework === row.id);
-		if (!stat?.latestAnalysisAt) return '';
-		const analysisTs = new Date(stat.latestAnalysisAt).getTime();
-		const qTs = row.questionUploadedAt ? new Date(row.questionUploadedAt).getTime() : 0;
-		const aTs = row.answerUploadedAt ? new Date(row.answerUploadedAt).getTime() : 0;
-		const maxPdfTs = Math.max(qTs, aTs);
-		if (maxPdfTs > analysisTs) {
-			return 'Your file is newer than the analysis.';
+	function getHomeworkFileStaleNotes(row: HomeworkRow): string[] {
+		const analysisTs = getAnalysisTimestampMs(row);
+		if (!analysisTs) return [];
+		const notes: string[] = [];
+		const questionTs = parseTimestampToMs(row.questionUploadedAt ?? null);
+		if (questionTs > analysisTs) {
+			notes.push('Homework PDF is newer than the analysis');
+		}
+		if (row.answerSource !== 'ai_generated') {
+			const answerTs = parseTimestampToMs(row.answerUploadedAt ?? null);
+			if (answerTs > analysisTs) {
+				notes.push('Answer PDF is newer than the analysis');
+			}
+		}
+		return notes;
+	}
+
+	function getRowLatestConversationActivityMs(row: HomeworkRow): number {
+		const keys = new Set<string>();
+		if (row.modelId) keys.add(row.modelId);
+		const matchedModel = availableModels.find((model) => model.id === row.modelId);
+		if (matchedModel?.name) keys.add(matchedModel.name);
+		let latestMs = 0;
+		for (const key of keys) {
+			latestMs = Math.max(latestMs, convLatestActivityByModelId[key] ?? 0);
+		}
+		return latestMs;
+	}
+
+	function getStudentInteractionStaleNote(row: HomeworkRow): string {
+		const analysisTs = getAnalysisTimestampMs(row);
+		if (!analysisTs) return '';
+		const latestInteractionTs = getRowLatestConversationActivityMs(row);
+		if (latestInteractionTs > analysisTs) {
+			return 'Student interaction is newer than the analysis';
 		}
 		return '';
 	}
 
 	function getHomeworkStaleTooltip(row: HomeworkRow): string {
 		const notes: string[] = [];
-		const fileNote = getHomeworkFileStaleNote(row);
+		const fileNotes = getHomeworkFileStaleNotes(row);
 		const errorNote = getHomeworkStaleNote(row);
-		if (fileNote) notes.push(fileNote);
+		const studentInteractionNote = getStudentInteractionStaleNote(row);
+		if (fileNotes.length > 0) notes.push(...fileNotes);
 		if (errorNote) notes.push(errorNote);
+		if (studentInteractionNote) notes.push(studentInteractionNote);
 		return notes.join('\n');
 	}
 	let showPromptSection = false;
@@ -513,20 +566,100 @@ import { flyAndScale } from '$lib/utils/transitions';
 		writePersistedJobs(readPersistedJobs().filter((item) => item.jobId !== jobId));
 	}
 
-	function setUploadIndicator(homeworkId: string | null, docType: 'question' | 'answer', active: boolean) {
-		if (!homeworkId) return;
-		uploadingMap = { ...uploadingMap, [`${homeworkId}-${docType}`]: active };
+	type HomeworkDocType = 'question' | 'answer';
+
+	function getHomeworkDocProgressKey(homeworkId: string, docType: HomeworkDocType): string {
+		return `${homeworkId}-${docType}`;
+	}
+
+	function getModelDocProgressKey(modelId: string, docType: HomeworkDocType): string {
+		return `model:${modelId}-${docType}`;
+	}
+
+	function getRowDocProgressKeys(row: HomeworkRow, docType: HomeworkDocType): string[] {
+		const keys = [getHomeworkDocProgressKey(row.id, docType)];
+		if (row.modelId) keys.push(getModelDocProgressKey(row.modelId, docType));
+		return keys;
+	}
+
+	function getPersistedUploadDocType(job: PersistedInstructorJob): HomeworkDocType | null {
+		if (job.type === 'question-upload') return 'question';
+		if (job.type === 'answer-upload') return 'answer';
+		return null;
+	}
+
+	function getPersistedUploadProgressKey(job: PersistedInstructorJob): string | null {
+		const docType = getPersistedUploadDocType(job);
+		if (!docType) return null;
+		if (job.homeworkId) return getHomeworkDocProgressKey(job.homeworkId, docType);
+		if (job.modelId) return getModelDocProgressKey(job.modelId, docType);
+		return null;
+	}
+
+	function setBooleanMapValue(
+		target: Record<string, boolean>,
+		key: string,
+		active: boolean
+	): Record<string, boolean> {
+		const next = { ...target };
+		if (active) next[key] = true;
+		else delete next[key];
+		return next;
+	}
+
+	function setStringMapValue(
+		target: Record<string, string>,
+		key: string,
+		value: string | null
+	): Record<string, string> {
+		const next = { ...target };
+		if (value) next[key] = value;
+		else delete next[key];
+		return next;
+	}
+
+	function setDocUploadingByKey(key: string, active: boolean) {
+		uploadingMap = setBooleanMapValue(uploadingMap, key, active);
+	}
+
+	function setDocProcessingByKey(key: string, active: boolean) {
+		pdfProcessingMap = setBooleanMapValue(pdfProcessingMap, key, active);
+	}
+
+	function setDocStepByKey(key: string, step: string | null) {
+		pdfJobStepByKey = setStringMapValue(pdfJobStepByKey, key, step);
+	}
+
+	function getRowDocUploading(row: HomeworkRow, docType: HomeworkDocType): boolean {
+		return getRowDocProgressKeys(row, docType).some((key) => Boolean(uploadingMap[key]));
+	}
+
+	function getRowDocProcessing(row: HomeworkRow, docType: HomeworkDocType): boolean {
+		return getRowDocProgressKeys(row, docType).some((key) => Boolean(pdfProcessingMap[key]));
+	}
+
+	function getRowDocStep(row: HomeworkRow, docType: HomeworkDocType): string {
+		for (const key of getRowDocProgressKeys(row, docType)) {
+			if (pdfJobStepByKey[key]) return pdfJobStepByKey[key];
+		}
+		return '';
+	}
+
+	function isAnalysisProcessing(row: HomeworkRow): boolean {
+		return Boolean(
+			exportingConversationMap[row.id] ||
+				runningAnalysisByHomeworkId[row.id] ||
+				homeworkJobStepByModelId[row.modelId ?? '']
+		);
 	}
 
 	function setJobStep(modelId: string | null, step: string | null) {
 		if (!modelId) return;
-		const next = { ...homeworkJobStepByModelId };
-		if (step) {
-			next[modelId] = step;
-		} else {
-			delete next[modelId];
-		}
-		homeworkJobStepByModelId = next;
+		homeworkJobStepByModelId = setStringMapValue(
+			homeworkJobStepByModelId,
+			modelId,
+			step
+		);
 	}
 
 	function markPersistedJobActive(job: PersistedInstructorJob, active: boolean) {
@@ -539,7 +672,9 @@ import { flyAndScale } from '$lib/utils/transitions';
 		}
 
 		if (job.type === 'question-upload' || job.type === 'answer-upload') {
-			setUploadIndicator(job.homeworkId, job.type === 'question-upload' ? 'question' : 'answer', active);
+			const key = getPersistedUploadProgressKey(job);
+			if (!key) return;
+			setDocProcessingByKey(key, active);
 		}
 	}
 
@@ -708,6 +843,8 @@ import { flyAndScale } from '$lib/utils/transitions';
 		pollAbortControllers.clear();
 		activeJobIds.clear();
 		uploadingMap = {};
+		pdfProcessingMap = {};
+		pdfJobStepByKey = {};
 		exportingConversationMap = {};
 		runningAnalysisByHomeworkId = {};
 		homeworkJobStepByModelId = {};
@@ -715,6 +852,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 		homeworkRows = [];
 		homeworkStats = [];
 		convCountByModelId = {};
+		convLatestActivityByModelId = {};
 		hasLoadedHomework = false;
 		// When switching to a non-empty group, trigger data loads.
 		// When switching to empty/no group, the cleared state above is sufficient.
@@ -777,6 +915,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 					if (Array.isArray(hwData)) {
 						// Preserve frontend-known filenames since backend does not store them.
 						const existingFileNames = new Map(homeworkRows.map(r => [r.id, { q: r.questionFileName, a: r.answerFileName }]));
+						const existingTimestamps = new Map(homeworkRows.map(r => [r.id, { q: r.questionUploadedAt, a: r.answerUploadedAt }]));
 						fetchedHomeworkRows = hwData.map((hw: any) => ({
 							id: hw.id,
 							modelId: hw.model_id ?? null,
@@ -785,7 +924,9 @@ import { flyAndScale } from '$lib/utils/transitions';
 							topicMapped: hw.topic_mapped ?? false,
 							answerSource: hw.answer_source ?? null,
 							questionFileName: hw.question_filename ?? existingFileNames.get(hw.id)?.q ?? null,
-							answerFileName: hw.answer_filename ?? existingFileNames.get(hw.id)?.a ?? null
+							answerFileName: hw.answer_filename ?? existingFileNames.get(hw.id)?.a ?? null,
+							questionUploadedAt: hw.question_uploaded_at ?? existingTimestamps.get(hw.id)?.q ?? null,
+							answerUploadedAt: hw.answer_uploaded_at ?? existingTimestamps.get(hw.id)?.a ?? null
 						}));
 						for (const hw of hwData) {
 							topicMappedByHomeworkId.set(hw.id, hw.topic_mapped ?? false);
@@ -1011,32 +1152,41 @@ import { flyAndScale } from '$lib/utils/transitions';
 				body: JSON.stringify({ group_id: groupId, skip: 0, limit: 1000 }),
 				signal: controller.signal
 			});
-			if (!res.ok) throw new Error('Conv count fetch failed');
-			const data = await res.json();
-			const nextCounts: Record<string, ConversationCount> = {};
-			const studentsByModel: Record<string, Set<string>> = {};
-			if (Array.isArray(data)) {
-				for (const chat of data) {
-					const modelKeys = [
-						chat?.meta?.model_id,
-						chat?.meta?.model_name,
-						chat?.meta?.base_model_name
-					].filter((value) => typeof value === 'string' && value.length > 0);
-					for (const modelKey of new Set(modelKeys)) {
-						if (!studentsByModel[modelKey]) {
-							studentsByModel[modelKey] = new Set();
+				if (!res.ok) throw new Error('Conv count fetch failed');
+				const data = await res.json();
+				const nextCounts: Record<string, ConversationCount> = {};
+				const nextLatestActivityByModelId: Record<string, number> = {};
+				const studentsByModel: Record<string, Set<string>> = {};
+				if (Array.isArray(data)) {
+					for (const chat of data) {
+						const chatActivityMs = normalizeEpochToMs(
+							Number(chat?.updated_at ?? chat?.created_at ?? 0)
+						);
+						const modelKeys = [
+							chat?.meta?.model_id,
+							chat?.meta?.model_name,
+							chat?.meta?.base_model_name
+						].filter((value) => typeof value === 'string' && value.length > 0);
+						for (const modelKey of new Set(modelKeys)) {
+							if (!studentsByModel[modelKey]) {
+								studentsByModel[modelKey] = new Set();
+							}
+							studentsByModel[modelKey].add(chat.user_id);
+							nextCounts[modelKey] = {
+								studentCount: studentsByModel[modelKey].size,
+								chatCount: (nextCounts[modelKey]?.chatCount ?? 0) + 1
+							};
+							nextLatestActivityByModelId[modelKey] = Math.max(
+								nextLatestActivityByModelId[modelKey] ?? 0,
+								chatActivityMs
+							);
 						}
-						studentsByModel[modelKey].add(chat.user_id);
-						nextCounts[modelKey] = {
-							studentCount: studentsByModel[modelKey].size,
-							chatCount: (nextCounts[modelKey]?.chatCount ?? 0) + 1
-						};
 					}
 				}
-			}
-			if ($aiTutorSelectedGroupId !== groupId) return; // stale
-			convCountByModelId = nextCounts;
-			console.log('[aitutordashboard]-[InstructorSetup]-[ConversationCountsRefreshCompleted]:', nextCounts);
+				if ($aiTutorSelectedGroupId !== groupId) return; // stale
+				convCountByModelId = nextCounts;
+				convLatestActivityByModelId = nextLatestActivityByModelId;
+				console.log('[aitutordashboard]-[InstructorSetup]-[ConversationCountsRefreshCompleted]:', nextCounts);
 		} catch (e) {
 			if (e instanceof Error && e.name === 'AbortError') {
 				console.log('[aitutordashboard]-[InstructorSetup]-[ConversationCountsAborted]: group=' + groupId);
@@ -1226,6 +1376,20 @@ import { flyAndScale } from '$lib/utils/transitions';
 		if (activeJobIds.has(job.jobId)) return;
 		activeJobIds.add(job.jobId);
 		markPersistedJobActive(job, true);
+		const uploadProgressKey = getPersistedUploadProgressKey(job);
+		// Safety net: force-clear step if polling hangs or finally is skipped
+		const safetyTimeout = setTimeout(() => {
+			console.warn('[AI Tutor][Instructor Setup] safety clear for stuck job step', { jobId: job.jobId, modelId: job.modelId });
+			if (job.type === 'analysis') {
+				setJobStep(job.modelId, null);
+			} else if (uploadProgressKey) {
+				setDocStepByKey(uploadProgressKey, null);
+				setDocProcessingByKey(uploadProgressKey, false);
+			}
+			markPersistedJobActive(job, false);
+			removePersistedJob(job.jobId);
+			activeJobIds.delete(job.jobId);
+		}, POLL_TIMEOUT_MS + 5000);
 		// Create an AbortController for this poll so group-switch / unmount can cancel it
 		const controller = new AbortController();
 		pollAbortControllers.set(job.jobId, controller);
@@ -1245,19 +1409,23 @@ import { flyAndScale } from '$lib/utils/transitions';
 					: job.type === 'question-upload'
 						? 'question upload'
 						: 'answer upload',
-				(data) => {
-					console.info('[AI Tutor][Instructor Setup] monitor job progress', {
-						jobId: job.jobId,
-						type: job.type,
-						status: data?.status ?? 'unknown',
-						step: data?.step ?? 'unknown'
-					});
-					// Keep a refresh-safe step message per model so the status column
-					// shows which backend step is currently running.
-					setJobStep(job.modelId, data?.step ? `Step: ${data.step}` : null);
-				},
-				controller.signal
-			);
+					(data) => {
+						console.info('[AI Tutor][Instructor Setup] monitor job progress', {
+							jobId: job.jobId,
+							type: job.type,
+							status: data?.status ?? 'unknown',
+							step: data?.step ?? 'unknown'
+						});
+						if (job.type === 'analysis') {
+							// Keep a refresh-safe step message per model so the status column
+							// shows which backend step is currently running.
+							setJobStep(job.modelId, data?.step ? `Step: ${data.step}` : null);
+						} else if (uploadProgressKey) {
+							setDocStepByKey(uploadProgressKey, data?.step ? `Step: ${data.step}` : 'Processing PDF');
+						}
+					},
+					controller.signal
+				);
 			console.info('[AI Tutor][Instructor Setup] monitor job done', {
 				jobId: job.jobId,
 				type: job.type,
@@ -1276,14 +1444,16 @@ import { flyAndScale } from '$lib/utils/transitions';
 						return {
 							...row,
 							questionUploaded: true,
-							questionFileName: job.fileName ?? row.questionFileName
+							questionFileName: job.fileName ?? row.questionFileName,
+							questionUploadedAt: new Date().toISOString()
 						};
 					}
 					return {
 						...row,
 						answerUploaded: true,
 						answerSource: 'uploaded',
-						answerFileName: job.fileName ?? row.answerFileName
+						answerFileName: job.fileName ?? row.answerFileName,
+						answerUploadedAt: new Date().toISOString()
 					};
 				});
 				toast.success(`${job.type === 'question-upload' ? 'Homework' : 'Answer'} upload completed.`);
@@ -1303,15 +1473,20 @@ import { flyAndScale } from '$lib/utils/transitions';
 			});
 			toast.error(error instanceof Error ? error.message : 'Background job failed.');
 		} finally {
-			setJobStep(job.modelId, null);
+			clearTimeout(safetyTimeout);
+			if (job.type === 'analysis') {
+				setJobStep(job.modelId, null);
+			} else if (uploadProgressKey) {
+				setDocStepByKey(uploadProgressKey, null);
+				setDocProcessingByKey(uploadProgressKey, false);
+			}
 			markPersistedJobActive(job, false);
 			removePersistedJob(job.jobId);
 			activeJobIds.delete(job.jobId);
 			pollAbortControllers.delete(job.jobId);
 			// Ensure upload spinner is cleared when a background upload job finishes or fails.
-			if ((job.type === "question-upload" || job.type === "answer-upload") && job.homeworkId) {
-				const docType = job.type === "question-upload" ? "question" : "answer";
-				uploadingMap = { ...uploadingMap, [`${job.homeworkId}-${docType}`]: false };
+			if (uploadProgressKey) {
+				setDocUploadingByKey(uploadProgressKey, false);
 			}
 		}
 	}
@@ -1337,31 +1512,37 @@ import { flyAndScale } from '$lib/utils/transitions';
 				);
 				if (checkRes.ok) {
 					const checkData = await checkRes.json();
-					if (checkData?.status === 'done' || checkData?.status === 'failed') {
-						console.info('[resumePersistedJobs] job already finished, skipping monitor', {
-							jobId: job.jobId,
-							status: checkData.status
-						});
-						removePersistedJob(job.jobId);
-						// If it was an upload, clear any stale spinner and refresh data so the UI shows the result
-						if (job.type === 'question-upload' || job.type === 'answer-upload') {
-							if (job.homeworkId) {
-								const docType = job.type === 'question-upload' ? 'question' : 'answer';
-								uploadingMap = { ...uploadingMap, [`${job.homeworkId}-${docType}`]: false };
+						if (checkData?.status === 'done' || checkData?.status === 'failed') {
+							console.info('[resumePersistedJobs] job already finished, skipping monitor', {
+								jobId: job.jobId,
+								status: checkData.status
+							});
+							removePersistedJob(job.jobId);
+							// If it was an upload, clear any stale spinner and refresh data so the UI shows the result
+							if (job.type === 'question-upload' || job.type === 'answer-upload') {
+								const progressKey = getPersistedUploadProgressKey(job);
+								if (progressKey) {
+									setDocUploadingByKey(progressKey, false);
+									setDocProcessingByKey(progressKey, false);
+									setDocStepByKey(progressKey, null);
+								}
+								if (job.groupId === $aiTutorSelectedGroupId) {
+									await loadHomeworkStats(job.groupId);
+								}
 							}
-							if (job.groupId === $aiTutorSelectedGroupId) {
-								await loadHomeworkStats(job.groupId);
-							}
+							continue;
 						}
-						continue;
 					}
-				}
 			} catch {
 				// Network hiccup — fall through to normal monitoring
 			}
-			if ((job.type === 'question-upload' || job.type === 'answer-upload') && job.homeworkId) {
-				const docType = job.type === 'question-upload' ? 'question' : 'answer';
-				uploadingMap = { ...uploadingMap, [`${job.homeworkId}-${docType}`]: true };
+			if (job.type === 'question-upload' || job.type === 'answer-upload') {
+				const progressKey = getPersistedUploadProgressKey(job);
+				if (progressKey) {
+					setDocUploadingByKey(progressKey, false);
+					setDocProcessingByKey(progressKey, true);
+					setDocStepByKey(progressKey, 'Processing PDF');
+				}
 			}
 			void monitorPersistedJob(job);
 		}
@@ -1706,13 +1887,19 @@ import { flyAndScale } from '$lib/utils/transitions';
 			toast.error('Please upload a PDF file.');
 			return;
 		}
-		const key = hwId ? `${hwId}-${docType}` : `draft-${draftUid ?? 0}-${docType}`;
+		const key = hwId
+			? getHomeworkDocProgressKey(hwId, docType)
+			: modelId
+				? getModelDocProgressKey(modelId, docType)
+				: `draft-${draftUid ?? 0}-${docType}`;
 		// Guard against double-click / concurrent upload for the same homework+docType
-		if (uploadingMap[key]) {
+		if (uploadingMap[key] || pdfProcessingMap[key]) {
 			console.log('[UPLOAD]-[' + key + ']-[Skipped]: already uploading, ignoring duplicate');
 			return;
 		}
-		uploadingMap = { ...uploadingMap, [key]: true };
+		setDocUploadingByKey(key, true);
+		setDocProcessingByKey(key, false);
+		setDocStepByKey(key, null);
 		if (useFrontendTestingData) {
 			await new Promise((resolve) => setTimeout(resolve, 400));
 			if (hwId) {
@@ -1768,7 +1955,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 					draftRows = draftRows.filter((d) => d.uid !== draftUid);
 				}
 			}
-			uploadingMap = { ...uploadingMap, [key]: false };
+			setDocUploadingByKey(key, false);
 			toast.success(`TestData ${docType === 'question' ? 'homework' : 'answer'} PDF uploaded.`);
 			await tick();
 			updateScrollState();
@@ -1830,14 +2017,16 @@ import { flyAndScale } from '$lib/utils/transitions';
 			}
 			// Upload is done; reset the spinner immediately so it only covers the HTTP upload,
 			// not the entire background pipeline job.
-			uploadingMap = { ...uploadingMap, [key]: false };
+			setDocUploadingByKey(key, false);
 			await monitorPersistedJob(persistedJob);
 			if (hwId === null && draftUid !== undefined)
 				draftRows = draftRows.filter((d) => d.uid !== draftUid);
 		} catch (e) {
 			toast.error(e instanceof Error ? e.message : 'Upload failed.');
 			console.error('PDF upload failed:', e);
-			uploadingMap = { ...uploadingMap, [key]: false };
+			setDocUploadingByKey(key, false);
+			setDocProcessingByKey(key, false);
+			setDocStepByKey(key, null);
 		}
 	}
 
@@ -1890,54 +2079,46 @@ import { flyAndScale } from '$lib/utils/transitions';
 
 	function getHomeworkAnalysisState(row: HomeworkRow) {
 		const stat = homeworkStats.find((item) => item.homework === row.id);
-		if (isHomeworkActionBusy(row)) {
-			return 'Processing…';
+		if (getRowDocUploading(row, 'question') || getRowDocUploading(row, 'answer')) {
+			return 'Uploading PDF';
+		}
+		if (
+			getRowDocProcessing(row, 'question') ||
+			getRowDocProcessing(row, 'answer') ||
+			getRowDocStep(row, 'question') ||
+			getRowDocStep(row, 'answer') ||
+			(row.questionUploaded && !row.topicMapped)
+		) {
+			return 'Processing PDF';
+		}
+		if (isAnalysisProcessing(row)) {
+			return 'Processing';
+		}
+		if (!row.questionUploaded) {
+			return 'Upload Homework PDF';
 		}
 		if (Boolean(stat?.status) && row.questionUploaded) {
 			return 'Completed';
 		}
-		if (!row.topicMapped) {
-			return 'Preparing Topics';
+		if (!row.answerUploaded) {
+			return '(Optional)Upload Answer PDF';
 		}
-		if (row.questionUploaded) {
-			return 'Ready';
+		if (getConversationCountForRow(row) === 0) {
+			return 'Student interactions needed';
 		}
-		return '';
-	}
-
-	function getHomeworkAnalysisStep(row: HomeworkRow) {
-		return homeworkJobStepByModelId[row.modelId ?? ''] ?? '';
+		return 'Ready';
 	}
 
 	function isHomeworkActionBusy(row: HomeworkRow) {
 		return Boolean(
-			uploadingMap[`${row.id}-question`] ||
-				uploadingMap[`${row.id}-answer`] ||
-				exportingConversationMap[row.id] ||
-				runningAnalysisByHomeworkId[row.id] ||
-				homeworkJobStepByModelId[row.modelId ?? '']
+			getRowDocUploading(row, 'question') ||
+				getRowDocUploading(row, 'answer') ||
+				getRowDocProcessing(row, 'question') ||
+				getRowDocProcessing(row, 'answer') ||
+				getRowDocStep(row, 'question') ||
+				getRowDocStep(row, 'answer') ||
+				isAnalysisProcessing(row)
 		);
-	}
-
-	function getHomeworkActionRequirements(row: HomeworkRow) {
-		const missing: string[] = [];
-		if (!row.questionUploaded) missing.push('Upload homework PDF');
-		if (!row.topicMapped) missing.push('Wait for topic mapping');
-		if (getConversationCountForRow(row) === 0) missing.push('Need student conversations');
-		return missing;
-	}
-
-	function getHomeworkActionHint(row: HomeworkRow) {
-		if (isHomeworkActionBusy(row)) {
-			return '';
-		}
-
-		const actionLabel = getHomeworkPrimaryActionLabel(row);
-		if (actionLabel) return '';
-
-		const missing = getHomeworkActionRequirements(row);
-		if (missing.length === 0) return '';
-		return missing.length === 1 ? missing[0] : `${missing[0]}...`;
 	}
 
 	function getConversationCountForRow(row: HomeworkRow) {
@@ -1974,35 +2155,56 @@ import { flyAndScale } from '$lib/utils/transitions';
 		return `${maxStudentCount} (${maxChatCount} chats)`;
 	}
 
-	function getHomeworkPrimaryActionLabel(row: HomeworkRow) {
-		if (isHomeworkActionBusy(row)) {
-			return 'Processing…';
+	type HomeworkActionButton =
+		| { kind: 'upload'; label: 'Upload'; docType: HomeworkDocType; disabled?: boolean }
+		| { kind: 'run'; label: 'Run'; disabled?: boolean }
+		| { kind: 'rerun'; label: 'Re-run'; disabled?: boolean }
+		| { kind: 'processing'; label: 'Processing'; disabled: true };
+
+	function getHomeworkActionButtons(row: HomeworkRow): HomeworkActionButton[] {
+		const status = getHomeworkAnalysisState(row);
+		if (status === 'Uploading PDF' || status === 'Processing PDF' || status === 'Processing') {
+			return [{ kind: 'processing', label: 'Processing', disabled: true }];
 		}
-		const stat = homeworkStats.find((item) => item.homework === row.id);
-		if (Boolean(stat?.status) && row.questionUploaded) {
-			return 'Re-run';
+		if (status === 'Upload Homework PDF') {
+			return [{ kind: 'upload', label: 'Upload', docType: 'question' }];
 		}
-		if (!row.questionUploaded) {
-			return 'Upload Homework';
+		if (status === '(Optional)Upload Answer PDF') {
+			return [
+				{ kind: 'upload', label: 'Upload', docType: 'answer' },
+				{ kind: 'run', label: 'Run' }
+			];
 		}
-		return 'Run';
+		if (status === 'Completed') {
+			return [{ kind: 'rerun', label: 'Re-run' }];
+		}
+		return [{ kind: 'run', label: 'Run' }];
 	}
 
-	async function handleHomeworkPrimaryAction(row: HomeworkRow) {
-		const action = getHomeworkPrimaryActionLabel(row);
-		if (action === 'Run' || action === 'Re-run') {
-			if (action === 'Re-run') {
-				pendingRunRow = row;
-				showRunConfirmModal = true;
-				return;
-			}
-			const ready = await validateRunPrerequisites(row);
-			if (!ready) return;
-			selectedHwForRun = row.id;
-			selectedRunHomeworks = new Set([row.id]);
-			syncRunSelectionFlags();
-			await runAnalysis(row);
+	function shouldShowStaleInfo(row: HomeworkRow): boolean {
+		return getHomeworkAnalysisState(row) === 'Completed' && Boolean(getHomeworkStaleTooltip(row));
+	}
+
+	function triggerUploadPicker(row: HomeworkRow, docType: HomeworkDocType) {
+		if (!row.id) return;
+		const input = document.getElementById(
+			`upload-${docType}-${row.id}`
+		) as HTMLInputElement | null;
+		input?.click();
+	}
+
+	async function handleHomeworkRunAction(row: HomeworkRow, rerun = false) {
+		if (rerun) {
+			pendingRunRow = row;
+			showRunConfirmModal = true;
+			return;
 		}
+		const ready = await validateRunPrerequisites(row);
+		if (!ready) return;
+		selectedHwForRun = row.id;
+		selectedRunHomeworks = new Set([row.id]);
+		syncRunSelectionFlags();
+		await runAnalysis(row);
 	}
 
 	async function confirmRunAnalysis() {
@@ -2586,14 +2788,14 @@ import { flyAndScale } from '$lib/utils/transitions';
 						<thead
 							class="text-xs text-gray-700 uppercase bg-[#EEE6F3] dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5"
 						>
-							<tr>
-								<th class="w-[16.666%] px-3 py-1.5 select-none">Homework</th>
-								<th class="w-[16.666%] px-3 py-1.5 select-none">Homework PDF</th>
-								<th class="w-[16.666%] px-3 py-1.5 select-none">Answer PDF</th>
-								<th class="w-[16.666%] px-3 py-1.5 select-none">Students Interacted</th>
-								<th class="w-[16.666%] px-3 py-1.5 select-none">Status</th>
-								<th class="w-[16.666%] px-3 py-1.5 select-none">Action</th>
-							</tr>
+								<tr>
+									<th class="w-[16.666%] px-3 py-1.5 select-none">Homework</th>
+									<th class="w-[16.666%] px-3 py-1.5 select-none">Homework PDF</th>
+									<th class="w-[16.666%] px-3 py-1.5 select-none">(Optional)Answer PDF</th>
+									<th class="w-[16.666%] px-3 py-1.5 select-none">Students Interacted</th>
+									<th class="w-[16.666%] px-3 py-1.5 select-none">Status</th>
+									<th class="w-[16.666%] px-3 py-1.5 select-none">Action</th>
+								</tr>
 						</thead>
 						<tbody>
 							{#if !$aiTutorSelectedGroupId && !useFrontendTestingData}
@@ -2625,12 +2827,55 @@ import { flyAndScale } from '$lib/utils/transitions';
 										</td>
 										<td class="px-3 py-1">
 											<div class="flex items-center gap-1.5">
-												<label class="cursor-pointer">
-													<input
-														type="file"
-														accept=".pdf"
-														class="hidden"
-														on:change={makeUploadHandler(row.id, 'question', row.modelId)}
+													<label class="cursor-pointer">
+														<input
+															id={`upload-question-${row.id}`}
+															type="file"
+															accept=".pdf"
+															class="hidden"
+															on:change={makeUploadHandler(row.id, 'question', row.modelId)}
+														/>
+													<span
+														class="inline-flex items-center justify-center rounded-full border border-[#57068C]/40 p-1 text-[#57068C] transition hover:bg-purple-50 dark:border-purple-700 dark:text-purple-400 dark:hover:bg-purple-900/20"
+													>
+														<svg
+															xmlns="http://www.w3.org/2000/svg"
+															fill="none"
+															viewBox="0 0 24 24"
+															stroke-width="1.8"
+															stroke="currentColor"
+															class="h-3.5 w-3.5"
+														>
+															<path
+																stroke-linecap="round"
+																stroke-linejoin="round"
+																d="M12 16.5V4.5m0 0 4.5 4.5M12 4.5 7.5 9M4.5 19.5h15"
+															/>
+															</svg>
+														</span>
+													</label>
+													{#if getRowDocUploading(row, 'question')}
+														<span class="text-xs text-gray-500 dark:text-gray-400">Uploading PDF</span>
+													{:else if getRowDocStep(row, 'question')}
+														<span class="text-xs text-gray-500 dark:text-gray-400">{getRowDocStep(row, 'question')}</span>
+													{:else if getRowDocProcessing(row, 'question')}
+														<span class="text-xs text-gray-500 dark:text-gray-400">Processing PDF</span>
+													{:else if row.questionFileName}
+														<span class="text-xs {row.questionUploaded ? 'font-bold text-gray-900 dark:text-gray-100' : 'text-gray-500 dark:text-gray-400'}">{row.questionFileName}</span>
+													{:else if row.questionUploaded}
+														<span class="text-xs text-gray-500 dark:text-gray-400">Uploaded</span>
+													{/if}
+												</div>
+											</td>
+											<td class="px-3 py-1">
+												<div class="flex items-center gap-1.5">
+													<label class="cursor-pointer">
+														<input
+															id={`upload-answer-${row.id}`}
+															type="file"
+															accept=".pdf"
+															class="hidden"
+															on:change={makeUploadHandler(row.id, 'answer', row.modelId)}
 													/>
 													<span
 														class="inline-flex items-center justify-center rounded-full border border-[#57068C]/40 p-1 text-[#57068C] transition hover:bg-purple-50 dark:border-purple-700 dark:text-purple-400 dark:hover:bg-purple-900/20"
@@ -2648,59 +2893,26 @@ import { flyAndScale } from '$lib/utils/transitions';
 																stroke-linejoin="round"
 																d="M12 16.5V4.5m0 0 4.5 4.5M12 4.5 7.5 9M4.5 19.5h15"
 															/>
-														</svg>
-													</span>
-												</label>
-														{#if uploadingMap[`${row.id}-question`]}
-															<span class="text-xs text-gray-500 dark:text-gray-400">Uploading</span>
-														{:else if homeworkJobStepByModelId[row.modelId ?? '']}
-															<span class="text-xs text-gray-500 dark:text-gray-400">{homeworkJobStepByModelId[row.modelId ?? '']}</span>
-														{:else if row.questionFileName}
-															<span class="text-xs {row.questionUploaded ? 'font-bold text-gray-900 dark:text-gray-100' : 'text-gray-500 dark:text-gray-400'}">{row.questionFileName}</span>
-														{:else if row.questionUploaded}
-															<span class="text-xs text-gray-500 dark:text-gray-400">Uploaded</span>
-														{/if}
-										</td>
-										<td class="px-3 py-1">
-											<div class="flex items-center gap-1.5">
-												<label class="cursor-pointer">
-													<input
-														type="file"
-														accept=".pdf"
-														class="hidden"
-														on:change={makeUploadHandler(row.id, 'answer', row.modelId)}
-													/>
-													<span
-														class="inline-flex items-center justify-center rounded-full border border-[#57068C]/40 p-1 text-[#57068C] transition hover:bg-purple-50 dark:border-purple-700 dark:text-purple-400 dark:hover:bg-purple-900/20"
-													>
-														<svg
-															xmlns="http://www.w3.org/2000/svg"
-															fill="none"
-															viewBox="0 0 24 24"
-															stroke-width="1.8"
-															stroke="currentColor"
-															class="h-3.5 w-3.5"
-														>
-															<path
-																stroke-linecap="round"
-																stroke-linejoin="round"
-																d="M12 16.5V4.5m0 0 4.5 4.5M12 4.5 7.5 9M4.5 19.5h15"
-															/>
-														</svg>
-													</span>
-												</label>
-												{#if uploadingMap[`${row.id}-answer`]}
-													<span class="text-xs text-gray-500 dark:text-gray-400">Uploading</span>
-												{:else if row.answerUploaded}
-														{#if row.answerSource === 'ai_generated'}
-															<span class="text-xs font-bold text-gray-900 dark:text-gray-100">Generated</span>
-														{:else if row.answerFileName}
-															<span class="text-xs font-bold text-gray-900 dark:text-gray-100">{row.answerFileName}</span>
-														{:else}
-															<span class="text-xs text-gray-500 dark:text-gray-400">Uploaded</span>
-														{/if}
-												{/if}
-										</td>
+															</svg>
+														</span>
+													</label>
+													{#if getRowDocUploading(row, 'answer')}
+														<span class="text-xs text-gray-500 dark:text-gray-400">Uploading PDF</span>
+													{:else if getRowDocStep(row, 'answer')}
+														<span class="text-xs text-gray-500 dark:text-gray-400">{getRowDocStep(row, 'answer')}</span>
+													{:else if getRowDocProcessing(row, 'answer')}
+														<span class="text-xs text-gray-500 dark:text-gray-400">Processing PDF</span>
+													{:else if row.answerUploaded}
+															{#if row.answerSource === 'ai_generated'}
+																<span class="text-xs font-bold text-gray-900 dark:text-gray-100">(Auto-Generated)</span>
+															{:else if row.answerFileName}
+																<span class="text-xs font-bold text-gray-900 dark:text-gray-100">{row.answerFileName}</span>
+																{:else}
+																<span class="text-xs text-gray-500 dark:text-gray-400">Uploaded</span>
+															{/if}
+													{/if}
+												</div>
+											</td>
 										<td class="px-3 py-1 text-gray-700 dark:text-gray-300">
 											<div class="flex items-center gap-1.5">
 												<span>{getConversationCountDisplay(row)}</span>
@@ -2723,14 +2935,14 @@ import { flyAndScale } from '$lib/utils/transitions';
 											</div>
 										</td>
 										<td class="px-3 py-1">
-											<div class="max-w-[12rem] whitespace-normal break-words leading-4">
-													<div class="flex items-center gap-1.5">
-															<div class="text-xs font-medium text-gray-900 dark:text-gray-100">{getHomeworkAnalysisState(row)}</div>
-															
-														{#if getHomeworkStaleTooltip(row)}
-																			<Popover.Root>
-																				<Popover.Trigger
-																					type="button"
+												<div class="max-w-[12rem] whitespace-normal break-words leading-4">
+														<div class="flex items-center gap-1.5">
+																<div class="text-xs font-medium text-gray-900 dark:text-gray-100">{getHomeworkAnalysisState(row)}</div>
+																
+															{#if shouldShowStaleInfo(row)}
+																				<Popover.Root>
+																					<Popover.Trigger
+																						type="button"
 																					class="inline-block hover:text-[#57068C] transition-colors"
 																				>
 																					<InformationCircle className="h-5 w-5 text-gray-400 dark:text-gray-500" />
@@ -2749,19 +2961,55 @@ import { flyAndScale } from '$lib/utils/transitions';
 																		{/if}
 													</div>
 											</div>
-										</td>
-										<td class="px-3 py-1">
-										<button
-													type="button"
-													class="inline-flex items-center gap-1 rounded-full border px-3 py-1 text-xs font-bold transition disabled:cursor-not-allowed disabled:opacity-50 {getHomeworkPrimaryActionLabel(row) === 'Upload Homework' || getHomeworkPrimaryActionLabel(row) === 'Processing…' ? 'border-gray-300 text-gray-500 dark:border-gray-600 dark:text-gray-400' : 'border-[#57068C]/40 text-[#57068C] hover:bg-purple-50 dark:border-purple-700 dark:text-purple-400 dark:hover:bg-purple-900/20'}"
-													on:click={() => handleHomeworkPrimaryAction(row)}
-													disabled={isHomeworkActionBusy(row) || getHomeworkPrimaryActionLabel(row) === 'Upload Homework'}
-												>
-														<svg class="h-3 w-3 flex-shrink-0" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
-														{getHomeworkPrimaryActionLabel(row)}
-													</button>
-									</tr>
-								{/each}
+											</td>
+											<td class="px-3 py-1">
+												<div class="flex items-center gap-1.5">
+													{#each getHomeworkActionButtons(row) as action}
+														{#if action.kind === 'upload'}
+															<button
+																type="button"
+																class="inline-flex items-center gap-1 whitespace-nowrap rounded-full border border-[#57068C]/40 px-3 py-1 text-xs font-bold text-[#57068C] transition hover:bg-purple-50 dark:border-purple-700 dark:text-purple-400 dark:hover:bg-purple-900/20 disabled:cursor-not-allowed disabled:opacity-50"
+																on:click={() => triggerUploadPicker(row, action.docType)}
+																disabled={Boolean(action.disabled)}
+															>
+																{action.label}
+															</button>
+														{:else if action.kind === 'processing'}
+															<button
+																type="button"
+																class="inline-flex items-center gap-1 whitespace-nowrap rounded-full border border-gray-300 px-3 py-1 text-xs font-bold text-gray-500 dark:border-gray-600 dark:text-gray-400"
+																disabled
+															>
+																{action.label}
+															</button>
+														{:else if action.kind === 'rerun'}
+															<button
+																type="button"
+																class="inline-flex items-center gap-1 whitespace-nowrap rounded-full border border-[#57068C]/40 px-3 py-1 text-xs font-bold text-[#57068C] transition hover:bg-purple-50 dark:border-purple-700 dark:text-purple-400 dark:hover:bg-purple-900/20 disabled:cursor-not-allowed disabled:opacity-50"
+																on:click={() => {
+																	void handleHomeworkRunAction(row, true);
+																}}
+																disabled={Boolean(action.disabled)}
+															>
+																{action.label}
+															</button>
+														{:else}
+															<button
+																type="button"
+																class="inline-flex items-center gap-1 whitespace-nowrap rounded-full border border-[#57068C]/40 px-3 py-1 text-xs font-bold text-[#57068C] transition hover:bg-purple-50 dark:border-purple-700 dark:text-purple-400 dark:hover:bg-purple-900/20 disabled:cursor-not-allowed disabled:opacity-50"
+																on:click={() => {
+																	void handleHomeworkRunAction(row, false);
+																}}
+																disabled={Boolean(action.disabled)}
+															>
+																{action.label}
+															</button>
+														{/if}
+													{/each}
+												</div>
+											</td>
+										</tr>
+									{/each}
 							{/if}
 							{/if}
 
