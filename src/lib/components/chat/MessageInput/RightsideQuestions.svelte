@@ -238,15 +238,15 @@
 	}
 </script>
 
-<div class="flex h-full w-full flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-900">
-	<div class="flex items-start justify-between gap-4 border-b border-gray-200 px-5 py-4 dark:border-gray-700">
+<div class="flex h-full w-full flex-col overflow-hidden rounded-2xl border border-[#57068C] bg-white dark:border-[#57068C] dark:bg-gray-900">
+	<div class="flex items-start justify-between gap-4 px-5 py-4 bg-[#57068C] dark:bg-[#57068C] rounded-t-2xl">
 		<div>
-			<h3 class="text-lg font-semibold text-gray-900 dark:text-gray-100">Practice Questions</h3>
-			<div class="mt-1 text-xs text-gray-500 dark:text-gray-400">{groupName}</div>
+			<h3 class="text-lg font-semibold text-white">Practice Questions</h3>
+			<div class="mt-1 text-xs text-white/80">{groupName}</div>
 		</div>
 		<button
 			on:click={closePanel}
-			class="rounded p-1 transition hover:bg-gray-100 dark:hover:bg-gray-800"
+			class="rounded p-1 transition hover:bg-white/20"
 			aria-label="Close panel"
 		>
 			<svg
@@ -255,7 +255,7 @@
 				viewBox="0 0 24 24"
 				stroke-width="2"
 				stroke="currentColor"
-				class="h-3.5 w-3.5 text-gray-600 dark:text-gray-400"
+				class="h-3.5 w-3.5 text-white"
 			>
 				<path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" />
 			</svg>

@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { Popover } from 'bits-ui';
+	import { Tooltip } from 'bits-ui';
 	import { page } from '$app/stores';
 	import { aiTutorSelectedGroupId } from '$lib/stores';
 	import { aiTutorAllowedModelIds } from '$lib/stores/aiTutorWorkspaceModels';
@@ -1421,15 +1421,15 @@
 													{topic.questions}
 												</span>
 												{#if overflowStates[`${homework.id}-${topic.topic}`] && topic.questions}
-													<Popover.Root>
-														<Popover.Trigger
+													<Tooltip.Root openDelay={200}>
+														<Tooltip.Trigger
 															type="button"
-															class="inline-flex flex-shrink-0 items-center text-gray-900 transition-colors hover:text-black dark:text-gray-100 dark:hover:text-white"
+															class="inline-flex flex-shrink-0 items-center cursor-pointer text-gray-900 transition-colors hover:text-black dark:text-gray-100 dark:hover:text-white select-none"
 															aria-label="View full question list"
 														>
 															<EllipsisHorizontal className="h-5 w-5" strokeWidth="2.5" />
-														</Popover.Trigger>
-														<Popover.Content
+														</Tooltip.Trigger>
+														<Tooltip.Content
 															side="bottom"
 															align="start"
 															sideOffset={4}
@@ -1445,8 +1445,8 @@
 																	</span>
 																{/each}
 															</div>
-														</Popover.Content>
-													</Popover.Root>
+														</Tooltip.Content>
+													</Tooltip.Root>
 												{/if}
 											</div>
 										</td>
