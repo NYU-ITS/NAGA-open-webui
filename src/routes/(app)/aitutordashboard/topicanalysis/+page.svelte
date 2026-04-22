@@ -44,6 +44,68 @@
 	const homeworkModelNameCellClass =
 		'max-w-[12rem] overflow-hidden whitespace-normal break-words leading-4 [display:-webkit-box] [-webkit-line-clamp:3] [-webkit-box-orient:vertical]';
 
+	// Overflow detection for table cells with truncate
+	let overflowStates: Record<string, boolean> = {};
+	function overflowCheck(node: HTMLElement, key: string) {
+		const check = () => {
+			overflowStates[key] = node.scrollWidth > node.clientWidth;
+			overflowStates = overflowStates;
+		};
+		const ro = new ResizeObserver(check);
+		ro.observe(node);
+		check();
+		return {
+			destroy() {
+				ro.disconnect();
+			}
+		};
+	}
+
+	// Column resize (state resets on refresh)
+	let topicTableEl: HTMLTableElement;
+	let colWidths = [18, 6, 12, 40]; // percentages
+	let resizingCol: number | null = null;
+	let resizeStartX = 0;
+	let resizeStartWidth = 0;
+	let resizeNextStartWidth = 0;
+
+	function initColResize(e: MouseEvent, index: number) {
+		resizingCol = index;
+		resizeStartX = e.pageX;
+		resizeStartWidth = colWidths[index];
+		if (index < colWidths.length - 1) {
+			resizeNextStartWidth = colWidths[index + 1];
+		}
+		document.body.style.cursor = 'col-resize';
+		document.body.style.userSelect = 'none';
+		window.addEventListener('mousemove', handleColResize);
+		window.addEventListener('mouseup', stopColResize);
+	}
+
+	function handleColResize(e: MouseEvent) {
+		if (resizingCol === null || !topicTableEl) return;
+		const tableWidth = topicTableEl.offsetWidth;
+		const deltaPx = e.pageX - resizeStartX;
+		const deltaPct = (deltaPx / tableWidth) * 100;
+		const newWidth = Math.max(4, resizeStartWidth + deltaPct);
+
+		// Adjust next column to keep total roughly stable
+		if (resizingCol < colWidths.length - 1) {
+			const nextNewWidth = Math.max(4, resizeNextStartWidth - deltaPct);
+			colWidths[resizingCol + 1] = nextNewWidth;
+		}
+		colWidths[resizingCol] = newWidth;
+		colWidths = [...colWidths];
+	}
+
+	function stopColResize() {
+		resizingCol = null;
+		document.body.style.cursor = '';
+		document.body.style.userSelect = '';
+		window.removeEventListener('mousemove', handleColResize);
+		window.removeEventListener('mouseup', stopColResize);
+	}
+
 	// Group ID (needed for error-types endpoints)
 	let groupId = '';
 	$: groupId = $aiTutorSelectedGroupId || '';
@@ -1301,13 +1363,13 @@
 		<!-- Table Card Container -->
 		<div class="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
 			<div class="scrollbar-hidden relative overflow-x-auto rounded-sm pt-0.5">
-			<table class="w-full min-w-[800px] table-fixed rounded-sm text-left text-sm text-gray-500 dark:text-gray-400">
+			<table bind:this={topicTableEl} class="w-full min-w-[800px] table-fixed rounded-sm text-left text-sm text-gray-500 dark:text-gray-400">
 				<thead class="sticky top-0 text-xs text-gray-700 uppercase bg-[#EEE6F3] dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5 z-10">
 					<tr>
-						<th scope="col" class="w-[24%] overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5">Homework</th>
-						<th scope="col" class="w-[12%] overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5">Questions in Topic</th>
-						<th scope="col" class="w-[14%] overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5">Students with Errors</th>
-						<th scope="col" class="w-[44%] overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5">Error Type Analysis</th>
+											<th scope="col" class="relative overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 select-none" style="width: {colWidths[0]}%">Homework<span class="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#57068C] dark:hover:bg-[#B588FF] z-10" on:mousedown|preventDefault={(e) => initColResize(e, 0)} /></th>
+											<th scope="col" class="relative overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 select-none" style="width: {colWidths[1]}%">Questions in Topic<span class="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#57068C] dark:hover:bg-[#B588FF] z-10" on:mousedown|preventDefault={(e) => initColResize(e, 1)} /></th>
+											<th scope="col" class="relative overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 select-none" style="width: {colWidths[2]}%">Students with Errors<span class="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#57068C] dark:hover:bg-[#B588FF] z-10" on:mousedown|preventDefault={(e) => initColResize(e, 2)} /></th>
+											<th scope="col" class="relative overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 select-none" style="width: {colWidths[3]}%">Error Type Analysis<span class="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#57068C] dark:hover:bg-[#B588FF] z-10" on:mousedown|preventDefault={(e) => initColResize(e, 3)} /></th>
 					</tr>
 				</thead>
 				<tbody>
@@ -1350,30 +1412,44 @@
 										</div>
 									</td>
 									<td class="px-3 py-1.5">
-										<div class="text-gray-900 dark:text-gray-100">{topic.questionCount}</div>
-										<div class="mt-0.5 inline-flex max-w-full items-center gap-1 align-middle text-gray-500 dark:text-gray-400">
-											<span class="truncate">[{topic.questions}]</span>
-											{#if topic.questions}
-												<Popover.Root>
-													<Popover.Trigger
-														type="button"
-														class="inline-flex items-center text-gray-400 transition-colors hover:text-gray-500 dark:text-gray-500 dark:hover:text-gray-400"
-														aria-label="View full question list"
-													>
-														<EllipsisHorizontal className="h-4 w-4" />
-													</Popover.Trigger>
-													<Popover.Content
-														side="top"
-														align="start"
-														sideOffset={6}
-														class="z-50 max-w-[18rem] rounded-lg border border-gray-200 bg-white p-3 text-xs text-gray-700 shadow-lg dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300"
-													>
-														<p class="whitespace-normal break-words leading-relaxed">[{topic.questions}]</p>
-													</Popover.Content>
-												</Popover.Root>
-											{/if}
-										</div>
-									</td>
+												<div class="text-gray-900 dark:text-gray-100">{topic.questionCount}</div>
+											<div class="mt-0.5 flex min-w-0 items-center gap-1.5">
+												<span
+													use:overflowCheck={`${homework.id}-${topic.topic}`}
+													class="overflow-hidden whitespace-nowrap text-gray-500 dark:text-gray-400"
+												>
+													{topic.questions}
+												</span>
+												{#if overflowStates[`${homework.id}-${topic.topic}`] && topic.questions}
+													<Popover.Root>
+														<Popover.Trigger
+															type="button"
+															class="inline-flex flex-shrink-0 items-center text-gray-900 transition-colors hover:text-black dark:text-gray-100 dark:hover:text-white"
+															aria-label="View full question list"
+														>
+															<EllipsisHorizontal className="h-5 w-5" strokeWidth="2.5" />
+														</Popover.Trigger>
+														<Popover.Content
+															side="bottom"
+															align="start"
+															sideOffset={4}
+															class="z-50 max-w-[20rem] rounded-lg border border-gray-200 bg-white p-3 text-xs text-gray-700 shadow-lg dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300"
+														>
+															<div class="mb-2 text-xs font-semibold text-gray-500 dark:text-gray-400">
+																Questions in this topic
+															</div>
+															<div class="flex flex-wrap gap-1">
+																{#each topic.questions.split(', ') as q}
+																	<span class="inline-flex items-center rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-700 dark:bg-gray-700 dark:text-gray-300">
+																		{q}
+																	</span>
+																{/each}
+															</div>
+														</Popover.Content>
+													</Popover.Root>
+												{/if}
+											</div>
+										</td>
 									<td class="px-3 py-1.5">
 										<span class="text-gray-900 dark:text-gray-100">{topic.studentsWithError}</span>
 									</td>

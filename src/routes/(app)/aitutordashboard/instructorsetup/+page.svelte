@@ -239,6 +239,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 	let editingErrorTypeIsNew = false;
 	let editErrorTypeName = '';
 	let editErrorTypeDescription = '';
+	let editErrorTypeExample = '';
 	let showErrorTypeMenuOpen: Record<number, boolean> = {};
 	let isEditingErrorTypes = false;
 
@@ -923,7 +924,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 					if (!hwResponse.ok) throw new Error('Homework fetch failed');
 					const hwData = await hwResponse.json();
 					if (Array.isArray(hwData)) {
-						// Preserve frontend-known filenames since backend does not store them.
+						// Backend now stores filenames; preserve frontend-known ones as fallback.
 						const existingFileNames = new Map(homeworkRows.map(r => [r.id, { q: r.questionFileName, a: r.answerFileName }]));
 						const existingTimestamps = new Map(homeworkRows.map(r => [r.id, { q: r.questionUploadedAt, a: r.answerUploadedAt }]));
 						fetchedHomeworkRows = hwData.map((hw: any) => ({
@@ -933,8 +934,8 @@ import { flyAndScale } from '$lib/utils/transitions';
 							answerUploaded: hw.answer_uploaded ?? false,
 							topicMapped: hw.topic_mapped ?? false,
 							answerSource: hw.answer_source ?? null,
-							questionFileName: hw.question_filename ?? existingFileNames.get(hw.id)?.q ?? null,
-							answerFileName: hw.answer_filename ?? existingFileNames.get(hw.id)?.a ?? null,
+							questionFileName: hw.question_pdf_name ?? existingFileNames.get(hw.id)?.q ?? null,
+							answerFileName: hw.answer_pdf_name ?? existingFileNames.get(hw.id)?.a ?? null,
 							questionUploadedAt: hw.question_uploaded_at ?? existingTimestamps.get(hw.id)?.q ?? null,
 							answerUploadedAt: hw.answer_uploaded_at ?? existingTimestamps.get(hw.id)?.a ?? null
 						}));
@@ -1226,6 +1227,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 						originalErrorTypeDefs = c.defs;
 						draftErrorTypeDefs = c.defs;
 						errorTypesUpdatedAt = c.updatedAt;
+						console.log('[ErrorTypes] Cache hit:', JSON.stringify(c.defs));
 					}
 				},
 				loader: async () => {
@@ -1235,6 +1237,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 					);
 					if (!res.ok) throw new Error('Error types fetch failed');
 					const data = await res.json();
+					console.log('[ErrorTypes] Backend response:', JSON.stringify(data));
 					const errorTypes = Array.isArray(data?.error_types)
 						? data.error_types
 						: Array.isArray(data)
@@ -1243,7 +1246,8 @@ import { flyAndScale } from '$lib/utils/transitions';
 					const defs = errorTypes.slice(0, 4).map((et: any, i: number) => ({
 						type: et.name ?? 'Unknown',
 						color: errorTypeColors[i % errorTypeColors.length],
-						description: et.description ?? ''
+						description: et.description ?? '',
+						example: et.example ?? ''
 					}));
 					// B: backend updated_at — null for legacy rows or default source
 					const updatedAt: string | null = data?.updated_at ?? null;
@@ -1777,25 +1781,31 @@ import { flyAndScale } from '$lib/utils/transitions';
 							Authorization: `Bearer ${localStorage.token}`
 						},
 						body: JSON.stringify(
-							draftErrorTypeDefs.map((d) => ({ name: d.type, description: d.description }))
+							draftErrorTypeDefs.map((d) => ({ name: d.type, description: d.description, example: d.example }))
 						)
 					}
 				);
 				if (res.ok) {
 					const data = await res.json();
-					// B: use server-returned updated_at; fall back to local time if backend hasn't been updated
+					console.log('[ErrorTypes] Persist success. Server returned:', JSON.stringify(data.error_types));
+					console.log('[ErrorTypes] Sent draft:', JSON.stringify(draftErrorTypeDefs));
 					savedAt = data?.updated_at ?? new Date().toISOString();
 					errorTypesUpdatedAt = savedAt;
+				} else {
+					console.warn('[ErrorTypes] Persist failed, status:', res.status);
+					toast.error('Failed to save error types. Please try again.');
 				}
 			}
 			if (savedAt !== null) {
-				// A: always write localStorage as a robust fallback
 				if (typeof localStorage !== 'undefined')
 					localStorage.setItem(errorTypesSavedAtKey($aiTutorSelectedGroupId), savedAt);
+				clearAITutorSessionCache(getInstructorSetupCacheKey('error-types', $aiTutorSelectedGroupId));
 				writeAITutorSessionCache(getInstructorSetupCacheKey('error-types', $aiTutorSelectedGroupId), {
 					defs: draftErrorTypeDefs,
 					updatedAt: errorTypesUpdatedAt
 				});
+				console.log('[ErrorTypes] Cache updated with:', JSON.stringify(draftErrorTypeDefs));
+				toast.success('Error types saved.');
 				// Sync original to match draft after successful save
 				originalErrorTypeDefs = draftErrorTypeDefs;
 				// Show "Saved" state briefly
@@ -1808,6 +1818,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 		} catch (e) {
 			testToast('Instructor Setup failed saving error types');
 			console.error('Failed to persist error types:', e);
+			toast.error('Failed to save error types. Please try again.');
 		}
 	}
 
@@ -1832,18 +1843,20 @@ import { flyAndScale } from '$lib/utils/transitions';
 		editingErrorTypeIsNew = false;
 		editErrorTypeName = draftErrorTypeDefs[index].type;
 		editErrorTypeDescription = draftErrorTypeDefs[index].description;
+		editErrorTypeExample = draftErrorTypeDefs[index].example ?? '';
 		showEditErrorTypeModal = true;
 	}
 
 	function addErrorType() {
 		if (draftErrorTypeDefs.length >= 4) return;
 		const color = errorTypeColors[draftErrorTypeDefs.length % errorTypeColors.length];
-		const newDef = { type: 'New Error Type', color, description: '' };
+		const newDef = { type: 'New Error Type', color, description: '', example: '' };
 		draftErrorTypeDefs = [...draftErrorTypeDefs, newDef];
 		editingErrorTypeIndex = draftErrorTypeDefs.length - 1;
 		editingErrorTypeIsNew = true;
 		editErrorTypeName = newDef.type;
 		editErrorTypeDescription = '';
+		editErrorTypeExample = '';
 		showEditErrorTypeModal = true;
 	}
 
@@ -1852,18 +1865,19 @@ import { flyAndScale } from '$lib/utils/transitions';
 		draftErrorTypeDefs[editingErrorTypeIndex] = {
 			...draftErrorTypeDefs[editingErrorTypeIndex],
 			type: editErrorTypeName,
-			description: editErrorTypeDescription
+			description: editErrorTypeDescription,
+			example: editErrorTypeExample
 		};
 		draftErrorTypeDefs = [...draftErrorTypeDefs];
 		closeErrorTypeModal();
-		// Draft mode: don't auto-save, user must click Save button
+		void persistErrorTypes();
 	}
 
 	function deleteErrorType() {
 		if (editingErrorTypeIndex === null) return;
 		draftErrorTypeDefs = draftErrorTypeDefs.filter((_, i) => i !== editingErrorTypeIndex);
 		closeErrorTypeModal();
-		// Draft mode: don't auto-save, user must click Save button
+		void persistErrorTypes();
 	}
 
 	function closeErrorTypeModal() {
@@ -3503,11 +3517,13 @@ import { flyAndScale } from '$lib/utils/transitions';
 			</div>
 
 			<div class="mb-6">
-				<label class="text-xs font-medium text-gray-600 dark:text-gray-400 block mb-1.5">Example</label>
-				<div class="rounded-lg bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 p-3 text-xs text-gray-700 dark:text-gray-300">
-					<div class="font-semibold mb-0.5">Conceptual Error</div>
-					<div>Student misunderstood the core concept or applied the wrong formula to solve the problem.</div>
-				</div>
+				<label class="text-xs font-medium text-gray-600 dark:text-gray-400 block mb-1.5">Example (optional)</label>
+				<textarea
+					class="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-1 focus:ring-[#57068C] resize-none"
+					rows="4"
+					bind:value={editErrorTypeExample}
+					placeholder="Concrete example for LLM clarity..."
+				></textarea>
 			</div>
 
 			<div class="flex justify-between items-center">
