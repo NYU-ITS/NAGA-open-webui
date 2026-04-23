@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
-	import { Popover } from 'bits-ui';
+	import { Tooltip } from 'bits-ui';
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
 	import { toast } from 'svelte-sonner';
@@ -896,24 +896,23 @@
 													<span class="truncate text-sm text-gray-700 dark:text-gray-300">
 														{topicList.join(', ')}
 													</span>
-													<Popover.Root>
-														<Popover.Trigger
+													<Tooltip.Root openDelay={200}>
+														<Tooltip.Trigger
 															type="button"
 															class="inline-flex items-center text-gray-400 transition-colors hover:text-gray-500 dark:text-gray-500 dark:hover:text-gray-400"
 															aria-label="View full topics list"
-															on:click={(e) => e.stopPropagation()}
 														>
 															<EllipsisHorizontal className="h-4 w-4" />
-														</Popover.Trigger>
-														<Popover.Content
+														</Tooltip.Trigger>
+														<Tooltip.Content
 															side="top"
 															align="start"
 															sideOffset={6}
 															class="z-50 max-w-[20rem] rounded-lg border border-gray-200 bg-white p-3 text-xs text-gray-700 shadow-lg dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300"
 														>
 															<p class="whitespace-normal break-words leading-relaxed">{topicList.join(', ')}</p>
-														</Popover.Content>
-													</Popover.Root>
+														</Tooltip.Content>
+													</Tooltip.Root>
 												</div>
 											{:else}
 												<span class="text-sm text-gray-400 dark:text-gray-500">—</span>
@@ -977,6 +976,7 @@
 					<thead class="text-xs text-gray-700 uppercase bg-[#EEE6F3] dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5">
 						<tr>
 							<th class="min-w-[140px] overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-left font-semibold">Homework</th>
+							<th class="overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-left font-semibold">Mastered Topics</th>
 							<th class="overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-left font-semibold">Need More Practice</th>
 							<th class="overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-center font-semibold whitespace-nowrap w-[5rem]">Total</th>
 							<th class="overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-center font-semibold whitespace-nowrap w-[5rem]">Solved</th>
@@ -994,35 +994,63 @@
 								</td>
 								{#if hw.notStarted}
 									<td
-										colspan="5"
+										colspan="6"
 										class="px-3 py-1.5 text-center text-xs text-gray-400 dark:text-gray-500"
 									>
 										This homework&apos;s analysis has not been available.
 									</td>
 									{:else}
 										<td class="px-3 py-1.5">
-											{#if hw.needMorePractice.length > 0}
+											{#if hw.masteredTopics.length > 0}
 												<div class="inline-flex max-w-[26rem] items-center gap-1 align-middle">
 													<span class="truncate text-sm text-gray-700 dark:text-gray-300">
-														{hw.needMorePractice.join(', ')}
+														{hw.masteredTopics.join(', ')}
 													</span>
-													<Popover.Root>
-														<Popover.Trigger
+													<Tooltip.Root openDelay={200}>
+														<Tooltip.Trigger
 															type="button"
 															class="inline-flex items-center text-gray-400 transition-colors hover:text-gray-500 dark:text-gray-500 dark:hover:text-gray-400"
 															aria-label="View full topics list"
 														>
 															<EllipsisHorizontal className="h-4 w-4" />
-														</Popover.Trigger>
-														<Popover.Content
+														</Tooltip.Trigger>
+														<Tooltip.Content
+															side="top"
+															align="start"
+															sideOffset={6}
+															class="z-50 max-w-[20rem] rounded-lg border border-gray-200 bg-white p-3 text-xs text-gray-700 shadow-lg dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300"
+														>
+															<p class="whitespace-normal break-words leading-relaxed">{hw.masteredTopics.join(', ')}</p>
+														</Tooltip.Content>
+													</Tooltip.Root>
+												</div>
+											{:else}
+												<span class="text-sm text-gray-400 dark:text-gray-500">—</span>
+											{/if}
+										</td>
+										<td class="px-3 py-1.5">
+											{#if hw.needMorePractice.length > 0}
+												<div class="inline-flex max-w-[26rem] items-center gap-1 align-middle">
+													<span class="truncate text-sm text-gray-700 dark:text-gray-300">
+														{hw.needMorePractice.join(', ')}
+													</span>
+													<Tooltip.Root openDelay={200}>
+														<Tooltip.Trigger
+															type="button"
+															class="inline-flex items-center text-gray-400 transition-colors hover:text-gray-500 dark:text-gray-500 dark:hover:text-gray-400"
+															aria-label="View full topics list"
+														>
+															<EllipsisHorizontal className="h-4 w-4" />
+														</Tooltip.Trigger>
+														<Tooltip.Content
 															side="top"
 															align="start"
 															sideOffset={6}
 															class="z-50 max-w-[20rem] rounded-lg border border-gray-200 bg-white p-3 text-xs text-gray-700 shadow-lg dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300"
 														>
 															<p class="whitespace-normal break-words leading-relaxed">{hw.needMorePractice.join(', ')}</p>
-														</Popover.Content>
-													</Popover.Root>
+														</Tooltip.Content>
+													</Tooltip.Root>
 												</div>
 											{:else}
 												<span class="text-sm text-gray-400 dark:text-gray-500">—</span>
