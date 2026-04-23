@@ -615,7 +615,7 @@
 					</div>
 				</a>
 			</div>
-
+			{#if $user?.role === 'admin'}
 			<div class="px-1.5 flex justify-center text-gray-50 dark:text-gray-200">
 				<a
 					class="grow flex items-center space-x-3 rounded-lg px-2 py-[7px] hover:bg-[#8900E1] dark:hover:bg-gray-700 transition"
@@ -653,7 +653,7 @@
 					</div>
 				</a>
 			</div>
-
+			{/if}
 		{/if}
 
 		{#if $user?.role === 'user'}
