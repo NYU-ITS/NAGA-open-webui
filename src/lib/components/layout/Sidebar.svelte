@@ -589,9 +589,9 @@
 			</div>
 		{/if} -->
 
-		<!-- {#if $user?.role === 'admin' || isSuperAdmin || $user?.permissions?.workspace?.models || $user?.permissions?.workspace?.knowledge || $user?.permissions?.workspace?.prompts || $user?.permissions?.workspace?.tools} -->
+		{#if $user?.role === 'admin' || isSuperAdmin || $user?.permissions?.workspace?.models || $user?.permissions?.workspace?.knowledge || $user?.permissions?.workspace?.prompts || $user?.permissions?.workspace?.tools}
 
-		{#if $user?.role === 'admin' || isSuperAdmin}
+		<!-- {#if $user?.role === 'admin' || isSuperAdmin} -->
 			<div class="px-1.5 flex justify-center text-gray-50 dark:text-gray-200">
 				<a
 					class="grow flex items-center space-x-3 rounded-lg px-2 py-[7px] hover:bg-[#8900E1] dark:hover:bg-gray-700 transition"
