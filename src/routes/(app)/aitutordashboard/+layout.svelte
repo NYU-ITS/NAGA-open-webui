@@ -71,6 +71,23 @@
 		allUserGroups.find((group) => group.id === selectedGroupId) || allUserGroups[0] || null;
 
 	onMount(async () => {
+		// Block regular students (role === 'user') from accessing instructor dashboard
+		// Super admins bypass this check via API call
+		if ($user?.role === 'user') {
+			try {
+				const superAdmin = await checkIfSuperAdmin(localStorage.token, $user.email);
+				if (!superAdmin) {
+					goto('/');
+					return;
+				}
+				isSuperAdmin = superAdmin;
+			} catch (error) {
+				console.error('Error checking super admin status:', error);
+				goto('/');
+				return;
+			}
+		}
+
 		loaded = true;
 		showAITutorTestToast('loading aitutordashboard - Layout');
 		console.log('[aitutordashboard]-[Layout]-[Mount]:', {
@@ -81,11 +98,13 @@
 
 		// Load user identity information
 		if ($user && localStorage.token) {
-			// Check if super admin
-			try {
-				isSuperAdmin = await checkIfSuperAdmin(localStorage.token, $user.email);
-			} catch (error) {
-				console.error('Error checking super admin status:', error);
+			// Check super admin status (for non-user roles, still needed for group identity display)
+			if ($user?.role !== 'user') {
+				try {
+					isSuperAdmin = await checkIfSuperAdmin(localStorage.token, $user.email);
+				} catch (error) {
+					console.error('Error checking super admin status:', error);
+				}
 			}
 
 			// Load groups
