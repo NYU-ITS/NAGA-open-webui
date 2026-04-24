@@ -41,6 +41,7 @@
 	} from '$lib/apis/chats';
 	import { createNewFolder, getFolders, updateFolderParentIdById } from '$lib/apis/folders';
 	import { WEBUI_BASE_URL } from '$lib/constants';
+	import { checkIfSuperAdmin } from '$lib/apis/users';
 
 	import ArchivedChatsModal from './Sidebar/ArchivedChatsModal.svelte';
 	import UserMenu from './Sidebar/UserMenu.svelte';
@@ -73,6 +74,7 @@
 	let userAvatarSrc = `${WEBUI_BASE_URL}/static/user_temp.png`;
 
 	let showCreateChannel = false;
+	let isSuperAdmin = false;
 
 	// Pagination variables
 	let chatListLoading = false;
@@ -398,6 +400,15 @@
 		await initChannels();
 		await initChatList();
 
+		// Check if super admin
+		if ($user?.email) {
+			try {
+				isSuperAdmin = await checkIfSuperAdmin(localStorage.token, $user.email);
+			} catch (error) {
+				console.error('Error checking super admin status:', error);
+			}
+		}
+
 		window.addEventListener('keydown', onKeyDown);
 		window.addEventListener('keyup', onKeyUp);
 
@@ -578,7 +589,9 @@
 			</div>
 		{/if} -->
 
-		{#if $user?.role === 'admin' || $user?.permissions?.workspace?.models || $user?.permissions?.workspace?.knowledge || $user?.permissions?.workspace?.prompts || $user?.permissions?.workspace?.tools}
+		<!-- {#if $user?.role === 'admin' || isSuperAdmin || $user?.permissions?.workspace?.models || $user?.permissions?.workspace?.knowledge || $user?.permissions?.workspace?.prompts || $user?.permissions?.workspace?.tools} -->
+
+		{#if $user?.role === 'admin' || isSuperAdmin}
 			<div class="px-1.5 flex justify-center text-gray-50 dark:text-gray-200">
 				<a
 					class="grow flex items-center space-x-3 rounded-lg px-2 py-[7px] hover:bg-[#8900E1] dark:hover:bg-gray-700 transition"
@@ -617,7 +630,7 @@
 			</div>
 		{/if}
 
-		{#if $user?.role === 'admin'}
+		{#if $user?.role === 'admin' || isSuperAdmin}
 			<div class="px-1.5 flex justify-center text-gray-50 dark:text-gray-200">
 				<a
 					class="grow flex items-center space-x-3 rounded-lg px-2 py-[7px] hover:bg-[#8900E1] dark:hover:bg-gray-700 transition"
