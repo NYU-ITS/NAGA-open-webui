@@ -1424,10 +1424,10 @@
 													<Tooltip.Root openDelay={200}>
 														<Tooltip.Trigger
 															type="button"
-															class="inline-flex flex-shrink-0 items-center cursor-pointer text-gray-900 transition-colors hover:text-black dark:text-gray-100 dark:hover:text-white select-none"
+															class="inline-flex flex-shrink-0 items-center cursor-pointer text-[#57068C] transition-colors hover:text-[#3e0470] dark:text-purple-400 dark:hover:text-purple-300 select-none"
 															aria-label="View full question list"
 														>
-															<EllipsisHorizontal className="h-5 w-5" strokeWidth="2.5" />
+															<EllipsisHorizontal className="h-7 w-7" strokeWidth="2.5" />
 														</Tooltip.Trigger>
 														<Tooltip.Content
 															side="bottom"

@@ -85,6 +85,7 @@
 
 	export let submitPrompt: Function | null = null;
 	export let chatId: string | null = null;
+	export let prompt = '';
 
 	$: practiceContextKey = `${chatId ?? ''}::${practicingValue ?? ''}::${assignmentId ?? ''}`;
 	$: if (practiceContextKey !== lastPracticeContextKey) {
@@ -212,13 +213,8 @@
 		});
 	}
 
-	async function copyQuestion(question: PracticeQuestion) {
-		try {
-			await navigator.clipboard.writeText(question.question);
-			toast.success('Question copied.');
-		} catch (error) {
-			toast.error('Failed to copy question.');
-		}
+	function pasteQuestion(question: PracticeQuestion) {
+		prompt = question.question;
 	}
 
 	async function sendQuestion(question: PracticeQuestion) {
@@ -312,29 +308,29 @@
 				<!-- {!started ? 'text-gray-400 dark:text-gray-500' : 'text-gray-900 dark:text-gray-100'} -->
 				<div class="space-y-3 text-gray-900 dark:text-gray-100">
 					{#each filteredQuestions as question}
-						<article class="space-y-1 rounded-lg border border-gray-200 p-4 dark:border-gray-700">
-							<div class="mt-6 mb-1 markdown-prose-xs text-sm leading-6 text-gray-900 dark:text-gray-100">
+						<article class="flex flex-col rounded-lg border border-gray-200 p-4 dark:border-gray-700">
+							<div class="mb-1 markdown-prose-xs text-sm leading-6 text-gray-900 dark:text-gray-100">
 								<Markdown
 									id={`practice-question-${assignmentId ?? 'fallback'}-${question.id}`}
 									content={question.question}
 								/>
 							</div>
-							<div class="flex min-h-[1.25rem] items-center justify-end gap-3 pt-1">
+							<div class="mt-auto flex min-h-[1.25rem] items-center justify-between pt-3">
 								<button
 									type="button"
-									class="text-left text-xs font-semibold text-gray-600 transition hover:text-gray-800 dark:text-gray-300 dark:hover:text-gray-100"
-									on:click={() => copyQuestion(question)}
-								>
-									Copy
-								</button>
+									class="text-left text-[10px] font-medium text-gray-500 transition hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200"
+									on:click={() => pasteQuestion(question)}
+									>
+										Copy&Paste
+									</button>
 								<button
 									type="button"
-									class="text-left text-xs font-semibold text-gray-600 transition hover:text-gray-800 disabled:text-gray-400 dark:text-gray-300 dark:hover:text-gray-100 dark:disabled:text-gray-500"
+									class="inline-flex items-center gap-1 whitespace-nowrap rounded-full border border-[#57068C]/40 px-3 py-1 text-xs font-bold text-[#57068C] transition hover:bg-purple-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-purple-700 dark:text-purple-400 dark:hover:bg-purple-900/20"
 									on:click={() => sendQuestion(question)}
 									disabled={sendingQuestionId === question.id}
-								>
-									{sendingQuestionId === question.id ? 'Sending...' : 'Send'}
-								</button>
+									>
+										{sendingQuestionId === question.id ? 'Sending...' : 'Start'}
+									</button>
 							</div>
 						</article>
 					{/each}

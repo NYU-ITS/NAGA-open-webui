@@ -2177,6 +2177,7 @@
 				{addMessages}
 				{saveChatHandler}
 				bind:webSearchEnabled
+				bind:prompt
 			/>
 		</PaneGroup>
 	{:else if loading}
