@@ -4,6 +4,7 @@
 	import { toast } from 'svelte-sonner';
 	import { showControls, showRightsideQuestions } from '$lib/stores';
 	import Markdown from '$lib/components/chat/Messages/Markdown.svelte';
+	import { Tooltip } from 'bits-ui';
 
 	type PracticeQuestion = {
 		id: string;
@@ -316,13 +317,25 @@
 								/>
 							</div>
 							<div class="mt-auto flex min-h-[1.25rem] items-center justify-between pt-3">
-								<button
-									type="button"
-									class="text-left text-[10px] font-medium text-gray-500 transition hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200"
-									on:click={() => pasteQuestion(question)}
-									>
+								<Tooltip.Root openDelay={200}>
+									<Tooltip.Trigger
+										type="button"
+										class="inline-flex items-center text-gray-500 transition hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200"
+										aria-label="Copy and paste to input"
+										on:click={() => pasteQuestion(question)}
+										>
+										<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="h-3 w-3">
+											<path stroke-linecap="round" stroke-linejoin="round" d="M15.75 17.25v3.375c0 .621-.504 1.125-1.125 1.125h-9.75a1.125 1.125 0 0 1-1.125-1.125V7.875c0-.621.504-1.125 1.125-1.125H6.75a9.06 9.06 0 0 1 1.5.124m7.5 10.376h3.375c.621 0 1.125-.504 1.125-1.125V11.25c0-4.46-3.243-8.161-7.5-8.876a9.06 9.06 0 0 0-1.5-.124H9.375c-.621 0-1.125.504-1.125 1.125v3.5m7.5 10.375H9.375a1.125 1.125 0 0 1-1.125-1.125v-9.25m12 6.625v-1.875a3.375 3.375 0 0 0-3.375-3.375h-1.5a1.125 1.125 0 0 1-1.125-1.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H9.75" />
+										</svg>
+									</Tooltip.Trigger>
+									<Tooltip.Content
+										side="right"
+										sideOffset={4}
+										class="z-50 rounded-md border border-gray-200 bg-white px-2 py-1 text-xs text-gray-700 shadow-lg dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300"
+										>
 										Copy&Paste
-									</button>
+									</Tooltip.Content>
+								</Tooltip.Root>
 								<button
 									type="button"
 									class="inline-flex items-center gap-1 whitespace-nowrap rounded-full border border-[#57068C]/40 px-3 py-1 text-xs font-bold text-[#57068C] transition hover:bg-purple-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-purple-700 dark:text-purple-400 dark:hover:bg-purple-900/20"
