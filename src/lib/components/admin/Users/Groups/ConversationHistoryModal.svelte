@@ -133,6 +133,8 @@
 
 	let loading = false;
 	let memberStats = [];
+	let activeFetchGroupId = null;
+	let activeFetchRequestId = 0;
 	let selectedMembers = new Set();
 	let selectAll = false;
 	let actionDropdownOpen = false;
@@ -208,15 +210,23 @@
 
 	// Update fetchConversationData to pass user IDs
 	const fetchConversationData = async () => {
-		if (!group) {
+		const groupId = group?.id;
+		if (!groupId) {
 			toast.warning('No group selected');
 			return;
 		}
 
+		// Ignore duplicate concurrent requests for the same group.
+		if (loading && activeFetchGroupId === groupId) {
+			return;
+		}
+
+		const requestId = ++activeFetchRequestId;
+		activeFetchGroupId = groupId;
 		loading = true;
 		try {
 			// Test 1: Try your current approach
-			let rawChatData = await fetchGroupChatData(group.id);
+			let rawChatData = await fetchGroupChatData(groupId);
 
 			if (rawChatData.length === 0) {
 				console.log(' No data with group filter, testing without group filter...');
@@ -241,6 +251,11 @@
 				}
 			}
 
+			// Ignore stale responses from older requests.
+			if (requestId !== activeFetchRequestId) {
+				return;
+			}
+
 			memberStats = transformChatData(rawChatData);
 			
 			// Remove toast messages for data load
@@ -253,7 +268,10 @@
 			console.error('Failed to fetch chat data:', error);
 			toast.error('Failed to fetch conversation data.');
 		} finally {
-			loading = false;
+			if (requestId === activeFetchRequestId) {
+				loading = false;
+				activeFetchGroupId = null;
+			}
 		}
 	};
 	// Filtered member stats based on search and model filter
@@ -668,15 +686,16 @@
 	onMount(() => {
 		document.addEventListener('click', handleClickOutside);
 
-		if (group) {
-			fetchConversationData();
-		}
-
 		// Cleanup event listener
 		return () => {
 			document.removeEventListener('click', handleClickOutside);
 		};
 	});
+
+	// Fetch only when this modal is actually opened.
+	$: if (show && group?.id) {
+		fetchConversationData();
+	}
 
 	// Questions modal state
 	let showQuestionsModal = false;
