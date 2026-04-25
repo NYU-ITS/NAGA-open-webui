@@ -406,7 +406,6 @@
 		const hasStale = [...selectedMembers].some((id) => !validIds.has(id));
 		if (hasStale) {
 			selectedMembers = new Set([...selectedMembers].filter((id) => validIds.has(id)));
-			selectedMembers = selectedMembers;
 			updateSelectAllState();
 		}
 	}

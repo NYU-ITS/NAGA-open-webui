@@ -1,10 +1,12 @@
 import csv
 import json
 import logging
+import re
 import zipfile
 from datetime import datetime
 from io import BytesIO, StringIO
 from typing import Optional
+from urllib.parse import quote
 import pytz
 
 from open_webui.models.chats import (
@@ -1046,7 +1048,8 @@ async def export_chats_as_zip(
 
 def _build_conversation_export_rows(chats) -> list:
     """
-    Per-turn rows: member, email_id, model_name, chat_id, question, model_response, timestamp (EST).
+    Per-turn rows: member, email_id, model_name, chat_id, question, model_response, timestamp.
+    Timestamps are formatted in US/Eastern with the real zone abbreviation (EST/EDT).
     Order matches the CSV / JSON export: iterate chats (caller order), then message dict order.
     """
     if not chats:
@@ -1075,7 +1078,7 @@ def _build_conversation_export_rows(chats) -> list:
             if ts:
                 est_tz = pytz.timezone("US/Eastern")
                 dt_est = datetime.fromtimestamp(ts, tz=pytz.UTC).astimezone(est_tz)
-                human_ts = dt_est.strftime("%Y-%m-%d %I:%M:%S %p EST")
+                human_ts = dt_est.strftime("%Y-%m-%d %I:%M:%S %p %Z")
             else:
                 human_ts = "Unknown"
             rows.append(
@@ -1134,6 +1137,21 @@ def _load_chats_for_group_export(form_data: ChatExportCSVForm) -> list:
     )
 
 
+def _safe_export_filename(group_name: Optional[str], timestamp: str, ext: str) -> str:
+    """
+    Build a filesystem/header-safe filename.
+    Keeps alnum, dash and underscore; converts spaces to underscores; strips others.
+    """
+    base_name = (group_name or "").strip()
+    if not base_name:
+        base_name = "group"
+    safe = re.sub(r"[^A-Za-z0-9 _-]+", "", base_name)
+    safe = re.sub(r"\s+", "_", safe).strip("._-")
+    if not safe:
+        safe = "group"
+    return f"group-{safe}-conversations-{timestamp}.{ext}"
+
+
 ############################
 # Export Chats as CSV
 ############################
@@ -1187,15 +1205,19 @@ async def export_chats_as_csv(
         csv_content = output.getvalue()
         output.close()
 
-        # Create filename
-        group_name = group.name
+        # Create safe filename + RFC5987-compatible header value.
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f"group-{group_name}-conversations-{timestamp}.csv"
+        filename = _safe_export_filename(group.name, timestamp, "csv")
+        filename_star = quote(filename)
 
         return Response(
             content=csv_content,
             media_type="text/csv",
-            headers={"Content-Disposition": f"attachment; filename={filename}"}
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{filename}"; filename*=UTF-8\'\'{filename_star}'
+                )
+            }
         )
 
     except HTTPException:
@@ -1256,13 +1278,15 @@ async def export_chats_as_json(
         )
         body = json.dumps(payload, ensure_ascii=False, indent=2)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe_name = (group.name or "group").replace('"', "'")
-        filename = f"group-{safe_name}-conversations-{ts}.json"
+        filename = _safe_export_filename(group.name, ts, "json")
+        filename_star = quote(filename)
         return Response(
             content=body,
             media_type="application/json; charset=utf-8",
             headers={
-                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Disposition": (
+                    f'attachment; filename="{filename}"; filename*=UTF-8\'\'{filename_star}'
+                ),
             },
         )
 
