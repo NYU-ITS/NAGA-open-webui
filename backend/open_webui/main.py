@@ -57,6 +57,7 @@ from open_webui.socket.main import (
     periodic_usage_pool_cleanup,
 )
 from open_webui.routers import (
+    ai_tutor,
     audio,
     images,
     ollama,
@@ -1118,6 +1119,7 @@ app.include_router(openai.router, prefix="/openai", tags=["openai"])
 
 
 app.include_router(pipelines.router, prefix="/api/v1/pipelines", tags=["pipelines"])
+app.include_router(ai_tutor.router, prefix="/api/ai-tutor", tags=["ai_tutor"])
 app.include_router(tasks.router, prefix="/api/v1/tasks", tags=["tasks"])
 app.include_router(images.router, prefix="/api/v1/images", tags=["images"])
 

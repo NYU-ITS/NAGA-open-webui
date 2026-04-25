@@ -92,6 +92,7 @@ class ChatExportZipForm(BaseModel):
 
 class ChatExportCSVForm(BaseModel):
     group_id: str
+    chat_ids: Optional[list[str]] = None
     user_ids: Optional[list[str]] = []
     model_name: Optional[str] = ""
     base_model_name: Optional[str] = ""
@@ -100,7 +101,7 @@ class ChatExportCSVForm(BaseModel):
     min_time_taken: Optional[int] = None
     max_time_taken: Optional[int] = None
     skip: Optional[int] = 0
-    limit: Optional[int] = 1000
+    limit: Optional[int] = 0
     include_metadata: Optional[bool] = True
 
 
@@ -525,6 +526,26 @@ class ChatTable:
         except Exception:
             return None
 
+    def get_chats_by_ids_and_group_id(
+        self, chat_ids: list[str], group_id: str
+    ) -> list[ChatModel]:
+        """Return chats that match both id and group (admin export safety)."""
+        if not chat_ids:
+            return []
+        try:
+            with get_db() as db:
+                rows = (
+                    db.query(Chat)
+                    .filter(Chat.id.in_(chat_ids))
+                    .filter_by(group_id=group_id)
+                    .order_by(Chat.updated_at.desc())
+                    .all()
+                )
+                return [ChatModel.model_validate(c) for c in rows]
+        except Exception as e:
+            log.exception(f"Error loading chats by ids for group {group_id}: {e}")
+            return []
+
     def get_chat_by_share_id(self, id: str) -> Optional[ChatModel]:
         try:
             with get_db() as db:
@@ -936,7 +957,11 @@ class ChatTable:
                 
                 # Apply pagination and ordering
                 query = query.order_by(Chat.updated_at.desc())
-                all_chats = query.offset(skip).limit(limit).all()
+                if skip is not None and skip > 0:
+                    query = query.offset(skip)
+                if limit is not None and limit > 0:
+                    query = query.limit(limit)
+                all_chats = query.all()
                 
                 log.debug(f"Filtered chats count: {len(all_chats)}")
                 return [ChatModel.model_validate(chat) for chat in all_chats]

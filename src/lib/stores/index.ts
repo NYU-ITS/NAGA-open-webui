@@ -1,4 +1,4 @@
-import { APP_NAME } from '$lib/constants';
+import { APP_NAME, AI_TUTOR_FRONTEND_TESTING_ERROR_TYPES } from '$lib/constants';
 import { type Writable, writable } from 'svelte/store';
 import type { ModelConfig } from '$lib/apis';
 import type { Banner } from '$lib/types';
@@ -73,6 +73,11 @@ export const showArtifacts = writable(false);
 export const showCallOverlay = writable(false);
 export const showFacilitiesOverlay = writable(false);
 export const activeCallMode = writable<'live_text' | 'transcript_at_end'>('live_text');
+export const showRightsideQuestions = writable(false);
+export const aiTutorFrontendTestingErrorTypes = writable(AI_TUTOR_FRONTEND_TESTING_ERROR_TYPES);
+
+// AI Tutor Dashboard - single source of truth for selected group
+export const aiTutorSelectedGroupId = writable<string>('');
 
 export const temporaryChatEnabled = writable(false);
 export const scrollPaginationEnabled = writable(false);

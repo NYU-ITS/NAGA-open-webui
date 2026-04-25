@@ -4,12 +4,13 @@
 	import { Pane, PaneResizer } from 'paneforge';
 
 	import { onDestroy, onMount, tick } from 'svelte';
-	import { mobile, showControls, showCallOverlay, showOverview, showArtifacts, showFacilitiesOverlay, activeCallMode } from '$lib/stores';
+	import { mobile, showControls, showCallOverlay, showOverview, showArtifacts, showFacilitiesOverlay, activeCallMode, showRightsideQuestions } from '$lib/stores';
 
 	import Modal from '../common/Modal.svelte';
 	import Controls from './Controls/Controls.svelte';
 	import CallOverlay from './MessageInput/CallOverlay.svelte';
 	import FacilitiesOverlay from './MessageInput/FacilitiesOverlay.svelte';
+	import RightsideQuestions from './MessageInput/RightsideQuestions.svelte';
 	import Drawer from '../common/Drawer.svelte';
 	import Overview from './Overview.svelte';
 	import EllipsisVertical from '../icons/EllipsisVertical.svelte';
@@ -34,6 +35,7 @@
 	export let modelId;
 	export let webSearchEnabled = false;
 	export let initChatHandler: Function;
+	export let prompt = '';
 
 	export let pane;
 
@@ -119,7 +121,9 @@
 	});
 
 	onDestroy(() => {
-		showControls.set(false);
+		if (!$showRightsideQuestions && !$showFacilitiesOverlay) {
+			showControls.set(false);
+		}
 
 		mediaQuery.removeEventListener('change', handleMediaQuery);
 		document.removeEventListener('mousedown', onMouseDown);
@@ -130,13 +134,14 @@
 		showControls.set(false);
 		showOverview.set(false);
 		showArtifacts.set(false);
+		showRightsideQuestions.set(false);
 
 		if ($showCallOverlay) {
 			showCallOverlay.set(false);
 		}
 	};
 
-	$: if (!chatId) {
+	$: if (!chatId && !$showRightsideQuestions && !$showFacilitiesOverlay) {
 		closeHandler();
 	}
 </script>
@@ -151,7 +156,7 @@
 				}}
 			>
 				<div
-					class=" {$showCallOverlay || $showOverview || $showArtifacts || $showFacilitiesOverlay
+					class=" {$showCallOverlay || $showOverview || $showArtifacts || $showFacilitiesOverlay || $showRightsideQuestions
 						? ' h-screen  w-full'
 						: 'px-6 py-4'} h-full"
 				>
@@ -186,6 +191,12 @@
 									showControls.set(false);
 								}}
 							/>
+						</div>
+					{:else if $showRightsideQuestions}
+						<div
+							class=" h-full max-h-[100dvh] bg-white text-gray-700 dark:bg-black dark:text-gray-300 flex justify-center"
+						>
+							<RightsideQuestions {submitPrompt} {chatId} bind:prompt />
 						</div>
 					{:else if $showArtifacts}
 						<Artifacts {history} />
@@ -270,9 +281,9 @@
 			{#if $showControls}
 				<div class="pr-4 pb-8 flex max-h-full min-h-full h-full">
 					<div
-						class="w-full {($showOverview || $showArtifacts || $showFacilitiesOverlay) && !$showCallOverlay
+						class="w-full {($showOverview || $showArtifacts || $showFacilitiesOverlay || $showRightsideQuestions) && !$showCallOverlay
 							? 'h-full min-h-0 flex flex-col overflow-hidden '
-							: 'px-4 py-4 bg-white dark:shadow-lg dark:bg-gray-850  border border-gray-100 dark:border-gray-850'}  rounded-xl z-40 pointer-events-auto scrollbar-hidden {$showFacilitiesOverlay || $showOverview || $showArtifacts ? '' : 'overflow-y-auto'}"
+							: 'px-4 py-4 bg-white dark:shadow-lg dark:bg-gray-850  border border-gray-100 dark:border-gray-850'}  rounded-xl z-40 pointer-events-auto scrollbar-hidden {$showFacilitiesOverlay || $showOverview || $showArtifacts || $showRightsideQuestions ? '' : 'overflow-y-auto'}"
 					>
 						{#if $showCallOverlay && $activeCallMode !== 'transcript_at_end'}
 							<div class="w-full h-full flex justify-center">
@@ -306,6 +317,10 @@
 										showControls.set(false);
 									}}
 								/>
+							</div>
+						{:else if $showRightsideQuestions}
+							<div class="w-full flex-1 min-h-0 flex flex-col">
+								<RightsideQuestions {submitPrompt} {chatId} bind:prompt />
 							</div>
 						{:else if $showArtifacts}
 							<Artifacts {history} overlay={dragged} />
