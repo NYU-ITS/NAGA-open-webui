@@ -35,8 +35,7 @@
 			const filterData = {
 				group_id: groupId,
 				skip: 0,
-				limit: 100
-				// Remove all other filters temporarily
+				limit: 0
 			};
 
 			const response = await fetch('/api/v1/chats/filter/meta', {
@@ -109,7 +108,7 @@
 			const questionsArray = chat.meta?.questions_asked || [];
 			const questionsCount = Array.isArray(questionsArray) ? questionsArray.length : 0;
 			return {
-				id: chat.id,
+				id: String(chat.id),
 				user_id: chat.user_id, // ← ADDED THIS LINE
 				chatName: chat.title || `Chat ${index + 1}`,
 				name: user.name || `User ${chat.user_id}`,
@@ -155,6 +154,8 @@
 
 	let actionDropdownRef;
 	let modelDropdownRef;
+	/** Header "select all" checkbox: `indeterminate` must be set on the DOM in many browsers */
+	let selectAllHeaderRef = null;
 
 	// Sample math questions for placeholders
 	const sampleQuestions = [
@@ -218,7 +219,7 @@
 			let rawChatData = await fetchGroupChatData(group.id);
 
 			if (rawChatData.length === 0) {
-				console.log('❌ No data with group filter, testing without group filter...');
+				console.log(' No data with group filter, testing without group filter...');
 
 				// Test 2: Try without group filter to see if ANY chats exist
 				const testResponse = await fetch('/api/v1/chats/filter/meta', {
@@ -324,6 +325,7 @@
 	const handleMemberSelect = (groupIds) => {
 		// Handle both single ID and array of IDs
 		const ids = Array.isArray(groupIds) ? groupIds : [groupIds];
+		if (ids.length === 0) return;
 
 		// Check if all IDs in this group are currently selected
 		const allSelected = ids.every((id) => selectedMembers.has(id));
@@ -393,6 +395,20 @@
 	// Also update when selectedMembers changes
 	$: if (selectedMembers) {
 		updateSelectAllState();
+	}
+
+	$: if (selectAllHeaderRef) {
+		selectAllHeaderRef.indeterminate = isPartialSelection;
+	}
+
+	$: {
+		const validIds = new Set(filteredGroupedChats.flatMap((g) => g.ids));
+		const hasStale = [...selectedMembers].some((id) => !validIds.has(id));
+		if (hasStale) {
+			selectedMembers = new Set([...selectedMembers].filter((id) => validIds.has(id)));
+			selectedMembers = selectedMembers;
+			updateSelectAllState();
+		}
 	}
 
 	// Search functionality
@@ -491,16 +507,19 @@
 			return;
 		}
 
-		try {
-			toast.info('Preparing CSV export...');
+		if (selectedMembers.size === 0) {
+			toast.error('Please select at least one conversation to export as CSV');
+			return;
+		}
 
-			const uniqueUserIds = [...new Set(filteredMemberStats.map((chat) => chat.user_id))];
+		try {
+			toast.info(`Preparing CSV export for ${selectedMembers.size} conversations...`);
+
 			const filterData = {
 				group_id: group.id,
-				user_ids: uniqueUserIds, // ← ADDED THIS LINE
-				model_name: filteredModel || '',
+				chat_ids: Array.from(selectedMembers),
 				skip: 0,
-				limit: 1000
+				limit: 0
 			};
 
 			const response = await fetch('/api/v1/chats/export/csv', {
@@ -536,16 +555,69 @@
 			document.body.removeChild(link);
 			URL.revokeObjectURL(url);
 
-			// Enhanced success message
-			const filterInfo = [];
-			if (searchQuery) filterInfo.push(`search: "${searchQuery}"`);
-			if (filteredModel) filterInfo.push(`model: "${filteredModel}"`);
-
-			const filterText = filterInfo.length > 0 ? ` (${filterInfo.join(', ')})` : '';
-			toast.success(`Successfully exported filtered CSV: ${filename}${filterText}`);
+			toast.success(`Successfully exported CSV: ${filename} (${selectedMembers.size} conversations)`);
 		} catch (error) {
 			console.error('CSV export failed:', error);
 			toast.error(`Failed to export CSV: ${error.message}`);
+		}
+	};
+
+	const handleExportJSON = async () => {
+		if (!group) {
+			toast.error('No group selected');
+			return;
+		}
+
+		if (selectedMembers.size === 0) {
+			toast.error('Please select at least one conversation to export as JSON');
+			return;
+		}
+
+		try {
+			toast.info(`Preparing JSON export for ${selectedMembers.size} conversations...`);
+
+			const filterData = {
+				group_id: group.id,
+				chat_ids: Array.from(selectedMembers),
+				skip: 0,
+				limit: 0
+			};
+
+			const response = await fetch('/api/v1/chats/export/json', {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+					Authorization: `Bearer ${localStorage.token}`
+				},
+				body: JSON.stringify(filterData)
+			});
+
+			if (!response.ok) {
+				const errorData = await response.json().catch(() => ({}));
+				throw new Error(errorData.detail || `HTTP error! status: ${response.status}`);
+			}
+
+			const text = await response.text();
+			const contentDisposition = response.headers.get('Content-Disposition');
+			const filename = contentDisposition
+				? contentDisposition.split('filename=')[1]?.replace(/"/g, '')?.trim()
+				: `group-${group.id}-conversations.json`;
+
+			const blob = new Blob([text], { type: 'application/json' });
+			const url = URL.createObjectURL(blob);
+			const link = document.createElement('a');
+			link.href = url;
+			link.download = filename;
+
+			document.body.appendChild(link);
+			link.click();
+			document.body.removeChild(link);
+			URL.revokeObjectURL(url);
+
+			toast.success(`Successfully exported JSON: ${filename} (${selectedMembers.size} conversations)`);
+		} catch (error) {
+			console.error('JSON export failed:', error);
+			toast.error(`Failed to export JSON: ${error.message}`);
 		}
 	};
 
@@ -579,9 +651,6 @@
 	$: if (memberStats.length > 0) {
 		updateAvailableModels();
 	}
-
-	$: selectAll =
-		selectedMembers.size === filteredMemberStats.length && filteredMemberStats.length > 0;
 
 	// Click outside handler
 	const handleClickOutside = (event) => {
@@ -835,7 +904,7 @@
 					<div class="text-sm text-gray-650 dark:text-gray-400">Conversation History</div>
 				</div>
 
-				<!-- Export Buttons - Two Parallel Buttons -->
+				<!-- Export: PDF, CSV, JSON -->
 				<div class="flex items-center gap-3">
 					<button
 						class="text-xs text-gray-650 dark:text-gray-400 uppercase tracking-wider hover:text-gray-700 dark:hover:text-gray-200 flex items-center gap-2 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
@@ -858,9 +927,9 @@
 					<button
 						class="text-xs text-gray-650 dark:text-gray-400 uppercase tracking-wider hover:text-gray-700 dark:hover:text-gray-200 flex items-center gap-2 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
 						on:click={handleExportCSV}
-						disabled={filteredMemberStats.length === 0}
-						class:opacity-50={filteredMemberStats.length === 0}
-						class:cursor-not-allowed={filteredMemberStats.length === 0}
+						disabled={selectedMembers.size === 0}
+						class:opacity-50={selectedMembers.size === 0}
+						class:cursor-not-allowed={selectedMembers.size === 0}
 					>
 						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 							<path
@@ -871,6 +940,24 @@
 							/>
 						</svg>
 						<span class="font-bold">Export as CSV</span>
+					</button>
+
+					<button
+						class="text-xs text-gray-650 dark:text-gray-400 uppercase tracking-wider hover:text-gray-700 dark:hover:text-gray-200 flex items-center gap-2 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+						on:click={handleExportJSON}
+						disabled={selectedMembers.size === 0}
+						class:opacity-50={selectedMembers.size === 0}
+						class:cursor-not-allowed={selectedMembers.size === 0}
+					>
+						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+							<path
+								stroke-linecap="round"
+								stroke-linejoin="round"
+								stroke-width="2"
+								d="M8 9h8M8 13h4m-6 8h8a2 2 0 002-2V5a2 2 0 00-2-2h-2.343a2 2 0 01-1.414-.586l-1.657-1.657A2 2 0 0010.343 0H6a2 2 0 00-2 2v16a2 2 0 002 2z"
+							/>
+						</svg>
+						<span class="font-bold">Export as JSON</span>
 					</button>
 				</div>
 			</div>
@@ -899,11 +986,11 @@
 							>
 								<div class="flex items-center gap-2">
 									<input
+										bind:this={selectAllHeaderRef}
 										type="checkbox"
 										checked={selectAll || isPartialSelection}
-										indeterminate={isPartialSelection}
 										on:change={handleSelectAll}
-										class="rounded border-gray-300 text-gray-600 focus:ring-gray-650"
+										class="rounded border-gray-300 accent-[#8900e1] text-[#8900e1] focus:ring-2 focus:ring-[#8900e1]/45 focus:ring-offset-0 dark:accent-[#8900e1] dark:text-[#8900e1] dark:focus:ring-[#8900e1]/50"
 										title={isPartialSelection
 											? `${Array.from(selectedMembers).length} of ${filteredGroupedChats.flatMap((g) => g.ids).length} conversations selected (click to unselect all)`
 											: selectAll
@@ -1054,7 +1141,7 @@
 																	{model}
 																</span>
 																<span class="text-gray-400 text-[10px]">
-																	({memberStats.filter((m) => m.model === model).length})
+																	({filteredGroupedChats.filter((g) => g.model === model).length})
 																</span>
 															</div>
 														</button>
@@ -1138,7 +1225,7 @@
 										type="checkbox"
 										checked={group.ids.every((id) => selectedMembers.has(id))}
 										on:change={() => handleMemberSelect(group.ids)}
-										class="rounded border-gray-300 text-gray-600 focus:ring-gray-650"
+										class="rounded border-gray-300 accent-[#8900e1] text-[#8900e1] focus:ring-2 focus:ring-[#8900e1]/45 focus:ring-offset-0 dark:accent-[#8900e1] dark:text-[#8900e1] dark:focus:ring-[#8900e1]/50"
 										aria-label="Select conversations for {group.name} using {group.model}"
 									/>
 								</td>
