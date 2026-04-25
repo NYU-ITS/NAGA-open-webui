@@ -206,25 +206,49 @@
 		}
 	};
 
-	let lastFetchedGroupId = null;
-
-	// Fetch chats for the currently selected group; one trigger path, dedups duplicate concurrent calls.
+	// Update fetchConversationData to pass user IDs
 	const fetchConversationData = async () => {
 		if (!group) {
 			toast.warning('No group selected');
 			return;
 		}
-		if (loading) return;
 
-		const targetGroupId = group.id;
 		loading = true;
 		try {
-			const rawChatData = await fetchGroupChatData(targetGroupId);
-			if (group?.id !== targetGroupId) {
-				return; // selection changed mid-flight; ignore stale response
+			// Test 1: Try your current approach
+			let rawChatData = await fetchGroupChatData(group.id);
+
+			if (rawChatData.length === 0) {
+				console.log(' No data with group filter, testing without group filter...');
+
+				// Test 2: Try without group filter to see if ANY chats exist
+				const testResponse = await fetch('/api/v1/chats/filter/meta', {
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json',
+						Authorization: `Bearer ${localStorage.token}`
+					},
+					body: JSON.stringify({
+						skip: 0,
+						limit: 10
+						// No group_id filter
+					})
+				});
+
+				if (testResponse.ok) {
+					const allChats = await testResponse.json();
+					console.log('📊 Sample chat data:', allChats[0] || 'No chats exist');
+				}
 			}
+
 			memberStats = transformChatData(rawChatData);
-			lastFetchedGroupId = targetGroupId;
+			
+			// Remove toast messages for data load
+			// if (memberStats.length === 0) {
+			// 	toast.warning('No conversation data found.');
+			// } else {
+			// 	toast.success(`Successfully loaded ${memberStats.length} conversations`);
+			// }
 		} catch (error) {
 			console.error('Failed to fetch chat data:', error);
 			toast.error('Failed to fetch conversation data.');
@@ -640,14 +664,13 @@
 		}
 	};
 
-	// Single trigger: only fetch when modal opens for a group, or when the group changes while open
-	$: if (show && group?.id && group.id !== lastFetchedGroupId) {
-		fetchConversationData();
-	}
-
 	// Add event listener when component mounts
 	onMount(() => {
 		document.addEventListener('click', handleClickOutside);
+
+		if (group) {
+			fetchConversationData();
+		}
 
 		// Cleanup event listener
 		return () => {
