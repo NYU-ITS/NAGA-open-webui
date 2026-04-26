@@ -988,6 +988,22 @@
 				<Cross className="size-4.5 text-gray-800 dark:text-gray-400" />
 			</button>
 		</div>
+		<div class="mx-4 mb-3 rounded-md border border-violet-300 bg-violet-50 px-3 py-2 text-xs text-violet-900 dark:border-violet-700 dark:bg-violet-900/20 dark:text-violet-200">
+			<div class="flex items-start gap-2">
+				<span
+					class="mt-0.5 inline-flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full bg-violet-700 text-[10px] font-bold leading-none text-white dark:bg-violet-500"
+					aria-hidden="true"
+				>
+					i
+				</span>
+				<p>
+					For large conversation history downloads, we recommend using <strong
+						>JSON or CSV exports</strong
+					> and <strong>applying "Members" or "Model Name" filters before downloading</strong> for
+					smoother processing. PDF export is currently unavailable for large files.
+				</p>
+			</div>
+		</div>
 
 		<!-- Table container with horizontal scroll -->
 		<div class="flex-1 overflow-hidden">
