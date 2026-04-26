@@ -133,6 +133,8 @@
 
 	let loading = false;
 	let memberStats = [];
+	let activeFetchGroupId = null;
+	let activeFetchRequestId = 0;
 	let selectedMembers = new Set();
 	let selectAll = false;
 	let actionDropdownOpen = false;
@@ -208,15 +210,23 @@
 
 	// Update fetchConversationData to pass user IDs
 	const fetchConversationData = async () => {
-		if (!group) {
+		const groupId = group?.id;
+		if (!groupId) {
 			toast.warning('No group selected');
 			return;
 		}
 
+		// Ignore duplicate concurrent requests for the same group.
+		if (loading && activeFetchGroupId === groupId) {
+			return;
+		}
+
+		const requestId = ++activeFetchRequestId;
+		activeFetchGroupId = groupId;
 		loading = true;
 		try {
 			// Test 1: Try your current approach
-			let rawChatData = await fetchGroupChatData(group.id);
+			let rawChatData = await fetchGroupChatData(groupId);
 
 			if (rawChatData.length === 0) {
 				console.log(' No data with group filter, testing without group filter...');
@@ -241,6 +251,11 @@
 				}
 			}
 
+			// Ignore stale responses from older requests.
+			if (requestId !== activeFetchRequestId) {
+				return;
+			}
+
 			memberStats = transformChatData(rawChatData);
 			
 			// Remove toast messages for data load
@@ -253,7 +268,10 @@
 			console.error('Failed to fetch chat data:', error);
 			toast.error('Failed to fetch conversation data.');
 		} finally {
-			loading = false;
+			if (requestId === activeFetchRequestId) {
+				loading = false;
+				activeFetchGroupId = null;
+			}
 		}
 	};
 	// Filtered member stats based on search and model filter
@@ -668,15 +686,16 @@
 	onMount(() => {
 		document.addEventListener('click', handleClickOutside);
 
-		if (group) {
-			fetchConversationData();
-		}
-
 		// Cleanup event listener
 		return () => {
 			document.removeEventListener('click', handleClickOutside);
 		};
 	});
+
+	// Fetch only when this modal is actually opened.
+	$: if (show && group?.id) {
+		fetchConversationData();
+	}
 
 	// Questions modal state
 	let showQuestionsModal = false;
@@ -968,6 +987,22 @@
 			>
 				<Cross className="size-4.5 text-gray-800 dark:text-gray-400" />
 			</button>
+		</div>
+		<div class="mx-4 mb-3 rounded-md border border-violet-300 bg-violet-50 px-3 py-2 text-xs text-violet-900 dark:border-violet-700 dark:bg-violet-900/20 dark:text-violet-200">
+			<div class="flex items-start gap-2">
+				<span
+					class="mt-0.5 inline-flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full bg-violet-700 text-[10px] font-bold leading-none text-white dark:bg-violet-500"
+					aria-hidden="true"
+				>
+					i
+				</span>
+				<p>
+					For large conversation history downloads, we recommend using <strong
+						>JSON or CSV exports</strong
+					> and <strong>applying "Members" or "Model Name" filters before downloading</strong> for
+					smoother processing. PDF export is currently unavailable for large files.
+				</p>
+			</div>
 		</div>
 
 		<!-- Table container with horizontal scroll -->
