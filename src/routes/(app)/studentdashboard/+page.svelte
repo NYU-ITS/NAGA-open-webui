@@ -563,16 +563,17 @@
 					// Student Dashboard summary sync:
 					// - Student access should not depend on the admin-only group detail endpoint.
 					// - AI Tutor endpoints below are scoped to the selected group, and assignment/analysis rows are filtered by the current student.
-					const [rawHomeworkRows, practiceRows] = await Promise.all([
-						fetchAITutorJson<any[]>('/homework/', {
-							token: localStorage.token,
-							query: { group_id: selectedGroupId, student_id: $user.id }
-						}),
-						fetchAITutorJson<any[]>('/practice', {
-							token: localStorage.token,
-							query: { group_id: selectedGroupId, student_id: $user.id }
-						})
-					]);
+					try {
+						const [rawHomeworkRows, practiceRows] = await Promise.all([
+							fetchAITutorJson<any[]>('/homework/', {
+								token: localStorage.token,
+								query: { group_id: selectedGroupId, student_id: $user.id }
+							}),
+							fetchAITutorJson<any[]>('/practice', {
+								token: localStorage.token,
+								query: { group_id: selectedGroupId, student_id: $user.id }
+							})
+						]);
 
 						// Filter homeworks by allowed workspace models (same logic as aitutordashboard)
 						// If workspace models haven't loaded yet, defer filtering to the reactive block
@@ -780,14 +781,21 @@
 						}))
 						.sort((a, b) => a.name.localeCompare(b.name));
 
-					return {
-						homeworkData: nextHomeworkData,
-						practiceAssignments: nextPracticeAssignments,
-						conceptsData: nextConceptsData,
-						followUpQuestions: nextFollowUpQuestions
-					};
-				}
-			});
+						return {
+							homeworkData: nextHomeworkData,
+							practiceAssignments: nextPracticeAssignments,
+							conceptsData: nextConceptsData,
+							followUpQuestions: nextFollowUpQuestions
+						};
+					} catch (error) {
+						// If user doesn't have access to this group, redirect them
+						if ((error as any).status === 403) {
+							await goto('/studentdashboard');
+							return { homeworkData: [], practiceAssignments: [], conceptsData: [], followUpQuestions: [] };
+						}
+						throw error;
+					}
+				});
 
 			if (requestId !== studentDashboardRequestId) return;
 			applyStudentDashboardSnapshot(snapshot);

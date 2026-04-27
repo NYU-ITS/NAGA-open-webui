@@ -62,7 +62,9 @@ export const fetchAITutor = async (
 	});
 
 	if (!response.ok) {
-		throw new Error(await parseAITutorError(response));
+		const error = new Error(await parseAITutorError(response)) as any;
+		error.status = response.status;
+		throw error;
 	}
 
 	return response;
