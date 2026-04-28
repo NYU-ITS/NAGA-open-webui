@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { Tooltip } from 'bits-ui';
+	import { makeOverflowCheck } from '$lib/utils/overflowCheck';
 	import { page } from '$app/stores';
 	import { aiTutorSelectedGroupId } from '$lib/stores';
 	import { aiTutorAllowedModelIds } from '$lib/stores/aiTutorWorkspaceModels';
@@ -46,20 +47,7 @@
 
 	// Overflow detection for table cells with truncate
 	let overflowStates: Record<string, boolean> = {};
-	function overflowCheck(node: HTMLElement, key: string) {
-		const check = () => {
-			overflowStates[key] = node.scrollWidth > node.clientWidth;
-			overflowStates = overflowStates;
-		};
-		const ro = new ResizeObserver(check);
-		ro.observe(node);
-		check();
-		return {
-			destroy() {
-				ro.disconnect();
-			}
-		};
-	}
+	const overflowCheck = makeOverflowCheck(() => overflowStates, (s) => { overflowStates = s; });
 
 	// Column resize (state resets on refresh)
 	let topicTableEl: HTMLTableElement;
@@ -1427,7 +1415,7 @@
 															class="inline-flex flex-shrink-0 items-center cursor-pointer text-[#57068C] transition-colors hover:text-[#3e0470] dark:text-purple-400 dark:hover:text-purple-300 select-none"
 															aria-label="View full question list"
 														>
-															<EllipsisHorizontal className="h-7 w-7" strokeWidth="2.5" />
+															<EllipsisHorizontal className="h-4 w-4" strokeWidth="2.5" />
 														</Tooltip.Trigger>
 														<Tooltip.Content
 															side="bottom"
@@ -1522,12 +1510,16 @@
 					{/each}
 					{#if topicAnalysisLoading}
 						<tr class="bg-white dark:bg-gray-900 text-xs">
-							<td colspan="4" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">Loading topic analysis...</td>
+							<td colspan="4" class="px-3 py-12 text-center text-gray-400 dark:text-gray-500">Loading topic analysis...</td>
 						</tr>
-					{:else if filteredTopicGroupsByHomework.length === 0}
-						<tr class="bg-white dark:bg-gray-900 text-xs">
-							<td colspan="4" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">{topicAnalysisEmptyMessage}</td>
-						</tr>
+						{:else if filteredTopicGroupsByHomework.length === 0}
+							{console.log('[topicanalysis] No topic analysis data')}
+							<tr class="bg-white dark:bg-gray-900 text-xs">
+								<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>—</span></td>
+								<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>—</span></td>
+								<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>—</span></td>
+								<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>—</span></td>
+							</tr>
 					{/if}
 				</tbody>
 			</table>

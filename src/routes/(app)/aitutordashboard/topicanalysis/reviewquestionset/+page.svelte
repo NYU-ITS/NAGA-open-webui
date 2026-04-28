@@ -25,11 +25,14 @@
 
 	import ChevronUp from '$lib/components/icons/ChevronUp.svelte';
 	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
+import { createColResize } from '$lib/utils/colResize';
 	import CustomDropdown from '$lib/components/CustomDropdown.svelte';
 
 
 	const AI_TUTOR_API_BASE = AI_TUTOR_API_BASE_URL;
 	const useFrontendTestingData = AI_TUTOR_FRONTEND_TESTING_MODE;
+let reviewTableEl: HTMLTableElement;
+const { colWidths: reviewColWidths, initColResize: initReviewColResize } = createColResize([35, 35, 30]);
 	const testToast = showAITutorTestToast;
 	const PRACTICE_QUESTION_SESSION_TTL_MS = 5 * 60 * 1000;
 	const LAST_AI_TUTOR_GROUP_STORAGE_KEY = 'ai_tutor_last_selected_group_id';
@@ -1631,7 +1634,7 @@
 	<div class="space-y-4">
 		<div>
 			<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200 flex items-center gap-2">
-				1.Practice Question Set
+				1. Practice Question Set
 			</h2>
 			<div class="mt-1 text-xs text-gray-900 dark:text-gray-100">
 				Generate or upload a question set. Download, edit, and re-upload as needed. The system standardizes all uploads with topics and answers.
@@ -1640,8 +1643,8 @@
 
 
 		<div class="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
-			<div class="scrollbar-hidden relative overflow-x-auto max-w-full rounded-sm pt-0.5">
-				<table class="w-full text-sm text-left text-gray-500 dark:text-gray-400 table-auto max-w-full rounded-sm">
+				<div class="scrollbar-hidden relative overflow-x-auto rounded-sm pt-0.5">
+				<table bind:this={reviewTableEl} class="w-full text-sm text-left text-gray-500 dark:text-gray-400 table-auto max-w-full rounded-sm">
 				<thead class="text-xs text-gray-700 uppercase bg-[#EEE6F3] dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5">
 					<tr>
 						<th scope="col" class="w-[18rem] px-3 py-1.5">Homework</th>
@@ -1654,17 +1657,17 @@
 						<tr class="bg-white dark:bg-gray-900 text-xs">
 							<td colspan="3" class="px-3 py-12 text-center text-gray-400 dark:text-gray-500">Loading practice question sets...</td>
 						</tr>
-					{:else if practiceQuestions.length === 0}
-						<tr class="bg-white dark:bg-gray-900 text-xs">
-							<td colspan="3" class="px-3 py-12 text-center text-gray-400 dark:text-gray-500">
-												{practiceQuestionsEmptyMessage}
-											</td>
-						</tr>
-					{:else}
+						{:else if practiceQuestions.length === 0}
+							{console.log('[reviewquestionset] No practice questions')}
+							<tr class="bg-white dark:bg-gray-900 text-xs">
+								<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>—</span></td>
+								<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>—</span></td>
+								<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>—</span></td>
+							</tr>
 						{#each practiceQuestions as practice}
 							<tr class="bg-white dark:bg-gray-900 dark:border-gray-850 text-xs border-t border-gray-100 dark:border-gray-850 hover:bg-gray-50 dark:hover:bg-gray-800 transition">
 								<td class="px-3 py-1.5 font-medium text-gray-900 dark:text-white">
-									<div class="max-w-[18rem] overflow-hidden whitespace-normal break-words leading-4 [display:-webkit-box] [-webkit-line-clamp:3] [-webkit-box-orient:vertical]">{getHomeworkModelName(practice.homeworkId ?? practice.homework)}</div>
+									<div class="max-w-[12rem] overflow-hidden whitespace-normal break-words leading-4 [display:-webkit-box] [-webkit-line-clamp:3] [-webkit-box-orient:vertical]">{getHomeworkModelName(practice.homeworkId ?? practice.homework)}</div>
 								</td>
 								<td class="px-3 py-1.5">
 									<div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-gray-700 dark:text-gray-300">
@@ -1767,7 +1770,7 @@
 			<div class="flex items-start justify-between gap-4">
 				<div>
 					<h2 class="text-xl font-semibold text-gray-900 dark:text-gray-100 flex items-center gap-2">
-						2.Questions
+						2. Questions
 					</h2>
 					<div class="mt-1 text-xs text-gray-900 dark:text-gray-100">
 						<div class="flex flex-wrap items-center gap-x-3">

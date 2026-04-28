@@ -214,8 +214,53 @@
 		});
 	}
 
-	function pasteQuestion(question: PracticeQuestion) {
-		prompt = question.question;
+	async function pasteQuestion(question: PracticeQuestion) {
+		console.log('[pasteQuestion] clicked, question:', question.question);
+		// 1. Copy to clipboard with fallback
+		let copied = false;
+		try {
+			if (navigator.clipboard && navigator.clipboard.writeText) {
+				await navigator.clipboard.writeText(question.question);
+				copied = true;
+				console.log('[pasteQuestion] navigator.clipboard succeeded');
+			}
+		} catch (err) {
+			console.warn('[pasteQuestion] Clipboard API failed:', err);
+		}
+		if (!copied) {
+			try {
+				const ta = document.createElement('textarea');
+				ta.value = question.question;
+				ta.style.cssText = 'position:fixed;top:-9999px;left:-9999px;';
+				document.body.appendChild(ta);
+				ta.focus();
+				ta.select();
+				copied = document.execCommand('copy');
+				document.body.removeChild(ta);
+				console.log('[pasteQuestion] execCommand result:', copied);
+			} catch (err2) {
+				console.warn('[pasteQuestion] execCommand copy failed:', err2);
+			}
+		}
+		if (copied) {
+			toast.success('Question copied to clipboard');
+		}
+
+		// 2. Append to existing prompt instead of replacing
+		console.log('[pasteQuestion] prompt before:', JSON.stringify(prompt));
+		if (prompt && prompt.trim()) {
+			prompt = prompt.trim() + '\n\n' + question.question;
+		} else {
+			prompt = question.question;
+		}
+		console.log('[pasteQuestion] prompt after:', JSON.stringify(prompt));
+
+		// 3. Focus the chat input so user can see the change
+		setTimeout(() => {
+			const input = document.getElementById('chat-input');
+			console.log('[pasteQuestion] chat-input element:', input);
+			input?.focus();
+		}, 50);
 	}
 
 	async function sendQuestion(question: PracticeQuestion) {
@@ -333,7 +378,7 @@
 										sideOffset={4}
 										class="z-50 rounded-md border border-gray-200 bg-white px-2 py-1 text-xs text-gray-700 shadow-lg dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300"
 										>
-										Copy&Paste
+										Copy & Append to Input
 									</Tooltip.Content>
 								</Tooltip.Root>
 								<button

@@ -18,6 +18,7 @@
 		loadWithAITutorSessionCache
 	} from '$lib/utils/aiTutorSessionCache';
 	import ChevronUp from '$lib/components/icons/ChevronUp.svelte';
+	import { createColResize } from '$lib/utils/colResize';
 	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
 	import Search from '$lib/components/icons/Search.svelte';
 	import EllipsisHorizontal from '$lib/components/icons/EllipsisHorizontal.svelte';
@@ -26,6 +27,7 @@
 	const useFrontendTestingData = AI_TUTOR_FRONTEND_TESTING_MODE;
 	const testToast = showAITutorTestToast;
 	const STUDENT_ANALYSIS_SESSION_TTL_MS = 5 * 60 * 1000;
+	const { colWidths, initColResize } = createColResize([16, 20, 16, 12, 20, 16]);
 	let lastSyncedGroupId = '';
 	const frontendTestingHomeworkModelNames = [
 		'Homework1-MATH-Code-Section-Semester',
@@ -657,57 +659,71 @@ $: isFilterActive = selectedHomework !== 'All' || search.trim() !== '';
 		<!-- Table Card Container -->
 		<div class="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
 			<div class="scrollbar-hidden relative overflow-x-auto whitespace-nowrap rounded-sm pt-0.5">
-				<table class="w-full table-auto rounded-sm text-left text-sm text-gray-500 dark:text-gray-400">
+				<table class="w-full table-auto text-left text-sm text-gray-500 dark:text-gray-400">
 				<thead class="-translate-y-0.5 bg-[#EEE6F3] text-xs uppercase text-gray-700 dark:bg-gray-850 dark:text-gray-400">
 					<tr>
-						<th scope="col" class="cursor-pointer select-none px-3 py-1.5" on:click={() => toggleSort('name')}>
+						<th scope="col" class="relative cursor-pointer select-none overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5" style="width: {$colWidths[0]}%" on:click={() => toggleSort('name')}>
 							<div class="flex items-center gap-1.5">
 								Student
 								{#if sortField === 'name'}
 									<span class="font-normal">
-										{#if sortOrder === 'asc'}<ChevronUp className="size-2" />{:else}<ChevronDown className="size-2" />{/if}
+										{#if sortOrder === 'asc'}<ChevronUp className="size-3" />{:else}<ChevronDown className="size-3" />{/if}
 									</span>
 								{:else}
-									<span class="invisible"><ChevronUp className="size-2" /></span>
+										<span class="invisible"><ChevronUp className="size-3" /></span>
 								{/if}
 							</div>
+							<span role="separator" aria-label="Resize column" class="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#57068C] dark:hover:bg-[#B588FF] z-10" on:mousedown|preventDefault={(e) => initColResize(e, 0)} />
 						</th>
-						<th scope="col" class="px-3 py-1.5 select-none">Email</th>
-						<th scope="col" class="w-[12rem] px-3 py-1.5 select-none">Homework</th>
-						<th scope="col" class="cursor-pointer select-none px-3 py-1.5" on:click={() => toggleSort('accuracy')}>
+						<th scope="col" class="relative overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 select-none" style="width: {$colWidths[1]}%">Email<span role="separator" aria-label="Resize column" class="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#57068C] dark:hover:bg-[#B588FF] z-10" on:mousedown|preventDefault={(e) => initColResize(e, 1)} /></th>
+						<th scope="col" class="relative overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 select-none" style="width: {$colWidths[2]}%">Homework<span role="separator" aria-label="Resize column" class="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#57068C] dark:hover:bg-[#B588FF] z-10" on:mousedown|preventDefault={(e) => initColResize(e, 2)} /></th>
+						<th scope="col" class="relative cursor-pointer select-none overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5" style="width: {$colWidths[3]}%" on:click={() => toggleSort('accuracy')}>
 							<div class="flex items-center gap-1.5">
 								AVG Accuracy (%)
 								{#if sortField === 'accuracy'}
 									<span class="font-normal">
-										{#if sortOrder === 'asc'}<ChevronUp className="size-2" />{:else}<ChevronDown className="size-2" />{/if}
+										{#if sortOrder === 'asc'}<ChevronUp className="size-3" />{:else}<ChevronDown className="size-3" />{/if}
 									</span>
 								{:else}
-									<span class="invisible"><ChevronUp className="size-2" /></span>
+										<span class="invisible"><ChevronUp className="size-3" /></span>
 								{/if}
 							</div>
+							<span role="separator" aria-label="Resize column" class="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#57068C] dark:hover:bg-[#B588FF] z-10" on:mousedown|preventDefault={(e) => initColResize(e, 3)} />
 						</th>
-						<th scope="col" class="px-3 py-1.5 select-none">Topics to be Improved</th>
-						<th scope="col" class="px-3 py-1.5 select-none">Action</th>
+						<th scope="col" class="relative overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 select-none" style="width: {$colWidths[4]}%">Topics to be Improved<span role="separator" aria-label="Resize column" class="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#57068C] dark:hover:bg-[#B588FF] z-10" on:mousedown|preventDefault={(e) => initColResize(e, 4)} /></th>
+						<th scope="col" class="relative overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 select-none" style="width: {$colWidths[5]}%">Action<span role="separator" aria-label="Resize column" class="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#57068C] dark:hover:bg-[#B588FF] z-10" on:mousedown|preventDefault={(e) => initColResize(e, 5)} /></th>
 					</tr>
 				</thead>
 				<tbody>
 					{#if !$aiTutorSelectedGroupId && !useFrontendTestingData}
+						{console.log('[studentanalysis] No group selected')}
 						<tr class="bg-white text-xs dark:bg-gray-900">
-							<td colspan="6" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">
-								Loading group selection...
-							</td>
+							<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>Not available</span></td>
+							<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>Not available</span></td>
+							<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>Not available</span></td>
+							<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>Not available</span></td>
+							<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>Not available</span></td>
+							<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>Not available</span></td>
 						</tr>
 					{:else if homeworkOptions.length === 0 && !useFrontendTestingData}
+						{console.log('[studentanalysis] No homeworks uploaded')}
 						<tr class="bg-white text-xs dark:bg-gray-900">
-							<td colspan="6" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">
-								No homework uploaded for this group yet.
-							</td>
+							<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>Not available</span></td>
+							<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>Not available</span></td>
+							<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>Not available</span></td>
+							<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>Not available</span></td>
+							<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>Not available</span></td>
+							<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>Not available</span></td>
 						</tr>
 					{:else if filteredAndSortedData.length === 0}
+						{console.log('[studentanalysis] Filtered data empty')}
 						<tr class="bg-white text-xs dark:bg-gray-900">
-							<td colspan="6" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">
-								{loading && !hasLoadedOnce ? 'Loading student analysis...' : studentAnalysisEmptyMessage}
-							</td>
+							<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>—</span></td>
+							<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>—</span></td>
+							<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>—</span></td>
+							<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>—</span></td>
+							<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>—</span></td>
+							<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>—</span></td>
 						</tr>
 					{:else}
 						{#each filteredAndSortedData as student}
@@ -718,9 +734,10 @@ $: isFilterActive = selectedHomework !== 'All' || search.trim() !== '';
 									<div class={homeworkModelNameCellClass}>{getHomeworkModelName(student.homeworkId)}</div>
 								</td>
 								{#if !student.hasAnalysis}
-									<td colspan="3" class="px-3 py-1 text-center text-gray-400 dark:text-gray-500">
-										The analysis of this student&apos;s homework hasn&apos;t been available
-									</td>
+									{console.log('[studentanalysis] No analysis for student:', student.name)}
+									<td class="px-3 py-1 text-center text-gray-400 dark:text-gray-500"><span class="text-sm">Not available</span></td>
+									<td class="px-3 py-1 text-center text-gray-400 dark:text-gray-500"><span class="text-sm">Not available</span></td>
+									<td class="px-3 py-1 text-gray-400 dark:text-gray-500"><span class="text-sm">Not available</span></td>
 								{:else}
 									<td class="px-3 py-1 text-gray-700 dark:text-gray-300">
 										{student.avgAccuracy.toFixed(1)}%
@@ -753,7 +770,7 @@ $: isFilterActive = selectedHomework !== 'All' || search.trim() !== '';
 										<!-- [Table Button: icon+name] Download Report -->
 										<button
 											type="button"
-											class="inline-flex items-center gap-1 rounded-full border border-gray-300 px-2.5 py-1 text-xs font-bold text-gray-600 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-600 dark:text-gray-400 dark:hover:bg-gray-800"
+										class="inline-flex items-center gap-1 rounded-full border border-[#57068C]/40 px-2.5 py-1 text-xs font-bold text-[#57068C] transition hover:bg-[#EEE6F3] disabled:cursor-not-allowed disabled:opacity-50 dark:border-purple-700 dark:text-purple-400 dark:hover:bg-purple-900/20"
 											on:click={() => downloadStudentReport(student)}
 										>
 											<svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5m0 0l5-5m-5 5V4" /></svg>

@@ -14,7 +14,8 @@
 		TESTING_AI_TUTOR
 	} from '$lib/constants';
 	import { aiTutorFrontendTestingErrorTypes } from '$lib/stores';
-import { DropdownMenu, Popover } from 'bits-ui';
+	import { DropdownMenu, Popover, Tooltip } from 'bits-ui';
+	import { makeOverflowCheck } from '$lib/utils/overflowCheck';
 	import { showAITutorTestToast } from '$lib/utils/aiTutorTesting';
 	import {
 		clearAITutorSessionCache,
@@ -26,6 +27,7 @@ import { DropdownMenu, Popover } from 'bits-ui';
 	import ChevronUp from '$lib/components/icons/ChevronUp.svelte';
 	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
 	import EllipsisHorizontal from '$lib/components/icons/EllipsisHorizontal.svelte';
+import { createColResize } from '$lib/utils/colResize';
 	import Pencil from '$lib/components/icons/Pencil.svelte';
 import ArrowPath from '$lib/components/icons/ArrowPath.svelte';
 import Hourglass from '$lib/components/icons/Hourglass.svelte';
@@ -50,6 +52,10 @@ import { flyAndScale } from '$lib/utils/transitions';
 	const testToast = showAITutorTestToast;
 	const CACHE_TTL_MS = 5 * 60 * 1000;
 	let lastSyncedGroupId = '';
+let hwTableEl: HTMLTableElement;
+const { colWidths: hwColWidths, initColResize: initHwColResize } = createColResize([16.666, 16.666, 16.666, 16.666, 16.666, 16.666]);
+let promptTableEl: HTMLTableElement;
+const { colWidths: promptColWidths, initColResize: initPromptColResize } = createColResize([30, 30, 20, 20]);
 
 	// ── Types ─────────────────────────────────────────────────────────────────
 	type HomeworkStat = {
@@ -122,7 +128,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 	let draftRows: DraftRow[] = [];
 	let _prevGroupIdForReset = '';
 	let _nextDraftUid = 0;
-	// 1.1.Error Type Configuration - Draft Mode
+	// 1.1. Error Type Configuration - Draft Mode
 	// original: from backend; draft: local modifications
 	let originalErrorTypeDefs: { type: string; color: string; description: string }[] = [];
 	let draftErrorTypeDefs: { type: string; color: string; description: string }[] = [];
@@ -2094,7 +2100,10 @@ import { flyAndScale } from '$lib/utils/transitions';
 	}
 
 	const homeworkModelNameCellClass =
-		'max-w-[14rem] overflow-hidden whitespace-normal break-words leading-4 [display:-webkit-box] [-webkit-line-clamp:3] [-webkit-box-orient:vertical]';
+		'max-w-[12rem] overflow-hidden whitespace-normal break-words leading-4 [display:-webkit-box] [-webkit-line-clamp:3] [-webkit-box-orient:vertical]';
+
+	let overflowStates: Record<string, boolean> = {};
+	const overflowCheck = makeOverflowCheck(() => overflowStates, (s) => { overflowStates = s; });
 
 	function getHomeworkModelName(homework: string) {
 		// homework name is now homework model name
@@ -2579,7 +2588,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 			>
 				<div>
 					<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200 flex items-center gap-2">
-						1.Error Type Configuration
+						1. Error Type Configuration
 					</h2>
 					<div class="text-xs text-gray-900 dark:text-gray-100">
 						You can have at most 4 error types
@@ -2795,7 +2804,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 			>
 				<div>
 					<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200 flex items-center gap-2">
-						2.Homework & Answer Files
+						2. Homework & Answer Files
 					</h2>
 					<div class="text-xs text-gray-900 dark:text-gray-100">
 						Upload the PDF files here before starting the analysis. Workspace model name must include "homework".
@@ -2812,7 +2821,7 @@ import { flyAndScale } from '$lib/utils/transitions';
 			{#if showHomeworkAnswerFiles}
 			<div class="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
 				<div
-					class="scrollbar-hidden relative overflow-x-auto max-w-full rounded-sm pt-0.5"
+					class="scrollbar-hidden relative overflow-x-auto rounded-sm pt-0.5"
 				>
 					<table
 						class="w-full text-sm text-left text-gray-500 dark:text-gray-400 rounded-sm"
@@ -2821,28 +2830,36 @@ import { flyAndScale } from '$lib/utils/transitions';
 							class="text-xs text-gray-700 uppercase bg-[#EEE6F3] dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5"
 						>
 								<tr>
-									<th class="w-[16.666%] px-3 py-1.5 select-none">Homework</th>
-									<th class="w-[16.666%] px-3 py-1.5 select-none">Homework PDF</th>
-									<th class="w-[16.666%] px-3 py-1.5 select-none">(Optional)Answer PDF</th>
-									<th class="w-[16.666%] px-3 py-1.5 select-none">Students Interacted</th>
-									<th class="w-[16.666%] px-3 py-1.5 select-none">Status</th>
-									<th class="w-[16.666%] px-3 py-1.5 select-none">Action</th>
+									<th scope="col" class="relative overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 select-none" style="width: {$hwColWidths[0]}%">Homework<span role="separator" aria-label="Resize column" class="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#57068C] dark:hover:bg-[#B588FF] z-10" on:mousedown|preventDefault={(e) => initHwColResize(e, hwTableEl, 0)} /></th>
+									<th scope="col" class="relative overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 select-none" style="width: {$hwColWidths[1]}%">Homework PDF<span role="separator" aria-label="Resize column" class="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#57068C] dark:hover:bg-[#B588FF] z-10" on:mousedown|preventDefault={(e) => initHwColResize(e, hwTableEl, 1)} /></th>
+									<th scope="col" class="relative overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 select-none" style="width: {$hwColWidths[2]}%">(Optional)Answer PDF<span role="separator" aria-label="Resize column" class="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#57068C] dark:hover:bg-[#B588FF] z-10" on:mousedown|preventDefault={(e) => initHwColResize(e, hwTableEl, 2)} /></th>
+									<th scope="col" class="relative overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 select-none" style="width: {$hwColWidths[3]}%">Students Interacted<span role="separator" aria-label="Resize column" class="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#57068C] dark:hover:bg-[#B588FF] z-10" on:mousedown|preventDefault={(e) => initHwColResize(e, hwTableEl, 3)} /></th>
+									<th scope="col" class="relative overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 select-none" style="width: {$hwColWidths[4]}%">Status<span role="separator" aria-label="Resize column" class="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#57068C] dark:hover:bg-[#B588FF] z-10" on:mousedown|preventDefault={(e) => initHwColResize(e, hwTableEl, 4)} /></th>
+									<th scope="col" class="relative overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 select-none" style="width: {$hwColWidths[5]}%">Action<span role="separator" aria-label="Resize column" class="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#57068C] dark:hover:bg-[#B588FF] z-10" on:mousedown|preventDefault={(e) => initHwColResize(e, hwTableEl, 5)} /></th>
 								</tr>
 						</thead>
 						<tbody>
-							{#if !$aiTutorSelectedGroupId && !useFrontendTestingData}
-								<tr class="bg-white dark:bg-gray-900 text-xs">
-									<td colspan="6" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">
-										Loading group selection...
-									</td>
-								</tr>
+								{#if !$aiTutorSelectedGroupId && !useFrontendTestingData}
+									{console.log('[instructorsetup] No group selected')}
+									<tr class="bg-white dark:bg-gray-900 text-xs">
+										<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>Not available</span></td>
+										<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>Not available</span></td>
+										<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>Not available</span></td>
+										<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>Not available</span></td>
+										<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>Not available</span></td>
+										<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>Not available</span></td>
+									</tr>
 							{:else}
-							{#if homeworkFileRows.length === 0}
-								<tr class="bg-white dark:bg-gray-900 text-xs">
-									<td colspan="6" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">
-										No homework models are found for this group.
-									</td>
-								</tr>
+								{#if homeworkFileRows.length === 0}
+									{console.log('[instructorsetup] No homework files')}
+									<tr class="bg-white dark:bg-gray-900 text-xs">
+										<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>—</span></td>
+										<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>—</span></td>
+										<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>—</span></td>
+										<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>—</span></td>
+										<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>—</span></td>
+										<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>—</span></td>
+									</tr>
 							{:else}
 								{#each homeworkFileRows as row, i (row.id)}
 									<tr
@@ -2893,7 +2910,33 @@ import { flyAndScale } from '$lib/utils/transitions';
 													{:else if getRowDocProcessing(row, 'question')}
 														<span class="text-xs text-gray-500 dark:text-gray-400">Processing PDF</span>
 													{:else if row.questionFileName}
-														<span class="text-xs {row.questionUploaded ? 'font-bold text-gray-900 dark:text-gray-100' : 'text-gray-500 dark:text-gray-400'}">{row.questionFileName}</span>
+												<div class="flex items-center gap-1.5 max-w-[12rem]">
+													<span
+														use:overflowCheck={`q-${row.id}`}
+														class="overflow-hidden whitespace-nowrap text-xs {row.questionUploaded ? 'font-bold text-gray-900 dark:text-gray-100' : 'text-gray-500 dark:text-gray-400'}"
+													>
+														{row.questionFileName}
+													</span>
+													{#if overflowStates[`q-${row.id}`]}
+														<Tooltip.Root openDelay={200}>
+															<Tooltip.Trigger
+																type="button"
+																class="inline-flex flex-shrink-0 items-center cursor-pointer text-[#57068C] transition-colors hover:text-[#3e0470] dark:text-purple-400 dark:hover:text-purple-300 select-none"
+																aria-label="View filename"
+															>
+																<EllipsisHorizontal className="h-3.5 w-3.5" strokeWidth="2.5" />
+															</Tooltip.Trigger>
+															<Tooltip.Content
+																side="bottom"
+																align="start"
+																sideOffset={4}
+																class="z-50 max-w-[20rem] rounded-lg border border-gray-200 bg-white p-3 text-xs text-gray-700 shadow-lg dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300"
+															>
+																<p class="whitespace-normal break-words leading-relaxed">{row.questionFileName}</p>
+															</Tooltip.Content>
+														</Tooltip.Root>
+													{/if}
+												</div>
 													{:else if row.questionUploaded}
 														<span class="text-xs font-bold text-gray-900">Uploaded</span>
 													{/if}
@@ -2938,7 +2981,33 @@ import { flyAndScale } from '$lib/utils/transitions';
 															{#if row.answerSource === 'ai_generated'}
 																<span class="text-xs font-bold text-gray-900 dark:text-gray-100">(Auto-Generated)</span>
 														{:else if row.answerFileName}
-															<span class="text-xs font-bold text-gray-900 dark:text-gray-100">{row.answerFileName}</span>
+													<div class="flex items-center gap-1.5 max-w-[12rem]">
+														<span
+															use:overflowCheck={`a-${row.id}`}
+															class="overflow-hidden whitespace-nowrap text-xs font-bold text-gray-900 dark:text-gray-100"
+														>
+															{row.answerFileName}
+														</span>
+														{#if overflowStates[`a-${row.id}`]}
+															<Tooltip.Root openDelay={200}>
+																<Tooltip.Trigger
+																	type="button"
+																	class="inline-flex flex-shrink-0 items-center cursor-pointer text-[#57068C] transition-colors hover:text-[#3e0470] dark:text-purple-400 dark:hover:text-purple-300 select-none"
+																	aria-label="View filename"
+																>
+																	<EllipsisHorizontal className="h-3.5 w-3.5" strokeWidth="2.5" />
+																</Tooltip.Trigger>
+																<Tooltip.Content
+																	side="bottom"
+																	align="start"
+																	sideOffset={4}
+																	class="z-50 max-w-[20rem] rounded-lg border border-gray-200 bg-white p-3 text-xs text-gray-700 shadow-lg dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300"
+																>
+																	<p class="whitespace-normal break-words leading-relaxed">{row.answerFileName}</p>
+																</Tooltip.Content>
+															</Tooltip.Root>
+														{/if}
+													</div>
 														{:else}
 															<span class="text-xs font-bold text-gray-900">Uploaded</span>
 														{/if}
@@ -3166,19 +3235,20 @@ import { flyAndScale } from '$lib/utils/transitions';
 		{#if showPromptConfiguration}
 		<div class="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
 			<div
-				class="scrollbar-hidden relative max-w-full overflow-x-auto whitespace-nowrap rounded-sm pt-0.5"
+				class="scrollbar-hidden relative overflow-x-auto rounded-sm pt-0.5"
 			>
 					<table
+						bind:this={promptTableEl}
 						class="max-w-full w-full table-auto rounded-sm text-left text-sm text-gray-500 dark:text-gray-400"
 					>
 						<thead
 							class="-translate-y-0.5 bg-[#EEE6F3] text-xs uppercase text-gray-700 dark:bg-gray-850 dark:text-gray-400"
 						>
 							<tr>
-								<th class="px-3 py-1.5 select-none">Prompt</th>
-								<th class="px-3 py-1.5 select-none">Used For</th>
-								<th class="px-3 py-1.5 select-none">Scope</th>
-								<th class="px-3 py-1.5 select-none">Action</th>
+								<th scope="col" class="relative overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 select-none" style="width: {$promptColWidths[0]}%">Prompt<span role="separator" aria-label="Resize column" class="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#57068C] dark:hover:bg-[#B588FF] z-10" on:mousedown|preventDefault={(e) => initPromptColResize(e, promptTableEl, 0)} /></th>
+								<th scope="col" class="relative overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 select-none" style="width: {$promptColWidths[1]}%">Used For<span role="separator" aria-label="Resize column" class="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#57068C] dark:hover:bg-[#B588FF] z-10" on:mousedown|preventDefault={(e) => initPromptColResize(e, promptTableEl, 1)} /></th>
+								<th scope="col" class="relative overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 select-none" style="width: {$promptColWidths[2]}%">Scope<span role="separator" aria-label="Resize column" class="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#57068C] dark:hover:bg-[#B588FF] z-10" on:mousedown|preventDefault={(e) => initPromptColResize(e, promptTableEl, 2)} /></th>
+								<th scope="col" class="relative overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 select-none" style="width: {$promptColWidths[3]}%">Action<span role="separator" aria-label="Resize column" class="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#57068C] dark:hover:bg-[#B588FF] z-10" on:mousedown|preventDefault={(e) => initPromptColResize(e, promptTableEl, 3)} /></th>
 							</tr>
 						</thead>
 						<tbody>

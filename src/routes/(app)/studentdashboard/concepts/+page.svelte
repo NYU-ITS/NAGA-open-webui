@@ -276,7 +276,7 @@
 						{#each followUpQuestions as item}
 							<tr class="hover:bg-gray-50 dark:hover:bg-gray-800 transition">
 								<td class="px-6 py-4 text-sm font-medium text-gray-900 dark:text-gray-100">
-									{item.homework}
+									<span class="max-w-[12rem] overflow-hidden whitespace-normal break-words leading-4 [display:-webkit-box] [-webkit-line-clamp:3] [-webkit-box-orient:vertical]">{item.homework}</span>
 								</td>
 								<td class="px-6 py-4 text-sm">
 									<span

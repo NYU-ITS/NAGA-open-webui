@@ -11,10 +11,17 @@
 	import { showAITutorTestToast } from '$lib/utils/aiTutorTesting';
 	import { loadWithAITutorSessionCache } from '$lib/utils/aiTutorSessionCache';
 	import EllipsisHorizontal from '$lib/components/icons/EllipsisHorizontal.svelte';
+import { makeOverflowCheck } from '$lib/utils/overflowCheck';
 
 	const testToast = showAITutorTestToast;
 	const useFrontendTestingData = AI_TUTOR_FRONTEND_TESTING_MODE;
 	const STUDENT_DASHBOARD_SESSION_TTL_MS = 5 * 60 * 1000;
+
+let overflowStates: Record<string, boolean> = {};
+const overflowCheck = makeOverflowCheck(
+	() => overflowStates,
+	(s) => { overflowStates = s; }
+);
 
 	type HomeworkSummaryRow = {
 		homework: string;
@@ -302,6 +309,7 @@
 	let hasLoadedStudentDashboardOnce = useFrontendTestingData;
 	let isDashboardLoading = false;
 	let dashboardLoadError: string | null = null;
+	let showStudentWorkflow = true;
 	let followUpQuestions = [
 		{ homework: 'Homework 1', status: 'Not Ready' },
 		{ homework: 'Homework 2', status: 'Not Ready' },
@@ -312,6 +320,8 @@
 		{ homework: 'Homework 7', status: 'Not Ready' },
 		{ homework: 'Homework 8', status: 'Not Ready' }
 	];
+	const homeworkModelNameCellClass =
+		'max-w-[12rem] overflow-hidden whitespace-normal break-words leading-4 [display:-webkit-box] [-webkit-line-clamp:3] [-webkit-box-orient:vertical]';
 	const placeholderConceptsData: ConceptRow[] = [
 		{
 			name: 'Linear Algebra',
@@ -860,6 +870,136 @@
 		</div>
 	{/if}
 
+	<!-- [Visual Guide: Student Workflow] -->
+	<div class="rounded-xl border-2 border-[#57068C]/30 bg-gradient-to-br from-[#57068C]/5 to-transparent p-4 dark:border-purple-500/20 dark:from-purple-500/10">
+		<button
+			type="button"
+			class="w-full flex items-center justify-between gap-2 mb-2"
+			on:click={() => showStudentWorkflow = !showStudentWorkflow}
+		>
+			<div class="flex flex-col items-center text-center flex-1">
+				<h3 class="text-lg font-bold text-gray-900 dark:text-gray-100">Homework & Homework Practice Workflow</h3>
+				<p class="mt-0.5 text-xs text-gray-600 dark:text-gray-400">Follow these 3 steps to complete your homework and practice</p>
+			</div>
+			<span class="text-gray-500 dark:text-gray-400">
+				{#if showStudentWorkflow}
+					<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-5 h-5"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 15.75l7.5-7.5 7.5 7.5" /></svg>
+				{:else}
+					<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-5 h-5"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" /></svg>
+				{/if}
+			</span>
+		</button>
+
+		{#if showStudentWorkflow}
+		<!-- Flow Diagram -->
+		<div class="flex items-center justify-between px-2 py-2">
+			<!-- Step 1 Node -->
+			<div class="flex flex-col items-center gap-1.5 min-h-[60px]">
+				<div class="flex items-center justify-center w-12 h-12 rounded-full border-3 border-[#57068C] bg-white dark:bg-gray-900">
+					<svg class="w-6 h-6 text-[#57068C]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+					</svg>
+				</div>
+				<p class="text-xs font-semibold text-gray-900 dark:text-gray-100 text-center">New Homework</p>
+			</div>
+
+			<!-- Arrow 1 -->
+			<div class="flex items-center gap-2 flex-1 mx-3">
+				<div class="flex-1 h-1 bg-gradient-to-r from-[#57068C]/40 to-[#57068C]/20 dark:from-purple-500/30 dark:to-purple-500/10"></div>
+				<svg class="w-5 h-5 text-[#57068C]/50 dark:text-purple-500/40 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+					<path fill-rule="evenodd" d="M10.293 3.293a1 1 0 011.414 0l6 6a1 1 0 010 1.414l-6 6a1 1 0 01-1.414-1.414L14.586 10l-4.293-4.293a1 1 0 010-1.414z" clip-rule="evenodd" />
+				</svg>
+			</div>
+
+			<!-- Step 2 Node -->
+			<div class="flex flex-col items-center gap-1.5 min-h-[60px]">
+				<div class="flex items-center justify-center w-12 h-12 rounded-full border-3 border-[#57068C] bg-white dark:bg-gray-900">
+					<svg class="w-6 h-6 text-[#57068C]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+					</svg>
+				</div>
+				<p class="text-xs font-semibold text-gray-900 dark:text-gray-100 text-center">Instructor Review</p>
+			</div>
+
+			<!-- Arrow 2 -->
+			<div class="flex items-center gap-2 flex-1 mx-3">
+				<svg class="w-5 h-5 text-[#57068C]/50 dark:text-purple-500/40 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+					<path fill-rule="evenodd" d="M10.293 3.293a1 1 0 011.414 0l6 6a1 1 0 010 1.414l-6 6a1 1 0 01-1.414-1.414L14.586 10l-4.293-4.293a1 1 0 010-1.414z" clip-rule="evenodd" />
+				</svg>
+				<div class="flex-1 h-1 bg-gradient-to-r from-[#57068C]/20 to-[#57068C]/40 dark:from-purple-500/10 dark:to-purple-500/30"></div>
+			</div>
+
+			<!-- Step 3 Node -->
+			<div class="flex flex-col items-center gap-1.5">
+				<div class="flex items-center justify-center w-12 h-12 rounded-full border-3 border-[#57068C] bg-white dark:bg-gray-900">
+					<svg class="w-6 h-6 text-[#57068C]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+					</svg>
+				</div>
+				<p class="text-xs font-semibold text-gray-900 dark:text-gray-100 text-center">Practice Homework</p>
+			</div>
+		</div>
+
+		<!-- Details -->
+		<div class="flex justify-between gap-4 pt-2 border-t border-gray-200 dark:border-gray-800">
+			<!-- Step 1 Details -->
+			<div class="space-y-2 pt-2">
+				<div class="flex items-center gap-2">
+					<div class="w-1 h-4 bg-[#57068C] rounded-full"></div>
+					<p class="text-xs font-bold text-gray-900 dark:text-gray-100">STEP 1: NEW HOMEWORK</p>
+				</div>
+				<ul class="space-y-2 text-sm text-gray-700 dark:text-gray-300">
+					<li class="flex items-start gap-2">
+						<span class="text-[#57068C] font-bold flex-shrink-0">→</span>
+						<span><strong>Finish by Asking AI</strong></span>
+					</li>
+					<li class="flex items-start gap-2">
+						<span class="text-[#57068C] font-bold flex-shrink-0">→</span>
+						<span>Do not skip procedures</span>
+					</li>
+				</ul>
+			</div>
+
+			<!-- Step 2 Details -->
+			<div class="space-y-2 pt-2">
+				<div class="flex items-center gap-2">
+					<div class="w-1 h-4 bg-[#57068C] rounded-full"></div>
+					<p class="text-xs font-bold text-gray-900 dark:text-gray-100">STEP 2: INSTRUCTOR REVIEW</p>
+				</div>
+				<ul class="space-y-2 text-sm text-gray-700 dark:text-gray-300">
+					<li class="flex items-start gap-2">
+						<span class="text-[#57068C] font-bold flex-shrink-0">→</span>
+						<span><strong>Record process</strong></span>
+					</li>
+					<li class="flex items-start gap-2">
+						<span class="text-[#57068C] font-bold flex-shrink-0">→</span>
+						<span>Analyze weakpoints</span>
+					</li>
+				</ul>
+			</div>
+
+			<!-- Step 3 Details -->
+			<div class="space-y-2 pt-2 h-full flex flex-col">
+				<div class="flex items-center gap-2">
+					<div class="w-1 h-4 bg-[#57068C] rounded-full"></div>
+					<p class="text-xs font-bold text-gray-900 dark:text-gray-100">STEP 3: PRACTICE HOMEWORK</p>
+				</div>
+				<ul class="space-y-2 text-sm text-gray-700 dark:text-gray-300">
+					<li class="flex items-start gap-2">
+						<span class="text-[#57068C] font-bold flex-shrink-0">→</span>
+						<span>New Practice Question will come out when instructor finishes reviewing</span>
+					</li>
+					<li class="flex items-start gap-2">
+						<span class="text-[#57068C] font-bold flex-shrink-0">→</span>
+						<span><strong>Finish by asking AI</strong></span>
+					</li>
+				</ul>
+			</div>
+		</div>
+		{/if}
+	</div>
+
 	<div class="space-y-4">
 		<div>
 			<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200 flex items-center gap-2">
@@ -872,13 +1012,13 @@
 		</div>
 
 		<div class="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
-			<div class="scrollbar-hidden relative overflow-x-auto max-w-full rounded-sm pt-0.5">
-				<table class="w-full text-sm text-left text-gray-500 dark:text-gray-400 table-auto max-w-full rounded-sm">
+			<div class="scrollbar-hidden relative overflow-x-auto rounded-sm pt-0.5">
+				<table class="w-full text-sm text-left text-gray-500 dark:text-gray-400 table-auto rounded-sm">
 					<thead class="text-xs text-gray-700 uppercase bg-[#EEE6F3] dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5">
 						<tr>
-							<th class="min-w-[140px] overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-left font-semibold">Homework Mastery</th>
-							<th class="overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-left font-semibold">Topic</th>
-							<th class="min-w-[120px] overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-left font-semibold">Action</th>
+							<th scope="col" class="min-w-[140px] overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-left font-semibold">Homework Mastery</th>
+							<th scope="col" class="overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-left font-semibold">Topic</th>
+							<th scope="col" class="min-w-[120px] overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-left font-semibold">Action</th>
 						</tr>
 					</thead>
 					<tbody>
@@ -887,36 +1027,42 @@
 									class="border-t border-gray-100 bg-white transition hover:bg-gray-50 dark:border-gray-850 dark:bg-gray-900 dark:hover:bg-gray-800 cursor-pointer"
 									on:click={() => startPracticeAssignment(item)}
 								>
-									<td class="min-w-[140px] px-3 py-1.5 font-medium text-gray-900 dark:text-gray-100">{item.homeworkLabel}</td>
+									<td class="min-w-[140px] px-3 py-1.5 font-medium text-gray-900 dark:text-gray-100"><span class="{homeworkModelNameCellClass}">{item.homeworkLabel}</span></td>
 									{#if item.status === 'Ready'}
 										<td class="px-3 py-1.5">
 											{#if getPracticeTopics(item.topic).length > 0}
 												{@const topicList = getPracticeTopics(item.topic)}
-												<div class="inline-flex max-w-[26rem] items-center gap-1 align-middle">
-													<span class="truncate text-sm text-gray-700 dark:text-gray-300">
+												{@const topicKey = `practice-${item.id}-topics`}
+												<div class="inline-flex max-w-[12rem] items-center gap-1 align-middle">
+													<span
+														use:overflowCheck={topicKey}
+														class="overflow-hidden whitespace-nowrap text-sm text-gray-700 dark:text-gray-300"
+													>
 														{topicList.join(', ')}
 													</span>
-													<Tooltip.Root openDelay={200}>
-														<Tooltip.Trigger
-															type="button"
-															class="inline-flex items-center text-gray-400 transition-colors hover:text-gray-500 dark:text-gray-500 dark:hover:text-gray-400"
-															aria-label="View full topics list"
-														>
-															<EllipsisHorizontal className="h-4 w-4" />
-														</Tooltip.Trigger>
-														<Tooltip.Content
-															side="top"
-															align="start"
-															sideOffset={6}
-															class="z-50 max-w-[20rem] rounded-lg border border-gray-200 bg-white p-3 text-xs text-gray-700 shadow-lg dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300"
-														>
-															<p class="whitespace-normal break-words leading-relaxed">{topicList.join(', ')}</p>
-														</Tooltip.Content>
-													</Tooltip.Root>
+													{#if overflowStates[topicKey]}
+														<Tooltip.Root openDelay={200}>
+															<Tooltip.Trigger
+																type="button"
+																class="inline-flex flex-shrink-0 items-center cursor-pointer text-[#57068C] transition-colors hover:text-[#3e0470] dark:text-purple-400 dark:hover:text-purple-300 select-none"
+																aria-label="View full topics list"
+															>
+																<EllipsisHorizontal className="h-4 w-4" strokeWidth="2.5" />
+															</Tooltip.Trigger>
+															<Tooltip.Content
+																side="top"
+																align="start"
+																sideOffset={6}
+																class="z-50 max-w-[20rem] rounded-lg border border-gray-200 bg-white p-3 text-xs text-gray-700 shadow-lg dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300"
+															>
+																<p class="whitespace-normal break-words leading-relaxed">{topicList.join(', ')}</p>
+															</Tooltip.Content>
+														</Tooltip.Root>
+													{/if}
 												</div>
-											{:else}
+												{:else}
 												<span class="text-sm text-gray-400 dark:text-gray-500">—</span>
-											{/if}
+												{/if}
 										</td>
 										<td class="px-3 py-1.5">
 											<button
@@ -927,11 +1073,11 @@
 											</button>
 										</td>
 									{:else}
-										<td
-											colspan="2"
-											class="px-3 py-1.5 text-center text-xs text-gray-400 dark:text-gray-500"
-										>
-											This homework&apos;s analysis has not been available.
+										<td class="px-3 py-1.5">
+											<span class="text-xs text-gray-400 dark:text-gray-500">—</span>
+										</td>
+										<td class="px-3 py-1.5">
+											<span class="text-xs text-gray-400 dark:text-gray-500">—</span>
 										</td>
 									{/if}
 								</tr>
@@ -971,17 +1117,17 @@
 
 
 		<div class="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
-			<div class="scrollbar-hidden relative overflow-x-auto max-w-full rounded-sm pt-0.5">
-				<table class="w-full text-sm text-left text-gray-500 dark:text-gray-400 table-auto max-w-full rounded-sm">
+			<div class="scrollbar-hidden relative overflow-x-auto rounded-sm pt-0.5">
+				<table class="w-full text-sm text-left text-gray-500 dark:text-gray-400 table-auto rounded-sm">
 					<thead class="text-xs text-gray-700 uppercase bg-[#EEE6F3] dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5">
 						<tr>
-							<th class="min-w-[140px] overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-left font-semibold">Homework</th>
-							<th class="overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-left font-semibold">Mastered Topics</th>
-							<th class="overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-left font-semibold">Need More Practice</th>
-							<th class="overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-center font-semibold whitespace-nowrap w-[5rem]">Total</th>
-							<th class="overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-center font-semibold whitespace-nowrap w-[5rem]">Solved</th>
-							<th class="overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-center font-semibold whitespace-nowrap w-[5rem]">Attempted</th>
-							<th class="overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-center font-semibold whitespace-nowrap w-[5rem]">Errors</th>
+							<th scope="col" class="min-w-[140px] overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-left font-semibold">Homework</th>
+							<th scope="col" class="overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-left font-semibold">Mastered Topics</th>
+							<th scope="col" class="overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-left font-semibold">Need More Practice</th>
+							<th scope="col" class="overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-center font-semibold whitespace-nowrap w-[5rem]">Total</th>
+							<th scope="col" class="overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-center font-semibold whitespace-nowrap w-[5rem]">Solved</th>
+							<th scope="col" class="overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-center font-semibold whitespace-nowrap w-[5rem]">Attempted</th>
+							<th scope="col" class="overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-center font-semibold whitespace-nowrap w-[5rem]">Errors</th>
 						</tr>
 					</thead>
 					<tbody>
@@ -990,71 +1136,95 @@
 								class="border-t border-gray-100 bg-white transition hover:bg-gray-50 dark:border-gray-850 dark:bg-gray-900 dark:hover:bg-gray-800"
 							>
 								<td class="min-w-[140px] px-3 py-1.5 font-medium text-gray-900 dark:text-gray-100">
-									{hw.homework}
+									<span class="{homeworkModelNameCellClass}">{hw.homework}</span>
 								</td>
 								{#if hw.notStarted}
-									<td
-										colspan="6"
-										class="px-3 py-1.5 text-center text-xs text-gray-400 dark:text-gray-500"
-									>
-										This homework&apos;s analysis has not been available.
+									<td class="px-3 py-1.5">
+										<span class="text-xs text-gray-400 dark:text-gray-500">—</span>
+									</td>
+									<td class="px-3 py-1.5">
+										<span class="text-xs text-gray-400 dark:text-gray-500">—</span>
+									</td>
+									<td class="px-3 py-1.5 text-center">
+										<span class="text-xs text-gray-400 dark:text-gray-500">—</span>
+									</td>
+									<td class="px-3 py-1.5 text-center">
+										<span class="text-xs text-gray-400 dark:text-gray-500">—</span>
+									</td>
+									<td class="px-3 py-1.5 text-center">
+										<span class="text-xs text-gray-400 dark:text-gray-500">—</span>
+									</td>
+									<td class="px-3 py-1.5 text-center">
+										<span class="text-xs text-gray-400 dark:text-gray-500">—</span>
 									</td>
 									{:else}
 										<td class="px-3 py-1.5">
 											{#if hw.masteredTopics.length > 0}
-												<div class="inline-flex max-w-[26rem] items-center gap-1 align-middle">
-													<span class="truncate text-sm text-gray-700 dark:text-gray-300">
+												{@const masteredKey = `hw-${hw.homework}-mastered`}
+												<div class="inline-flex max-w-[12rem] items-center gap-1 align-middle">
+													<span
+														use:overflowCheck={masteredKey}
+														class="overflow-hidden whitespace-nowrap text-sm text-gray-700 dark:text-gray-300"
+													>
 														{hw.masteredTopics.join(', ')}
 													</span>
-													<Tooltip.Root openDelay={200}>
-														<Tooltip.Trigger
-															type="button"
-															class="inline-flex items-center text-gray-400 transition-colors hover:text-gray-500 dark:text-gray-500 dark:hover:text-gray-400"
-															aria-label="View full topics list"
-														>
-															<EllipsisHorizontal className="h-4 w-4" />
-														</Tooltip.Trigger>
-														<Tooltip.Content
-															side="top"
-															align="start"
-															sideOffset={6}
-															class="z-50 max-w-[20rem] rounded-lg border border-gray-200 bg-white p-3 text-xs text-gray-700 shadow-lg dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300"
-														>
-															<p class="whitespace-normal break-words leading-relaxed">{hw.masteredTopics.join(', ')}</p>
-														</Tooltip.Content>
-													</Tooltip.Root>
+													{#if overflowStates[masteredKey]}
+														<Tooltip.Root openDelay={200}>
+															<Tooltip.Trigger
+																type="button"
+																class="inline-flex flex-shrink-0 items-center cursor-pointer text-[#57068C] transition-colors hover:text-[#3e0470] dark:text-purple-400 dark:hover:text-purple-300 select-none"
+																aria-label="View full topics list"
+															>
+																<EllipsisHorizontal className="h-4 w-4" strokeWidth="2.5" />
+															</Tooltip.Trigger>
+															<Tooltip.Content
+																side="top"
+																align="start"
+																sideOffset={6}
+																class="z-50 max-w-[20rem] rounded-lg border border-gray-200 bg-white p-3 text-xs text-gray-700 shadow-lg dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300"
+															>
+																<p class="whitespace-normal break-words leading-relaxed">{hw.masteredTopics.join(', ')}</p>
+															</Tooltip.Content>
+														</Tooltip.Root>
+													{/if}
 												</div>
-											{:else}
+												{:else}
 												<span class="text-sm text-gray-400 dark:text-gray-500">—</span>
-											{/if}
+												{/if}
 										</td>
 										<td class="px-3 py-1.5">
 											{#if hw.needMorePractice.length > 0}
-												<div class="inline-flex max-w-[26rem] items-center gap-1 align-middle">
-													<span class="truncate text-sm text-gray-700 dark:text-gray-300">
+												{@const practiceKey = `hw-${hw.homework}-practice`}
+												<div class="inline-flex max-w-[12rem] items-center gap-1 align-middle">
+													<span
+														use:overflowCheck={practiceKey}
+														class="overflow-hidden whitespace-nowrap text-sm text-gray-700 dark:text-gray-300"
+													>
 														{hw.needMorePractice.join(', ')}
 													</span>
-													<Tooltip.Root openDelay={200}>
-														<Tooltip.Trigger
-															type="button"
-															class="inline-flex items-center text-gray-400 transition-colors hover:text-gray-500 dark:text-gray-500 dark:hover:text-gray-400"
-															aria-label="View full topics list"
-														>
-															<EllipsisHorizontal className="h-4 w-4" />
-														</Tooltip.Trigger>
-														<Tooltip.Content
-															side="top"
-															align="start"
-															sideOffset={6}
-															class="z-50 max-w-[20rem] rounded-lg border border-gray-200 bg-white p-3 text-xs text-gray-700 shadow-lg dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300"
-														>
-															<p class="whitespace-normal break-words leading-relaxed">{hw.needMorePractice.join(', ')}</p>
-														</Tooltip.Content>
-													</Tooltip.Root>
+													{#if overflowStates[practiceKey]}
+														<Tooltip.Root openDelay={200}>
+															<Tooltip.Trigger
+																type="button"
+																class="inline-flex flex-shrink-0 items-center cursor-pointer text-[#57068C] transition-colors hover:text-[#3e0470] dark:text-purple-400 dark:hover:text-purple-300 select-none"
+																aria-label="View full topics list"
+															>
+																<EllipsisHorizontal className="h-4 w-4" strokeWidth="2.5" />
+															</Tooltip.Trigger>
+															<Tooltip.Content
+																side="top"
+																align="start"
+																sideOffset={6}
+																class="z-50 max-w-[20rem] rounded-lg border border-gray-200 bg-white p-3 text-xs text-gray-700 shadow-lg dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300"
+															>
+																<p class="whitespace-normal break-words leading-relaxed">{hw.needMorePractice.join(', ')}</p>
+															</Tooltip.Content>
+														</Tooltip.Root>
+													{/if}
 												</div>
-											{:else}
+												{:else}
 												<span class="text-sm text-gray-400 dark:text-gray-500">—</span>
-											{/if}
+												{/if}
 									</td>
 									<td class="px-3 py-1.5 text-center text-gray-900 dark:text-gray-100">
 										{hw.totalCount}
@@ -1071,13 +1241,17 @@
 								{/if}
 							</tr>
 						{/each}
-						{#if filteredHomeworkData.length === 0}
-							<tr>
-								<td colspan="6" class="px-3 py-12 text-center text-xs text-gray-400 dark:text-gray-500">
-									No homework matches the current homework/topic filters.
-								</td>
-							</tr>
-						{/if}
+								{#if filteredHomeworkData.length === 0}
+									<tr>
+										<td class="px-3 py-12 text-center text-xs text-gray-400 dark:text-gray-500"><span>—</span></td>
+										<td class="px-3 py-12 text-center text-xs text-gray-400 dark:text-gray-500"><span>—</span></td>
+										<td class="px-3 py-12 text-center text-xs text-gray-400 dark:text-gray-500"><span>—</span></td>
+										<td class="px-3 py-12 text-center text-xs text-gray-400 dark:text-gray-500"><span>—</span></td>
+										<td class="px-3 py-12 text-center text-xs text-gray-400 dark:text-gray-500"><span>—</span></td>
+										<td class="px-3 py-12 text-center text-xs text-gray-400 dark:text-gray-500"><span>—</span></td>
+										<td class="px-3 py-12 text-center text-xs text-gray-400 dark:text-gray-500"><span>—</span></td>
+									</tr>
+								{/if}
 					</tbody>
 				</table>
 			</div>
@@ -1088,12 +1262,12 @@
 		<div class="space-y-3">
 			<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Follow Up Questions</h2>
 			<div class="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
-				<div class="scrollbar-hidden relative overflow-x-auto max-w-full rounded-sm pt-0.5">
-					<table class="w-full text-sm text-left text-gray-500 dark:text-gray-400 table-auto max-w-full rounded-sm">
+				<div class="scrollbar-hidden relative overflow-x-auto rounded-sm pt-0.5">
+					<table class="w-full text-sm text-left text-gray-500 dark:text-gray-400 table-auto rounded-sm">
 						<thead class="text-xs text-gray-700 uppercase bg-[#EEE6F3] dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5">
 							<tr>
-								<th class="min-w-[140px] overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-left font-semibold">Homework</th>
-								<th class="overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-left font-semibold">Status</th>
+								<th scope="col" class="min-w-[140px] overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-left font-semibold">Homework</th>
+								<th scope="col" class="overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-left font-semibold">Status</th>
 							</tr>
 						</thead>
 						<tbody>
@@ -1102,7 +1276,7 @@
 									class="border-t border-gray-100 bg-white transition hover:bg-gray-50 dark:border-gray-850 dark:bg-gray-900 dark:hover:bg-gray-800"
 								>
 									<td class="min-w-[140px] px-3 py-1.5 font-medium text-gray-900 dark:text-gray-100">
-										{item.homework}
+										<span class="{homeworkModelNameCellClass}">{item.homework}</span>
 									</td>
 									<td class="px-3 py-1.5">
 										<span
@@ -1115,13 +1289,12 @@
 									</td>
 								</tr>
 							{/each}
-							{#if followUpQuestions.length === 0}
-								<tr>
-									<td colspan="2" class="px-3 py-12 text-center text-xs text-gray-400 dark:text-gray-500">
-										No follow-up questions available.
-									</td>
-								</tr>
-							{/if}
+								{#if followUpQuestions.length === 0}
+									<tr>
+										<td class="px-3 py-12 text-center text-xs text-gray-400 dark:text-gray-500"><span>—</span></td>
+										<td class="px-3 py-12 text-center text-xs text-gray-400 dark:text-gray-500"><span>—</span></td>
+									</tr>
+								{/if}
 						</tbody>
 					</table>
 				</div>

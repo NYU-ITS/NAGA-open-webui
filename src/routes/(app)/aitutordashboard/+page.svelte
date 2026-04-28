@@ -19,8 +19,11 @@
 	} from '$lib/utils/aiTutorSessionCache';
 	import ChevronUp from '$lib/components/icons/ChevronUp.svelte';
 	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
+import { createColResize } from '$lib/utils/colResize';
 
 	const AI_TUTOR_API_BASE = AI_TUTOR_API_BASE_URL;
+let mainTableEl: HTMLTableElement;
+const { colWidths: mainColWidths, initColResize: initMainColResize } = createColResize([24, 16, 20, 12, 14, 14]);
 	const frontendTestingHomeworkModelNames = [
 		'Homework1-MATH-Code-Section-Semester',
 		'Homework2-MATH-Code-Section-Semester',
@@ -1302,7 +1305,7 @@ let runStep = '';
 type AnalysisRecord = { contents: string; startedAt: string; completedAt: string | null; failed: boolean };
 let analysisHistory: AnalysisRecord[] = [];
 const homeworkModelNameCellClass =
-	'whitespace-normal break-words leading-4';
+	'max-w-[12rem] overflow-hidden whitespace-normal break-words leading-4 [display:-webkit-box] [-webkit-line-clamp:3] [-webkit-box-orient:vertical]';
 $: latestCompletedRun = analysisHistory.find((record) => !!record.completedAt && !record.failed) ?? null;
 $: lastRunStatusClass = latestCompletedRun ? 'bg-green-500' : 'bg-yellow-500';
 
@@ -1646,8 +1649,8 @@ async function runAnalysis() {
 		<h2 class="text-2xl font-semibold text-gray-800 dark:text-gray-200">Statistics</h2>
 
 		<div class="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
-			<div class="scrollbar-hidden relative whitespace-nowrap overflow-x-auto max-w-full rounded-sm pt-0.5">
-				<table class="w-full text-sm text-left text-gray-500 dark:text-gray-400 table-auto max-w-full rounded-sm">
+			<div class="scrollbar-hidden relative overflow-x-auto rounded-sm pt-0.5">
+				<table bind:this={mainTableEl} class="w-full text-sm text-left text-gray-500 dark:text-gray-400 table-auto max-w-full rounded-sm">
 				<thead class="text-xs text-gray-700 uppercase bg-[#EEE6F3] dark:bg-gray-850 dark:text-gray-400 -translate-y-0.5">
 					<tr>
 						{#each [
@@ -1657,28 +1660,33 @@ async function runAnalysis() {
 							{ key: 'avgAttempted',   label: 'Avg Attempted', sortable: true },
 							{ key: 'avgSolved',      label: 'Avg Solved', sortable: true },
 							{ key: 'avgErrors',      label: 'Avg Errors', sortable: true }
-						] as col}
-							<th scope="col" class="px-3 py-1.5 select-none {col.key === 'homework' ? 'w-[24rem]' : col.key === null ? 'w-[10rem]' : 'w-[5rem]'} {col.sortable ? 'cursor-pointer' : ''}" on:click={col.sortable ? () => setSortKey(col.key) : undefined}>
+						] as col, i}
+							<th scope="col" class="relative overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 select-none {col.sortable ? 'cursor-pointer' : ''}" style="width: {$mainColWidths[i]}%" on:click={col.sortable ? () => setSortKey(col.key) : undefined}>
 								<div class="flex gap-1.5 items-center">
 									{col.label}
 									{#if col.sortable && sortKey === col.key}
 										<span class="font-normal">
-											{#if sortOrder === 'asc'}<ChevronUp className="size-2" />{:else}<ChevronDown className="size-2" />{/if}
+											{#if sortOrder === 'asc'}<ChevronUp className="size-3" />{:else}<ChevronDown className="size-3" />{/if}
 										</span>
 									{:else}
-										<span class="invisible"><ChevronUp className="size-2" /></span>
+										<span class="invisible"><ChevronUp className="size-3" /></span>
 									{/if}
 								</div>
+								<span role="separator" aria-label="Resize column" class="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#57068C] dark:hover:bg-[#B588FF] z-10" on:mousedown|preventDefault={(e) => initMainColResize(e, mainTableEl, i)} />
 							</th>
 						{/each}
 					</tr>
 				</thead>
 				<tbody>
 					{#if sortedStats.length === 0}
+						{console.log('[dashboard] Statistics table empty')}
 						<tr class="bg-white dark:bg-gray-900 text-xs">
-							<td colspan="6" class="px-3 py-6 text-center text-gray-400 dark:text-gray-500">
-								No data available
-							</td>
+							<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>—</span></td>
+							<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>—</span></td>
+							<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>—</span></td>
+							<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>—</span></td>
+							<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>—</span></td>
+							<td class="px-3 py-12 text-center text-gray-400 dark:text-gray-500"><span>—</span></td>
 						</tr>
 					{:else}
 						{#each sortedStats as stat}
