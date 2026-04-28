@@ -1114,8 +1114,9 @@ import { flyAndScale } from '$lib/utils/transitions';
 							}))
 						: [];
 					const excludedModels: { name: string; reason: string }[] = [];
+					const homeworkNamePattern = /(homework|hw\s*#\s*\d+|hw[-_]\s*#?\s*\d+|hw\d+)/i;
 					const result = allMapped.filter((model: { id: string; name: string }) => {
-						if (!(model.name ?? model.id).toLowerCase().includes('homework')) {
+						if (!homeworkNamePattern.test(model.name ?? model.id)) {
 							excludedModels.push({ name: model.name ?? model.id, reason: 'name missing homework' });
 							return false;
 						}
