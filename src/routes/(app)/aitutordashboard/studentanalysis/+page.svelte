@@ -127,7 +127,8 @@
 			homeworkId: frontendTestingHomeworkModelNames[0],
 			avgAccuracy: 92.3,
 			topicsToImprove: 'Limit Definition',
-			performanceSummary: 'Attempted 14/15, solved 13, errors 1.'
+			performanceSummary: 'Attempted 14/15, solved 13, errors 1.',
+			hasAnalysis: true
 		},
 		{
 			id: 'analysis-2',
@@ -137,7 +138,8 @@
 			homeworkId: frontendTestingHomeworkModelNames[1],
 			avgAccuracy: 76.5,
 			topicsToImprove: 'Integration by Parts, Factoring',
-			performanceSummary: 'Attempted 12/15, solved 10, errors 2.'
+			performanceSummary: 'Attempted 12/15, solved 10, errors 2.',
+			hasAnalysis: true
 		},
 		{
 			id: 'analysis-3',
@@ -147,7 +149,8 @@
 			homeworkId: frontendTestingHomeworkModelNames[2],
 			avgAccuracy: 84.6,
 			topicsToImprove: 'Trigonometric Identities',
-			performanceSummary: 'Attempted 13/15, solved 11, errors 2.'
+			performanceSummary: 'Attempted 13/15, solved 11, errors 2.',
+			hasAnalysis: true
 		},
 		{
 			id: 'analysis-4',
@@ -157,7 +160,8 @@
 			homeworkId: frontendTestingHomeworkModelNames[3],
 			avgAccuracy: 68.8,
 			topicsToImprove: 'Trigonometric Identities, Limit Definition',
-			performanceSummary: 'Attempted 11/16, solved 9, errors 2.'
+			performanceSummary: 'Attempted 11/16, solved 9, errors 2.',
+			hasAnalysis: true
 		}
 	];
 
@@ -733,14 +737,13 @@ $: isFilterActive = selectedHomework !== 'All' || search.trim() !== '';
 								<td class="px-3 py-1 text-gray-700 dark:text-gray-300">
 									<div class={homeworkModelNameCellClass}>{getHomeworkModelName(student.homeworkId)}</div>
 								</td>
-								{#if !student.hasAnalysis}
-									{console.log('[studentanalysis] No analysis for student:', student.name)}
-									<td class="px-3 py-1 text-center text-gray-400 dark:text-gray-500"><span class="text-sm">Not available</span></td>
-									<td class="px-3 py-1 text-center text-gray-400 dark:text-gray-500"><span class="text-sm">Not available</span></td>
-									<td class="px-3 py-1 text-gray-400 dark:text-gray-500"><span class="text-sm">Not available</span></td>
+								{#if !student.hasAnalysis || student.avgAccuracy == null}
+									<td colspan={3} class="px-3 py-1 text-left text-gray-400 dark:text-gray-500">
+										This field of analysis has not been available
+									</td>
 								{:else}
 									<td class="px-3 py-1 text-gray-700 dark:text-gray-300">
-										{student.avgAccuracy.toFixed(1)}%
+										{student.avgAccuracy?.toFixed(1) ?? '—'}%
 									</td>
 									<td class="px-3 py-1 text-gray-700 dark:text-gray-300">
 										<div class="inline-flex max-w-[16rem] items-center gap-1 align-middle">
