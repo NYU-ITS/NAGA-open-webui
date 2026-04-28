@@ -43,8 +43,7 @@ export async function loadWorkspaceModels(token: string): Promise<WorkspaceModel
 				user_id: m.user_id
 			}));
 		const excludedModels: { name: string; reason: string }[] = [];
-		const homeworkNamePattern =
-			/(homework|hw\s*#\s*\d+|hw[-_]\s*#?\s*\d+|hw\d+)/i;
+			const homeworkNamePattern = /(homework|hw(?:\s*#\s*|[-_]\s*#?\s*|\s+)?\d+)/i;
 		const models = allModels.filter((model: WorkspaceModel) => {
 			const modelName = model.name ?? model.id;
 			if (model.base_model_id == null) {

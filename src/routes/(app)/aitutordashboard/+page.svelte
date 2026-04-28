@@ -637,7 +637,7 @@ async function loadModels() {
 				}))
 			: [];
 		const excludedModels: { name: string; reason: string }[] = [];
-		const homeworkNamePattern = /(homework|hw\s*#\s*\d+|hw[-_]\s*#?\s*\d+|hw\d+)/i;
+			const homeworkNamePattern = /(homework|hw(?:\s*#\s*|[-_]\s*#?\s*|\s+)?\d+)/i;
 		availableModels = allMappedModels.filter((model) => {
 			if (model.base_model_id == null) {
 				excludedModels.push({ name: model.name ?? model.id, reason: 'no base_model_id' });
