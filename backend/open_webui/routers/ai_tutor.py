@@ -134,43 +134,6 @@ async def proxy_ai_tutor_request(request: Request, path: str, _user=Depends(get_
                 detail="You do not have access to this group.",
             )
 
-    # For student-scoped endpoints, validate that students can only access their own data
-    if is_student_scoped_endpoint(path) and _user.role != "admin":
-        # Get query parameters
-        student_id = request.query_params.get("student_id")
-
-        # Students must specify student_id parameter
-        if not student_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Student ID is required to access this endpoint.",
-            )
-
-        # Student can only request their own data
-        if student_id != _user.id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Students can only access their own data.",
-            )
-
-        # Additionally validate that the requested student is in the same group
-        if group_id:
-            try:
-                group = Groups.get_group_by_id(group_id)
-                if not group or student_id not in (group.user_ids or []):
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail="The requested student is not in this group.",
-                    )
-            except HTTPException:
-                raise
-            except Exception as e:
-                log.error(f"Error validating student group membership: {e}")
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Could not validate group membership.",
-                )
-
     upstream_url = build_upstream_url(path)
     request_body = await request.body()
 

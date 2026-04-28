@@ -566,11 +566,11 @@
 					const [rawHomeworkRows, practiceRows] = await Promise.all([
 						fetchAITutorJson<any[]>('/homework/', {
 							token: localStorage.token,
-							query: { group_id: selectedGroupId, student_id: $user.id }
+							query: { group_id: selectedGroupId }
 						}),
 						fetchAITutorJson<any[]>('/practice', {
 							token: localStorage.token,
-							query: { group_id: selectedGroupId, student_id: $user.id }
+							query: { group_id: selectedGroupId }
 						})
 					]);
 
@@ -595,8 +595,7 @@
 						});
 
 						const assignments = await fetchAITutorJson<any[]>('/assignment/', {
-							token: localStorage.token,
-							query: { student_id: $user.id }
+							token: localStorage.token
 						});
 
 					console.log('[studentdashboard]-[Summary]-[RawAssignments]:', {
