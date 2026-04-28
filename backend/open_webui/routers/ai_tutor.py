@@ -6,6 +6,7 @@ from fastapi.responses import Response
 
 from open_webui.env import AI_TUTOR_API_BASE_URL, SRC_LOG_LEVELS
 from open_webui.utils.auth import get_verified_user
+from open_webui.utils.super_admin import is_super_admin
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.models.groups import Groups
 
@@ -43,14 +44,19 @@ def is_student_scoped_endpoint(path: str) -> bool:
     return any(normalized_path.startswith(prefix.lstrip('/')) for prefix in STUDENT_SCOPED_ENDPOINTS)
 
 
-def user_can_access_group(user_id: str, user_role: str, group_id: str) -> bool:
+def user_can_access_group(user_id: str, user_role: str, group_id: str, user=None) -> bool:
     """
     Check if a user can access a specific group.
 
+    Superadmins can access all groups.
     Instructors can access groups they own or are members of.
     Students can access groups they are members of.
     """
     try:
+        # Superadmins can access any group
+        if user and is_super_admin(user):
+            return True
+
         group = Groups.get_group_by_id(group_id)
         if not group:
             return False
@@ -122,7 +128,7 @@ async def proxy_ai_tutor_request(request: Request, path: str, _user=Depends(get_
 
     # Validate group access if group_id is provided
     if group_id:
-        if not user_can_access_group(_user.id, _user.role, group_id):
+        if not user_can_access_group(_user.id, _user.role, group_id, _user):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You do not have access to this group.",
