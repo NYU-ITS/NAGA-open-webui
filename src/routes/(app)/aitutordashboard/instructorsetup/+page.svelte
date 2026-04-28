@@ -974,7 +974,7 @@ const { colWidths: promptColWidths, initColResize: initPromptColResize } = creat
 						// Endpoint: GET /analysis/?homework_id={homework_id}
 						// Purpose: aggregate student analysis rows into homework-level setup metrics.
 						const analysisResponse = await fetch(
-							`${AI_TUTOR_API_BASE}/analysis/?homework_id=${encodeURIComponent(homeworkId)}`,
+							`${AI_TUTOR_API_BASE}/analysis/?group_id=${encodeURIComponent(groupId)}&homework_id=${encodeURIComponent(homeworkId)}`,
 							{
 								method: 'GET',
 								headers: { Authorization: `Bearer ${localStorage.token}` },
@@ -2379,7 +2379,7 @@ const { colWidths: promptColWidths, initColResize: initPromptColResize } = creat
 			// Endpoint: POST /analysis/run?homework_id={homework_id}
 			// Purpose: start the analysis pipeline for the selected homework after prerequisite checks pass.
 			const res = await fetch(
-				`${AI_TUTOR_API_BASE}/analysis/run?homework_id=${encodeURIComponent(targetHomeworkId)}`,
+				`${AI_TUTOR_API_BASE}/analysis/run?group_id=${encodeURIComponent($aiTutorSelectedGroupId)}&homework_id=${encodeURIComponent(targetHomeworkId)}`,
 				{ method: 'POST', headers: { Authorization: `Bearer ${localStorage.token}` } }
 			);
 			if (res.ok) {

@@ -1033,7 +1033,7 @@ const { colWidths: reviewColWidths, initColResize: initReviewColResize } = creat
 		await Promise.all(
 			homeworkRows.map(async (row) => {
 				const analysisResponse = await fetch(
-					`${AI_TUTOR_API_BASE}/analysis/?homework_id=${encodeURIComponent(row.id)}`,
+					`${AI_TUTOR_API_BASE}/analysis/?group_id=${encodeURIComponent(groupId)}&homework_id=${encodeURIComponent(row.id)}`,
 					{
 						method: 'GET',
 						headers: { Authorization: `Bearer ${localStorage.token}` }
