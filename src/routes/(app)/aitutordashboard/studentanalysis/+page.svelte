@@ -436,7 +436,7 @@ $: isFilterActive = selectedHomework !== 'All' || search.trim() !== '';
 			// Purpose: fetch every homework's analysis once for the current group so
 			// switching homework filters or dashboard tabs does not trigger a fresh network call.
 						const response = await fetch(
-							`${AI_TUTOR_API_BASE}/analysis/?homework_id=${encodeURIComponent(homework.id)}`,
+							`${AI_TUTOR_API_BASE}/analysis/?group_id=${encodeURIComponent(groupId)}&homework_id=${encodeURIComponent(homework.id)}`,
 							{
 								method: 'GET',
 								headers: {

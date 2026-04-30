@@ -595,8 +595,7 @@
 						});
 
 						const assignments = await fetchAITutorJson<any[]>('/assignment/', {
-							token: localStorage.token,
-							query: { student_id: $user.id }
+							token: localStorage.token
 						});
 
 					console.log('[studentdashboard]-[Summary]-[RawAssignments]:', {
@@ -619,7 +618,7 @@
 						homeworkRows.map(async (homework) => {
 							const analyses = await fetchAITutorJson<any[]>('/analysis/', {
 								token: localStorage.token,
-								query: { homework_id: homework.id }
+								query: { group_id: selectedGroupId, homework_id: homework.id }
 							});
 							const studentAnalysis =
 								analyses.find((analysis) => analysis.student_id === $user.id) ??

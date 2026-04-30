@@ -43,17 +43,22 @@ export async function loadWorkspaceModels(token: string): Promise<WorkspaceModel
 				user_id: m.user_id
 			}));
 		const excludedModels: { name: string; reason: string }[] = [];
+			const homeworkNamePattern = /(homework|hw(?:\s*#\s*|[-_]\s*#?\s*|\s+)?\d+)/i;
 		const models = allModels.filter((model: WorkspaceModel) => {
+			const modelName = model.name ?? model.id;
 			if (model.base_model_id == null) {
-				excludedModels.push({ name: model.name ?? model.id, reason: 'no base_model_id' });
+				excludedModels.push({ name: modelName, reason: 'no base_model_id' });
 				return false;
 			}
-			if (!(model.name ?? model.id).toLowerCase().includes('homework')) {
-				excludedModels.push({ name: model.name ?? model.id, reason: 'name missing homework' });
+			if (!homeworkNamePattern.test(modelName)) {
+				excludedModels.push({
+					name: modelName,
+					reason: 'name missing homework/hw pattern'
+				});
 				return false;
 			}
-			if ((model.name ?? model.id).startsWith('Mastery')) {
-				excludedModels.push({ name: model.name ?? model.id, reason: 'Mastery prefix' });
+			if (modelName.startsWith('Mastery')) {
+				excludedModels.push({ name: modelName, reason: 'Mastery prefix' });
 				return false;
 			}
 			return true;
