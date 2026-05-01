@@ -60,7 +60,7 @@ scrape_configs:
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(config)
-    output_path.chmod(0o600)
+    output_path.chmod(0o644)
 
 
 if __name__ == "__main__":

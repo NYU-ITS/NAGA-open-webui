@@ -46,8 +46,9 @@ jobs:
         env:
           RUN_LIVE: ${{ github.event.inputs.run_live || 'false' }}
           PLAYWRIGHT_VIDEO: "on"
-          PLAYWRIGHT_RUN_LIVE: ${{ github.event.inputs.run_live == 'true' && '1' || '0' }}
-          PLAYWRIGHT_BASE_URL: ${{ secrets.PLAYWRIGHT_BASE_URL }}
+          PLAYWRIGHT_RUN_LIVE: "0"
+          PLAYWRIGHT_BASE_URL: ""
+          PLAYWRIGHT_BASE_URL_SECRET: ${{ secrets.PLAYWRIGHT_BASE_URL }}
           PLAYWRIGHT_ADMIN_EMAIL: ${{ secrets.PLAYWRIGHT_ADMIN_EMAIL }}
           PLAYWRIGHT_ADMIN_PASSWORD: ${{ secrets.PLAYWRIGHT_ADMIN_PASSWORD }}
           PLAYWRIGHT_STUDENT_EMAIL: ${{ secrets.PLAYWRIGHT_STUDENT_EMAIL }}
@@ -55,6 +56,12 @@ jobs:
           PLAYWRIGHT_HOMEWORK_PDF_PATH: ${{ secrets.PLAYWRIGHT_HOMEWORK_PDF_PATH }}
         run: |
           if [[ "${RUN_LIVE}" == "true" ]]; then
+            if [[ -z "${PLAYWRIGHT_BASE_URL_SECRET}" ]]; then
+              echo "PLAYWRIGHT_BASE_URL secret is required when run_live=true."
+              exit 1
+            fi
+            export PLAYWRIGHT_RUN_LIVE=1
+            export PLAYWRIGHT_BASE_URL="${PLAYWRIGHT_BASE_URL_SECRET}"
             npx playwright test playwright/tests/ai-tutor-dashboard.mocked.spec.ts playwright/tests/ai-tutor-dashboard.live.spec.ts
           else
             npx playwright test playwright/tests/ai-tutor-dashboard.mocked.spec.ts
