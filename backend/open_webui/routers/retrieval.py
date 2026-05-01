@@ -46,6 +46,7 @@ from open_webui.retrieval.vector.connector import VECTOR_DB_CLIENT
 # Document loaders
 from open_webui.retrieval.loaders.main import Loader
 from open_webui.retrieval.loaders.youtube import YoutubeLoader
+from open_webui.retrieval.loaders.pdf_complex import _effective_pdf_image_description_model_id
 
 # Web search engines
 from open_webui.retrieval.web.main import SearchResult
@@ -356,6 +357,39 @@ async def get_embedding_config(request: Request, user=Depends(get_verified_user)
     }
 
 
+@router.get("/pdf-image-description")
+async def get_pdf_image_description_config(request: Request, user=Depends(get_verified_user)):
+    requesting_email = user.email
+    scoped = request.app.state.config.PDF_IMAGE_DESCRIPTION_MODEL_USER.get(requesting_email) or ""
+    effective_model_id = _effective_pdf_image_description_model_id(
+        request.app.state.config,
+        rbac_owner_email=requesting_email,
+        user=user,
+    )
+    return {
+        "status": True,
+        "pdf_image_description_model_user": scoped.strip(),
+        "effective_model_id": effective_model_id,
+    }
+
+
+class PdfImageDescriptionModelUpdateForm(BaseModel):
+    pdf_image_description_model: str
+
+
+@router.post("/pdf-image-description/update")
+async def update_pdf_image_description_config(
+    request: Request,
+    form_data: PdfImageDescriptionModelUpdateForm,
+    user=Depends(get_verified_user),
+):
+    request.app.state.config.PDF_IMAGE_DESCRIPTION_MODEL_USER.set(
+        user.email,
+        (form_data.pdf_image_description_model or "").strip(),
+    )
+    return {"status": True}
+
+
 @router.get("/reranking")
 async def get_reraanking_config(request: Request, user=Depends(get_verified_user)):
     return {
@@ -639,9 +673,18 @@ async def update_reranking_config(
 
 @router.get("/config")
 async def get_rag_config(request: Request, user=Depends(get_verified_user)):
+    requesting_email = user.email
+    pdf_scoped = request.app.state.config.PDF_IMAGE_DESCRIPTION_MODEL_USER.get(requesting_email) or ""
+    pdf_effective = _effective_pdf_image_description_model_id(
+        request.app.state.config,
+        rbac_owner_email=requesting_email,
+        user=user,
+    )
     return {
         "status": True,
         "pdf_extract_images": request.app.state.config.PDF_EXTRACT_IMAGES,
+        "pdf_image_description_model_user": pdf_scoped.strip(),
+        "pdf_image_description_effective_model_id": pdf_effective,
         "RAG_FULL_CONTEXT": request.app.state.config.RAG_FULL_CONTEXT.get(user.email),
         "BYPASS_EMBEDDING_AND_RETRIEVAL": request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL,
         "enable_google_drive_integration": request.app.state.config.ENABLE_GOOGLE_DRIVE_INTEGRATION,
@@ -2191,6 +2234,7 @@ def _process_file_sync(
                         DOCUMENT_INTELLIGENCE_KEY=request.app.state.config.DOCUMENT_INTELLIGENCE_KEY,
                         REQUEST=request,
                         USER=user,
+                        PDF_IMAGE_RBAC_OWNER_EMAIL=owner_email,
                     )
                     docs = loader.load(
                         file.filename, file.meta.get("content_type"), file_path

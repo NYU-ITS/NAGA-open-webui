@@ -275,9 +275,40 @@ def _resolve_configured_model_name(configured_value: Any) -> str:
     return str(configured_value).strip()
 
 
-def _select_pdf_image_description_model_id(app_config: Any, models: dict[str, Any]) -> str | None:
-    configured_model_id = _resolve_configured_model_name(
+def _effective_pdf_image_description_model_id(
+    app_config: Any, rbac_owner_email: str | None, user: Any
+) -> str:
+    scoped = getattr(app_config, "PDF_IMAGE_DESCRIPTION_MODEL_USER", None)
+    lookup_emails: list[str] = []
+    if rbac_owner_email and str(rbac_owner_email).strip():
+        lookup_emails.append(str(rbac_owner_email).strip())
+    elif user is not None and getattr(user, "email", None):
+        lookup_emails.append(str(user.email).strip())
+
+    if scoped is not None and hasattr(scoped, "get"):
+        for email in lookup_emails:
+            if not email:
+                continue
+            try:
+                raw = scoped.get(email)
+            except Exception:
+                raw = ""
+            if isinstance(raw, str) and raw.strip():
+                return raw.strip()
+
+    return _resolve_configured_model_name(
         getattr(app_config, "PDF_IMAGE_DESCRIPTION_MODEL", "")
+    )
+
+
+def _select_pdf_image_description_model_id(
+    app_config: Any,
+    models: dict[str, Any],
+    rbac_owner_email: str | None,
+    user: Any,
+) -> str | None:
+    configured_model_id = _effective_pdf_image_description_model_id(
+        app_config, rbac_owner_email, user
     )
     if not configured_model_id:
         return None
@@ -439,11 +470,12 @@ class ComplexPDFLoader:
         return docs
 
 
-def describe_images_with_task_model(
+def describe_pdf_images_via_chat(
     request: Any,
     user: Any,
     page_number: int,
     images: list[PageImage],
+    rbac_owner_email: str | None = None,
 ) -> list[str]:
     if request is None or user is None or not images:
         return []
@@ -484,17 +516,19 @@ def describe_images_with_task_model(
 
         async def _run() -> list[str]:
             models = await get_models_for_user(request, user)
-            task_model_id = _select_pdf_image_description_model_id(
+            selected_model_id = _select_pdf_image_description_model_id(
                 app_config=request.app.state.config,
                 models=models,
+                rbac_owner_email=rbac_owner_email,
+                user=user,
             )
-            if not task_model_id:
-                task_model_id = _guess_vision_model_id(models)
-                if task_model_id:
+            if not selected_model_id:
+                selected_model_id = _guess_vision_model_id(models)
+                if selected_model_id:
                     log.info(
                         "PDF image description fallback model selected for %s: %s",
                         user.email,
-                        task_model_id,
+                        selected_model_id,
                     )
                 else:
                     log.warning(
@@ -503,7 +537,7 @@ def describe_images_with_task_model(
                     )
                     return []
 
-            model_info = models.get(task_model_id, {})
+            model_info = models.get(selected_model_id, {})
             vision_capable = (
                 model_info.get("info", {})
                 .get("meta", {})
@@ -511,7 +545,7 @@ def describe_images_with_task_model(
                 .get("vision")
             )
             if vision_capable is False:
-                model_id_lower = task_model_id.lower()
+                model_id_lower = selected_model_id.lower()
                 likely_vision = any(
                     keyword in model_id_lower for keyword in ["gpt-4o", "gemini", "claude", "vision"]
                 )
@@ -519,14 +553,14 @@ def describe_images_with_task_model(
                     log.warning(
                         "PDF image description skipped for %s: selected model not vision-capable (%s)",
                         user.email,
-                        task_model_id,
+                        selected_model_id,
                     )
                     return []
 
             content = _build_image_description_content(page_number=page_number, images=images)
 
             payload = {
-                "model": task_model_id,
+                "model": selected_model_id,
                 "messages": [{"role": "user", "content": content}],
                 "stream": False,
                 "metadata": {
@@ -539,7 +573,7 @@ def describe_images_with_task_model(
                 "PDF image description request | user=%s | page=%s | model=%s | images=%s | context_chars=%s",
                 user.email,
                 page_number,
-                task_model_id,
+                selected_model_id,
                 len(images),
                 sum(len(image.context_text or "") for image in images),
             )
@@ -573,7 +607,7 @@ def describe_images_with_task_model(
                     "PDF image description returned empty result | user=%s | page=%s | model=%s",
                     user.email,
                     page_number,
-                    task_model_id,
+                    selected_model_id,
                 )
             return parsed
 
@@ -581,3 +615,7 @@ def describe_images_with_task_model(
     except Exception as e:
         log.warning("PDF image description failed on page %s: %s", page_number, e)
         return []
+
+
+# Deprecated name; use describe_pdf_images_via_chat
+describe_images_with_task_model = describe_pdf_images_via_chat

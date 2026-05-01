@@ -196,7 +196,7 @@ class Loader:
                 try:
                     from open_webui.retrieval.loaders.pdf_complex import (
                         ComplexPDFLoader,
-                        describe_images_with_task_model,
+                        describe_pdf_images_via_chat,
                     )
                 except ImportError as import_error:
                     log.warning(
@@ -205,13 +205,20 @@ class Loader:
                     )
                 else:
                     log.info(f"[LOADER] PDF_DETECTED | file={filename} | loader=ComplexPDFLoader")
+                    raw_owner = self.kwargs.get("PDF_IMAGE_RBAC_OWNER_EMAIL")
+                    rbac_pdf = (
+                        raw_owner.strip()
+                        if isinstance(raw_owner, str) and raw_owner.strip()
+                        else None
+                    )
                     return ComplexPDFLoader(
                         file_path=file_path,
-                        image_describer=lambda page_number, images: describe_images_with_task_model(
+                        image_describer=lambda page_number, images: describe_pdf_images_via_chat(
                             request=request_obj,
                             user=user_obj,
                             page_number=page_number,
                             images=images,
+                            rbac_owner_email=rbac_pdf,
                         ),
                     )
 

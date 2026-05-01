@@ -75,6 +75,7 @@ from open_webui.config import (
     RAG_FULL_CONTEXT,  # Used in config endpoints
     RAG_RELEVANCE_THRESHOLD,  # PersistentConfig, used in retrieval
     PDF_IMAGE_DESCRIPTION_MODEL,
+    PDF_IMAGE_DESCRIPTION_MODEL_USER,
 )
 from open_webui.retrieval.utils import get_embedding_function
 
@@ -201,6 +202,7 @@ def get_worker_config():
             # Respect configured PDF image extraction setting (defaults to False).
             _worker_config.PDF_EXTRACT_IMAGES = PDF_EXTRACT_IMAGES
             _worker_config.PDF_IMAGE_DESCRIPTION_MODEL = PDF_IMAGE_DESCRIPTION_MODEL
+            _worker_config.PDF_IMAGE_DESCRIPTION_MODEL_USER = PDF_IMAGE_DESCRIPTION_MODEL_USER
             _worker_config.DOCUMENT_INTELLIGENCE_ENDPOINT = DOCUMENT_INTELLIGENCE_ENDPOINT
             _worker_config.DOCUMENT_INTELLIGENCE_KEY = DOCUMENT_INTELLIGENCE_KEY
             _worker_config.BYPASS_EMBEDDING_AND_RETRIEVAL = BYPASS_EMBEDDING_AND_RETRIEVAL
@@ -440,6 +442,17 @@ class _FallbackConfig:
         self.CONTENT_EXTRACTION_ENGINE = os.environ.get("CONTENT_EXTRACTION_ENGINE", "auto")
         self.TIKA_SERVER_URL = os.environ.get("TIKA_SERVER_URL", "")
         self.PDF_EXTRACT_IMAGES = os.environ.get("PDF_EXTRACT_IMAGES", "False").lower() == "true"
+        from types import SimpleNamespace
+
+        from open_webui.env import DEFAULT_TASK_MODEL_ID as _DEFAULT_PDF_IMG_MODEL_ID
+
+        _pdf_env = os.environ.get("PDF_IMAGE_DESCRIPTION_MODEL", "").strip()
+        self.PDF_IMAGE_DESCRIPTION_MODEL = SimpleNamespace(
+            value=_pdf_env if _pdf_env else _DEFAULT_PDF_IMG_MODEL_ID,
+        )
+        self.PDF_IMAGE_DESCRIPTION_MODEL_USER = MockUserScopedConfig(
+            os.environ.get("PDF_IMAGE_DESCRIPTION_MODEL_USER", "").strip()
+        )
         self.TEXT_SPLITTER = os.environ.get("RAG_TEXT_SPLITTER", "recursive")
         # UserScopedConfig objects - use MockUserScopedConfig for compatibility
         # These are used in save_docs_to_vector_db and other worker code paths
@@ -789,6 +802,7 @@ def process_file_job(
                                                     PDF_EXTRACT_IMAGES=pdf_extract_images_val,
                                                     REQUEST=request,
                                                     USER=user,
+                                                    PDF_IMAGE_RBAC_OWNER_EMAIL=owner_email,
                                                 )
                                                 try:
                                                     print(f"[DEBUG] About to call loader.load() for file_id={file.id} | extract_images={pdf_extract_images_val}", flush=True)
@@ -904,6 +918,7 @@ def process_file_job(
                                                 PDF_EXTRACT_IMAGES=pdf_extract_images_val,
                                                 REQUEST=request,
                                                 USER=user,
+                                                PDF_IMAGE_RBAC_OWNER_EMAIL=owner_email,
                                             )
                                             try:
                                                 print(f"[DEBUG] About to call loader.load() for file_id={file.id} | extract_images={pdf_extract_images_val}", flush=True)
@@ -999,6 +1014,7 @@ def process_file_job(
                                             PDF_EXTRACT_IMAGES=pdf_extract_images_val,
                                             REQUEST=request,
                                             USER=user,
+                                            PDF_IMAGE_RBAC_OWNER_EMAIL=owner_email,
                                         )
                                         try:
                                             print(f"[DEBUG] About to call loader.load() for file_id={file.id} | extract_images={pdf_extract_images_val} | timestamp={extract_start:.3f}", flush=True)

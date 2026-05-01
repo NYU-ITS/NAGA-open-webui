@@ -1555,6 +1555,12 @@ PDF_IMAGE_DESCRIPTION_MODEL = PersistentConfig(
     os.environ.get("PDF_IMAGE_DESCRIPTION_MODEL", DEFAULT_TASK_MODEL_ID),
 )
 
+# Per-admin / group-inherited vision model for complex-PDF figure descriptions (RAG ingestion)
+PDF_IMAGE_DESCRIPTION_MODEL_USER = UserScopedConfig(
+    "rag.pdf_image_description.model_user",
+    os.getenv("PDF_IMAGE_DESCRIPTION_MODEL_USER", ""),
+)
+
 TITLE_GENERATION_PROMPT_TEMPLATE = PersistentConfig(
     "TITLE_GENERATION_PROMPT_TEMPLATE",
     "task.title.prompt_template",
