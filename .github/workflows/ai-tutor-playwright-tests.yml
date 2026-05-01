@@ -1,0 +1,101 @@
+name: AI Tutor Playwright Checks
+
+on:
+  push:
+    branches: [rs/ai-tutor-tests]
+    paths:
+      - "playwright/**"
+      - "src/**"
+      - "package.json"
+      - "package-lock.json"
+      - "playwright.config.ts"
+      - "scripts/**"
+      - ".github/workflows/ai-tutor-playwright-tests.yml"
+  workflow_dispatch:
+    inputs:
+      run_live:
+        description: "Run live UI workflows too"
+        required: false
+        default: "false"
+
+permissions:
+  contents: read
+
+jobs:
+  playwright:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps
+
+      - name: Run AI Tutor Playwright checks
+        env:
+          RUN_LIVE: ${{ github.event.inputs.run_live || 'false' }}
+          PLAYWRIGHT_VIDEO: "on"
+          PLAYWRIGHT_RUN_LIVE: ${{ github.event.inputs.run_live == 'true' && '1' || '0' }}
+          PLAYWRIGHT_BASE_URL: ${{ secrets.PLAYWRIGHT_BASE_URL }}
+          PLAYWRIGHT_ADMIN_EMAIL: ${{ secrets.PLAYWRIGHT_ADMIN_EMAIL }}
+          PLAYWRIGHT_ADMIN_PASSWORD: ${{ secrets.PLAYWRIGHT_ADMIN_PASSWORD }}
+          PLAYWRIGHT_STUDENT_EMAIL: ${{ secrets.PLAYWRIGHT_STUDENT_EMAIL }}
+          PLAYWRIGHT_STUDENT_PASSWORD: ${{ secrets.PLAYWRIGHT_STUDENT_PASSWORD }}
+          PLAYWRIGHT_HOMEWORK_PDF_PATH: ${{ secrets.PLAYWRIGHT_HOMEWORK_PDF_PATH }}
+        run: |
+          if [[ "${RUN_LIVE}" == "true" ]]; then
+            npx playwright test playwright/tests/ai-tutor-dashboard.mocked.spec.ts playwright/tests/ai-tutor-dashboard.live.spec.ts
+          else
+            npx playwright test playwright/tests/ai-tutor-dashboard.mocked.spec.ts
+          fi
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+
+      - name: Upload Playwright videos
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-videos
+          path: test-results/
+
+      - name: Forward quality metrics to Grafana Cloud
+        if: always()
+        env:
+          GRAFANA_CLOUD_PROMETHEUS_URL: ${{ secrets.GRAFANA_CLOUD_PROMETHEUS_URL }}
+          GRAFANA_CLOUD_PROMETHEUS_USER: ${{ secrets.GRAFANA_CLOUD_PROMETHEUS_USER }}
+          GRAFANA_CLOUD_PROMETHEUS_PASSWORD: ${{ secrets.GRAFANA_CLOUD_PROMETHEUS_PASSWORD }}
+          QUALITY_ENVIRONMENT: github-actions
+          QUALITY_REPOSITORY: NAGA-open-webui
+          QUALITY_BRANCH: ${{ github.ref_name }}
+          QUALITY_SOURCE: frontend-ci
+          QUALITY_RUN_ID: ${{ github.run_id }}
+          QUALITY_COMMIT_SHA: ${{ github.sha }}
+          QUALITY_METRICS_TARGET: host.docker.internal:9109
+          QUALITY_FORWARD_SECONDS: "45"
+        run: |
+          if [[ -z "${GRAFANA_CLOUD_PROMETHEUS_URL}" || -z "${GRAFANA_CLOUD_PROMETHEUS_USER}" || -z "${GRAFANA_CLOUD_PROMETHEUS_PASSWORD}" ]]; then
+            echo "Grafana Cloud secrets are not configured; skipping metrics forwarding."
+            exit 0
+          fi
+          python scripts/serve_playwright_metrics.py --host 0.0.0.0 &
+          exporter_pid=$!
+          trap 'kill ${exporter_pid} >/dev/null 2>&1 || true' EXIT
+          sleep 3
+          curl -fsS http://127.0.0.1:9109/metrics >/dev/null
+          bash scripts/forward_metrics_to_grafana_cloud.sh
