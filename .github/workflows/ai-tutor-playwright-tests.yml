@@ -42,7 +42,23 @@ jobs:
       - name: Install Playwright browsers
         run: npx playwright install --with-deps
 
+      - name: Run frontend unit and component checks
+        id: frontend_unit
+        continue-on-error: true
+        run: |
+          mkdir -p test-results
+          npm run test:frontend -- --run \
+            src/lib/utils/__tests__/aiTutorTesting.test.ts \
+            src/lib/apis/aiTutor/index.test.ts \
+            src/lib/stores/__tests__/aiTutorWorkspaceModels.test.ts \
+            src/lib/utils/__tests__/aiTutorSessionCache.test.ts \
+            --reporter=default \
+            --reporter=junit \
+            --outputFile=test-results/vitest-results.xml
+
       - name: Run AI Tutor Playwright checks
+        id: playwright_checks
+        continue-on-error: true
         env:
           RUN_LIVE: ${{ github.event.inputs.run_live || 'false' }}
           PLAYWRIGHT_VIDEO: "on"
@@ -100,9 +116,19 @@ jobs:
             echo "Grafana Cloud secrets are not configured; skipping metrics forwarding."
             exit 0
           fi
-          python scripts/serve_playwright_metrics.py --host 0.0.0.0 &
+          python scripts/serve_playwright_metrics.py \
+            --vitest-results test-results/vitest-results.xml \
+            --host 0.0.0.0 &
           exporter_pid=$!
           trap 'kill ${exporter_pid} >/dev/null 2>&1 || true' EXIT
           sleep 3
           curl -fsS http://127.0.0.1:9109/metrics >/dev/null
           bash scripts/forward_metrics_to_grafana_cloud.sh
+
+      - name: Fail if frontend checks failed
+        if: always()
+        run: |
+          if [[ "${{ steps.frontend_unit.outcome }}" != "success" || "${{ steps.playwright_checks.outcome }}" != "success" ]]; then
+            echo "One or more frontend quality checks failed. Metrics and artifacts were still published."
+            exit 1
+          fi
