@@ -1,4 +1,4 @@
-name: AI Tutor Playwright Checks
+name: AI Tutor Frontend Quality Checks
 
 on:
   push:
@@ -23,6 +23,7 @@ permissions:
 
 jobs:
   playwright:
+    name: Vitest unit checks and Playwright UI workflows
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
