@@ -46,7 +46,7 @@ jobs:
         id: frontend_unit
         continue-on-error: true
         run: |
-          mkdir -p test-results
+          mkdir -p quality-results
           npm run test:frontend -- --run \
             src/lib/utils/__tests__/aiTutorTesting.test.ts \
             src/lib/apis/aiTutor/index.test.ts \
@@ -54,7 +54,7 @@ jobs:
             src/lib/utils/__tests__/aiTutorSessionCache.test.ts \
             --reporter=default \
             --reporter=junit \
-            --outputFile=test-results/vitest-results.xml
+            --outputFile=quality-results/vitest-results.xml
 
       - name: Run AI Tutor Playwright checks
         id: playwright_checks
@@ -97,6 +97,13 @@ jobs:
           name: playwright-videos
           path: test-results/
 
+      - name: Upload frontend unit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-unit-results
+          path: quality-results/
+
       - name: Forward quality metrics to Grafana Cloud
         if: always()
         env:
@@ -117,7 +124,7 @@ jobs:
             exit 0
           fi
           python scripts/serve_playwright_metrics.py \
-            --vitest-results test-results/vitest-results.xml \
+            --vitest-results quality-results/vitest-results.xml \
             --host 0.0.0.0 &
           exporter_pid=$!
           trap 'kill ${exporter_pid} >/dev/null 2>&1 || true' EXIT
