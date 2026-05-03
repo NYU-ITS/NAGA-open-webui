@@ -5,6 +5,8 @@ const HOST = process.env.PLAYWRIGHT_HOST ?? '127.0.0.1';
 const BASE_URL = process.env.PLAYWRIGHT_BASE_URL?.trim() || `http://${HOST}:${PORT}`;
 const WEB_SERVER_COMMAND =
 	process.env.PLAYWRIGHT_WEB_SERVER_COMMAND?.trim() || `npm run dev -- --host ${HOST} --port ${PORT}`;
+const CI_RETRIES = Number(process.env.PLAYWRIGHT_RETRIES ?? 2);
+const CI_WORKERS = Number(process.env.PLAYWRIGHT_WORKERS ?? 2);
 
 /**
  * Video in the HTML report:
@@ -23,8 +25,8 @@ export default defineConfig({
 	testDir: './playwright/tests',
 	fullyParallel: true,
 	forbidOnly: !!process.env.CI,
-	retries: process.env.CI ? 2 : 0,
-	workers: process.env.CI ? 2 : undefined,
+	retries: process.env.CI ? CI_RETRIES : 0,
+	workers: process.env.CI ? CI_WORKERS : undefined,
 	reporter: [['list'], ['html', { open: 'never' }]],
 	use: {
 		baseURL: BASE_URL,

@@ -13,6 +13,8 @@ export QUALITY_PROMETHEUS_CONFIG_PATH="${QUALITY_PROMETHEUS_CONFIG_PATH:-/tmp/na
 export PLAYWRIGHT_VIDEO="${PLAYWRIGHT_VIDEO:-off}"
 export PLAYWRIGHT_RUN_LIVE="${PLAYWRIGHT_RUN_LIVE:-0}"
 export PLAYWRIGHT_WEB_SERVER_COMMAND="${PLAYWRIGHT_WEB_SERVER_COMMAND:-npx vite dev --host 127.0.0.1 --port 4173}"
+export PLAYWRIGHT_WORKERS="${PLAYWRIGHT_WORKERS:-1}"
+export PLAYWRIGHT_RETRIES="${PLAYWRIGHT_RETRIES:-0}"
 
 vitest_status=0
 npm run test:frontend -- --run \
@@ -25,7 +27,7 @@ npm run test:frontend -- --run \
   --outputFile=quality-results/vitest-results.xml || vitest_status=$?
 
 playwright_status=0
-npx playwright test playwright/tests/ai-tutor-dashboard.mocked.spec.ts --project=chromium || playwright_status=$?
+npx playwright test playwright/tests/ai-tutor-dashboard.mocked.spec.ts --project=chromium --workers="${PLAYWRIGHT_WORKERS}" --retries="${PLAYWRIGHT_RETRIES}" || playwright_status=$?
 
 python3 scripts/serve_playwright_metrics.py \
   --vitest-results quality-results/vitest-results.xml \
