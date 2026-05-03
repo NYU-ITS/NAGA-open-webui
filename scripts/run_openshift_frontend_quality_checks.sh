@@ -12,6 +12,7 @@ export QUALITY_FORWARD_SECONDS="${QUALITY_FORWARD_SECONDS:-75}"
 export QUALITY_PROMETHEUS_CONFIG_PATH="${QUALITY_PROMETHEUS_CONFIG_PATH:-/tmp/naga-open-webui-grafana-cloud-prometheus.yml}"
 export PLAYWRIGHT_VIDEO="${PLAYWRIGHT_VIDEO:-off}"
 export PLAYWRIGHT_RUN_LIVE="${PLAYWRIGHT_RUN_LIVE:-0}"
+export PLAYWRIGHT_WEB_SERVER_COMMAND="${PLAYWRIGHT_WEB_SERVER_COMMAND:-npx vite dev --host 127.0.0.1 --port 4173}"
 
 vitest_status=0
 npm run test:frontend -- --run \
