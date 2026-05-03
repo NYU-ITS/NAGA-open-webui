@@ -1,0 +1,72 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: ai-tutor-frontend-quality-checks
+spec:
+  schedule: "20 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 3600
+      template:
+        spec:
+          automountServiceAccountToken: false
+          restartPolicy: Never
+          containers:
+            - name: frontend-quality-checks
+              image: image-registry.openshift-image-registry.svc:5000/rit-genai-naga-dev/ai-tutor-frontend-quality-checks:latest
+              imagePullPolicy: Always
+              env:
+                - name: QUALITY_ENVIRONMENT
+                  value: openshift-dev
+                - name: QUALITY_REPOSITORY
+                  value: NAGA-open-webui
+                - name: QUALITY_BRANCH
+                  value: rs/ai-tutor-tests
+                - name: QUALITY_SOURCE
+                  value: openshift-frontend-checks-hourly
+                - name: QUALITY_RUN_ID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.name
+                - name: QUALITY_COMMIT_SHA
+                  value: openshift-build
+                - name: QUALITY_FORWARD_SECONDS
+                  value: "75"
+                - name: PLAYWRIGHT_VIDEO
+                  value: "off"
+                - name: PLAYWRIGHT_RUN_LIVE
+                  value: "0"
+                - name: GRAFANA_CLOUD_PROMETHEUS_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: ai-tutor-grafana-cloud-secret
+                      key: GRAFANA_CLOUD_PROMETHEUS_URL
+                - name: GRAFANA_CLOUD_PROMETHEUS_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: ai-tutor-grafana-cloud-secret
+                      key: GRAFANA_CLOUD_PROMETHEUS_USER
+                - name: GRAFANA_CLOUD_PROMETHEUS_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: ai-tutor-grafana-cloud-secret
+                      key: GRAFANA_CLOUD_PROMETHEUS_PASSWORD
+              resources:
+                requests:
+                  cpu: 250m
+                  memory: 768Mi
+                limits:
+                  cpu: "1"
+                  memory: 2Gi
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+                runAsNonRoot: true
+                seccompProfile:
+                  type: RuntimeDefault

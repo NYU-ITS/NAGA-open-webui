@@ -1,0 +1,25 @@
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: ai-tutor-frontend-quality-checks
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: ai-tutor-frontend-quality-checks
+spec:
+  source:
+    type: Git
+    git:
+      uri: https://github.com/NYU-ITS/NAGA-open-webui.git
+      ref: rs/ai-tutor-tests
+    contextDir: .
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: quality_checks/Dockerfile
+  output:
+    to:
+      kind: ImageStreamTag
+      name: ai-tutor-frontend-quality-checks:latest
+  triggers: []
