@@ -3,7 +3,8 @@
 This runs the non-live AI Tutor frontend checks in OpenShift dev:
 
 - Vitest unit/component checks for AI Tutor frontend code
-- Mocked Playwright dashboard workflows
+- Mocked Playwright dashboard workflows are supported but disabled by default
+  in OpenShift dev because Chromium + Vite can exceed the small dev memory limit.
 - Grafana Cloud metric forwarding
 
 It does not use test accounts and does not hit live user flows.
@@ -30,3 +31,13 @@ oc apply -f k8s/quality-checks/cronjob.yaml -n rit-genai-naga-dev
 ```
 
 The hourly job starts at minute 20 of each hour, uses resources only while it runs, sends metrics, then exits.
+
+## Optional mocked Playwright
+
+The Job defaults to Vitest-only in OpenShift dev:
+
+```yaml
+RUN_MOCKED_PLAYWRIGHT: "0"
+```
+
+Set it to `"1"` only on a larger runner/pod memory limit.

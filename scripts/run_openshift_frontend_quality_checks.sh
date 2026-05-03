@@ -15,6 +15,7 @@ export PLAYWRIGHT_RUN_LIVE="${PLAYWRIGHT_RUN_LIVE:-0}"
 export PLAYWRIGHT_WEB_SERVER_COMMAND="${PLAYWRIGHT_WEB_SERVER_COMMAND:-npx vite dev --host 127.0.0.1 --port 4173}"
 export PLAYWRIGHT_WORKERS="${PLAYWRIGHT_WORKERS:-1}"
 export PLAYWRIGHT_RETRIES="${PLAYWRIGHT_RETRIES:-0}"
+export RUN_MOCKED_PLAYWRIGHT="${RUN_MOCKED_PLAYWRIGHT:-0}"
 
 vitest_status=0
 npm run test:frontend -- --run \
@@ -27,7 +28,11 @@ npm run test:frontend -- --run \
   --outputFile=quality-results/vitest-results.xml || vitest_status=$?
 
 playwright_status=0
-npx playwright test playwright/tests/ai-tutor-dashboard.mocked.spec.ts --project=chromium --workers="${PLAYWRIGHT_WORKERS}" --retries="${PLAYWRIGHT_RETRIES}" || playwright_status=$?
+if [[ "${RUN_MOCKED_PLAYWRIGHT}" == "1" ]]; then
+  npx playwright test playwright/tests/ai-tutor-dashboard.mocked.spec.ts --project=chromium --workers="${PLAYWRIGHT_WORKERS}" --retries="${PLAYWRIGHT_RETRIES}" || playwright_status=$?
+else
+  echo "Skipping mocked Playwright in OpenShift. Set RUN_MOCKED_PLAYWRIGHT=1 to enable it for a larger runner."
+fi
 
 python3 scripts/serve_playwright_metrics.py \
   --vitest-results quality-results/vitest-results.xml \

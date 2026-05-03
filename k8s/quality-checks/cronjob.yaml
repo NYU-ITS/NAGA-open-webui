@@ -40,6 +40,8 @@ spec:
                   value: "off"
                 - name: PLAYWRIGHT_RUN_LIVE
                   value: "0"
+                - name: RUN_MOCKED_PLAYWRIGHT
+                  value: "0"
                 - name: GRAFANA_CLOUD_PROMETHEUS_URL
                   valueFrom:
                     secretKeyRef:
