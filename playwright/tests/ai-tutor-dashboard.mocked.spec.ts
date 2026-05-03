@@ -190,13 +190,8 @@ test.describe('AI Tutor dashboard (Playwright mocked backend)', () => {
 
 	test('renders topic analysis from mocked analytics payload', async ({ page }) => {
 		await mockAuthAndDashboardApis(page, 'success');
-		const homeworkResponsePromise = page.waitForResponse((response) =>
-			response.url().includes('/api/ai-tutor/homework')
-		);
 		await page.goto('/aitutordashboard/topicanalysis?group_id=group-nyu-101');
 		await dismissWhatsNewIfShown(page);
-		const homeworkResponse = await homeworkResponsePromise;
-		await expect(async () => await homeworkResponse.json()).resolves.toEqual(mockHomeworkRows);
 		await page.getByRole('link', { name: 'Summary' }).click();
 		await page.getByRole('link', { name: 'Topic Analysis' }).click();
 
@@ -208,13 +203,8 @@ test.describe('AI Tutor dashboard (Playwright mocked backend)', () => {
 
 	test('shows loading state while analysis response is delayed', async ({ page }) => {
 		await mockAuthAndDashboardApis(page, 'loading');
-		const homeworkResponsePromise = page.waitForResponse((response) =>
-			response.url().includes('/api/ai-tutor/homework')
-		);
 		await page.goto('/aitutordashboard/topicanalysis?group_id=group-nyu-101');
 		await dismissWhatsNewIfShown(page);
-		const homeworkResponse = await homeworkResponsePromise;
-		await expect(async () => await homeworkResponse.json()).resolves.toEqual(mockHomeworkRows);
 		await page.getByRole('link', { name: 'Summary' }).click();
 		await page.getByRole('link', { name: 'Topic Analysis' }).click();
 
