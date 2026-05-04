@@ -522,15 +522,11 @@ def describe_pdf_images_via_chat(
                 rbac_owner_email=rbac_owner_email,
                 user=user,
             )
+            model_source = "configured"
             if not selected_model_id:
+                model_source = "fallback_vision_guess"
                 selected_model_id = _guess_vision_model_id(models)
-                if selected_model_id:
-                    log.info(
-                        "PDF image description fallback model selected for %s: %s",
-                        user.email,
-                        selected_model_id,
-                    )
-                else:
+                if not selected_model_id:
                     log.warning(
                         "PDF image description skipped for %s: no candidate model available",
                         user.email,
@@ -570,10 +566,11 @@ def describe_pdf_images_via_chat(
             }
 
             log.info(
-                "PDF image description request | user=%s | page=%s | model=%s | images=%s | context_chars=%s",
+                "PDF image description request | user=%s | page=%s | model=%s | model_source=%s | images=%s | context_chars=%s",
                 user.email,
                 page_number,
                 selected_model_id,
+                model_source,
                 len(images),
                 sum(len(image.context_text or "") for image in images),
             )

@@ -362,6 +362,7 @@ from open_webui.utils.chat import (
     generate_chat_completion as chat_completion_handler,
     chat_completed as chat_completed_handler,
     chat_action as chat_action_handler,
+    _sanitize_form_data_for_logging,
 )
 from open_webui.utils.middleware import process_chat_payload, process_chat_response
 from open_webui.utils.access_control import has_access
@@ -1337,10 +1338,15 @@ async def chat_completion(
         request.state.metadata = metadata
         form_data["metadata"] = metadata
         log.debug(
-            f"[DEBUG] [inside chat_completion() from main.py] The chat payload is processed! The metadata is: {metadata}."
-            f"The form_data is: {form_data}."
-            f"The user is: {user.email} and user_id is: {user.id}."
-            f"The model is: {model}."
+            "[DEBUG] [inside chat_completion() from main.py] The chat payload is processed! The metadata is: %s."
+            "The form_data is: %s."
+            "The user is: %s and user_id is: %s."
+            "The model is: %s.",
+            metadata,
+            _sanitize_form_data_for_logging(form_data),
+            user.email,
+            user.id,
+            model,
         )
 
         log.debug("Processing the chat payload...")
@@ -1359,7 +1365,13 @@ async def chat_completion(
     try:
         log.debug("Calling the chat completion handler...")
         response = await chat_completion_handler(request, form_data, user)
-        log.debug(f"[DEBUG] [inside chat_completion() from main.py] The chat completion handler returned the response: {response}. The inputs for chat_completion_handler() are: {request}, {form_data}, {user}.")
+        log.debug(
+            "[DEBUG] [inside chat_completion() from main.py] The chat completion handler returned the response: %s. "
+            "The inputs for chat_completion_handler() are: request, form_data=%s, user=%s.",
+            response,
+            _sanitize_form_data_for_logging(form_data),
+            user.email,
+        )
 
         log.debug("Calling the process_chat_response()... this is defined in middleware.py")
         return await process_chat_response(

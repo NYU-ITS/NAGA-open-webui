@@ -163,11 +163,15 @@ def _sanitize_messages_for_logging(messages: Any) -> Any:
                     new_parts.append(part)
                     continue
                 p = dict(part)
-                if part.get("type") == "image_url" and isinstance(part.get("image_url"), dict):
-                    iu = dict(part["image_url"])
-                    if "url" in iu:
-                        iu["url"] = _truncate_base64_data_url(iu["url"])
-                    p["image_url"] = iu
+                if part.get("type") == "image_url":
+                    iu_val = part.get("image_url")
+                    if isinstance(iu_val, dict):
+                        iu = dict(iu_val)
+                        if "url" in iu:
+                            iu["url"] = _truncate_base64_data_url(iu["url"])
+                        p["image_url"] = iu
+                    elif isinstance(iu_val, str):
+                        p["image_url"] = _truncate_base64_data_url(iu_val)
                 new_parts.append(p)
             entry["content"] = new_parts
         elif isinstance(content, str):
