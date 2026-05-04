@@ -1,10 +1,12 @@
 import csv
 import json
 import logging
+import re
 import zipfile
 from datetime import datetime
 from io import BytesIO, StringIO
 from typing import Optional
+from urllib.parse import quote
 import pytz
 
 from open_webui.models.chats import (
@@ -1040,6 +1042,117 @@ async def export_chats_as_zip(
 
 
 ############################
+# Shared export rows (same fields as CSV: one user message per row)
+############################
+
+
+def _build_conversation_export_rows(chats) -> list:
+    """
+    Per-turn rows: member, email_id, model_name, chat_id, question, model_response, timestamp.
+    Timestamps are formatted in US/Eastern with the real zone abbreviation (EST/EDT).
+    Order matches the CSV / JSON export: iterate chats (caller order), then message dict order.
+    """
+    if not chats:
+        return []
+    user_ids = list(set(c.user_id for c in chats))
+    users_map = {u.id: u for u in Users.get_users_by_user_ids(user_ids)}
+    rows: list[dict] = []
+    for chat in chats:
+        u = users_map.get(chat.user_id)
+        member = u.name if u else f"User_{chat.user_id}"
+        email = u.email if u else ""
+        model_name = chat.meta.get("model_name") or chat.meta.get("base_model_name") or "Unknown"
+        messages = Chats.get_messages_by_chat_id(chat.id)
+        if not messages:
+            continue
+        assistant_by_parent = {}
+        for _mid, msg in messages.items():
+            if msg.get("role") == "assistant":
+                parent_id = msg.get("parentId") or msg.get("parent_id")
+                if parent_id and parent_id not in assistant_by_parent:
+                    assistant_by_parent[parent_id] = msg.get("content", "") or ""
+        for message_id, message in messages.items():
+            if message.get("role") != "user":
+                continue
+            ts = message.get("timestamp", 0)
+            if ts:
+                est_tz = pytz.timezone("US/Eastern")
+                dt_est = datetime.fromtimestamp(ts, tz=pytz.UTC).astimezone(est_tz)
+                human_ts = dt_est.strftime("%Y-%m-%d %I:%M:%S %p %Z")
+            else:
+                human_ts = "Unknown"
+            rows.append(
+                {
+                    "member": member,
+                    "email_id": email,
+                    "model_name": model_name,
+                    "chat_id": chat.id,
+                    "question": message.get("content", ""),
+                    "model_response": assistant_by_parent.get(message_id, ""),
+                    "timestamp": human_ts,
+                }
+            )
+    return rows
+
+
+def _chats_to_json_payload(group_id: str, group_name: str, flat_rows: list) -> dict:
+    """Group flat rows by chat_id with turns: question, model_response, timestamp."""
+    chat_order: list = []
+    by_cid: dict = {}
+    for r in flat_rows:
+        cid = r["chat_id"]
+        if cid not in by_cid:
+            chat_order.append(cid)
+            by_cid[cid] = {
+                "chat_id": cid,
+                "member": r["member"],
+                "email_id": r["email_id"],
+                "model_name": r["model_name"],
+                "turns": [],
+            }
+        by_cid[cid]["turns"].append(
+            {
+                "question": r["question"],
+                "model_response": r["model_response"],
+                "timestamp": r["timestamp"],
+            }
+        )
+    return {
+        "group_id": group_id,
+        "group_name": group_name,
+        # `chat_order` matches the order of threads in the export (same as DB fetch order, newest updated first when using chat_ids)
+        "chats": [by_cid[cid] for cid in chat_order],
+    }
+
+
+def _load_chats_for_group_export(form_data: ChatExportCSVForm) -> list:
+    """Match CSV/JSON: chat_ids (non-empty) or filter payload."""
+    filter_payload = form_data.model_dump()
+    raw_chat_ids = filter_payload.pop("chat_ids", None) or []
+    chat_ids = list(dict.fromkeys(str(x) for x in raw_chat_ids if x))
+    if chat_ids:
+        return Chats.get_chats_by_ids_and_group_id(chat_ids, form_data.group_id)
+    return Chats.get_chats_by_user_id_and_meta_filter(
+        filter_payload, form_data.skip, form_data.limit
+    )
+
+
+def _safe_export_filename(group_name: Optional[str], timestamp: str, ext: str) -> str:
+    """
+    Build a filesystem/header-safe filename.
+    Keeps alnum, dash and underscore; converts spaces to underscores; strips others.
+    """
+    base_name = (group_name or "").strip()
+    if not base_name:
+        base_name = "group"
+    safe = re.sub(r"[^A-Za-z0-9 _-]+", "", base_name)
+    safe = re.sub(r"\s+", "_", safe).strip("._-")
+    if not safe:
+        safe = "group"
+    return f"group-{safe}-conversations-{timestamp}.{ext}"
+
+
+############################
 # Export Chats as CSV
 ############################
 
@@ -1068,54 +1181,14 @@ async def export_chats_as_csv(
                 detail="Group not found"
             )
 
-        # Get filtered chats
-        chats = Chats.get_chats_by_user_id_and_meta_filter(
-            form_data.model_dump(), form_data.skip, form_data.limit
-        )
-
+        chats = _load_chats_for_group_export(form_data)
         if not chats:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="No chats found matching the criteria"
             )
 
-        # Batch get user data
-        user_ids = list(set(chat.user_id for chat in chats))
-        users_map = {user.id: user for user in Users.get_users_by_user_ids(user_ids)}
-
-        # Generate CSV rows
-        csv_rows = []
-        for chat in chats:
-            user_info = users_map.get(chat.user_id)
-            member_name = user_info.name if user_info else f"User_{chat.user_id}"
-            model_name = chat.meta.get('model_name') or chat.meta.get('base_model_name') or 'Unknown'
-
-            # Get messages for this chat
-            messages = Chats.get_messages_by_chat_id(chat.id)
-            if not messages:
-                continue
-
-            # Extract user questions with timestamps
-            for message_id, message in messages.items():
-                if message.get('role') == 'user':
-                    timestamp = message.get('timestamp', 0)
-                    if timestamp:
-                        # Convert to EST timezone
-                        est_tz = pytz.timezone('US/Eastern')
-                        utc_dt = datetime.fromtimestamp(timestamp, tz=pytz.UTC)
-                        est_dt = utc_dt.astimezone(est_tz)
-                        human_timestamp = est_dt.strftime('%Y-%m-%d %I:%M:%S %p EST')
-                    else:
-                        human_timestamp = 'Unknown'
-                    
-                    csv_rows.append({
-                        'member': member_name,
-                        'model_name': model_name,
-                        'chat_id': chat.id,
-                        'question': message.get('content', ''),
-                        'timestamp': human_timestamp
-                    })
-
+        csv_rows = _build_conversation_export_rows(chats)
         if not csv_rows:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -1124,7 +1197,7 @@ async def export_chats_as_csv(
 
         # Generate CSV
         output = StringIO()
-        fieldnames = ['member', 'model_name', 'chat_id', 'question', 'timestamp']
+        fieldnames = ['member', 'email_id', 'model_name', 'chat_id', 'question', 'model_response', 'timestamp']
         writer = csv.DictWriter(output, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(csv_rows)
@@ -1132,14 +1205,19 @@ async def export_chats_as_csv(
         csv_content = output.getvalue()
         output.close()
 
-        # Create filename
+        # Create safe filename + RFC5987-compatible header value.
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f"group-{form_data.group_id}-conversations-{timestamp}.csv"
+        filename = _safe_export_filename(group.name, timestamp, "csv")
+        filename_star = quote(filename)
 
         return Response(
             content=csv_content,
             media_type="text/csv",
-            headers={"Content-Disposition": f"attachment; filename={filename}"}
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{filename}"; filename*=UTF-8\'\'{filename_star}'
+                )
+            }
         )
 
     except HTTPException:
@@ -1149,4 +1227,74 @@ async def export_chats_as_csv(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to export chats as CSV"
+        )
+
+
+############################
+# Export Chats as JSON (same data as CSV; includes grouped `chats` by thread)
+############################
+
+
+@router.post("/export/json")
+async def export_chats_as_json(
+    form_data: ChatExportCSVForm, user=Depends(get_verified_user)
+):
+    """
+    JSON export: `group_id`, `group_name`, and `chats` (ordered threads, each with `turns`).
+    (CSV export is unchanged and still has flat rows. This endpoint does not include a `rows` key.)
+    """
+    try:
+        if user.role != "admin":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only administrators can export group chat data",
+            )
+
+        from open_webui.models.groups import Groups
+
+        group = Groups.get_group_by_id(form_data.group_id)
+        if not group:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Group not found",
+            )
+
+        chats = _load_chats_for_group_export(form_data)
+        if not chats:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No chats found matching the criteria",
+            )
+
+        flat_rows = _build_conversation_export_rows(chats)
+        if not flat_rows:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No questions found in the selected chats",
+            )
+
+        payload = _chats_to_json_payload(
+            form_data.group_id, group.name or "", flat_rows
+        )
+        body = json.dumps(payload, ensure_ascii=False, indent=2)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = _safe_export_filename(group.name, ts, "json")
+        filename_star = quote(filename)
+        return Response(
+            content=body,
+            media_type="application/json; charset=utf-8",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{filename}"; filename*=UTF-8\'\'{filename_star}'
+                ),
+            },
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception(f"Error exporting chats as JSON: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to export chats as JSON",
         )

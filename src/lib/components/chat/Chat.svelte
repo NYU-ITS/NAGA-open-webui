@@ -28,6 +28,7 @@
 		user,
 		socket,
 		showControls,
+		showRightsideQuestions,
 		showCallOverlay,
 		currentChatPage,
 		temporaryChatEnabled,
@@ -135,6 +136,26 @@
 	let chatFiles = [];
 	let files = [];
 	let params = {};
+	const PRACTICE_CHAT_SEQUENCE_KEY = 'aiTutorPracticeChatSequence';
+
+	const buildPracticeChatTitleFromPending = () => {
+		if (typeof localStorage === 'undefined') return null;
+		const raw = localStorage.getItem('aiTutorPracticeAssignmentPending');
+		if (!raw) return null;
+		try {
+			const payload = JSON.parse(raw);
+			if (!payload?.assignmentId) return null;
+			let baseName = String(payload?.homeworkLabel ?? payload?.topic ?? 'Practice').trim();
+			if (!baseName) baseName = 'Practice';
+			const baseTitle = /^practice\b/i.test(baseName) ? baseName : `Practice ${baseName}`;
+			const current = Number(localStorage.getItem(PRACTICE_CHAT_SEQUENCE_KEY) ?? '0');
+			const next = Number.isFinite(current) && current > 0 ? current + 1 : 1;
+			localStorage.setItem(PRACTICE_CHAT_SEQUENCE_KEY, String(next));
+			return `[${next}] ${baseTitle}`;
+		} catch {
+			return null;
+		}
+	};
 
 	$: if (chatIdProp) {
 		(async () => {
@@ -397,16 +418,14 @@
 		window.addEventListener('message', onMessageHandler);
 		$socket?.on('chat-events', chatEventHandler);
 
-		if (!$chatId) {
+		if (!chatIdProp && !$chatId) {
 			chatIdUnsubscriber = chatId.subscribe(async (value) => {
 				if (!value) {
 					await initNewChat();
 				}
 			});
-		} else {
-			if ($temporaryChatEnabled) {
-				await goto('/');
-			}
+		} else if ($temporaryChatEnabled) {
+			await goto('/');
 		}
 
 		if (localStorage.getItem(`chat-input-${chatIdProp}`)) {
@@ -699,6 +718,7 @@
 		await showCallOverlay.set(false);
 		await showOverview.set(false);
 		await showArtifacts.set(false);
+		await showRightsideQuestions.set(false);
 
 		if ($page.url.pathname.includes('/c/')) {
 			window.history.replaceState(history.state, '', `/`);
@@ -775,16 +795,36 @@
 	};
 
 	const loadChat = async () => {
-		chatId.set(chatIdProp);
-		chat = await getChatById(localStorage.token, $chatId).catch(async (error) => {
+		const targetChatId = chatIdProp;
+		chatId.set(targetChatId);
+		chat = await getChatById(localStorage.token, targetChatId).catch(async (error) => {
 			await goto('/');
 			return null;
 		});
 
 		if (chat) {
-			tags = await getTagsById(localStorage.token, $chatId).catch(async (error) => {
+			let shouldRestorePracticePanel = false;
+			tags = await getTagsById(localStorage.token, targetChatId).catch(async (error) => {
 				return [];
 			});
+			showRightsideQuestions.set(false);
+
+			// Auto-restore practice panel if this chat has a bound practice assignment
+			try {
+				const chatBoundRaw = localStorage.getItem(`aiTutorPracticeAssignment-${targetChatId}`);
+				if (chatBoundRaw) {
+					const parsed = JSON.parse(chatBoundRaw);
+					if (parsed?.assignmentId) {
+						shouldRestorePracticePanel = true;
+						console.log('[Chat]-[LoadChat]-[AutoRestoredPractice]:', {
+							chatId: targetChatId,
+							assignmentId: parsed.assignmentId
+						});
+					}
+				}
+			} catch (e) {
+				console.error('[Chat]-[LoadChat]-[AutoRestoreError]:', e);
+			}
 
 			const chatContent = chat.chat;
 
@@ -820,6 +860,11 @@
 					history.messages[history.currentId].done = true;
 				}
 				await tick();
+
+				if (shouldRestorePracticePanel) {
+					showRightsideQuestions.set(true);
+					showControls.set(true);
+				}
 
 				return true;
 			} else {
@@ -1825,9 +1870,12 @@
 		let _chatId = $chatId;
 
 		if (!$temporaryChatEnabled) {
+			const practiceTitle = $page.url.searchParams.get('practicing')
+				? buildPracticeChatTitleFromPending()
+				: null;
 			chat = await createNewChat(localStorage.token, {
 				id: _chatId,
-				title: $i18n.t('New Chat'),
+				title: practiceTitle ?? $i18n.t('New Chat'),
 				models: selectedModels,
 				system: $settings.system ?? undefined,
 				params: params,
@@ -1838,6 +1886,21 @@
 			});
 
 			_chatId = chat.id;
+
+			// Migrate pending practice assignment from localStorage to chat-bound key
+			try {
+				const pendingRaw = localStorage.getItem('aiTutorPracticeAssignmentPending');
+				if (pendingRaw) {
+					localStorage.setItem(`aiTutorPracticeAssignment-${_chatId}`, pendingRaw);
+					localStorage.removeItem('aiTutorPracticeAssignmentPending');
+					console.log('[Chat]-[InitChat]-[MigratedPracticeAssignment]:', {
+						chatId: _chatId,
+						pendingCleared: true
+					});
+				}
+			} catch (e) {
+				console.error('[Chat]-[InitChat]-[MigrateError]:', e);
+			}
 			await chatId.set(_chatId);
 
 			await chats.set(await getChatList(localStorage.token, $currentChatPage));
@@ -2114,6 +2177,7 @@
 				{addMessages}
 				{saveChatHandler}
 				bind:webSearchEnabled
+				bind:prompt
 			/>
 		</PaneGroup>
 	{:else if loading}
