@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: ai-tutor-frontend-quality-check
+  name: ai-tutor-frontend-scheduled-quality-check
 spec:
   backoffLimit: 0
   ttlSecondsAfterFinished: 3600
@@ -10,7 +10,7 @@ spec:
       automountServiceAccountToken: false
       restartPolicy: Never
       containers:
-        - name: frontend-quality-checks
+        - name: frontend-scheduled-quality-checks
           image: image-registry.openshift-image-registry.svc:5000/rit-genai-naga-dev/ai-tutor-frontend-quality-checks:latest
           imagePullPolicy: Always
           env:
@@ -21,7 +21,7 @@ spec:
             - name: QUALITY_BRANCH
               value: rs/ai-tutor-tests
             - name: QUALITY_SOURCE
-              value: openshift-frontend-checks
+              value: openshift-frontend-scheduled-checks
             - name: QUALITY_RUN_ID
               valueFrom:
                 fieldRef:

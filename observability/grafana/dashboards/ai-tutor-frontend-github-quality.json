@@ -9,11 +9,11 @@
       "pluginName": "Prometheus"
     }
   ],
-  "uid": "ai-tutor-frontend-github-quality",
-  "title": "AI Tutor Frontend Quality - GitHub",
+  "uid": "ai-tutor-frontend-quality",
+  "title": "AI Tutor Frontend Quality - GitHub and OpenShift Scheduled Checks",
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "30s",
   "time": {
     "from": "now-24h",
@@ -21,8 +21,9 @@
   },
   "tags": [
     "ai-tutor",
+    "frontend",
     "github-actions",
-    "frontend"
+    "openshift-dev"
   ],
   "templating": {
     "list": []
@@ -47,8 +48,8 @@
     {
       "id": 1,
       "type": "stat",
-      "title": "Frontend Unit Checks Passing",
-      "description": "Shows whether the latest AI Tutor frontend unit/component checks passed in GitHub Actions.",
+      "title": "GitHub Unit Checks",
+      "description": "Latest AI Tutor frontend Vitest unit/component result from GitHub Actions.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -62,13 +63,27 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max(max_over_time(ai_tutor_quality_source_ok{environment=\"github-actions\",repository=\"NAGA-open-webui\",source=\"frontend_unit\"}[$__range]))",
+          "expr": "max(last_over_time(ai_tutor_quality_source_ok{environment=\"github-actions\",repository=\"NAGA-open-webui\",source=\"frontend_unit\"}[$__range]) and on(environment,repository,source,run_id) topk by(environment,repository,source) (1, last_over_time(ai_tutor_quality_source_last_run_timestamp_seconds{environment=\"github-actions\",repository=\"NAGA-open-webui\",source=\"frontend_unit\"}[$__range])))",
           "instant": true,
           "range": false
         }
       ],
       "fieldConfig": {
         "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
           "mappings": [
             {
               "type": "value",
@@ -83,20 +98,7 @@
                 }
               }
             }
-          ],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          }
+          ]
         },
         "overrides": []
       },
@@ -118,8 +120,8 @@
     {
       "id": 2,
       "type": "stat",
-      "title": "Playwright UI Workflows Passing",
-      "description": "Shows whether the latest AI Tutor Playwright UI workflow checks passed in GitHub Actions.",
+      "title": "GitHub Playwright Workflows",
+      "description": "Latest mocked AI Tutor dashboard browser-workflow result from GitHub Actions.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -133,13 +135,27 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max(max_over_time(ai_tutor_quality_source_ok{environment=\"github-actions\",repository=\"NAGA-open-webui\",source=\"playwright_ui\"}[$__range]))",
+          "expr": "max(last_over_time(ai_tutor_quality_source_ok{environment=\"github-actions\",repository=\"NAGA-open-webui\",source=\"playwright_ui\"}[$__range]) and on(environment,repository,source,run_id) topk by(environment,repository,source) (1, last_over_time(ai_tutor_quality_source_last_run_timestamp_seconds{environment=\"github-actions\",repository=\"NAGA-open-webui\",source=\"playwright_ui\"}[$__range])))",
           "instant": true,
           "range": false
         }
       ],
       "fieldConfig": {
         "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
           "mappings": [
             {
               "type": "value",
@@ -154,7 +170,123 @@
                 }
               }
             }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
           ],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "OpenShift Scheduled Frontend Unit Checks",
+      "description": "Latest AI Tutor frontend Vitest result from the OpenShift scheduled frontend Job.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(last_over_time(ai_tutor_quality_source_ok{environment=\"openshift-dev\",repository=\"NAGA-open-webui\",source=\"frontend_unit\"}[$__range]) and on(environment,repository,source,run_id) topk by(environment,repository,source) (1, last_over_time(ai_tutor_quality_source_last_run_timestamp_seconds{environment=\"openshift-dev\",repository=\"NAGA-open-webui\",source=\"frontend_unit\"}[$__range])))",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "Needs attention",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "Passing",
+                  "color": "green"
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Time Since OpenShift Frontend Run",
+      "description": "How long since OpenShift scheduled frontend Job last sent unit-test metrics.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "time() - max(last_over_time(ai_tutor_quality_source_last_run_timestamp_seconds{environment=\"openshift-dev\",repository=\"NAGA-open-webui\",source=\"frontend_unit\"}[$__range]))",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -187,24 +319,24 @@
       }
     },
     {
-      "id": 3,
+      "id": 5,
       "type": "stat",
-      "title": "Frontend Unit Tests Passed",
-      "description": "Count of AI Tutor frontend unit/component checks that passed in the selected time window.",
+      "title": "GitHub Unit Passed",
+      "description": "Latest GitHub Vitest pass count, not a sum of older runs.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
       "gridPos": {
-        "h": 5,
-        "w": 6,
-        "x": 12,
-        "y": 0
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 5
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(max_over_time(ai_tutor_quality_checks_total{environment=\"github-actions\",repository=\"NAGA-open-webui\",source=\"frontend_unit\",status=\"passed\"}[$__range]))",
+          "expr": "sum(last_over_time(ai_tutor_quality_checks_total{environment=\"github-actions\",repository=\"NAGA-open-webui\",source=\"frontend_unit\",status=\"passed\"}[$__range]) and on(environment,repository,source,run_id) topk by(environment,repository,source) (1, last_over_time(ai_tutor_quality_source_last_run_timestamp_seconds{environment=\"github-actions\",repository=\"NAGA-open-webui\",source=\"frontend_unit\"}[$__range])))",
           "instant": true,
           "range": false
         }
@@ -244,45 +376,41 @@
       }
     },
     {
-      "id": 4,
+      "id": 6,
       "type": "stat",
-      "title": "Time Since Last Frontend CI Run",
-      "description": "How long it has been since GitHub Actions last sent frontend quality results to Grafana Cloud.",
+      "title": "GitHub Unit Failed",
+      "description": "Latest GitHub Vitest failed/error count.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
       "gridPos": {
-        "h": 5,
-        "w": 6,
-        "x": 18,
-        "y": 0
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 5
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "time() - max(max_over_time(ai_tutor_quality_source_last_run_timestamp_seconds{environment=\"github-actions\",repository=\"NAGA-open-webui\",source=~\"frontend_unit|playwright_ui\"}[$__range]))",
+          "expr": "sum(last_over_time(ai_tutor_quality_checks_total{environment=\"github-actions\",repository=\"NAGA-open-webui\",source=\"frontend_unit\",status=~\"failed|error\"}[$__range]) and on(environment,repository,source,run_id) topk by(environment,repository,source) (1, last_over_time(ai_tutor_quality_source_last_run_timestamp_seconds{environment=\"github-actions\",repository=\"NAGA-open-webui\",source=\"frontend_unit\"}[$__range])))",
           "instant": true,
           "range": false
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "s",
+          "unit": "short",
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
+                "color": "red",
                 "value": null
               },
               {
-                "color": "orange",
-                "value": 86400
-              },
-              {
-                "color": "red",
-                "value": 172800
+                "color": "green",
+                "value": 1
               }
             ]
           }
@@ -300,15 +428,243 @@
         "orientation": "auto",
         "textMode": "auto",
         "colorMode": "value",
-        "graphMode": "area",
+        "graphMode": "none",
         "justifyMode": "auto"
       }
     },
     {
-      "id": 5,
+      "id": 7,
+      "type": "stat",
+      "title": "GitHub Playwright Passed",
+      "description": "Latest GitHub mocked Playwright pass count.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 5
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(last_over_time(ai_tutor_quality_checks_total{environment=\"github-actions\",repository=\"NAGA-open-webui\",source=\"playwright_ui\",status=\"passed\"}[$__range]) and on(environment,repository,source,run_id) topk by(environment,repository,source) (1, last_over_time(ai_tutor_quality_source_last_run_timestamp_seconds{environment=\"github-actions\",repository=\"NAGA-open-webui\",source=\"playwright_ui\"}[$__range])))",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "GitHub Playwright Failed",
+      "description": "Latest GitHub mocked Playwright failed/error count.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 5
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(last_over_time(ai_tutor_quality_checks_total{environment=\"github-actions\",repository=\"NAGA-open-webui\",source=\"playwright_ui\",status=~\"failed|error\"}[$__range]) and on(environment,repository,source,run_id) topk by(environment,repository,source) (1, last_over_time(ai_tutor_quality_source_last_run_timestamp_seconds{environment=\"github-actions\",repository=\"NAGA-open-webui\",source=\"playwright_ui\"}[$__range])))",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 9,
+      "type": "stat",
+      "title": "OpenShift Scheduled Unit Passed",
+      "description": "Latest OpenShift dev Vitest pass count.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 5
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(last_over_time(ai_tutor_quality_checks_total{environment=\"openshift-dev\",repository=\"NAGA-open-webui\",source=\"frontend_unit\",status=\"passed\"}[$__range]) and on(environment,repository,source,run_id) topk by(environment,repository,source) (1, last_over_time(ai_tutor_quality_source_last_run_timestamp_seconds{environment=\"openshift-dev\",repository=\"NAGA-open-webui\",source=\"frontend_unit\"}[$__range])))",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 10,
+      "type": "stat",
+      "title": "OpenShift Scheduled Unit Failed",
+      "description": "Latest OpenShift dev Vitest failed/error count.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 5
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(last_over_time(ai_tutor_quality_checks_total{environment=\"openshift-dev\",repository=\"NAGA-open-webui\",source=\"frontend_unit\",status=~\"failed|error\"}[$__range]) and on(environment,repository,source,run_id) topk by(environment,repository,source) (1, last_over_time(ai_tutor_quality_source_last_run_timestamp_seconds{environment=\"openshift-dev\",repository=\"NAGA-open-webui\",source=\"frontend_unit\"}[$__range])))",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 11,
       "type": "timeseries",
       "title": "Frontend Checks Needing Attention",
-      "description": "Failed or errored frontend checks over time, split by source.",
+      "description": "Failures/errors over time, split by GitHub vs OpenShift and by check type.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -317,13 +673,13 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 5
+        "y": 9
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (source, status) (ai_tutor_quality_checks_total{environment=\"github-actions\",repository=\"NAGA-open-webui\",source=~\"frontend_unit|playwright_ui\",status=~\"failed|error\"})",
-          "legendFormat": "{{source}} {{status}}",
+          "expr": "sum by (environment, source, status) (ai_tutor_quality_checks_total{repository=\"NAGA-open-webui\",source=~\"frontend_unit|playwright_ui\",status=~\"failed|error\"} and on(environment,repository,source,run_id) topk by(environment,repository,source) (1, ai_tutor_quality_source_last_run_timestamp_seconds{repository=\"NAGA-open-webui\",source=~\"frontend_unit|playwright_ui\"}))",
+          "legendFormat": "{{environment}} {{source}} {{status}}",
           "range": true
         }
       ],
@@ -354,10 +710,10 @@
       }
     },
     {
-      "id": 6,
+      "id": 12,
       "type": "table",
       "title": "Latest Frontend Check Details",
-      "description": "Individual AI Tutor frontend unit checks and Playwright UI workflow checks from the selected time window. IDs are shown as plain values.",
+      "description": "Individual checks from the latest GitHub and OpenShift frontend quality runs. OpenShift scheduled checks currently run Vitest only; GitHub runs Vitest and mocked Playwright.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -366,12 +722,12 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 5
+        "y": 9
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "max_over_time(ai_tutor_quality_check_duration_seconds{environment=\"github-actions\",repository=\"NAGA-open-webui\",source=~\"frontend_unit|playwright_ui\"}[$__range])",
+          "expr": "last_over_time(ai_tutor_quality_check_duration_seconds{repository=\"NAGA-open-webui\",source=~\"frontend_unit|playwright_ui\"}[$__range]) and on(environment,repository,source,run_id) topk by(environment,repository,source) (1, last_over_time(ai_tutor_quality_source_last_run_timestamp_seconds{repository=\"NAGA-open-webui\",source=~\"frontend_unit|playwright_ui\"}[$__range]))",
           "format": "table",
           "instant": true,
           "range": false
@@ -414,7 +770,7 @@
               },
               {
                 "id": "displayName",
-                "value": "GitHub run ID"
+                "value": "Run ID"
               }
             ]
           },
@@ -463,6 +819,18 @@
               {
                 "id": "displayName",
                 "value": "Check type"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "environment"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Where"
               }
             ]
           },

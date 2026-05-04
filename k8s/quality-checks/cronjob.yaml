@@ -1,9 +1,10 @@
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: ai-tutor-frontend-quality-checks
+  name: ai-tutor-frontend-scheduled-quality-checks
 spec:
-  schedule: "20 * * * *"
+  schedule: "0 1 * * *"
+  timeZone: "America/New_York"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 2
   failedJobsHistoryLimit: 2
@@ -16,7 +17,7 @@ spec:
           automountServiceAccountToken: false
           restartPolicy: Never
           containers:
-            - name: frontend-quality-checks
+            - name: frontend-scheduled-quality-checks
               image: image-registry.openshift-image-registry.svc:5000/rit-genai-naga-dev/ai-tutor-frontend-quality-checks:latest
               imagePullPolicy: Always
               env:
@@ -27,7 +28,7 @@ spec:
                 - name: QUALITY_BRANCH
                   value: rs/ai-tutor-tests
                 - name: QUALITY_SOURCE
-                  value: openshift-frontend-checks-hourly
+                  value: openshift-frontend-scheduled-checks
                 - name: QUALITY_RUN_ID
                   valueFrom:
                     fieldRef:

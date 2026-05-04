@@ -1,6 +1,6 @@
-# AI Tutor Frontend Quality Checks on OpenShift
+# AI Tutor Frontend Scheduled Quality Checks on OpenShift
 
-This runs the non-live AI Tutor frontend checks in OpenShift dev:
+This runs scheduled AI Tutor frontend checks in OpenShift dev:
 
 - Vitest unit/component checks for AI Tutor frontend code
 - Mocked Playwright dashboard workflows are supported but disabled by default
@@ -16,21 +16,21 @@ oc apply -f k8s/quality-checks/buildconfig.yaml -n rit-genai-naga-dev
 oc start-build ai-tutor-frontend-quality-checks -n rit-genai-naga-dev --follow
 ```
 
-## Manual run
+## Manual Run
 
 ```bash
-oc delete job ai-tutor-frontend-quality-check -n rit-genai-naga-dev --ignore-not-found
+oc delete job ai-tutor-frontend-scheduled-quality-check -n rit-genai-naga-dev --ignore-not-found
 oc apply -f k8s/quality-checks/job.yaml -n rit-genai-naga-dev
-oc logs job/ai-tutor-frontend-quality-check -n rit-genai-naga-dev -f
+oc logs job/ai-tutor-frontend-scheduled-quality-check -n rit-genai-naga-dev -f
 ```
 
-## Hourly run
+## Daily Schedule
 
 ```bash
 oc apply -f k8s/quality-checks/cronjob.yaml -n rit-genai-naga-dev
 ```
 
-The hourly job starts at minute 20 of each hour, uses resources only while it runs, sends metrics, then exits.
+The scheduled job runs daily at 1:00 AM New York time, uses resources only while it runs, sends metrics, then exits.
 
 ## Optional mocked Playwright
 
