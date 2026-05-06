@@ -78,7 +78,12 @@ from open_webui.config import (
     PDF_IMAGE_DESCRIPTION_MODEL_USER,
     # Required by get_all_base_models / get_models_for_user (used in PDF image description)
     ENABLE_OPENAI_API,
+    OPENAI_API_BASE_URLS,
+    OPENAI_API_KEYS,
+    OPENAI_API_CONFIGS,
     ENABLE_OLLAMA_API,
+    OLLAMA_BASE_URLS,
+    OLLAMA_API_CONFIGS,
     ENABLE_EVALUATION_ARENA_MODELS,
     EVALUATION_ARENA_MODELS,
 )
@@ -214,7 +219,12 @@ def get_worker_config():
             
             # Required by get_all_base_models / get_models_for_user (PDF image description path)
             _worker_config.ENABLE_OPENAI_API = ENABLE_OPENAI_API
+            _worker_config.OPENAI_API_BASE_URLS = OPENAI_API_BASE_URLS
+            _worker_config.OPENAI_API_KEYS = OPENAI_API_KEYS
+            _worker_config.OPENAI_API_CONFIGS = OPENAI_API_CONFIGS
             _worker_config.ENABLE_OLLAMA_API = ENABLE_OLLAMA_API
+            _worker_config.OLLAMA_BASE_URLS = OLLAMA_BASE_URLS
+            _worker_config.OLLAMA_API_CONFIGS = OLLAMA_API_CONFIGS
             _worker_config.ENABLE_EVALUATION_ARENA_MODELS = ENABLE_EVALUATION_ARENA_MODELS
             _worker_config.EVALUATION_ARENA_MODELS = EVALUATION_ARENA_MODELS
             
@@ -311,6 +321,7 @@ class MockState:
         self.EMBEDDING_FUNCTION = None
         self.FUNCTIONS = {}
         self.OPENAI_MODELS = {}
+        self.OLLAMA_MODELS = {}
     
     def initialize_embedding_function(self, embedding_api_key: Optional[str] = None, embedding_model: Optional[str] = None):
         """
@@ -490,7 +501,12 @@ class _FallbackConfig:
         # Required by get_all_base_models / get_models_for_user (PDF image description path)
         # Default to False since this project uses Portkey functions, not direct OpenAI/Ollama
         self.ENABLE_OPENAI_API = os.environ.get("ENABLE_OPENAI_API", "False").lower() == "true"
+        self.OPENAI_API_BASE_URLS = []
+        self.OPENAI_API_KEYS = []
+        self.OPENAI_API_CONFIGS = {}
         self.ENABLE_OLLAMA_API = os.environ.get("ENABLE_OLLAMA_API", "False").lower() == "true"
+        self.OLLAMA_BASE_URLS = []
+        self.OLLAMA_API_CONFIGS = {}
         self.ENABLE_EVALUATION_ARENA_MODELS = os.environ.get("ENABLE_EVALUATION_ARENA_MODELS", "False").lower() == "true"
         self.EVALUATION_ARENA_MODELS = []
         
