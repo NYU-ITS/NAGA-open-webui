@@ -1,5 +1,24 @@
 # Open WebUI 👋
 
+## AI Tutor Testing and Observability
+
+This branch includes AI Tutor frontend testing and observability support for local runs, GitHub Actions, Grafana Cloud, and OpenShift dev scheduled checks.
+
+Start here for the current state:
+
+- [AI_TUTOR_FRONTEND_TEST_REPORT.md](AI_TUTOR_FRONTEND_TEST_REPORT.md)
+- [k8s/quality-checks/README.md](k8s/quality-checks/README.md)
+- [playwright/README.md](playwright/README.md)
+
+Current setup:
+
+- Local: Vitest checks and mocked Playwright checks can be run from this repo.
+- GitHub Actions: `.github/workflows/ai-tutor-playwright-tests.yml` runs AI Tutor Vitest checks, mocked Playwright checks, uploads reports/videos, and can forward metrics to Grafana Cloud.
+- OpenShift dev: `ai-tutor-frontend-scheduled-quality-checks` runs daily at `1:00 AM America/New_York` and currently runs Vitest-only checks.
+- Grafana: `observability/grafana/dashboards/ai-tutor-frontend-github-quality.json` can be imported into Grafana Cloud.
+
+OpenShift Playwright is intentionally disabled by default because Chromium + Vite needs more memory than the current small dev Job budget.
+
 ![GitHub stars](https://img.shields.io/github/stars/open-webui/open-webui?style=social)
 ![GitHub forks](https://img.shields.io/github/forks/open-webui/open-webui?style=social)
 ![GitHub watchers](https://img.shields.io/github/watchers/open-webui/open-webui?style=social)

@@ -1,8 +1,4 @@
 
-# Project Title
-
-A brief description of what this project does and who it's for
-
 # Playwright E2E (AI Tutor)
 
 This repo uses **Playwright** for browser-level testing of the AI Tutor UI.
@@ -11,6 +7,14 @@ There are two kinds of tests:
 
 - **Mocked UI tests**: run fast and do *not* require a real backend.
 - **Live workflow bots**: drive a real local deployment and validate end-to-end flows.
+
+Current deployment status:
+
+- GitHub Actions runs mocked Playwright checks and publishes reports/videos.
+- OpenShift scheduled frontend checks currently run Vitest only.
+- OpenShift Playwright is disabled by default because Chromium + Vite needs a larger memory budget than the current dev Job.
+
+For the full frontend testing status, see [`../AI_TUTOR_FRONTEND_TEST_REPORT.md`](../AI_TUTOR_FRONTEND_TEST_REPORT.md).
 
 ## What files to look at
 
@@ -150,4 +154,3 @@ Some skips indicate environment prerequisites, not a test bug:
 - **No homework models found**: create/enable a workspace model whose name contains `"homework"` for the selected group.
 - **No chat models**: configure at least one model for chat (and ensure the student can see it).
 - **No assistant response**: inference backend may be slow/misconfigured; the test will skip rather than fail when it cannot confidently assert success.
-

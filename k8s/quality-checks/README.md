@@ -9,6 +9,10 @@ This runs scheduled AI Tutor frontend checks in OpenShift dev:
 
 It does not use test accounts and does not hit live user flows.
 
+For the full frontend local, GitHub Actions, Grafana Cloud, and OpenShift setup, see:
+
+- `../../AI_TUTOR_FRONTEND_TEST_REPORT.md`
+
 ## One-time build setup
 
 ```bash
@@ -31,6 +35,16 @@ oc apply -f k8s/quality-checks/cronjob.yaml -n rit-genai-naga-dev
 ```
 
 The scheduled job runs daily at 1:00 AM New York time, uses resources only while it runs, sends metrics, then exits.
+
+## Post-Deploy Run
+
+To run the same checks immediately after a dev rollout:
+
+```bash
+oc create job ai-tutor-frontend-post-deploy-check-$(date +%s) \
+  --from=cronjob/ai-tutor-frontend-scheduled-quality-checks \
+  -n rit-genai-naga-dev
+```
 
 ## Optional mocked Playwright
 
