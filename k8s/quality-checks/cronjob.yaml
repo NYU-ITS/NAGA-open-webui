@@ -43,21 +43,8 @@ spec:
                   value: "0"
                 - name: RUN_MOCKED_PLAYWRIGHT
                   value: "0"
-                - name: GRAFANA_CLOUD_PROMETHEUS_URL
-                  valueFrom:
-                    secretKeyRef:
-                      name: ai-tutor-grafana-cloud-secret
-                      key: GRAFANA_CLOUD_PROMETHEUS_URL
-                - name: GRAFANA_CLOUD_PROMETHEUS_USER
-                  valueFrom:
-                    secretKeyRef:
-                      name: ai-tutor-grafana-cloud-secret
-                      key: GRAFANA_CLOUD_PROMETHEUS_USER
-                - name: GRAFANA_CLOUD_PROMETHEUS_PASSWORD
-                  valueFrom:
-                    secretKeyRef:
-                      name: ai-tutor-grafana-cloud-secret
-                      key: GRAFANA_CLOUD_PROMETHEUS_PASSWORD
+                - name: QUALITY_PUSHGATEWAY_URL
+                  value: http://ai-tutor-quality-pushgateway:9091
               resources:
                 requests:
                   cpu: 250m
