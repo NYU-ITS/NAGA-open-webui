@@ -105,6 +105,26 @@ jobs:
           name: frontend-unit-results
           path: quality-results/
 
+      - name: Create quality metrics artifact
+        if: always()
+        run: |
+          mkdir -p quality-metrics
+          python scripts/serve_playwright_metrics.py \
+            --vitest-results quality-results/vitest-results.xml \
+            --host 127.0.0.1 &
+          exporter_pid=$!
+          trap 'kill ${exporter_pid} >/dev/null 2>&1 || true' EXIT
+          sleep 3
+          curl -fsS http://127.0.0.1:9109/metrics -o quality-metrics/github-actions.prom
+
+      - name: Upload quality metrics for OpenShift
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-tutor-frontend-quality-metrics
+          path: quality-metrics/github-actions.prom
+          retention-days: 14
+
       - name: Forward quality metrics to Grafana Cloud
         if: always()
         env:
