@@ -179,7 +179,10 @@ class TestFileProcessorCleanup:
         request = MockRequest(embedding_api_key=mock_embedding_api_key)
         
         # Initialize embedding function
-        request.app.state.initialize_embedding_function(embedding_api_key=mock_embedding_api_key)
+        request.app.state.initialize_embedding_function(
+            embedding_api_key=mock_embedding_api_key,
+            embedding_model="test-embedding-model",
+        )
         
         # Verify it's set
         initial_ef = request.app.state.EMBEDDING_FUNCTION
@@ -279,11 +282,16 @@ class TestFileProcessorIntegration:
         
         # Verify structure
         assert hasattr(request, 'app'), "MockRequest should have app attribute"
+        assert hasattr(request, 'state'), "MockRequest should have state attribute"
         assert hasattr(request.app, 'state'), "MockApp should have state attribute"
+        assert request.state is request.app.state, "MockRequest.state should mirror app.state"
         assert hasattr(request.app.state, 'EMBEDDING_FUNCTION'), "MockState should have EMBEDDING_FUNCTION"
         
         # Initialize embedding function
-        request.app.state.initialize_embedding_function(embedding_api_key=mock_embedding_api_key)
+        request.app.state.initialize_embedding_function(
+            embedding_api_key=mock_embedding_api_key,
+            embedding_model="test-embedding-model",
+        )
         
         # Verify it can be cleaned up
         request.app.state.EMBEDDING_FUNCTION = None
@@ -348,4 +356,3 @@ pytestmark = pytest.mark.workers
 if __name__ == "__main__":
     # Allow running directly for debugging
     pytest.main([__file__, "-v", "-s"])
-
