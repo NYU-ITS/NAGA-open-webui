@@ -8,6 +8,9 @@ kind: BuildConfig
 metadata:
   name: ai-tutor-frontend-quality-checks
 spec:
+  failedBuildsHistoryLimit: 2
+  successfulBuildsHistoryLimit: 2
+  runPolicy: Serial
   source:
     type: Git
     git:
@@ -23,3 +26,10 @@ spec:
       kind: ImageStreamTag
       name: ai-tutor-frontend-quality-checks:latest
   triggers: []
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
