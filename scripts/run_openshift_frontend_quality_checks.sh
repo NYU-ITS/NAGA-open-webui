@@ -72,6 +72,8 @@ if [[ "${RUN_MOCKED_PLAYWRIGHT}" == "1" ]]; then
   npx playwright test playwright/tests/ai-tutor-dashboard.mocked.spec.ts --project=chromium --workers="${PLAYWRIGHT_WORKERS}" --retries="${PLAYWRIGHT_RETRIES}" || playwright_status=$?
 else
   echo "Skipping mocked Playwright in OpenShift. Set RUN_MOCKED_PLAYWRIGHT=1 to enable it for a larger runner."
+  rm -rf playwright-report
+  mkdir -p playwright-report
 fi
 
 python3 scripts/serve_playwright_metrics.py \
