@@ -11,8 +11,8 @@ There are two kinds of tests:
 Current deployment status:
 
 - GitHub Actions runs mocked Playwright checks and publishes reports/videos.
-- OpenShift scheduled frontend checks currently run Vitest only.
-- OpenShift Playwright is disabled by default because Chromium + Vite needs a larger memory budget than the current dev Job.
+- OpenShift post-deployment checks run live Playwright against the deployed dev frontend after a build/rollout.
+- Vitest and mocked Playwright stay in GitHub Actions so OpenShift does not repeat tests that already ran in CI.
 
 For the full frontend testing status, see [`../AI_TUTOR_FRONTEND_TEST_REPORT.md`](../AI_TUTOR_FRONTEND_TEST_REPORT.md).
 
@@ -114,6 +114,17 @@ Steps:
 
 ```bash
 npm run test:e2e:ui -- playwright/tests/ai-tutor-dashboard.mocked.spec.ts
+```
+
+### OpenShift live post-deploy run
+
+OpenShift runs only the live workflow spec against the deployed frontend service. It skips Playwright's local web server because the app is already deployed:
+
+```bash
+export PLAYWRIGHT_RUN_LIVE=1
+export PLAYWRIGHT_SKIP_WEB_SERVER=1
+export PLAYWRIGHT_BASE_URL="http://open-webui.rit-genai-naga-dev.svc:80"
+npm run test:e2e:ui -- --project=chromium playwright/tests/ai-tutor-dashboard.live.spec.ts
 ```
 
 ### Live workflow bots (requires a running app + real accounts)

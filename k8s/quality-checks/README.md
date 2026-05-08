@@ -1,13 +1,13 @@
-# AI Tutor Frontend Scheduled Quality Checks on OpenShift
+# AI Tutor Frontend Post-Deployment Quality Checks on OpenShift
 
-This runs scheduled AI Tutor frontend checks in OpenShift dev:
+This runs AI Tutor frontend checks after the OpenShift dev frontend StatefulSet is rebuilt and rolled out:
 
-- Vitest unit/component checks for AI Tutor frontend code
-- Mocked Playwright dashboard workflows are supported but disabled by default
-  in OpenShift dev because Chromium + Vite can exceed the small dev memory limit.
-- Grafana Cloud metric forwarding
+- live Playwright dashboard workflows against the deployed OpenShift frontend
+- OpenShift Pushgateway metric publishing
 
-It does not use test accounts and does not hit live user flows.
+It does not run Vitest or mocked Playwright here. Those already run in GitHub Actions. The OpenShift job is only for post-deployment browser validation of the deployed dev environment.
+
+This frontend flow is build-triggered from the frontend app ImageStream. The backend `AI_Tutor_Analysis` repo has its own BuildConfig image-change trigger for backend smoke, integration, health, and external-service checks; that backend trigger does not run frontend Playwright.
 
 For the full frontend local, GitHub Actions, Grafana Cloud, and OpenShift setup, see:
 
@@ -20,38 +20,66 @@ oc apply -f k8s/quality-checks/buildconfig.yaml -n rit-genai-naga-dev
 oc start-build ai-tutor-frontend-quality-checks -n rit-genai-naga-dev --follow
 ```
 
-## Manual Run
+The quality-check BuildConfig watches:
 
-```bash
-oc delete job ai-tutor-frontend-scheduled-quality-check -n rit-genai-naga-dev --ignore-not-found
-oc apply -f k8s/quality-checks/job.yaml -n rit-genai-naga-dev
-oc logs job/ai-tutor-frontend-scheduled-quality-check -n rit-genai-naga-dev -f
+```text
+open-webui:latest
 ```
 
-## Daily Schedule
+When the frontend app build updates the `open-webui:latest` ImageStreamTag, OpenShift starts `ai-tutor-frontend-quality-checks`. The quality build runs `scripts/run_openshift_frontend_quality_checks_from_build.sh` as its `postCommit` hook.
+
+Important: this immediate trigger requires the frontend app build to publish to the `open-webui:latest` ImageStreamTag. If the app build only pushes `registry.cloud.rt.nyu.edu/rit-genai-poc/naga-open-webui:latest` as a raw DockerImage, OpenShift has no ImageStream update to watch and the quality BuildConfig will not start immediately.
+
+## One-Time Live Test Inputs
+
+Create the live Playwright credentials secret from real dev test accounts:
 
 ```bash
-oc apply -f k8s/quality-checks/cronjob.yaml -n rit-genai-naga-dev
+oc create secret generic ai-tutor-playwright-live-secret \
+  -n rit-genai-naga-dev \
+  --from-literal=admin-email='<admin-or-instructor-email>' \
+  --from-literal=admin-password='<admin-or-instructor-password>' \
+  --from-literal=student-email='<student-email>' \
+  --from-literal=student-password='<student-password>' \
+  --dry-run=client -o yaml | oc apply -f -
 ```
 
-The scheduled job runs daily at 1:00 AM New York time, uses resources only while it runs, sends metrics, then exits.
-
-## Post-Deploy Run
-
-To run the same checks immediately after a dev rollout:
+Create the PDF fixture ConfigMap from a small non-sensitive homework PDF:
 
 ```bash
-oc create job ai-tutor-frontend-post-deploy-check-$(date +%s) \
-  --from=cronjob/ai-tutor-frontend-scheduled-quality-checks \
-  -n rit-genai-naga-dev
+oc create configmap ai-tutor-playwright-fixtures \
+  -n rit-genai-naga-dev \
+  --from-file=homework.pdf=/path/to/homework.pdf \
+  --dry-run=client -o yaml | oc apply -f -
 ```
 
-## Optional mocked Playwright
+## Build, Deploy, and Test
 
-The Job defaults to Vitest-only in OpenShift dev:
+This uses the current user's OpenShift permissions. It starts the frontend quality image build, starts the frontend app build, restarts the frontend StatefulSet so it pulls the new image, waits for rollout, runs the quality Job, sends metrics, and exits.
+
+```bash
+bash scripts/run_frontend_build_deploy_quality_check.sh
+```
+
+If the frontend was already rebuilt and you only want to run the post-deployment check:
+
+```bash
+bash scripts/run_post_deploy_frontend_quality_check.sh
+```
+
+This is intentionally not scheduled. It runs only after a deployment rollout or when someone explicitly runs the same commands.
+
+The Job uses resources only while it runs, sends metrics, then exits.
+
+The build-triggered path does not use the Job. It runs inside the quality-check build hook, mounts `ai-tutor-playwright-live-secret` and `ai-tutor-playwright-fixtures` as read-only build volumes, pushes metrics to the namespace Pushgateway, then exits.
+
+## Resource Profile
+
+The job requests `1 CPU` and `2Gi` memory, with a `2 CPU` and `4Gi` limit. That is intentionally scoped to one Chromium worker and no video recording:
 
 ```yaml
-RUN_MOCKED_PLAYWRIGHT: "0"
+PLAYWRIGHT_WORKERS: "1"
+PLAYWRIGHT_VIDEO: "off"
 ```
 
-Set it to `"1"` only on a larger runner/pod memory limit.
+Increase only after checking actual pod usage from a real run.

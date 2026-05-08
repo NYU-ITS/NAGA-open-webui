@@ -5,6 +5,7 @@ const HOST = process.env.PLAYWRIGHT_HOST ?? '127.0.0.1';
 const BASE_URL = process.env.PLAYWRIGHT_BASE_URL?.trim() || `http://${HOST}:${PORT}`;
 const WEB_SERVER_COMMAND =
 	process.env.PLAYWRIGHT_WEB_SERVER_COMMAND?.trim() || `npm run dev -- --host ${HOST} --port ${PORT}`;
+const SKIP_WEB_SERVER = process.env.PLAYWRIGHT_SKIP_WEB_SERVER === '1';
 const CI_RETRIES = Number(process.env.PLAYWRIGHT_RETRIES ?? 2);
 const CI_WORKERS = Number(process.env.PLAYWRIGHT_WORKERS ?? 2);
 
@@ -34,12 +35,14 @@ export default defineConfig({
 		screenshot: 'only-on-failure',
 		video: videoModeFromEnv()
 	},
-	webServer: {
-		command: WEB_SERVER_COMMAND,
-		url: BASE_URL,
-		reuseExistingServer: !process.env.CI,
-		timeout: 180 * 1000
-	},
+	webServer: SKIP_WEB_SERVER
+		? undefined
+		: {
+				command: WEB_SERVER_COMMAND,
+				url: BASE_URL,
+				reuseExistingServer: !process.env.CI,
+				timeout: 180 * 1000
+			},
 	projects: [
 		{
 			name: 'chromium',

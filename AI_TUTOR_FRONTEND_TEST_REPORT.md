@@ -19,8 +19,8 @@ The frontend calls backend analytics services from `AI_Tutor_Analysis`, but this
 - Optional live Playwright workflow scaffolding.
 - GitHub Actions reporting for Vitest and mocked Playwright.
 - Grafana Cloud metric forwarding from GitHub Actions.
-- OpenShift scheduled frontend quality checks for Vitest.
-- Grafana dashboard JSON for frontend GitHub and OpenShift scheduled results.
+- OpenShift post-deployment frontend quality checks for live Playwright.
+- Grafana dashboard JSON for separate GitHub and OpenShift frontend results.
 
 ## Local Checks
 
@@ -87,30 +87,25 @@ Files:
 
 - `k8s/quality-checks/buildconfig.yaml`
 - `k8s/quality-checks/job.yaml`
-- `k8s/quality-checks/cronjob.yaml`
 - `k8s/quality-checks/README.md`
 
 OpenShift objects:
 
 - BuildConfig/ImageStream image: `ai-tutor-frontend-quality-checks`
-- manual Job: `ai-tutor-frontend-scheduled-quality-check`
-- scheduled CronJob: `ai-tutor-frontend-scheduled-quality-checks`
-
-Schedule:
-
-- daily at `1:00 AM America/New_York`
+- post-deployment Job: `ai-tutor-frontend-post-deploy-quality-check`
 
 What OpenShift runs today:
 
-- Vitest-only AI Tutor frontend checks
+- live Playwright AI Tutor dashboard workflows against the deployed frontend
 
-What OpenShift does not run today:
+What OpenShift does not run:
 
-- Playwright browser workflows
+- Vitest unit/component checks
+- mocked Playwright dashboard workflows
 
 Reason:
 
-- Chromium + Vite exceeded the current small OpenShift dev memory budget during testing. GitHub Actions remains the current place for mocked Playwright checks.
+- those checks already run in GitHub Actions and do not need to be repeated in OpenShift
 
 ## Grafana
 
@@ -122,7 +117,7 @@ The dashboard separates:
 
 - GitHub Vitest checks
 - GitHub Playwright checks
-- OpenShift scheduled frontend checks
+- OpenShift live Playwright post-deployment checks
 
 The dashboard uses latest-run style queries for stat panels so counts do not stack across repeated runs in the selected time window.
 
@@ -149,19 +144,14 @@ PLAYWRIGHT_BROWSERS_PATH=0 npm run test:e2e:ui -- --project=chromium playwright/
 
 ## Resource Guidance
 
-Current OpenShift Vitest checks:
+Current OpenShift live Playwright checks:
 
-- request: `250m CPU`, `768Mi memory`
-- limit: `1 CPU`, `2Gi memory`
-
-Recommended OpenShift Playwright budget:
-
-- minimum request: `1 CPU`, `2Gi memory`
-- recommended limit: `2 CPU`, `4Gi memory`
-- safer for video/report-heavy runs: `2 CPU`, `6Gi memory`
+- request: `1 CPU`, `2Gi memory`
+- limit: `2 CPU`, `4Gi memory`
+- workers: `1`
+- video: `off`
 
 ## Current Limitations
 
-- OpenShift frontend scheduled checks are Vitest-only.
-- Live Playwright checks require real accounts and are not enabled by default.
+- Live Playwright checks require real dev test accounts and a small homework PDF fixture.
 - GitHub Actions should not access VPN-only OpenShift services unless a secure service-account-based path is approved.

@@ -1,6 +1,11 @@
 apiVersion: image.openshift.io/v1
 kind: ImageStream
 metadata:
+  name: open-webui
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
   name: ai-tutor-frontend-quality-checks
 ---
 apiVersion: build.openshift.io/v1
@@ -21,11 +26,33 @@ spec:
     type: Docker
     dockerStrategy:
       dockerfilePath: quality_checks/Dockerfile
+      volumes:
+        - name: ai-tutor-playwright-live-secret
+          source:
+            type: Secret
+            secret:
+              secretName: ai-tutor-playwright-live-secret
+          mounts:
+            - destinationPath: /var/run/ai-tutor-playwright-live-secret
+        - name: ai-tutor-playwright-fixtures
+          source:
+            type: ConfigMap
+            configMap:
+              name: ai-tutor-playwright-fixtures
+          mounts:
+            - destinationPath: /workspace/playwright-fixtures
   output:
     to:
       kind: ImageStreamTag
       name: ai-tutor-frontend-quality-checks:latest
-  triggers: []
+  postCommit:
+    script: bash scripts/run_openshift_frontend_quality_checks_from_build.sh
+  triggers:
+    - type: ImageChange
+      imageChange:
+        from:
+          kind: ImageStreamTag
+          name: open-webui:latest
   resources:
     requests:
       cpu: 500m

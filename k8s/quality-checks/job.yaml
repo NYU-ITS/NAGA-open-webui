@@ -1,7 +1,11 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: ai-tutor-frontend-scheduled-quality-check
+  name: ai-tutor-frontend-post-deploy-quality-check
+  labels:
+    app.kubernetes.io/name: ai-tutor-frontend-post-deploy-quality-check
+    app.kubernetes.io/component: frontend-quality-check
+    app.kubernetes.io/part-of: ai-tutor-quality
 spec:
   backoffLimit: 0
   ttlSecondsAfterFinished: 3600
@@ -10,7 +14,7 @@ spec:
       automountServiceAccountToken: false
       restartPolicy: Never
       containers:
-        - name: frontend-scheduled-quality-checks
+        - name: frontend-post-deploy-quality-checks
           image: image-registry.openshift-image-registry.svc:5000/rit-genai-naga-dev/ai-tutor-frontend-quality-checks:latest
           imagePullPolicy: Always
           env:
@@ -21,7 +25,7 @@ spec:
             - name: QUALITY_BRANCH
               value: rs/ai-tutor-tests
             - name: QUALITY_SOURCE
-              value: openshift-frontend-scheduled-checks
+              value: openshift-frontend-live-playwright
             - name: QUALITY_RUN_ID
               valueFrom:
                 fieldRef:
@@ -33,18 +37,46 @@ spec:
             - name: PLAYWRIGHT_VIDEO
               value: "off"
             - name: PLAYWRIGHT_RUN_LIVE
+              value: "1"
+            - name: PLAYWRIGHT_SKIP_WEB_SERVER
+              value: "1"
+            - name: PLAYWRIGHT_BASE_URL
+              value: http://open-webui.rit-genai-naga-dev.svc:80
+            - name: PLAYWRIGHT_WORKERS
+              value: "1"
+            - name: PLAYWRIGHT_RETRIES
               value: "0"
-            - name: RUN_MOCKED_PLAYWRIGHT
-              value: "0"
+            - name: PLAYWRIGHT_HOMEWORK_PDF_PATH
+              value: /workspace/playwright-fixtures/homework.pdf
+            - name: PLAYWRIGHT_ADMIN_EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: ai-tutor-playwright-live-secret
+                  key: admin-email
+            - name: PLAYWRIGHT_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ai-tutor-playwright-live-secret
+                  key: admin-password
+            - name: PLAYWRIGHT_STUDENT_EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: ai-tutor-playwright-live-secret
+                  key: student-email
+            - name: PLAYWRIGHT_STUDENT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ai-tutor-playwright-live-secret
+                  key: student-password
             - name: QUALITY_PUSHGATEWAY_URL
               value: http://ai-tutor-quality-pushgateway:9091
           resources:
             requests:
-              cpu: 250m
-              memory: 768Mi
-            limits:
               cpu: "1"
               memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -53,3 +85,11 @@ spec:
             runAsNonRoot: true
             seccompProfile:
               type: RuntimeDefault
+          volumeMounts:
+            - name: playwright-fixtures
+              mountPath: /workspace/playwright-fixtures
+              readOnly: true
+      volumes:
+        - name: playwright-fixtures
+          configMap:
+            name: ai-tutor-playwright-fixtures
