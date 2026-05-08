@@ -38,6 +38,8 @@ spec:
               value: "off"
             - name: PLAYWRIGHT_RUN_LIVE
               value: "1"
+            - name: PLAYWRIGHT_STRICT_LIVE_CHECKS
+              value: "1"
             - name: PLAYWRIGHT_SKIP_WEB_SERVER
               value: "1"
             - name: PLAYWRIGHT_BASE_URL

@@ -5,6 +5,9 @@ import { basename } from 'node:path';
 import { expect, test, type Page } from '@playwright/test';
 
 const liveEnabled = process.env.PLAYWRIGHT_RUN_LIVE === '1';
+const strictLiveChecks =
+	process.env.PLAYWRIGHT_STRICT_LIVE_CHECKS === '1' ||
+	process.env.QUALITY_ENVIRONMENT?.toLowerCase().startsWith('openshift');
 const fallbackUserEmail = process.env.PLAYWRIGHT_USER_EMAIL ?? '';
 const fallbackUserPassword = process.env.PLAYWRIGHT_USER_PASSWORD ?? '';
 const adminEmail = process.env.PLAYWRIGHT_ADMIN_EMAIL ?? fallbackUserEmail;
@@ -12,6 +15,14 @@ const adminPassword = process.env.PLAYWRIGHT_ADMIN_PASSWORD ?? fallbackUserPassw
 const studentEmail = process.env.PLAYWRIGHT_STUDENT_EMAIL ?? fallbackUserEmail;
 const studentPassword = process.env.PLAYWRIGHT_STUDENT_PASSWORD ?? fallbackUserPassword;
 const homeworkPdfPath = process.env.PLAYWRIGHT_HOMEWORK_PDF_PATH ?? '';
+
+function skipOrFail(condition: unknown, message: string) {
+	if (!condition) return;
+	if (strictLiveChecks) {
+		throw new Error(message);
+	}
+	test.skip(true, message);
+}
 
 async function loginViaApi(page: Page, email: string, password: string) {
 	const response = await page.request.post('/api/v1/auths/signin', {
@@ -51,12 +62,12 @@ async function loginViaApi(page: Page, email: string, password: string) {
 }
 
 async function loginAsAdmin(page: Page) {
-	test.skip(!adminEmail || !adminPassword, 'Provide PLAYWRIGHT_ADMIN_EMAIL and PLAYWRIGHT_ADMIN_PASSWORD.');
+	skipOrFail(!adminEmail || !adminPassword, 'Provide PLAYWRIGHT_ADMIN_EMAIL and PLAYWRIGHT_ADMIN_PASSWORD.');
 	await loginViaApi(page, adminEmail, adminPassword);
 }
 
 async function loginAsStudent(page: Page) {
-	test.skip(!studentEmail || !studentPassword, 'Provide PLAYWRIGHT_STUDENT_EMAIL and PLAYWRIGHT_STUDENT_PASSWORD.');
+	skipOrFail(!studentEmail || !studentPassword, 'Provide PLAYWRIGHT_STUDENT_EMAIL and PLAYWRIGHT_STUDENT_PASSWORD.');
 	await loginViaApi(page, studentEmail, studentPassword);
 }
 
@@ -143,7 +154,7 @@ async function waitUntilHomeworkModelsResolved(page: Page) {
 	}
 
 	if (await emptyModels.isVisible().catch(() => false)) {
-		test.skip(
+		skipOrFail(
 			true,
 			'No homework models for this group after waiting. Use a workspace model whose name includes "homework" and grant this group access to it.'
 		);
@@ -266,7 +277,7 @@ async function waitForHomeworkPdfUploadFinished(
 }
 
 async function uploadHomeworkPdf(page: Page, pdfPath: string) {
-	test.skip(!pdfPath, 'Provide PLAYWRIGHT_HOMEWORK_PDF_PATH for upload workflow.');
+	skipOrFail(!pdfPath, 'Provide PLAYWRIGHT_HOMEWORK_PDF_PATH for upload workflow.');
 
 	const table = await ensureHomeworkUploadTableVisible(page);
 	await waitUntilHomeworkModelsResolved(page);
@@ -278,7 +289,7 @@ async function uploadHomeworkPdf(page: Page, pdfPath: string) {
 	// Choosing a file fires `change` → upload starts immediately; no Action-column button click required.
 	// When homework was already uploaded, Action shows Run/Re-run — replacement upload is still this input + icon.
 	const questionInput = homeworkRow.locator('input[id^="upload-question-"]');
-	test.skip((await questionInput.count()) === 0, 'No homework question file input in row; check model/group.');
+	skipOrFail((await questionInput.count()) === 0, 'No homework question file input in row; check model/group.');
 
 	// Clear unrelated stale toasts before triggering upload so we only evaluate this upload attempt.
 	await clearVisibleToasts(page);
@@ -299,7 +310,7 @@ async function ensureChatModelSelectedIfNeeded(page: Page) {
 
 	await modelSelect.click();
 	const modelItems = page.getByRole('button', { name: 'model-item' });
-	test.skip((await modelItems.count()) === 0, 'No models available to select for chat; configure at least one model.');
+	skipOrFail((await modelItems.count()) === 0, 'No models available to select for chat; configure at least one model.');
 	await modelItems.first().click();
 	await expect(modelSelect).not.toContainText('Select a model', { timeout: 10_000 });
 }
@@ -327,8 +338,8 @@ async function sendChatAndWaitForAssistant(page: Page, message: string) {
 		await page.waitForTimeout(250);
 	}
 
-	test.skip(!winner, 'No assistant response (and no clear error toast) within timeout; local inference backend may be slow/misconfigured.');
-	test.skip(winner === 'error', 'Chat generation failed in this local environment (error toast shown). Configure a working model/inference backend.');
+	skipOrFail(!winner, 'No assistant response (and no clear error toast) within timeout; local inference backend may be slow/misconfigured.');
+	skipOrFail(winner === 'error', 'Chat generation failed in this local environment (error toast shown). Configure a working model/inference backend.');
 	expect(winner).toBe('assistant');
 }
 

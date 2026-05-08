@@ -88,6 +88,8 @@ The Job uses resources only while it runs, sends metrics, then exits.
 
 The build-triggered path does not use the Job. It runs inside the quality-check build hook, mounts `ai-tutor-playwright-live-secret` as a read-only build volume, uses the tracked `playwright/fixtures/Math_HW.pdf` fixture in the quality-check image, pushes metrics to the namespace Pushgateway, then exits.
 
+OpenShift sets `PLAYWRIGHT_STRICT_LIVE_CHECKS=1`. Missing live prerequisites, such as credentials, a readable fixture PDF, accessible homework models, or a usable chat model, fail the quality signal instead of becoming quiet skips.
+
 ## Resource Profile
 
 The job requests `1 CPU` and `2Gi` memory, with a `2 CPU` and `4Gi` limit. That is intentionally scoped to one Chromium worker and no video recording:
