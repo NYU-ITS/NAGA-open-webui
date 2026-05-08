@@ -2,6 +2,16 @@ apiVersion: image.openshift.io/v1
 kind: ImageStream
 metadata:
   name: open-webui
+spec:
+  tags:
+    - name: latest
+      from:
+        kind: DockerImage
+        name: registry.cloud.rt.nyu.edu/rit-genai-poc/naga-open-webui:latest
+      importPolicy:
+        scheduled: true
+      referencePolicy:
+        type: Source
 ---
 apiVersion: image.openshift.io/v1
 kind: ImageStream

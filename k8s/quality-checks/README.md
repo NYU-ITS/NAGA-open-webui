@@ -7,7 +7,7 @@ This runs AI Tutor frontend checks after the OpenShift dev frontend StatefulSet 
 
 It does not run Vitest or mocked Playwright here. Those already run in GitHub Actions. The OpenShift job is only for post-deployment browser validation of the deployed dev environment.
 
-This frontend flow is build-triggered from the frontend app ImageStream. The backend `AI_Tutor_Analysis` repo has its own BuildConfig image-change trigger for backend smoke, integration, health, and external-service checks; that backend trigger does not run frontend Playwright.
+This frontend flow is build-triggered from an OpenShift ImageStream that tracks the existing external frontend image. The backend `AI_Tutor_Analysis` repo has its own BuildConfig image-change trigger for backend smoke, integration, health, and external-service checks; that backend trigger does not run frontend Playwright.
 
 For the full frontend local, GitHub Actions, Grafana Cloud, and OpenShift setup, see:
 
@@ -26,9 +26,25 @@ The quality-check BuildConfig watches:
 open-webui:latest
 ```
 
-When the frontend app build updates the `open-webui:latest` ImageStreamTag, OpenShift starts `ai-tutor-frontend-quality-checks`. The quality build runs `scripts/run_openshift_frontend_quality_checks_from_build.sh` as its `postCommit` hook.
+`open-webui:latest` is configured as an ImageStream tag that tracks:
 
-Important: this immediate trigger requires the frontend app build to publish to the `open-webui:latest` ImageStreamTag. If the app build only pushes `registry.cloud.rt.nyu.edu/rit-genai-poc/naga-open-webui:latest` as a raw DockerImage, OpenShift has no ImageStream update to watch and the quality BuildConfig will not start immediately.
+```text
+registry.cloud.rt.nyu.edu/rit-genai-poc/naga-open-webui:latest
+```
+
+When OpenShift imports a new digest for that external image into `open-webui:latest`, it starts `ai-tutor-frontend-quality-checks`. The quality build runs `scripts/run_openshift_frontend_quality_checks_from_build.sh` as its `postCommit` hook.
+
+This preserves the current frontend app flow: the app BuildConfig can continue pushing to the external registry, and the Helm-managed `open-webui` StatefulSet can continue pulling the external image. The ImageStream is only the OpenShift-native automation signal for tests.
+
+The import is scheduled by OpenShift. It is automatic, but not guaranteed to fire the exact second the external registry push completes. For an immediate test run after a manual app build, import the image explicitly:
+
+```bash
+oc import-image open-webui:latest \
+  --from=registry.cloud.rt.nyu.edu/rit-genai-poc/naga-open-webui:latest \
+  --reference-policy=source \
+  --confirm \
+  -n rit-genai-naga-dev
+```
 
 ## One-Time Live Test Inputs
 
