@@ -39,6 +39,18 @@ push_metrics_to_gateway() {
   echo "Published AI Tutor frontend quality metrics to Pushgateway."
 }
 
+upload_playwright_artifacts() {
+  if [[ "${QUALITY_UPLOAD_ARTIFACTS:-1}" != "1" ]]; then
+    echo "OpenShift Playwright artifact upload is disabled."
+    return 0
+  fi
+
+  python3 scripts/upload_openshift_playwright_artifacts.py \
+    --report-dir playwright-report \
+    --results-dir test-results \
+    --metrics-file /tmp/ai-tutor-frontend-quality-metrics.prom || true
+}
+
 forward_metrics_to_grafana_cloud() {
   if [[ -z "${GRAFANA_CLOUD_PROMETHEUS_URL:-}" || -z "${GRAFANA_CLOUD_PROMETHEUS_USER:-}" || -z "${GRAFANA_CLOUD_PROMETHEUS_PASSWORD:-}" ]]; then
     echo "Grafana Cloud variables are not set; skipping Grafana Cloud forwarding."
@@ -80,6 +92,7 @@ sleep 3
 curl -fsS "http://${QUALITY_METRICS_TARGET}/metrics" >/dev/null
 
 push_metrics_to_gateway
+upload_playwright_artifacts
 forward_metrics_to_grafana_cloud
 
 if [[ "${playwright_status}" != "0" ]]; then

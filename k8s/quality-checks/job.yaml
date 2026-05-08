@@ -17,6 +17,13 @@ spec:
         - name: frontend-post-deploy-quality-checks
           image: image-registry.openshift-image-registry.svc:5000/rit-genai-naga-dev/ai-tutor-frontend-quality-checks:latest
           imagePullPolicy: Always
+          envFrom:
+            - secretRef:
+                name: ai-tutor-test-artifacts-bucket
+                optional: true
+            - configMapRef:
+                name: ai-tutor-test-artifacts-bucket
+                optional: true
           env:
             - name: QUALITY_ENVIRONMENT
               value: openshift-dev

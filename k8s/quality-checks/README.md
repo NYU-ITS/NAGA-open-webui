@@ -67,6 +67,7 @@ quality_checks/Dockerfile builds the Playwright quality-check image
 postCommit runs scripts/run_openshift_frontend_quality_checks_from_build.sh
 live Playwright runs against http://open-webui.rit-genai-naga-dev.svc:80
 metrics are pushed to ai-tutor-quality-pushgateway
+Playwright reports/results are uploaded to ObjectBucket/S3 when bucket credentials are available
 build succeeds or fails with the Playwright result
 ```
 
@@ -123,6 +124,8 @@ Default non-secret env:
 - `QUALITY_SOURCE=openshift-frontend-build-triggered-playwright`
 - `QUALITY_PUSHGATEWAY_URL=http://ai-tutor-quality-pushgateway:9091`
 - `QUALITY_FORWARD_SECONDS=75`
+- `QUALITY_UPLOAD_ARTIFACTS=1`
+- `ARTIFACT_PREFIX=openshift/frontend/dev`
 
 Required secret:
 
@@ -240,6 +243,29 @@ Dashboard JSON:
 - `observability/grafana/dashboards/ai-tutor-frontend-github-quality.json`
 
 Metrics must remain telemetry only. Do not export credentials, uploaded file contents, student submissions, request bodies, or database rows.
+
+## Artifact Upload
+
+After metrics are scraped locally, the runner uploads heavy Playwright artifacts when ObjectBucket/S3 credentials are available:
+
+- `playwright-report/`
+- `test-results/`
+- screenshots, videos, traces, and raw Playwright files inside those directories
+
+The upload path is:
+
+```text
+openshift/frontend/dev/runs/<run-id>/
+```
+
+The uploader also writes:
+
+```text
+openshift/frontend/dev/latest.json
+openshift/frontend/dev/index.json
+```
+
+Artifact upload is best-effort. If the bucket secret/config is missing, the runner logs a clear skip and the quality result still comes from Playwright plus the pushed metrics.
 
 ## Resources
 

@@ -44,6 +44,20 @@ spec:
               secretName: ai-tutor-playwright-live-secret
           mounts:
             - destinationPath: /var/run/ai-tutor-playwright-live-secret
+        - name: ai-tutor-test-artifacts-bucket-secret
+          source:
+            type: Secret
+            secret:
+              secretName: ai-tutor-test-artifacts-bucket
+          mounts:
+            - destinationPath: /var/run/ai-tutor-artifacts-secret
+        - name: ai-tutor-test-artifacts-bucket-config
+          source:
+            type: ConfigMap
+            configMap:
+              name: ai-tutor-test-artifacts-bucket
+          mounts:
+            - destinationPath: /var/run/ai-tutor-artifacts-config
   output:
     to:
       kind: ImageStreamTag

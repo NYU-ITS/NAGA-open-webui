@@ -192,6 +192,8 @@ Default non-secret env:
 - `QUALITY_SOURCE=openshift-frontend-build-triggered-playwright`
 - `QUALITY_PUSHGATEWAY_URL=http://ai-tutor-quality-pushgateway:9091`
 - `QUALITY_FORWARD_SECONDS=75`
+- `QUALITY_UPLOAD_ARTIFACTS=1`
+- `ARTIFACT_PREFIX=openshift/frontend/dev`
 
 Required OpenShift secret:
 
@@ -291,6 +293,14 @@ Dashboard expectations:
 - labels should include source, repository, branch, environment, run id, and commit when available
 
 Telemetry must not include credentials, uploaded file contents, student submissions, database rows, or API response bodies.
+
+OpenShift stores heavy Playwright artifacts in ObjectBucket/S3 when bucket credentials are available:
+
+- reports and raw Playwright outputs: `openshift/frontend/dev/runs/<run-id>/`
+- latest marker: `openshift/frontend/dev/latest.json`
+- recent run index: `openshift/frontend/dev/index.json`
+
+The deployed artifact viewer reads those markers to show the latest report and recent runs. Artifact upload is best-effort and does not override the Playwright pass/fail result.
 
 ## Resources
 
