@@ -72,7 +72,6 @@ forward_metrics_to_grafana_cloud() {
 
 playwright_status=0
 npx playwright test playwright/tests/ai-tutor-dashboard.live.spec.ts \
-  --project=chromium \
   --workers="${PLAYWRIGHT_WORKERS}" \
   --retries="${PLAYWRIGHT_RETRIES}" || playwright_status=$?
 
