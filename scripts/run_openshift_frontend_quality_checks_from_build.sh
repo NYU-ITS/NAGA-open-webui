@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SECRET_MOUNT_PATH="${PLAYWRIGHT_SECRET_MOUNT_PATH:-/var/run/ai-tutor-playwright-live-secret}"
-FIXTURE_MOUNT_PATH="${PLAYWRIGHT_FIXTURE_MOUNT_PATH:-/workspace/playwright-fixtures}"
+FIXTURE_MOUNT_PATH="${PLAYWRIGHT_FIXTURE_MOUNT_PATH:-/workspace/playwright/fixtures}"
 
 export QUALITY_ENVIRONMENT="${QUALITY_ENVIRONMENT:-openshift-dev}"
 export QUALITY_REPOSITORY="${QUALITY_REPOSITORY:-NAGA-open-webui}"
@@ -18,7 +18,7 @@ export PLAYWRIGHT_SKIP_WEB_SERVER="${PLAYWRIGHT_SKIP_WEB_SERVER:-1}"
 export PLAYWRIGHT_BASE_URL="${PLAYWRIGHT_BASE_URL:-http://open-webui.rit-genai-naga-dev.svc:80}"
 export PLAYWRIGHT_WORKERS="${PLAYWRIGHT_WORKERS:-1}"
 export PLAYWRIGHT_RETRIES="${PLAYWRIGHT_RETRIES:-0}"
-export PLAYWRIGHT_HOMEWORK_PDF_PATH="${PLAYWRIGHT_HOMEWORK_PDF_PATH:-${FIXTURE_MOUNT_PATH}/homework.pdf}"
+export PLAYWRIGHT_HOMEWORK_PDF_PATH="${PLAYWRIGHT_HOMEWORK_PDF_PATH:-${FIXTURE_MOUNT_PATH}/Math_HW.pdf}"
 
 load_playwright_secret() {
   local missing=0

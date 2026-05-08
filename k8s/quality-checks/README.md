@@ -60,14 +60,13 @@ oc create secret generic ai-tutor-playwright-live-secret \
   --dry-run=client -o yaml | oc apply -f -
 ```
 
-Create the PDF fixture ConfigMap from a small non-sensitive homework PDF:
+The live Playwright upload fixture is tracked in Git:
 
-```bash
-oc create configmap ai-tutor-playwright-fixtures \
-  -n rit-genai-naga-dev \
-  --from-file=homework.pdf=/path/to/homework.pdf \
-  --dry-run=client -o yaml | oc apply -f -
+```text
+playwright/fixtures/Math_HW.pdf
 ```
+
+To change the PDF used by OpenShift, replace that file with a new PDF using the same name, commit it, push it, and rebuild the frontend quality-check image.
 
 ## Build, Deploy, and Test
 
@@ -87,7 +86,7 @@ This is intentionally not scheduled. It runs only after a deployment rollout or 
 
 The Job uses resources only while it runs, sends metrics, then exits.
 
-The build-triggered path does not use the Job. It runs inside the quality-check build hook, mounts `ai-tutor-playwright-live-secret` and `ai-tutor-playwright-fixtures` as read-only build volumes, pushes metrics to the namespace Pushgateway, then exits.
+The build-triggered path does not use the Job. It runs inside the quality-check build hook, mounts `ai-tutor-playwright-live-secret` as a read-only build volume, uses the tracked `playwright/fixtures/Math_HW.pdf` fixture in the quality-check image, pushes metrics to the namespace Pushgateway, then exits.
 
 ## Resource Profile
 

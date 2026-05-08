@@ -47,7 +47,7 @@ spec:
             - name: PLAYWRIGHT_RETRIES
               value: "0"
             - name: PLAYWRIGHT_HOMEWORK_PDF_PATH
-              value: /workspace/playwright-fixtures/homework.pdf
+              value: /workspace/playwright/fixtures/Math_HW.pdf
             - name: PLAYWRIGHT_ADMIN_EMAIL
               valueFrom:
                 secretKeyRef:
@@ -85,11 +85,3 @@ spec:
             runAsNonRoot: true
             seccompProfile:
               type: RuntimeDefault
-          volumeMounts:
-            - name: playwright-fixtures
-              mountPath: /workspace/playwright-fixtures
-              readOnly: true
-      volumes:
-        - name: playwright-fixtures
-          configMap:
-            name: ai-tutor-playwright-fixtures

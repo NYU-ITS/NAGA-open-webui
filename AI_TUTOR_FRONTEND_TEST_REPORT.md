@@ -100,7 +100,7 @@ Automatic trigger:
 - `open-webui:latest` tracks the existing external image `registry.cloud.rt.nyu.edu/rit-genai-poc/naga-open-webui:latest`
 - when OpenShift imports a new external image digest into that ImageStream tag, it triggers `ai-tutor-frontend-quality-checks`
 - the frontend quality build runs `scripts/run_openshift_frontend_quality_checks_from_build.sh` as its `postCommit` hook
-- the hook mounts `ai-tutor-playwright-live-secret` and `ai-tutor-playwright-fixtures` as read-only build volumes
+- the hook mounts `ai-tutor-playwright-live-secret` as a read-only build volume and uses the tracked `playwright/fixtures/Math_HW.pdf` fixture
 - this does not change the current app BuildConfig external registry output or the Helm-managed `open-webui` StatefulSet image
 
 What OpenShift runs today:

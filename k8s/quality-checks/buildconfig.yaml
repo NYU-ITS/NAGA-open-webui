@@ -44,13 +44,6 @@ spec:
               secretName: ai-tutor-playwright-live-secret
           mounts:
             - destinationPath: /var/run/ai-tutor-playwright-live-secret
-        - name: ai-tutor-playwright-fixtures
-          source:
-            type: ConfigMap
-            configMap:
-              name: ai-tutor-playwright-fixtures
-          mounts:
-            - destinationPath: /workspace/playwright-fixtures
   output:
     to:
       kind: ImageStreamTag

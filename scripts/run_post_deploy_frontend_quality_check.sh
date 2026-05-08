@@ -7,14 +7,14 @@ WORKLOAD_NAME="${WORKLOAD_NAME:-open-webui}"
 JOB_NAME="${JOB_NAME:-ai-tutor-frontend-post-deploy-quality-check}"
 TIMEOUT="${TIMEOUT:-900s}"
 PLAYWRIGHT_SECRET="${PLAYWRIGHT_SECRET:-ai-tutor-playwright-live-secret}"
-PLAYWRIGHT_FIXTURES_CONFIGMAP="${PLAYWRIGHT_FIXTURES_CONFIGMAP:-ai-tutor-playwright-fixtures}"
+PLAYWRIGHT_FIXTURE_PATH="${PLAYWRIGHT_FIXTURE_PATH:-playwright/fixtures/Math_HW.pdf}"
 
 echo "Waiting for frontend ${WORKLOAD_TYPE} rollout: ${WORKLOAD_NAME}"
 oc rollout status "${WORKLOAD_TYPE}/${WORKLOAD_NAME}" -n "${NAMESPACE}" --timeout="${TIMEOUT}"
 
 echo "Checking live Playwright inputs"
 oc get secret "${PLAYWRIGHT_SECRET}" -n "${NAMESPACE}" >/dev/null
-oc get configmap "${PLAYWRIGHT_FIXTURES_CONFIGMAP}" -n "${NAMESPACE}" >/dev/null
+test -r "${PLAYWRIGHT_FIXTURE_PATH}"
 
 echo "Starting frontend post-deployment quality check: ${JOB_NAME}"
 oc delete job "${JOB_NAME}" -n "${NAMESPACE}" --ignore-not-found
