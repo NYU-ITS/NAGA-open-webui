@@ -126,6 +126,7 @@ Default non-secret env:
 - `QUALITY_FORWARD_SECONDS=75`
 - `QUALITY_UPLOAD_ARTIFACTS=1`
 - `ARTIFACT_PREFIX=openshift/frontend/dev`
+- `BUCKET_TLS_VERIFY=false`
 
 Required secret:
 
@@ -267,7 +268,7 @@ openshift/frontend/dev/index.json
 
 Artifact upload is best-effort. If the bucket secret/config is missing, the runner logs a clear skip and the quality result still comes from Playwright plus the pushed metrics.
 
-The BuildConfig mounts only the ObjectBucket secret and sets the non-secret bucket host/name as build env. This avoids OpenShift build volume collisions while keeping access keys out of image layers and logs.
+The BuildConfig mounts only the ObjectBucket secret and sets the non-secret bucket host/name as build env. This avoids OpenShift build volume collisions while keeping access keys out of image layers and logs. `BUCKET_TLS_VERIFY=false` is used for the internal OpenShift S3 service because the in-cluster service presents a self-signed certificate chain.
 
 ## Resources
 

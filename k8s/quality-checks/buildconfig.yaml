@@ -58,6 +58,8 @@ spec:
           value: ai-tutor-test-artifacts-9d35ede8-55f6-4d72-8a4c-8881b0d844f3
         - name: BUCKET_PORT
           value: "443"
+        - name: BUCKET_TLS_VERIFY
+          value: "false"
   output:
     to:
       kind: ImageStreamTag

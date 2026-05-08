@@ -57,6 +57,8 @@ spec:
               value: "0"
             - name: PLAYWRIGHT_HOMEWORK_PDF_PATH
               value: /workspace/playwright/fixtures/Math_HW.pdf
+            - name: BUCKET_TLS_VERIFY
+              value: "false"
             - name: PLAYWRIGHT_ADMIN_EMAIL
               valueFrom:
                 secretKeyRef:
