@@ -51,13 +51,13 @@ spec:
               secretName: ai-tutor-test-artifacts-bucket
           mounts:
             - destinationPath: /var/run/ai-tutor-artifacts-secret
-        - name: ai-tutor-test-artifacts-bucket-config
-          source:
-            type: ConfigMap
-            configMap:
-              name: ai-tutor-test-artifacts-bucket
-          mounts:
-            - destinationPath: /var/run/ai-tutor-artifacts-config
+      env:
+        - name: BUCKET_HOST
+          value: s3.openshift-storage.svc
+        - name: BUCKET_NAME
+          value: ai-tutor-test-artifacts-9d35ede8-55f6-4d72-8a4c-8881b0d844f3
+        - name: BUCKET_PORT
+          value: "443"
   output:
     to:
       kind: ImageStreamTag

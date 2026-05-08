@@ -267,6 +267,8 @@ openshift/frontend/dev/index.json
 
 Artifact upload is best-effort. If the bucket secret/config is missing, the runner logs a clear skip and the quality result still comes from Playwright plus the pushed metrics.
 
+The BuildConfig mounts only the ObjectBucket secret and sets the non-secret bucket host/name as build env. This avoids OpenShift build volume collisions while keeping access keys out of image layers and logs.
+
 ## Resources
 
 Quality build:
