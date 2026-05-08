@@ -1,42 +1,76 @@
 # AI Tutor Frontend Post-Deployment Quality Checks on OpenShift
 
-This runs AI Tutor frontend checks after the OpenShift dev frontend StatefulSet is rebuilt and rolled out:
+This README documents the frontend OpenShift quality-check implementation for `NAGA-open-webui`.
 
-- live Playwright dashboard workflows against the deployed OpenShift frontend
-- OpenShift Pushgateway metric publishing
-
-It does not run Vitest or mocked Playwright here. Those already run in GitHub Actions. The OpenShift job is only for post-deployment browser validation of the deployed dev environment.
-
-This frontend flow is build-triggered from an OpenShift ImageStream that tracks the existing external frontend image. The backend `AI_Tutor_Analysis` repo has its own BuildConfig image-change trigger for backend smoke, integration, health, and external-service checks; that backend trigger does not run frontend Playwright.
-
-For the full frontend local, GitHub Actions, Grafana Cloud, and OpenShift setup, see:
+For the full frontend testing, GitHub Actions, Grafana, and OpenShift overview, see:
 
 - `../../AI_TUTOR_FRONTEND_TEST_REPORT.md`
+- `../../playwright/README.md`
 
-## One-time build setup
+## Purpose
 
-```bash
-oc apply -f k8s/quality-checks/buildconfig.yaml -n rit-genai-naga-dev
-oc start-build ai-tutor-frontend-quality-checks -n rit-genai-naga-dev --follow
-```
-
-The quality-check BuildConfig watches:
+These checks answer one deployed-environment question:
 
 ```text
-open-webui:latest
+After the frontend dev image changes, can the deployed OpenShift frontend still complete the AI Tutor browser workflows?
 ```
 
-`open-webui:latest` is configured as an ImageStream tag that tracks:
+They do not run Vitest or mocked Playwright. Those already run in GitHub Actions. OpenShift runs only live browser validation against the deployed dev frontend.
+
+## OpenShift Objects
+
+Applied from `k8s/quality-checks/buildconfig.yaml`:
+
+- ImageStream signal: `open-webui:latest`
+- ImageStream: `ai-tutor-frontend-quality-checks`
+- BuildConfig: `ai-tutor-frontend-quality-checks`
+
+Optional explicit rerun object from `k8s/quality-checks/job.yaml`:
+
+- Job: `ai-tutor-frontend-post-deploy-quality-check`
+
+Namespace:
+
+- `rit-genai-naga-dev`
+
+## External Registry Flow Is Preserved
+
+The existing frontend app delivery path is not replaced:
+
+- the frontend app BuildConfig can still push to `registry.cloud.rt.nyu.edu/rit-genai-poc/naga-open-webui:latest`
+- the Helm-managed `StatefulSet/open-webui` can still pull the external registry image
+- the `open-webui:latest` ImageStream is only an OpenShift-native signal for test automation
+
+The ImageStream tracks:
 
 ```text
 registry.cloud.rt.nyu.edu/rit-genai-poc/naga-open-webui:latest
 ```
 
-When OpenShift imports a new digest for that external image into `open-webui:latest`, it starts `ai-tutor-frontend-quality-checks`. The quality build runs `scripts/run_openshift_frontend_quality_checks_from_build.sh` as its `postCommit` hook.
+with `referencePolicy: Source`, so the existing external image reference remains the source of truth.
 
-This preserves the current frontend app flow: the app BuildConfig can continue pushing to the external registry, and the Helm-managed `open-webui` StatefulSet can continue pulling the external image. The ImageStream is only the OpenShift-native automation signal for tests.
+## Automatic Trigger Flow
 
-The import is scheduled by OpenShift. It is automatic, but not guaranteed to fire the exact second the external registry push completes. For an immediate test run after a manual app build, import the image explicitly:
+The quality BuildConfig watches:
+
+```text
+open-webui:latest
+```
+
+Expected flow:
+
+```text
+frontend app image is pushed to the external registry
+OpenShift imports the new external digest into open-webui:latest
+ai-tutor-frontend-quality-checks build starts automatically
+quality_checks/Dockerfile builds the Playwright quality-check image
+postCommit runs scripts/run_openshift_frontend_quality_checks_from_build.sh
+live Playwright runs against http://open-webui.rit-genai-naga-dev.svc:80
+metrics are pushed to ai-tutor-quality-pushgateway
+build succeeds or fails with the Playwright result
+```
+
+OpenShift scheduled image import is automatic, but it may not happen immediately after an external registry push. For an immediate run after a manual frontend build, import the image explicitly:
 
 ```bash
 oc import-image open-webui:latest \
@@ -46,9 +80,66 @@ oc import-image open-webui:latest \
   -n rit-genai-naga-dev
 ```
 
-## One-Time Live Test Inputs
+For a strict "build, rollout, then test" gate, move this into OpenShift Pipelines/Tekton or an ArgoCD post-sync hook with service-account RBAC approved by the platform team.
 
-Create the live Playwright credentials secret from real dev test accounts:
+## Test Selection
+
+The OpenShift runner executes:
+
+```bash
+npx playwright test playwright/tests/ai-tutor-dashboard.live.spec.ts \
+  --project=chromium \
+  --workers="${PLAYWRIGHT_WORKERS}" \
+  --retries="${PLAYWRIGHT_RETRIES}"
+```
+
+OpenShift runs:
+
+- live admin/instructor homework upload workflow
+- live student chat workflow
+- live admin/instructor analytics dashboard workflow
+
+OpenShift does not run:
+
+- Vitest unit/component checks
+- mocked Playwright UI checks
+- backend pytest checks
+
+## Required Config
+
+Default non-secret env:
+
+- `PLAYWRIGHT_RUN_LIVE=1`
+- `PLAYWRIGHT_STRICT_LIVE_CHECKS=1`
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1`
+- `PLAYWRIGHT_BASE_URL=http://open-webui.rit-genai-naga-dev.svc:80`
+- `PLAYWRIGHT_WORKERS=1`
+- `PLAYWRIGHT_RETRIES=0`
+- `PLAYWRIGHT_VIDEO=off`
+- `PLAYWRIGHT_HOMEWORK_PDF_PATH=/workspace/playwright/fixtures/Math_HW.pdf`
+- `QUALITY_ENVIRONMENT=openshift-dev`
+- `QUALITY_REPOSITORY=NAGA-open-webui`
+- `QUALITY_BRANCH=rs/ai-tutor-tests`
+- `QUALITY_SOURCE=openshift-frontend-build-triggered-playwright`
+- `QUALITY_PUSHGATEWAY_URL=http://ai-tutor-quality-pushgateway:9091`
+- `QUALITY_FORWARD_SECONDS=75`
+
+Required secret:
+
+- name: `ai-tutor-playwright-live-secret`
+- keys:
+  - `admin-email`
+  - `admin-password`
+  - `student-email`
+  - `student-password`
+
+The BuildConfig mounts this secret read-only at:
+
+```text
+/var/run/ai-tutor-playwright-live-secret
+```
+
+Create/update the secret with placeholders:
 
 ```bash
 oc create secret generic ai-tutor-playwright-live-secret \
@@ -60,43 +151,150 @@ oc create secret generic ai-tutor-playwright-live-secret \
   --dry-run=client -o yaml | oc apply -f -
 ```
 
-The live Playwright upload fixture is tracked in Git:
+Do not put Playwright credentials in source control, ConfigMaps, Docker strategy env, or backend secrets.
+
+## Homework PDF Fixture
+
+The live upload fixture is tracked in Git:
 
 ```text
 playwright/fixtures/Math_HW.pdf
 ```
 
-To change the PDF used by OpenShift, replace that file with a new PDF using the same name, commit it, push it, and rebuild the frontend quality-check image.
+Inside the quality image it is read from:
 
-## Build, Deploy, and Test
-
-This uses the current user's OpenShift permissions. It starts the frontend quality image build, starts the frontend app build, restarts the frontend StatefulSet so it pulls the new image, waits for rollout, runs the quality Job, sends metrics, and exits.
-
-```bash
-bash scripts/run_frontend_build_deploy_quality_check.sh
+```text
+/workspace/playwright/fixtures/Math_HW.pdf
 ```
 
-If the frontend was already rebuilt and you only want to run the post-deployment check:
+To change the OpenShift test input, replace `playwright/fixtures/Math_HW.pdf` with a new file using the same name, commit it, push it, and rebuild the quality-check image. This keeps the fixture reviewable and versioned.
+
+The fixture should not be stored in the Playwright secret. Secrets are for credentials only.
+
+## Strict Failure Behavior
+
+OpenShift sets:
+
+```bash
+PLAYWRIGHT_STRICT_LIVE_CHECKS=1
+```
+
+Missing prerequisites fail the quality signal. Examples:
+
+- missing secret key
+- unreadable PDF fixture
+- login failure
+- missing homework upload area or homework model
+- no usable chat model for the student flow
+- route or dashboard inaccessible
+- workflow error toast during an asserted action
+
+This prevents a green OpenShift signal when the environment is incomplete.
+
+## Apply or Update
+
+```bash
+oc apply -f k8s/quality-checks/buildconfig.yaml -n rit-genai-naga-dev
+```
+
+Check the trigger:
+
+```bash
+oc get buildconfig ai-tutor-frontend-quality-checks \
+  -n rit-genai-naga-dev \
+  -o jsonpath='{.spec.triggers}'
+```
+
+## Manual Reruns
+
+Run the quality BuildConfig manually:
+
+```bash
+oc start-build ai-tutor-frontend-quality-checks --follow --wait -n rit-genai-naga-dev
+```
+
+Run the explicit Job path:
 
 ```bash
 bash scripts/run_post_deploy_frontend_quality_check.sh
 ```
 
-This is intentionally not scheduled. It runs only after a deployment rollout or when someone explicitly runs the same commands.
+The Job path uses the latest `ai-tutor-frontend-quality-checks:latest` image, injects credentials through `secretKeyRef`, runs live Playwright, publishes metrics, and exits.
 
-The Job uses resources only while it runs, sends metrics, then exits.
+## Metrics
 
-The build-triggered path does not use the Job. It runs inside the quality-check build hook, mounts `ai-tutor-playwright-live-secret` as a read-only build volume, uses the tracked `playwright/fixtures/Math_HW.pdf` fixture in the quality-check image, pushes metrics to the namespace Pushgateway, then exits.
+The runner starts `scripts/serve_playwright_metrics.py`, scrapes local metrics, and pushes them to:
 
-OpenShift sets `PLAYWRIGHT_STRICT_LIVE_CHECKS=1`. Missing live prerequisites, such as credentials, a readable fixture PDF, accessible homework models, or a usable chat model, fail the quality signal instead of becoming quiet skips.
-
-## Resource Profile
-
-The job requests `1 CPU` and `2Gi` memory, with a `2 CPU` and `4Gi` limit. That is intentionally scoped to one Chromium worker and no video recording:
-
-```yaml
-PLAYWRIGHT_WORKERS: "1"
-PLAYWRIGHT_VIDEO: "off"
+```text
+http://ai-tutor-quality-pushgateway:9091
 ```
 
-Increase only after checking actual pod usage from a real run.
+Pushgateway grouping:
+
+- job: `ai-tutor-quality`
+- `environment=openshift-dev`
+- `repository=NAGA-open-webui`
+
+Dashboard JSON:
+
+- `observability/grafana/dashboards/ai-tutor-frontend-github-quality.json`
+
+Metrics must remain telemetry only. Do not export credentials, uploaded file contents, student submissions, request bodies, or database rows.
+
+## Resources
+
+Quality build:
+
+- request: `500m CPU`, `1Gi memory`
+- limit: `2 CPU`, `4Gi memory`
+
+Explicit Job:
+
+- request: `1 CPU`, `2Gi memory`
+- limit: `2 CPU`, `4Gi memory`
+- `PLAYWRIGHT_WORKERS=1`
+- `PLAYWRIGHT_VIDEO=off`
+- `ttlSecondsAfterFinished: 3600`
+- `backoffLimit: 0`
+
+Build history is capped:
+
+- `successfulBuildsHistoryLimit: 2`
+- `failedBuildsHistoryLimit: 2`
+
+This keeps test automation short-lived and avoids wasting namespace resources.
+
+## Troubleshooting
+
+Check builds:
+
+```bash
+oc get builds -n rit-genai-naga-dev | grep ai-tutor-frontend-quality-checks
+```
+
+Follow a build:
+
+```bash
+oc logs -f build/ai-tutor-frontend-quality-checks-<number> -n rit-genai-naga-dev
+```
+
+Check the external image import:
+
+```bash
+oc get istag open-webui:latest -n rit-genai-naga-dev
+```
+
+Check quality pods:
+
+```bash
+oc get pods -n rit-genai-naga-dev | grep quality
+```
+
+Common failures:
+
+- `Missing mounted Playwright secret file`: update `ai-tutor-playwright-live-secret`
+- `Missing Playwright homework fixture`: verify `playwright/fixtures/Math_HW.pdf` exists in the pushed branch and image
+- login failure: verify dev test accounts and passwords
+- missing homework model/upload area: configure the instructor account/group/workspace model
+- no chat model: configure a model visible to the student account
+- no metrics in Grafana: verify Pushgateway and dashboard source labels
