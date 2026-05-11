@@ -55,6 +55,8 @@ spec:
               value: "1"
             - name: PLAYWRIGHT_RETRIES
               value: "0"
+            - name: PLAYWRIGHT_TIMEOUT
+              value: "60000"
             - name: PLAYWRIGHT_HOMEWORK_PDF_PATH
               value: /workspace/playwright/fixtures/Math_HW.pdf
             - name: BUCKET_TLS_VERIFY

@@ -18,6 +18,7 @@ export PLAYWRIGHT_SKIP_WEB_SERVER="${PLAYWRIGHT_SKIP_WEB_SERVER:-1}"
 export PLAYWRIGHT_BASE_URL="${PLAYWRIGHT_BASE_URL:-http://open-webui.rit-genai-naga-dev.svc:80}"
 export PLAYWRIGHT_WORKERS="${PLAYWRIGHT_WORKERS:-1}"
 export PLAYWRIGHT_RETRIES="${PLAYWRIGHT_RETRIES:-0}"
+export PLAYWRIGHT_TIMEOUT="${PLAYWRIGHT_TIMEOUT:-60000}"
 
 urlencode() {
   python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"
@@ -73,7 +74,8 @@ forward_metrics_to_grafana_cloud() {
 playwright_status=0
 npx playwright test playwright/tests/ai-tutor-dashboard.live.spec.ts \
   --workers="${PLAYWRIGHT_WORKERS}" \
-  --retries="${PLAYWRIGHT_RETRIES}" || playwright_status=$?
+  --retries="${PLAYWRIGHT_RETRIES}" \
+  --timeout="${PLAYWRIGHT_TIMEOUT}" || playwright_status=$?
 
 python3 scripts/serve_playwright_metrics.py \
   --report playwright-report/index.html \
