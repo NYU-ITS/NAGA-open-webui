@@ -1,22 +1,27 @@
+# Playwright E2E for AI Tutor
 
-# Playwright E2E (AI Tutor)
+This repo uses Playwright for browser-level AI Tutor testing.
 
-This repo uses **Playwright** for browser-level testing of the AI Tutor UI.
+For the full frontend testing and observability overview, see:
 
-There are two kinds of tests:
+- `../AI_TUTOR_FRONTEND_TEST_REPORT.md`
+- `../k8s/quality-checks/README.md`
 
-- **Mocked UI tests**: run fast and do *not* require a real backend.
-- **Live workflow bots**: drive a real local deployment and validate end-to-end flows.
+## Test Types
 
-Current deployment status:
+Mocked UI tests:
 
-- GitHub Actions runs mocked Playwright checks and publishes reports/videos.
-- OpenShift scheduled frontend checks currently run Vitest only.
-- OpenShift Playwright is disabled by default because Chromium + Vite needs a larger memory budget than the current dev Job.
+- file: `playwright/tests/ai-tutor-dashboard.mocked.spec.ts`
+- run in GitHub Actions
+- do not require a real backend, real accounts, or OpenShift
+- validate frontend dashboard rendering and UI behavior with mocked API responses
 
-For the full frontend testing status, see [`../AI_TUTOR_FRONTEND_TEST_REPORT.md`](../AI_TUTOR_FRONTEND_TEST_REPORT.md).
+Live workflow tests:
 
-## What files to look at
+- file: `playwright/tests/ai-tutor-dashboard.live.spec.ts`
+- run in OpenShift after frontend image updates
+- can also run locally against a reachable app
+- require real dev accounts, a usable deployed app, available models, and a readable homework PDF fixture
 
 - `playwright/tests/ai-tutor-dashboard.mocked.spec.ts`
   - Mocked UI coverage for the AI Tutor dashboard pages.
@@ -30,8 +35,9 @@ For the full frontend testing status, see [`../AI_TUTOR_FRONTEND_TEST_REPORT.md`
   - Mocked AI Tutor Practice Question scenario. This is currently marked `fixme` because the visible Generate button does not trigger `/api/ai-tutor/practice/generate` under the mocked admin setup.
 - `playwright/tests/ai-tutor-dashboard.live.spec.ts`
   - Live workflow bots (admin + student flows).
+OpenShift runs only the live workflow tests. Vitest and mocked Playwright remain in GitHub Actions.
 
-## First-time setup (once per machine)
+## First-Time Setup
 
 Install Playwright browsers:
 
@@ -39,91 +45,140 @@ Install Playwright browsers:
 npx playwright install
 ```
 
-
-## HTML report and video
-
-By default, `playwright.config.ts` uses `video: 'retain-on-failure'`, so the HTML report only keeps **recordings for failed tests** (to save disk space). To keep a video for **passing** tests too, run with:
+If the repo tooling uses Python, activate the shared environment first:
 
 ```bash
-export PLAYWRIGHT_VIDEO=on
-npx playwright test
-npx playwright show-report
+conda activate oi
 ```
 
-Set `PLAYWRIGHT_VIDEO=off` to disable video entirely.
+## Mocked UI Tests
 
-## Prerequisites for LIVE workflow bots
+Run without backend dependencies:
 
-The live tests are real browser automation. They assume your local app is usable by a human first.
+```bash
+npm run test:e2e:ui -- playwright/tests/ai-tutor-dashboard.mocked.spec.ts
+```
 
-- **Running web app**: `PLAYWRIGHT_BASE_URL` must point at a running OpenWebUI instance (ex: `http://localhost:8080`).
-- **Running AI Tutor backend**: It will be directly accessed from frontend
-- **A Homework PDF Path**: A path to the Homework PDF must be provided so that the workflow can upload it for testing. See below for env vars.
-- **Two real accounts**:
-  - **Admin/Instructor user** (can access AI Tutor dashboard + upload homework PDF)
-  - **Student user** (can open chat and send a message)
-- **AI Tutor group exists and is selectable**
-  - The admin user must be able to select the group from the “Select group” dropdown.
-- **Homework model exists for the group**
-  - The UI requires a workspace model whose name includes `"homework"` for the upload section to appear.
-  - On slow loads, the page can briefly show **“No homework models are found for this group.”** while workspace models are still fetching; the live test **waits** for that to clear instead of skipping immediately.
+These are the browser checks GitHub Actions runs by default.
 
+## Live Workflow Prerequisites
 
-## What each LIVE workflow does 
+The live tests are real browser automation. The target app must be usable by a human first.
 
-The live workflows are defined in `playwright/tests/ai-tutor-dashboard.live.spec.ts`.
+Required:
 
-### Workflow 1 (Admin) Upload homework PDF
+- `PLAYWRIGHT_RUN_LIVE=1`
+- `PLAYWRIGHT_BASE_URL` pointing at the target OpenWebUI app
+- admin/instructor email and password
+- student email and password
+- readable homework PDF
+- AI Tutor group visible to the admin/instructor
+- homework workspace model available for the selected group
+- chat model visible to the student
+- backend analytics services reachable from the frontend
+
+OpenShift strict mode:
+
+```bash
+PLAYWRIGHT_STRICT_LIVE_CHECKS=1
+```
+
+In strict mode, missing prerequisites fail the test run instead of becoming quiet skips.
+
+## Live Environment Variables
+
+Required for local live runs:
+
+- `PLAYWRIGHT_RUN_LIVE=1`
+- `PLAYWRIGHT_BASE_URL`
+- `PLAYWRIGHT_ADMIN_EMAIL`
+- `PLAYWRIGHT_ADMIN_PASSWORD`
+- `PLAYWRIGHT_STUDENT_EMAIL`
+- `PLAYWRIGHT_STUDENT_PASSWORD`
+- `PLAYWRIGHT_HOMEWORK_PDF_PATH`
+
+OpenShift also sets:
+
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1`
+- `PLAYWRIGHT_STRICT_LIVE_CHECKS=1`
+- `PLAYWRIGHT_WORKERS=1`
+- `PLAYWRIGHT_RETRIES=0`
+- `PLAYWRIGHT_VIDEO=off`
+
+## Homework PDF Fixture
+
+The OpenShift fixture is tracked in Git:
+
+```text
+playwright/fixtures/Math_HW.pdf
+```
+
+Inside the OpenShift quality image it is read from:
+
+```text
+/workspace/playwright/fixtures/Math_HW.pdf
+```
+
+To change the fixture used by OpenShift, replace `playwright/fixtures/Math_HW.pdf` with a new PDF using the same filename, commit it, push it, and rebuild the frontend quality-check image. Do not store the PDF in an OpenShift Secret. Secrets are reserved for credentials.
+
+For local live runs, point `PLAYWRIGHT_HOMEWORK_PDF_PATH` at any readable PDF. If macOS blocks a protected path such as `~/Downloads`, move the file into the repo or another readable directory.
+
+## Live Workflow Details
+
+### Workflow 1: Admin Uploads Homework PDF
 
 Goal: verify an admin/instructor can reach Instructor Setup and upload a homework PDF.
 
 Steps:
 
-1. Log in via API (`/api/v1/auths/signin`) and inject the token into `localStorage`.
-2. Open `"/aitutordashboard/instructorsetup"`.
-3. Close the “What’s New…” modal if it’s visible.
-4. Expand the **“2. Homework & Answer Files”** section if collapsed.
-5. Clear any old visible toasts from page load so they do not get mistaken for this upload attempt.
-6. In the **Homework PDF** column for the homework model row, set the PDF on the hidden input `#upload-question-…` (same as the purple upload icon). That fires the real upload; the Action column **Upload** button only appears when status is still “Upload Homework PDF” — after an upload, Action shows **Run** / **Re-run**, but replacing the PDF still uses this column’s file input.
-7. Wait for **real completion**: a success toast **“Homework upload completed.”** (the pipeline can show **“Processing PDF”** in the row for a long time; that alone is not success). If an **error** toast appears after this upload starts, the test **fails** with that message.
+1. Sign in through `/api/v1/auths/signin` and inject the token into `localStorage`.
+2. Open `/aitutordashboard/instructorsetup`.
+3. Close the "What's New" modal if it appears.
+4. Expand the "Homework & Answer Files" section when needed.
+5. Clear old visible toasts from page load.
+6. Set the configured PDF on the hidden homework upload input.
+7. Wait for a real success toast or fail on a clear upload error.
 
-### Workflow 2 (Student) Send a chat message
+### Workflow 2: Student Sends Chat Message
 
-Goal: verify a student can send a chat message and see an assistant response start.
+Goal: verify a student can send a chat message and see the assistant response path start.
 
 Steps:
 
-1. Log in via API and inject the token into `localStorage`.
-2. Open `"/"` (chat page).
-3. Close the “What’s New…” modal if it’s visible.
-4. If the UI shows **“Select a model”**, pick the first available model.
+1. Sign in through `/api/v1/auths/signin` and inject the token into `localStorage`.
+2. Open `/`.
+3. Close the "What's New" modal if it appears.
+4. Select the first available model if the UI asks for one.
 5. Type a message into `#chat-input`.
-6. Click `button[type="submit"]`.
-7. Wait up to 60s for either:
-   - an assistant message bubble (`.chat-assistant`), or
-   - a clear error toast.
+6. Submit the message.
+7. Wait for an assistant response or a clear error signal.
 
-### Workflow 3 (Admin) Open analytics dashboard
+### Workflow 3: Admin Opens Analytics Dashboard
 
-Goal: verify an admin can reach analytics and key UI elements render.
+Goal: verify an admin/instructor can reach AI Tutor analytics.
 
 Steps:
 
-1. Log in via API and inject the token into `localStorage`.
-2. Open `"/aitutordashboard/topicanalysis"`.
-3. Close the “What’s New…” modal if it’s visible.
-4. Assert:
-   - heading “Topic Analysis by Homework” is visible
-   - “Practice Question” link is visible
+1. Sign in through `/api/v1/auths/signin` and inject the token into `localStorage`.
+2. Open `/aitutordashboard/topicanalysis`.
+3. Close the "What's New" modal if it appears.
+4. Assert that "Topic Analysis by Homework" and "Practice Question" render.
 
-## How to run
-
-### Mocked UI tests (no backend required)
+## Run Live Locally
 
 Mocked tests are still Playwright browser tests: they open the real frontend in a real browser, but intercept API calls with `page.route(...)` and return controlled responses. They do not create real users, groups, knowledge bases, models, reports, or practice questions in the backend.
 
 ```bash
-npm run test:e2e:ui -- playwright/tests/ai-tutor-dashboard.mocked.spec.ts
+export PLAYWRIGHT_RUN_LIVE=1
+export PLAYWRIGHT_BASE_URL="http://localhost:8080"
+export PLAYWRIGHT_ADMIN_EMAIL="<admin-or-instructor-email>"
+export PLAYWRIGHT_ADMIN_PASSWORD="<admin-or-instructor-password>"
+export PLAYWRIGHT_STUDENT_EMAIL="<student-email>"
+export PLAYWRIGHT_STUDENT_PASSWORD="<student-password>"
+export PLAYWRIGHT_HOMEWORK_PDF_PATH="$(pwd)/playwright/fixtures/Math_HW.pdf"
+export PLAYWRIGHT_BROWSERS_PATH=0
+
+npm run test:e2e:ui -- --project=chromium playwright/tests/ai-tutor-dashboard.live.spec.ts
 ```
 
 Run all current mocked specs:
@@ -151,40 +206,81 @@ Current mocked coverage:
 Mocked tests intentionally assert the frontend contract. If a mocked test passes, it means the UI handled the mocked API responses correctly. It does not prove the real backend, database state, auth setup, or external services are healthy.
 
 ### Live workflow bots (requires a running app + real accounts)
+Useful modes:
 
-Export env vars and run:
+- headed: `npm run test:e2e:ui:headed -- playwright/tests/ai-tutor-dashboard.live.spec.ts`
+- debug: `npm run test:e2e:ui:debug -- playwright/tests/ai-tutor-dashboard.live.spec.ts`
+
+## OpenShift Live Run
+
+OpenShift sets the required env vars and runs:
 
 ```bash
-
-export PLAYWRIGHT_RUN_LIVE=1
-export PLAYWRIGHT_BASE_URL="http://localhost:8080"
-
-export PLAYWRIGHT_ADMIN_EMAIL="admin@example.com"
-export PLAYWRIGHT_ADMIN_PASSWORD="password"
-
-export PLAYWRIGHT_STUDENT_EMAIL="student@example.com"
-export PLAYWRIGHT_STUDENT_PASSWORD="password"
-
-export PLAYWRIGHT_HOMEWORK_PDF_PATH="/absolute/path/to/homework.pdf"
-
-# If you need to force Playwright to use local browsers:
-export PLAYWRIGHT_BROWSERS_PATH=0
-
-# If you want to only run for the chromium browser, else remove --project to test on all 3 browsers.
-npm run test:e2e:ui -- --project=chromium playwright/tests/ai-tutor-dashboard.live.spec.ts
+npx playwright test playwright/tests/ai-tutor-dashboard.live.spec.ts \
+  --project=chromium \
+  --workers=1 \
+  --retries=0
 ```
 
-Workflow 1 uses **only** the PDF configured by `PLAYWRIGHT_HOMEWORK_PDF_PATH`. If macOS blocks the configured path (commonly files in `~/Downloads`), the test fails with a clear PDF access error. Move the PDF somewhere this terminal can read (for example inside the repo or another non-protected folder) and point `PLAYWRIGHT_HOMEWORK_PDF_PATH` there.
+The OpenShift BuildConfig path:
 
-Other useful modes:
+```text
+open-webui:latest ImageStreamTag updates
+-> ai-tutor-frontend-quality-checks BuildConfig starts
+-> postCommit loads ai-tutor-playwright-live-secret
+-> postCommit verifies /workspace/playwright/fixtures/Math_HW.pdf
+-> live Playwright runs against http://open-webui.rit-genai-naga-dev.svc:80
+-> metrics are pushed to ai-tutor-quality-pushgateway
+```
 
-- Headed UI (watch it run): `npm run test:e2e:ui:headed -- playwright/tests/ai-tutor-dashboard.live.spec.ts`
-- Debug: `npm run test:e2e:ui:debug -- playwright/tests/ai-tutor-dashboard.live.spec.ts`
+Required OpenShift secret:
 
-## Notes / common skips
+- `ai-tutor-playwright-live-secret`
 
-Some skips indicate environment prerequisites, not a test bug:
+Required keys:
 
-- **No homework models found**: create/enable a workspace model whose name contains `"homework"` for the selected group.
-- **No chat models**: configure at least one model for chat (and ensure the student can see it).
-- **No assistant response**: inference backend may be slow/misconfigured; the test will skip rather than fail when it cannot confidently assert success.
+- `admin-email`
+- `admin-password`
+- `student-email`
+- `student-password`
+
+Create/update with placeholders:
+
+```bash
+oc create secret generic ai-tutor-playwright-live-secret \
+  -n rit-genai-naga-dev \
+  --from-literal=admin-email='<admin-or-instructor-email>' \
+  --from-literal=admin-password='<admin-or-instructor-password>' \
+  --from-literal=student-email='<student-email>' \
+  --from-literal=student-password='<student-password>' \
+  --dry-run=client -o yaml | oc apply -f -
+```
+
+## Report and Video
+
+By default, `playwright.config.ts` keeps video on failure. OpenShift overrides this with:
+
+```bash
+PLAYWRIGHT_VIDEO=off
+```
+
+to reduce storage and runtime cost.
+
+To keep local videos for passing tests:
+
+```bash
+export PLAYWRIGHT_VIDEO=on
+npx playwright test
+npx playwright show-report
+```
+
+## Common Failures
+
+- Missing PDF: verify `PLAYWRIGHT_HOMEWORK_PDF_PATH` locally or `playwright/fixtures/Math_HW.pdf` in OpenShift.
+- Login failure: verify account credentials and app auth behavior.
+- No homework model: configure a workspace model whose name includes `homework` for the selected group.
+- No chat model: configure a model visible to the student account.
+- No assistant response: verify model routing and backend inference health.
+- Dashboard inaccessible: verify route, permissions, and AI Tutor feature visibility for the account.
+
+In OpenShift strict mode, these are failed deployed-environment checks because they prevent a real workflow from succeeding.

@@ -1,6 +1,21 @@
 apiVersion: image.openshift.io/v1
 kind: ImageStream
 metadata:
+  name: open-webui
+spec:
+  tags:
+    - name: latest
+      from:
+        kind: DockerImage
+        name: registry.cloud.rt.nyu.edu/rit-genai-poc/naga-open-webui:latest
+      importPolicy:
+        scheduled: true
+      referencePolicy:
+        type: Source
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
   name: ai-tutor-frontend-quality-checks
 ---
 apiVersion: build.openshift.io/v1
@@ -8,6 +23,9 @@ kind: BuildConfig
 metadata:
   name: ai-tutor-frontend-quality-checks
 spec:
+  failedBuildsHistoryLimit: 2
+  successfulBuildsHistoryLimit: 2
+  runPolicy: Serial
   source:
     type: Git
     git:
@@ -18,8 +36,46 @@ spec:
     type: Docker
     dockerStrategy:
       dockerfilePath: quality_checks/Dockerfile
+      volumes:
+        - name: ai-tutor-playwright-live-secret
+          source:
+            type: Secret
+            secret:
+              secretName: ai-tutor-playwright-live-secret
+          mounts:
+            - destinationPath: /var/run/ai-tutor-playwright-live-secret
+        - name: ai-tutor-test-artifacts-bucket-secret
+          source:
+            type: Secret
+            secret:
+              secretName: ai-tutor-test-artifacts-bucket
+          mounts:
+            - destinationPath: /var/run/ai-tutor-artifacts-secret
+      env:
+        - name: BUCKET_HOST
+          value: s3.openshift-storage.svc
+        - name: BUCKET_NAME
+          value: ai-tutor-test-artifacts-9d35ede8-55f6-4d72-8a4c-8881b0d844f3
+        - name: BUCKET_PORT
+          value: "443"
+        - name: BUCKET_TLS_VERIFY
+          value: "false"
   output:
     to:
       kind: ImageStreamTag
       name: ai-tutor-frontend-quality-checks:latest
-  triggers: []
+  postCommit:
+    script: bash scripts/run_openshift_frontend_quality_checks_from_build.sh
+  triggers:
+    - type: ImageChange
+      imageChange:
+        from:
+          kind: ImageStreamTag
+          name: open-webui:latest
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi

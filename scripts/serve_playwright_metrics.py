@@ -31,6 +31,20 @@ def metric_line(name: str, value: float | int, labels: dict[str, str] | None = N
     return f"{name} {value}"
 
 
+def dedupe_metric_metadata(lines: list[str]) -> list[str]:
+    seen: set[tuple[str, str]] = set()
+    output: list[str] = []
+    for line in lines:
+        if line.startswith("# HELP ") or line.startswith("# TYPE "):
+            parts = line.split(maxsplit=3)
+            key = (parts[1], parts[2]) if len(parts) >= 3 else ("", line)
+            if key in seen:
+                continue
+            seen.add(key)
+        output.append(line)
+    return output
+
+
 def empty_metrics() -> list[str]:
     lines = [
         metric_line("ai_tutor_quality_source_available", 0, {"source": "playwright_ui"}),
@@ -248,20 +262,22 @@ def parse_playwright_report(report_path: Path) -> list[str]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Serve Playwright metrics for Prometheus/Grafana.")
     parser.add_argument("--report", default="playwright-report/index.html", help="Path to the Playwright HTML report.")
-    parser.add_argument("--vitest-results", default="test-results/vitest-results.xml", help="Path to the Vitest JUnit report.")
+    parser.add_argument("--vitest-results", help="Path to the Vitest JUnit report.")
     parser.add_argument("--host", default="127.0.0.1", help="Host to bind.")
     parser.add_argument("--port", default=9109, type=int, help="Port to bind.")
     args = parser.parse_args()
 
     report_path = Path(args.report).resolve()
-    vitest_results_path = Path(args.vitest_results).resolve()
+    vitest_results_path = Path(args.vitest_results).resolve() if args.vitest_results else None
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
             if self.path == "/metrics":
-                payload = (
-                    "\n".join(parse_vitest_report(vitest_results_path) + parse_playwright_report(report_path)) + "\n"
-                ).encode("utf-8")
+                lines = []
+                if vitest_results_path is not None:
+                    lines.extend(parse_vitest_report(vitest_results_path))
+                lines.extend(parse_playwright_report(report_path))
+                payload = ("\n".join(dedupe_metric_metadata(lines)) + "\n").encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
                 self.send_header("Content-Length", str(len(payload)))
