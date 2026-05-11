@@ -20,6 +20,14 @@ For the full frontend testing status, see [`../AI_TUTOR_FRONTEND_TEST_REPORT.md`
 
 - `playwright/tests/ai-tutor-dashboard.mocked.spec.ts`
   - Mocked UI coverage for the AI Tutor dashboard pages.
+- `playwright/tests/admin-users-groups.mocked.spec.ts`
+  - Mocked admin flow for creating users, creating a group, and adding users to that group.
+- `playwright/tests/workspace-knowledge-models.mocked.spec.ts`
+  - Mocked workspace flow for creating a knowledge base, uploading a file, creating a model, and linking the knowledge/group.
+- `playwright/tests/ai-tutor-student-analysis.mocked.spec.ts`
+  - Mocked AI Tutor Student Analysis flow for downloading an available student report.
+- `playwright/tests/ai-tutor-practice-question.mocked.spec.ts`
+  - Mocked AI Tutor Practice Question scenario. This is currently marked `fixme` because the visible Generate button does not trigger `/api/ai-tutor/practice/generate` under the mocked admin setup.
 - `playwright/tests/ai-tutor-dashboard.live.spec.ts`
   - Live workflow bots (admin + student flows).
 
@@ -112,9 +120,35 @@ Steps:
 
 ### Mocked UI tests (no backend required)
 
+Mocked tests are still Playwright browser tests: they open the real frontend in a real browser, but intercept API calls with `page.route(...)` and return controlled responses. They do not create real users, groups, knowledge bases, models, reports, or practice questions in the backend.
+
 ```bash
 npm run test:e2e:ui -- playwright/tests/ai-tutor-dashboard.mocked.spec.ts
 ```
+
+Run all current mocked specs:
+
+```bash
+npm run test:e2e:ui -- playwright/tests/*.mocked.spec.ts
+```
+
+Run one mocked spec in Chromium:
+
+```bash
+npm run test:e2e:ui -- playwright/tests/admin-users-groups.mocked.spec.ts --project=chromium
+npm run test:e2e:ui -- playwright/tests/workspace-knowledge-models.mocked.spec.ts --project=chromium
+npm run test:e2e:ui -- playwright/tests/ai-tutor-student-analysis.mocked.spec.ts --project=chromium
+```
+
+Current mocked coverage:
+
+- `ai-tutor-dashboard.mocked.spec.ts`: topic-analysis rendering, loading state, and backend-error fallback.
+- `admin-users-groups.mocked.spec.ts`: add two users, create a group, edit the group, and save both users into it.
+- `workspace-knowledge-models.mocked.spec.ts`: create a knowledge base, upload `playwright/knowledgeStore/test-pdf.pdf`, create a homework model, link the knowledge base, and assert the model appears.
+- `ai-tutor-student-analysis.mocked.spec.ts`: open Student Analysis and download a mocked report when a report button is available.
+- `ai-tutor-practice-question.mocked.spec.ts`: recorded as `fixme` until the Practice Question Generate button can be exercised reliably through the mocked UI.
+
+Mocked tests intentionally assert the frontend contract. If a mocked test passes, it means the UI handled the mocked API responses correctly. It does not prove the real backend, database state, auth setup, or external services are healthy.
 
 ### Live workflow bots (requires a running app + real accounts)
 
