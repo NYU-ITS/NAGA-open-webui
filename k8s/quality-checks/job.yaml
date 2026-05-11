@@ -42,7 +42,7 @@ spec:
             - name: QUALITY_FORWARD_SECONDS
               value: "75"
             - name: PLAYWRIGHT_VIDEO
-              value: "off"
+              value: "on"
             - name: PLAYWRIGHT_RUN_LIVE
               value: "1"
             - name: PLAYWRIGHT_STRICT_LIVE_CHECKS

@@ -117,7 +117,7 @@ Default non-secret env:
 - `PLAYWRIGHT_BASE_URL=http://open-webui.rit-genai-naga-dev.svc:80`
 - `PLAYWRIGHT_WORKERS=1`
 - `PLAYWRIGHT_RETRIES=0`
-- `PLAYWRIGHT_VIDEO=off`
+- `PLAYWRIGHT_VIDEO=on`
 - `PLAYWRIGHT_HOMEWORK_PDF_PATH=/workspace/playwright/fixtures/Math_HW.pdf`
 - `QUALITY_ENVIRONMENT=openshift-dev`
 - `QUALITY_REPOSITORY=NAGA-open-webui`
@@ -285,7 +285,7 @@ Explicit Job:
 - request: `1 CPU`, `2Gi memory`
 - limit: `2 CPU`, `4Gi memory`
 - `PLAYWRIGHT_WORKERS=1`
-- `PLAYWRIGHT_VIDEO=off`
+- `PLAYWRIGHT_VIDEO=on`
 - `ttlSecondsAfterFinished: 3600`
 - `backoffLimit: 0`
 

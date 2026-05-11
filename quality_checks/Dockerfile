@@ -23,7 +23,7 @@ RUN chmod +x ./scripts/run_openshift_frontend_quality_checks.sh ./scripts/run_op
 
 ENV HOME=/tmp \
     CI=1 \
-    PLAYWRIGHT_VIDEO=off \
+    PLAYWRIGHT_VIDEO=on \
     PLAYWRIGHT_RUN_LIVE=1 \
     PLAYWRIGHT_SKIP_WEB_SERVER=1
 
