@@ -36,6 +36,14 @@ Live workflow tests:
 - `playwright/tests/ai-tutor-dashboard.live.spec.ts`
   - Live workflow bots (admin + student flows).
 OpenShift runs only the live workflow tests. Vitest and mocked Playwright remain in GitHub Actions.
+- `playwright/tests/admin-users-groups.live.spec.ts`
+  - Live admin flow for creating users, creating a group, assigning users, and best-effort cleanup.
+- `playwright/tests/workspace-knowledge-models.live.spec.ts`
+  - Live workspace flow for creating a group, knowledge base, uploaded PDF, workspace model, and best-effort cleanup.
+- `playwright/tests/ai-tutor-student-analysis.live.spec.ts`
+  - Live AI Tutor Student Analysis flow for downloading a report when one exists.
+- `playwright/tests/ai-tutor-practice-question.live.spec.ts`
+  - Live AI Tutor Practice Question flow for generating, approving, and sending practice questions when the selected group has ready homework analysis.
 
 ## First-Time Setup
 
@@ -46,6 +54,9 @@ npx playwright install
 ```
 
 If the repo tooling uses Python, activate the shared environment first:
+## HTML report and video
+
+By default, `playwright.config.ts` uses `video: 'retain-on-failure'`, so the HTML report only keeps **recordings for failed tests** (to save disk space). To keep a video for **passing** tests too, run with:
 
 ```bash
 conda activate oi
@@ -66,6 +77,9 @@ These are the browser checks GitHub Actions runs by default.
 The live tests are real browser automation. The target app must be usable by a human first.
 
 Required:
+## What each LIVE workflow does
+
+The live workflows are defined in `playwright/tests/*.live.spec.ts`.
 
 - `PLAYWRIGHT_RUN_LIVE=1`
 - `PLAYWRIGHT_BASE_URL` pointing at the target OpenWebUI app
@@ -232,6 +246,14 @@ open-webui:latest ImageStreamTag updates
 -> live Playwright runs against http://open-webui.rit-genai-naga-dev.svc:80
 -> metrics are pushed to ai-tutor-quality-pushgateway
 ```
+Additional live specs:
+
+- `admin-users-groups.live.spec.ts`: creates two temporary users, creates a temporary group, assigns both users, then attempts cleanup.
+- `workspace-knowledge-models.live.spec.ts`: creates a temporary group, knowledge base, PDF upload, and homework model. Use `PLAYWRIGHT_KNOWLEDGE_PDF_PATH` to override the default `playwright/knowledgeStore/test-pdf.pdf`; use `PLAYWRIGHT_BASE_MODEL_LABEL` to force a specific base model label.
+- `ai-tutor-student-analysis.live.spec.ts`: opens Student Analysis and downloads the first available report. It skips when no report is available.
+- `ai-tutor-practice-question.live.spec.ts`: selects `PLAYWRIGHT_AI_TUTOR_GROUP_ID`, then `PLAYWRIGHT_AI_TUTOR_GROUP_NAME` / `PLAYWRIGHT_LIVE_GROUP_NAME`, otherwise the first admin-visible group. It skips when that group has no ready homework analysis.
+
+Other useful modes:
 
 Required OpenShift secret:
 
