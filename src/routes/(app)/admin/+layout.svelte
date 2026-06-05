@@ -59,10 +59,10 @@
 						>
 
 						<a
-							class="min-w-fit rounded-full p-1.5 {$page.url.pathname.includes('/admin/evaluations')
+							class="min-w-fit rounded-full p-1.5 {$page.url.pathname.includes('/admin/workspace-settings')
 								? 'text-[#57068c] dark:text-white'
 								: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
-							href="/admin/evaluations">{$i18n.t('Evaluations')}</a
+							href="/admin/workspace-settings">{$i18n.t('Workspace settings')}</a
 						>
 
 						<a
@@ -76,7 +76,14 @@
 							class="min-w-fit rounded-full p-1.5 {$page.url.pathname.includes('/admin/settings')
 								? 'text-[#57068c] dark:text-white'
 								: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
-							href="/admin/settings">{$i18n.t('Settings')}</a
+							href="/admin/settings">{$i18n.t('Advanced settings')}</a
+						>
+
+						<a
+							class="min-w-fit rounded-full p-1.5 {$page.url.pathname.includes('/admin/evaluations')
+								? 'text-[#57068c] dark:text-white'
+								: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
+							href="/admin/evaluations">{$i18n.t('Evaluations')}</a
 						>
 					</div>
 				</div>

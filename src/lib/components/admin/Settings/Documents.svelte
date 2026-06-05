@@ -634,7 +634,7 @@
 									bind:value={PortkeyUrl}
 									required
 								/>
-								<SensitiveInput placeholder={$i18n.t('API Key')} bind:value={PortkeyKey} />
+								<SensitiveInput placeholder={$i18n.t('API Key')} bind:value={PortkeyKey} editHref="/admin/workspace-settings" />
 							</div>
 						{/if}
 					</div>

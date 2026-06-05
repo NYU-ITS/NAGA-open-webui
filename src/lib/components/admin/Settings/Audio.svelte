@@ -380,7 +380,7 @@
 								required
 							/>
 
-							<SensitiveInput placeholder={$i18n.t('API Key')} bind:value={STT_PORTKEY_API_KEY} />
+							<SensitiveInput placeholder={$i18n.t('API Key')} bind:value={STT_PORTKEY_API_KEY} editHref="/admin/workspace-settings" />
 						</div>
 					</div>
 
@@ -572,7 +572,7 @@
 								required
 							/>
 
-							<SensitiveInput placeholder={$i18n.t('API Key')} bind:value={TTS_PORTKEY_API_KEY} />
+							<SensitiveInput placeholder={$i18n.t('API Key')} bind:value={TTS_PORTKEY_API_KEY} editHref="/admin/workspace-settings" />
 						</div>
 					</div>
 				{:else if TTS_ENGINE === 'elevenlabs'}
