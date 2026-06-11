@@ -5,12 +5,9 @@
 	import { user } from '$lib/stores';
 	import { getEmbeddingConfig, updateEmbeddingConfig, updateRAGConfig } from '$lib/apis/retrieval';
 	import { getAudioConfig, updateAudioConfig } from '$lib/apis/audio';
-	import {
-		getFunctions,
-		getFunctionValvesById,
-		getFunctionValvesSpecById,
-		updateFunctionValvesById
-	} from '$lib/apis/functions';
+	import { getFunctions, getFunctionValvesById, updateFunctionValvesById } from '$lib/apis/functions';
+	import { verifyOpenAIConnection } from '$lib/apis/openai';
+	import { WORKSPACE_CASCADED_FUNCTIONS_KEY } from '$lib/constants';
 
 	import Modal from '$lib/components/common/Modal.svelte';
 	import Switch from '$lib/components/common/Switch.svelte';
@@ -48,7 +45,31 @@
 	let fullEmbeddingConfig: Record<string, any> | null = null;
 	let fullAudioConfig: Record<string, any> | null = null;
 
+	// Snapshot of the API key as loaded on mount, used to detect which functions
+	// are tracking the workspace key vs. managing their own independently.
+	let originalApiKey = '';
+
 	let isSaving = false;
+
+	// ── Test connection ───────────────────────────────────────────────────────
+	let testingConnection = false;
+
+	const testConnectionHandler = async () => {
+		testingConnection = true;
+
+		const res = await verifyOpenAIConnection(localStorage.token, modelEngineUrl, apiKey).catch(
+			(error) => {
+				toast.error($i18n.t('Could not verify key — check value. ({{error}})', { error: `${error}` }));
+				return null;
+			}
+		);
+
+		if (res) {
+			toast.success($i18n.t('Connection OK'));
+		}
+
+		testingConnection = false;
+	};
 
 	const languageOptions = [
 		'Afrikaans', 'Arabic', 'Armenian', 'Azerbaijani', 'Belarusian', 'Bosnian', 'Bulgarian',
@@ -117,29 +138,46 @@
 				}
 			});
 
-			// 3. Functions — cascade key + URL to any pipe that has PORTKEY_API_KEY / PORTKEY_API_BASE_URL valves
+			// 3. Functions — cascade key + URL only to functions whose PORTKEY_API_KEY valve
+			// was tracking the previous workspace key (old key -> new key match). Functions
+			// with an independently-set key are left untouched.
 			const functions = await getFunctions(localStorage.token);
-			await Promise.all(
+			const cascadedFunctionIds: string[] = [];
+			const failedFunctionNames: string[] = [];
+			await Promise.allSettled(
 				(functions ?? []).map(async (fn: any) => {
 					try {
-						const spec = await getFunctionValvesSpecById(localStorage.token, fn.id);
-						const properties = spec?.properties ?? {};
-						const hasPortkeyFields =
-							'PORTKEY_API_KEY' in properties || 'PORTKEY_API_BASE_URL' in properties;
-						if (!hasPortkeyFields) return;
-
 						const currentValves = await getFunctionValvesById(localStorage.token, fn.id);
+						if (!currentValves || !('PORTKEY_API_KEY' in currentValves)) return;
+						if (currentValves['PORTKEY_API_KEY'] !== originalApiKey) return;
+
 						const updatedValves: Record<string, any> = { ...currentValves };
-						if ('PORTKEY_API_KEY' in properties) updatedValves['PORTKEY_API_KEY'] = apiKey;
-						if ('PORTKEY_API_BASE_URL' in properties) updatedValves['PORTKEY_API_BASE_URL'] = modelEngineUrl;
+						updatedValves['PORTKEY_API_KEY'] = apiKey;
+						if ('PORTKEY_API_BASE_URL' in updatedValves) {
+							updatedValves['PORTKEY_API_BASE_URL'] = modelEngineUrl;
+						}
 						await updateFunctionValvesById(localStorage.token, fn.id, updatedValves);
+						cascadedFunctionIds.push(fn.id);
 					} catch (_) {
-						// skip functions whose valves can't be read/updated
+						failedFunctionNames.push(fn.name ?? fn.id);
 					}
 				})
 			);
+			localStorage.setItem(WORKSPACE_CASCADED_FUNCTIONS_KEY, JSON.stringify(cascadedFunctionIds));
+
+			// Update the snapshot so subsequent saves in this session compare against the
+			// key that is now live, not the one loaded on initial mount.
+			originalApiKey = apiKey;
 
 			toast.success($i18n.t('Workspace settings saved successfully!'));
+
+			if (failedFunctionNames.length > 0) {
+				toast.warning(
+					$i18n.t('Could not sync the API key to: {{names}}', {
+						names: failedFunctionNames.join(', ')
+					})
+				);
+			}
 		} catch (e) {
 			toast.error(`${e}`);
 		} finally {
@@ -185,6 +223,10 @@
 		} catch (e) {
 			console.error('Failed to load audio config:', e);
 		}
+
+		// Snapshot the resolved API key so saveHandler can detect which functions
+		// were tracking the workspace key prior to this edit.
+		originalApiKey = apiKey;
 	});
 </script>
 
@@ -199,7 +241,7 @@
 			</div>
 			<div>
 				<p class="text-sm font-semibold dark:text-white">{$i18n.t('Are you sure you want to update the model engine?')}</p>
-				<p class="text-xs text-gray-500 dark:text-gray-400 mt-1">{$i18n.t('This change will affect across Embeddings and Audio.')}</p>
+				<p class="text-xs text-gray-500 dark:text-gray-400 mt-1">{$i18n.t('This URL is used for embeddings, audio (STT/TTS), and the default LLM function. Changing it updates all three on Save.')}</p>
 			</div>
 		</div>
 
@@ -269,6 +311,16 @@
 				bind:value={apiKey}
 				required={false}
 			/>
+			<div class="flex justify-end">
+				<button
+					type="button"
+					class="text-xs text-[#57068c] dark:text-purple-400 hover:underline disabled:opacity-50 disabled:cursor-not-allowed"
+					on:click={testConnectionHandler}
+					disabled={testingConnection || !apiKey}
+				>
+					{testingConnection ? $i18n.t('Testing...') : $i18n.t('Test Connection')}
+				</button>
+			</div>
 		</div>
 
 		<hr class="border-gray-100 dark:border-gray-850" />

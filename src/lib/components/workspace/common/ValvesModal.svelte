@@ -3,6 +3,8 @@
 	import { createEventDispatcher } from 'svelte';
 	import { onMount, getContext } from 'svelte';
 	import { addUser } from '$lib/apis/auths';
+	import { user } from '$lib/stores';
+	import { getEmbeddingConfig } from '$lib/apis/retrieval';
 
 	import Modal from '../../common/Modal.svelte';
 	import {
@@ -28,6 +30,10 @@
 
 	let valvesSpec = null;
 	let valves = {};
+
+	// Properties whose current value matches the live Workspace Settings
+	// API key / model engine URL.
+	let syncedFields = new Set();
 
 	const submitHandler = async () => {
 		saving = true;
@@ -65,6 +71,7 @@
 		loading = true;
 		valves = {};
 		valvesSpec = null;
+		syncedFields = new Set();
 
 		if (type === 'tool') {
 			valves = await getToolValvesById(localStorage.token, id);
@@ -84,6 +91,25 @@
 				if (valvesSpec.properties[property]?.type === 'array') {
 					valves[property] = (valves[property] ?? []).join(',');
 				}
+			}
+		}
+
+		if (type === 'function' && ('PORTKEY_API_KEY' in valves || 'PORTKEY_API_BASE_URL' in valves)) {
+			try {
+				const embeddingConfig = await getEmbeddingConfig(localStorage.token, $user.email);
+				const workspaceApiKey = embeddingConfig?.openai_config?.key ?? '';
+				const workspaceUrl = embeddingConfig?.openai_config?.url ?? '';
+
+				const synced = new Set();
+				if (workspaceApiKey && valves['PORTKEY_API_KEY'] === workspaceApiKey) {
+					synced.add('PORTKEY_API_KEY');
+				}
+				if (workspaceUrl && valves['PORTKEY_API_BASE_URL'] === workspaceUrl) {
+					synced.add('PORTKEY_API_BASE_URL');
+				}
+				syncedFields = synced;
+			} catch (_) {
+				// best-effort indicator only; ignore failures
 			}
 		}
 
@@ -128,7 +154,7 @@
 				>
 					<div class="px-1">
 						{#if !loading}
-							<Valves {valvesSpec} bind:valves />
+							<Valves {valvesSpec} {syncedFields} bind:valves />
 						{:else}
 							<Spinner className="size-5" />
 						{/if}

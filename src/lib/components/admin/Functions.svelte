@@ -32,10 +32,15 @@
 	import Search from '../icons/Search.svelte';
 	import Plus from '../icons/Plus.svelte';
 	import ChevronRight from '../icons/ChevronRight.svelte';
+	import { WORKSPACE_CASCADED_FUNCTIONS_KEY } from '$lib/constants';
 
 	const i18n = getContext('i18n');
 
 	let shiftKey = false;
+
+	// Function ids whose Portkey valves were just updated by the Workspace Settings
+	// cascade, shown once on this view and then cleared.
+	let recentlyUpdatedFunctionIds = new Set();
 
 	let functionsImportInputElement: HTMLInputElement;
 	let importFiles;
@@ -162,6 +167,16 @@
 	};
 
 	onMount(() => {
+		const cascaded = localStorage.getItem(WORKSPACE_CASCADED_FUNCTIONS_KEY);
+		if (cascaded) {
+			try {
+				recentlyUpdatedFunctionIds = new Set(JSON.parse(cascaded));
+			} catch (_) {
+				recentlyUpdatedFunctionIds = new Set();
+			}
+			localStorage.removeItem(WORKSPACE_CASCADED_FUNCTIONS_KEY);
+		}
+
 		const onKeyDown = (event) => {
 			if (event.key === 'Shift') {
 				shiftKey = true;
@@ -252,6 +267,16 @@
 								>
 									v{func?.meta?.manifest?.version ?? ''}
 								</div>
+							{/if}
+
+							{#if recentlyUpdatedFunctionIds.has(func.id)}
+								<Tooltip content={$i18n.t('API key updated from Workspace Settings')}>
+									<div
+										class="text-xs font-bold px-1 rounded-sm line-clamp-1 bg-[#57068c]/20 text-[#57068c] dark:text-purple-300"
+									>
+										{$i18n.t('Updated')}
+									</div>
+								</Tooltip>
 							{/if}
 
 							<div class=" line-clamp-1">

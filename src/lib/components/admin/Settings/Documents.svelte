@@ -5,6 +5,7 @@
 
 	import { user } from '$lib/stores';
 	import { getSuperAdminEmails } from '$lib/apis/users';
+	import { WORKSPACE_SETTINGS_PATH } from '$lib/constants';
 
 	let superAdminEmails: string[] = [];
 	let canViewFileSettings = false;
@@ -634,7 +635,7 @@
 									bind:value={PortkeyUrl}
 									required
 								/>
-								<SensitiveInput placeholder={$i18n.t('API Key')} bind:value={PortkeyKey} editHref="/admin/workspace-settings" />
+								<SensitiveInput placeholder={$i18n.t('API Key')} bind:value={PortkeyKey} editHref={WORKSPACE_SETTINGS_PATH} />
 							</div>
 						{/if}
 					</div>

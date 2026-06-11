@@ -10,6 +10,7 @@
 		getModels as _getModels,
 		getVoices as _getVoices
 	} from '$lib/apis/audio';
+	import { WORKSPACE_SETTINGS_PATH } from '$lib/constants';
 	import { config, settings } from '$lib/stores';
 
 	import SensitiveInput from '$lib/components/common/SensitiveInput.svelte';
@@ -380,7 +381,7 @@
 								required
 							/>
 
-							<SensitiveInput placeholder={$i18n.t('API Key')} bind:value={STT_PORTKEY_API_KEY} editHref="/admin/workspace-settings" />
+							<SensitiveInput placeholder={$i18n.t('API Key')} bind:value={STT_PORTKEY_API_KEY} editHref={WORKSPACE_SETTINGS_PATH} />
 						</div>
 					</div>
 
@@ -572,7 +573,7 @@
 								required
 							/>
 
-							<SensitiveInput placeholder={$i18n.t('API Key')} bind:value={TTS_PORTKEY_API_KEY} editHref="/admin/workspace-settings" />
+							<SensitiveInput placeholder={$i18n.t('API Key')} bind:value={TTS_PORTKEY_API_KEY} editHref={WORKSPACE_SETTINGS_PATH} />
 						</div>
 					</div>
 				{:else if TTS_ENGINE === 'elevenlabs'}

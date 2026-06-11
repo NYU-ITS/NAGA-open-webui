@@ -28,6 +28,15 @@ export const WEBUI_VERSION = APP_VERSION;
 export const WEBUI_BUILD_HASH = APP_BUILD_HASH;
 export const REQUIRED_OLLAMA_VERSION = '0.1.16';
 
+// localStorage key used to flag functions whose Portkey valves were just
+// updated by the Workspace Settings cascade, so the Functions list can
+// surface a "recently updated" indicator on next view.
+export const WORKSPACE_CASCADED_FUNCTIONS_KEY = 'workspaceSettingsCascadedFunctionIds';
+
+// Admin route for the Workspace Settings tab, linked from read-only API key
+// fields in Advanced Settings > Documents/Audio.
+export const WORKSPACE_SETTINGS_PATH = '/admin/workspace-settings';
+
 export const SUPPORTED_FILE_TYPE = [
 	'application/epub+zip',
 	'application/pdf',

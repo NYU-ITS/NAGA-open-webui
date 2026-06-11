@@ -7,6 +7,7 @@
 
 	export let valvesSpec = null;
 	export let valves = {};
+	export let syncedFields = new Set();
 </script>
 
 {#if valvesSpec && Object.keys(valvesSpec?.properties ?? {}).length}
@@ -18,6 +19,12 @@
 
 					{#if (valvesSpec?.required ?? []).includes(property)}
 						<span class=" text-gray-500">*required</span>
+					{/if}
+
+					{#if syncedFields.has(property)}
+						<span class="ml-1.5 text-[10px] font-normal text-[#57068c] dark:text-purple-400">
+							{$i18n.t('Synced with Workspace Settings')}
+						</span>
 					{/if}
 				</div>
 
