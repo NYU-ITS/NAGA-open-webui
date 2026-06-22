@@ -20,6 +20,8 @@ from open_webui.retrieval.web.tavily import search_tavily
 from open_webui.retrieval.web.main import SearchResult
 from open_webui.utils.models import get_models_for_user
 
+FACILITIES_EXPORT_COVER_TITLE = "NYU Pilot GenAI Research Facilities Draft"
+
 # facilities prompt template
 FACILITIES_PROMPT = """You are an expert grant writer specializing in the 'Facilities, Equipment, and Other Resources' section of academic proposals for {sponsor} grants.
 
@@ -1363,7 +1365,7 @@ def generate_facilities_pdf(sections: Dict[str, str], filename: str = "facilitie
     normal_style = styles['Normal']
     
     # Add title
-    story.append(Paragraph("Pilot GenAI Generated Draft", title_style))
+    story.append(Paragraph(FACILITIES_EXPORT_COVER_TITLE, title_style))
     story.append(Spacer(1, 20))
     
     # Add content
@@ -1509,7 +1511,7 @@ def generate_facilities_doc(sections: Dict[str, str], filename: str = "facilitie
     font.size = Pt(11)
     
     # Add title
-    title = doc.add_heading('Pilot GenAI Generated Draft', 0)
+    title = doc.add_heading(FACILITIES_EXPORT_COVER_TITLE, 0)
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     title_run = title.runs[0]
     title_run.font.size = Pt(16)

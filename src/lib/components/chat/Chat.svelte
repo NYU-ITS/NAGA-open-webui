@@ -159,6 +159,12 @@
 
 	$: if (chatIdProp) {
 		(async () => {
+	
+			if (get(showFacilitiesOverlay)) {
+				showFacilitiesOverlay.set(false);
+				showControls.set(false);
+			}
+
 			loading = true;
 			console.log(chatIdProp);
 
@@ -187,6 +193,7 @@
 				window.setTimeout(() => scrollToBottom(), 0);
 				const chatInput = document.getElementById('chat-input');
 				chatInput?.focus();
+
 			} else {
 				await goto('/');
 			}

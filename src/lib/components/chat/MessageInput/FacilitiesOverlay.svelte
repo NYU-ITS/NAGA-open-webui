@@ -19,37 +19,41 @@
 	export let saveChatHandler: Function | null = null;
 	export let webSearchEnabled: boolean = false;
 	export let files: any[] = [];
-	
-	// Local storage key - unique per chat
-	$: STORAGE_KEY = `facilities-overlay-form-${$chatId || 'new'}`;
-	
+
+	function getStorageKey(id: string | null | undefined): string {
+		return `facilities-overlay-form-${id || 'new'}`;
+	}
+
 	// Get the current web search state from the chat interface
 	$: currentWebSearchEnabled = webSearchEnabled;
 
+	function getInitialFormData(): Record<string, string> {
+		return {
+			projectTitle: '',
+			// NSF fields
+			researchSpaceFacilities: '',
+			coreInstrumentation: '',
+			computingDataResources: '',
+			internalFacilitiesNYU: '',
+			externalFacilitiesOther: '',
+			specialInfrastructure: '',
+			// NIH fields
+			laboratory: '',
+			animal: '',
+			computer: '',
+			office: '',
+			clinical: '',
+			other: '',
+			equipment: ''
+		};
+	}
+
 	let selectedSponsor = '';
-	let formData: Record<string, string> = {
-		projectTitle: '',
-		// NSF fields
-		researchSpaceFacilities: '',
-		coreInstrumentation: '',
-		computingDataResources: '',
-		internalFacilitiesNYU: '',
-		externalFacilitiesOther: '',
-		specialInfrastructure: '',
-		// NIH fields
-		laboratory: '',
-		animal: '',
-		computer: '',
-		office: '',
-		clinical: '',
-		other: '',
-		equipment: ''
-	};
+	let formData: Record<string, string> = getInitialFormData();
 
 	let generating = false;
 	let lastGeneratedResponse: { content: string; sections: any; sources: any[] } | null = null;
 	let showDownloadOptions = false;
-	let currentChatId = $chatId;
 	let showFilesUsedMessage = false;
 	let usedFiles: string[] = [];
 	let downloadBottomAnchor: HTMLElement | null = null;
@@ -79,11 +83,6 @@
 		}
 	}
 
-	$: if ($chatId !== currentChatId) {
-		currentChatId = $chatId;
-	}
-
-
 	const nsfFormSections = [
 		{ id: 'projectTitle', label: '1. Project Title', required: true },
 		{ id: 'researchSpaceFacilities', label: '2. Research Space and Facilities', required: true },
@@ -105,10 +104,41 @@
 		{ id: 'equipment', label: '8. Equipment', required: true }
 	];
 
-	// Select sections based on sponsor
-	$: currentSections = selectedSponsor === 'NIH' ? nihFormSections : nsfFormSections;
 
-	$: if ($chatId && (selectedSponsor || Object.values(formData).some(v => v.trim() !== '') || showFilesUsedMessage || showDownloadOptions)) {
+	let currentSections: typeof nsfFormSections = nsfFormSections;
+
+	function syncCurrentSections() {
+		currentSections = selectedSponsor === 'NIH' ? nihFormSections : nsfFormSections;
+	}
+
+	let lastLoadedChatId: string | null = null;
+	let hasInitializedChatState = false;
+
+	function resetFormState() {
+		selectedSponsor = '';
+		formData = getInitialFormData();
+		showFilesUsedMessage = false;
+		usedFiles = [];
+		showDownloadOptions = false;
+		lastGeneratedResponse = null;
+		sectionProgress = [];
+		generatedSectionContent = {};
+		lastProjectTitle = '';
+		downloadFilename = 'facilities_draft';
+		syncCurrentSections();
+	}
+
+	
+	$: if (
+		$chatId &&
+		$chatId === lastLoadedChatId &&
+		(
+			selectedSponsor ||
+			Object.values(formData).some((v) => v.trim() !== '') ||
+			showFilesUsedMessage ||
+			showDownloadOptions
+		)
+	) {
 		saveToLocalStorage();
 	}
 
@@ -118,7 +148,7 @@
 			console.log('Skipping save - no chatId yet (new chat)');
 			return;
 		}
-		
+
 		try {
 			const dataToSave = {
 				selectedSponsor,
@@ -130,7 +160,7 @@
 				chatId: $chatId,
 				timestamp: Date.now()
 			};
-			localStorage.setItem(STORAGE_KEY, JSON.stringify(dataToSave));
+			localStorage.setItem(getStorageKey($chatId), JSON.stringify(dataToSave));
 			console.log(`Saved form data to localStorage for chat: ${$chatId}`);
 		} catch (error) {
 			console.error('Error saving to localStorage:', error);
@@ -143,24 +173,26 @@
 			console.log('Skipping load - no chatId yet (new chat)');
 			return;
 		}
-		
+
 		try {
-			const saved = localStorage.getItem(STORAGE_KEY);
+			const saved = localStorage.getItem(getStorageKey($chatId));
 			if (saved) {
 				const parsed = JSON.parse(saved);
-				
+
 				// Only load if it matches current chat (safety check)
 				if (parsed.chatId === $chatId) {
 					selectedSponsor = parsed.selectedSponsor || '';
-					formData = parsed.formData || formData;
+					formData = { ...getInitialFormData(), ...(parsed.formData || {}) };
 					showFilesUsedMessage = parsed.showFilesUsedMessage || false;
 					usedFiles = parsed.usedFiles || [];
 					showDownloadOptions = parsed.showDownloadOptions || false;
 					lastGeneratedResponse = parsed.lastGeneratedResponse || null;
-					
+
+					syncCurrentSections();
+
 					console.log(`Loaded form data from localStorage for chat: ${$chatId}`, {
 						sponsor: selectedSponsor,
-						hasData: Object.values(formData).some(v => v.trim() !== ''),
+						hasData: Object.values(formData).some((v) => v.trim() !== ''),
 						showFilesUsedMessage: showFilesUsedMessage,
 						usedFilesCount: usedFiles.length,
 						savedAt: new Date(parsed.timestamp).toLocaleString()
@@ -177,22 +209,51 @@
 		if (!$chatId) {
 			return;
 		}
-		
+
 		try {
-			localStorage.removeItem(STORAGE_KEY);
+			localStorage.removeItem(getStorageKey($chatId));
 			console.log(`Cleared form data from localStorage for chat: ${$chatId}`);
 		} catch (error) {
 			console.error('Error clearing localStorage:', error);
 		}
 	}
 
-	// Load saved data when component mounts or chat changes
-	onMount(() => {
-		loadFromLocalStorage();
-	});
-	
-	// Reload form data when chat ID changes
-	$: if ($chatId) {
+
+	$: handleChatIdChange($chatId);
+
+	function handleChatIdChange(newChatIdValue: string | null | undefined) {
+		const newId: string | null = newChatIdValue ?? null;
+
+		// Initial run — align tracker with current chat and load any saved state.
+		if (!hasInitializedChatState) {
+			hasInitializedChatState = true;
+			lastLoadedChatId = newId;
+			if (newId) {
+				loadFromLocalStorage();
+			}
+			return;
+		}
+
+		// No transition — nothing to do.
+		if (newId === lastLoadedChatId) {
+			return;
+		}
+
+		const previousId = lastLoadedChatId;
+		lastLoadedChatId = newId;
+
+		if (!newId) {
+
+			resetFormState();
+			return;
+		}
+
+		if (!previousId) {
+			
+			return;
+		}
+
+		resetFormState();
 		loadFromLocalStorage();
 	}
 
@@ -378,8 +439,8 @@
 	function handleSponsorChange(sponsor: string) {
 		selectedSponsor = sponsor;
 		// Don't reset form data - keep existing data
+		syncCurrentSections();
 
-		
 		// Save after sponsor change (only if chatId exists)
 		if ($chatId) {
 			saveToLocalStorage();
