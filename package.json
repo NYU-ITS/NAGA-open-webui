@@ -18,7 +18,10 @@
 		"i18n:parse": "i18next --config i18next-parser.config.ts && prettier --write \"src/lib/i18n/**/*.{js,json}\"",
 		"cy:open": "cypress open",
 		"test:frontend": "vitest --passWithNoTests",
-		"pyodide:fetch": "node scripts/prepare-pyodide.js"
+		"test:frontend:custom-models": "vitest run --config tests/unit/frontend/vitest.config.ts",
+		"pyodide:fetch": "node scripts/prepare-pyodide.js",
+		"test:e2e": "playwright test --config tests/e2e/playwright.config.ts",
+		"test:e2e:headed": "playwright test --config tests/e2e/playwright.config.ts --headed"
 	},
 	"devDependencies": {
 		"@sveltejs/adapter-auto": "3.2.2",
@@ -47,7 +50,11 @@
 		"tslib": "^2.4.1",
 		"typescript": "^5.5.4",
 		"vite": "^5.4.14",
-		"vitest": "^1.6.1"
+		"vitest": "^1.6.1",
+		"@playwright/test": "^1.49.1",
+		"@testing-library/svelte": "^4.2.0",
+		"@testing-library/jest-dom": "^6.4.0",
+		"jsdom": "^24.0.0"
 	},
 	"type": "module",
 	"dependencies": {
