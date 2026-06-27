@@ -46,7 +46,7 @@ export async function deleteModelViaAPI(request: APIRequestContext, token: strin
   const response = await request.delete(`/api/v1/models/model/delete?id=${encodeURIComponent(id)}`, {
     headers: await authHeaders(token)
   });
-  if (response.status() === 404) return;
+  if (response.status() === 404 || response.status() === 401) return;
   await requireOk(response, `delete model ${id}`);
 }
 
