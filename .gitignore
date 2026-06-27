@@ -380,3 +380,9 @@ llm_portkey.py
 .env.local-ai-tutor
 QWEN.md
 _check_db.py
+
+scratchpad/
+
+tests/e2e/.auth/*.json
+tests/e2e/test-results/
+tests/e2e/playwright-report/
