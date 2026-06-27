@@ -9,7 +9,6 @@ export default defineConfig({
   reporter: [['list'], ['html', { outputFolder: 'tests/e2e/playwright-report', open: 'never' }]],
   use: {
     baseURL: process.env.E2E_BASE_URL || 'http://localhost:8080',
-    storageState: 'tests/e2e/.auth/user.json',
     trace: 'retain-on-failure',
     video: 'retain-on-failure',
     screenshot: 'only-on-failure'

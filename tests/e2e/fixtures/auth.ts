@@ -10,7 +10,6 @@ export async function loginAsAdmin(page: Page) {
   await login(page, process.env.E2E_ADMIN_EMAIL || 'admin@test.com', process.env.E2E_ADMIN_PASSWORD || 'changeme-e2e-admin');
   await fs.mkdir(authDir, { recursive: true });
   await page.context().storageState({ path: adminStatePath });
-  await page.context().storageState({ path: userStatePath });
 }
 
 export async function loginAsUser(page: Page) {
