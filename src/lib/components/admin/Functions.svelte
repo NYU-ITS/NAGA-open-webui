@@ -32,6 +32,7 @@
 	import Search from '../icons/Search.svelte';
 	import Plus from '../icons/Plus.svelte';
 	import ChevronRight from '../icons/ChevronRight.svelte';
+	import Badge from '../common/Badge.svelte';
 	import { WORKSPACE_CASCADED_FUNCTIONS_KEY } from '$lib/constants';
 
 	const i18n = getContext('i18n');
@@ -53,6 +54,7 @@
 	let selectedFunction = null;
 
 	let showDeleteConfirm = false;
+	let showDisableSystemDefaultConfirm = false;
 
 	let filteredItems = [];
 	$: filteredItems = $functions
@@ -269,6 +271,10 @@
 								</div>
 							{/if}
 
+							{#if func.is_system_default}
+								<Badge type="info" content={$i18n.t('System default')} />
+							{/if}
+
 							{#if recentlyUpdatedFunctionIds.has(func.id)}
 								<Tooltip content={$i18n.t('API key updated from Workspace Settings')}>
 									<div
@@ -323,6 +329,7 @@
 						</Tooltip>
 					{/if}
 
+					{#if !func.is_system_default}
 					<Tooltip content={$i18n.t('Valves')}>
 						<button
 							class="self-center w-fit text-sm px-2 py-2 dark:text-gray-300 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 rounded-xl"
@@ -353,9 +360,11 @@
 							</svg>
 						</button>
 					</Tooltip>
+					{/if}
 
 					<FunctionMenu
 						{func}
+						isSystemDefault={func.is_system_default}
 						editHandler={() => {
 							goto(`/admin/functions/edit?id=${encodeURIComponent(func.id)}`);
 						}}
@@ -393,6 +402,12 @@
 						<Switch
 							bind:state={func.is_active}
 							on:change={async (e) => {
+								if (!e.detail && $functions.filter((f) => f.is_active).length === 0) {
+									selectedFunction = func;
+									showDisableSystemDefaultConfirm = true;
+									return;
+								}
+
 								toggleFunctionById(localStorage.token, func.id);
 								models.set(
 									await getModels(
@@ -530,11 +545,36 @@
 	</div>
 </DeleteConfirmDialog>
 
+<ConfirmDialog
+	bind:show={showDisableSystemDefaultConfirm}
+	title={$i18n.t('Disable function?')}
+	on:confirm={async () => {
+		toggleFunctionById(localStorage.token, selectedFunction.id);
+		models.set(
+			await getModels(
+				localStorage.token,
+				$config?.features?.enable_direct_connections && ($settings?.directConnections ?? null)
+			)
+		);
+	}}
+	on:cancel={() => {
+		selectedFunction.is_active = true;
+		$functions = $functions;
+	}}
+>
+	<div class=" text-sm text-gray-500">
+		{$i18n.t(
+			'Disabling this function means no LLM provider is active for this workspace unless another function is enabled.'
+		)}
+	</div>
+</ConfirmDialog>
+
 <ManifestModal bind:show={showManifestModal} manifest={selectedFunction?.meta?.manifest ?? {}} />
 <ValvesModal
 	bind:show={showValvesModal}
 	type="function"
 	id={selectedFunction?.id ?? null}
+	isSystemDefault={selectedFunction?.is_system_default ?? false}
 	on:save={async () => {
 		await tick();
 		models.set(

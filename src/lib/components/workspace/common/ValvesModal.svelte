@@ -24,6 +24,7 @@
 
 	export let type = 'tool';
 	export let id = null;
+	export let isSystemDefault = false;
 
 	let saving = false;
 	let loading = false;
@@ -34,6 +35,10 @@
 	// Properties whose current value matches the live Workspace Settings
 	// API key / model engine URL.
 	let syncedFields = new Set();
+
+	// Live Workspace Settings values, e.g. { PORTKEY_API_KEY: '...', PORTKEY_API_BASE_URL: '...' }.
+	// Shown read-only in Valves.svelte when a Portkey field is in its "Default" state.
+	let workspaceValues = {};
 
 	const submitHandler = async () => {
 		saving = true;
@@ -72,6 +77,7 @@
 		valves = {};
 		valvesSpec = null;
 		syncedFields = new Set();
+		workspaceValues = {};
 
 		if (type === 'tool') {
 			valves = await getToolValvesById(localStorage.token, id);
@@ -92,13 +98,34 @@
 					valves[property] = (valves[property] ?? []).join(',');
 				}
 			}
+
+			// On the system default function only, PORTKEY_API_KEY is managed
+			// exclusively by the Workspace Settings cascade and must never be
+			// editable here - remove from spec so it is not rendered. Custom,
+			// admin-created functions may deliberately set their own key, so
+			// the field stays editable for them.
+			if (isSystemDefault && 'PORTKEY_API_KEY' in (valvesSpec.properties ?? {})) {
+				delete valvesSpec.properties['PORTKEY_API_KEY'];
+				valvesSpec.required = (valvesSpec.required ?? []).filter(
+					(f) => f !== 'PORTKEY_API_KEY'
+				);
+			}
 		}
 
-		if (type === 'function' && ('PORTKEY_API_KEY' in valves || 'PORTKEY_API_BASE_URL' in valves)) {
+		if (
+			type === 'function' &&
+			('PORTKEY_API_KEY' in (valvesSpec?.properties ?? {}) ||
+				'PORTKEY_API_BASE_URL' in (valvesSpec?.properties ?? {}))
+		) {
 			try {
 				const embeddingConfig = await getEmbeddingConfig(localStorage.token, $user.email);
 				const workspaceApiKey = embeddingConfig?.openai_config?.key ?? '';
 				const workspaceUrl = embeddingConfig?.openai_config?.url ?? '';
+
+				workspaceValues = {
+					PORTKEY_API_KEY: workspaceApiKey,
+					PORTKEY_API_BASE_URL: workspaceUrl
+				};
 
 				const synced = new Set();
 				if (workspaceApiKey && valves['PORTKEY_API_KEY'] === workspaceApiKey) {
@@ -154,7 +181,7 @@
 				>
 					<div class="px-1">
 						{#if !loading}
-							<Valves {valvesSpec} {syncedFields} bind:valves />
+							<Valves {valvesSpec} {syncedFields} {workspaceValues} bind:valves />
 						{:else}
 							<Spinner className="size-5" />
 						{/if}

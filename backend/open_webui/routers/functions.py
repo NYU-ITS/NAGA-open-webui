@@ -10,6 +10,7 @@ from open_webui.models.functions import (
     Functions,
 )
 from open_webui.utils.plugin import load_function_module_by_id, replace_imports
+from open_webui.utils.portkey import find_workspace_portkey_key
 from open_webui.config import CACHE_DIR
 from open_webui.constants import ERROR_MESSAGES
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -22,6 +23,30 @@ log.setLevel(SRC_LOG_LEVELS["MAIN"])
 
 
 router = APIRouter()
+
+
+def _prepopulate_portkey_valves(id: str, function_module) -> None:
+    """If the newly-created function declares a PORTKEY_API_KEY valve,
+    pre-populate it immediately from the workspace's current Portkey key, so
+    the admin doesn't have to paste it in manually. Best-effort: a failure
+    here must never fail function creation, since the function row already
+    exists by this point."""
+    if not hasattr(function_module, "Valves"):
+        return
+
+    Valves = function_module.Valves
+    if "PORTKEY_API_KEY" not in Valves.model_fields:
+        return
+
+    try:
+        key = find_workspace_portkey_key()
+        if not key:
+            return
+        valves = Valves(PORTKEY_API_KEY=key)
+        Functions.update_function_valves_by_id(id, valves.model_dump())
+        log.info("Pre-populated PORTKEY_API_KEY valve for newly created function %s", id)
+    except Exception:
+        log.exception(f"Failed to pre-populate Portkey valves for function {id}")
 
 ############################
 # GetFunctions
@@ -81,6 +106,7 @@ async def create_new_function(
             function_cache_dir.mkdir(parents=True, exist_ok=True)
 
             if function:
+                _prepopulate_portkey_valves(function.id, function_module)
                 invalidate_models_cache(request)
                 return function
             else:
@@ -228,6 +254,13 @@ async def update_function_by_id(
 async def delete_function_by_id(
     request: Request, id: str, user=Depends(get_admin_user)
 ):
+    function = Functions.get_function_by_id(id)
+    if function and function.is_system_default:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="System default functions cannot be deleted.",
+        )
+
     result = Functions.delete_function_by_id(id)
 
     if result:

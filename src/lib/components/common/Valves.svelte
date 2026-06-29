@@ -8,6 +8,23 @@
 	export let valvesSpec = null;
 	export let valves = {};
 	export let syncedFields = new Set();
+	// Live values from Workspace Settings, e.g. { PORTKEY_API_KEY: '...', PORTKEY_API_BASE_URL: '...' }.
+	export let workspaceValues = {};
+
+	// These two fields are managed by the Workspace Settings cascade. "Default"
+	// for them means "tracking the workspace value" - shown read-only, not an
+	// editable empty string like every other valve's Default state.
+	const PORTKEY_FIELDS = ['PORTKEY_API_KEY', 'PORTKEY_API_BASE_URL'];
+
+	// Per-field Switch state for the Portkey fields, kept in sync with `valves`.
+	let customToggles = {};
+	$: if (valvesSpec) {
+		for (const property of Object.keys(valvesSpec.properties ?? {})) {
+			if (PORTKEY_FIELDS.includes(property) && !(property in customToggles)) {
+				customToggles[property] = (valves[property] ?? null) !== null;
+			}
+		}
+	}
 </script>
 
 {#if valvesSpec && Object.keys(valvesSpec?.properties ?? {}).length}
@@ -28,30 +45,43 @@
 					{/if}
 				</div>
 
-				<button
-					class="p-1 px-3 text-xs flex rounded-sm transition"
-					type="button"
-					on:click={() => {
-						valves[property] =
-							(valves[property] ?? null) === null
+				{#if PORTKEY_FIELDS.includes(property)}
+					<Switch
+						bind:state={customToggles[property]}
+						on:change={() => {
+							valves[property] = customToggles[property]
 								? (valvesSpec.properties[property]?.default ?? '')
 								: null;
 
-						dispatch('change');
-					}}
-				>
-					{#if (valves[property] ?? null) === null}
-						<span class="ml-2 self-center">
-							{#if (valvesSpec?.required ?? []).includes(property)}
-								{$i18n.t('None')}
-							{:else}
-								{$i18n.t('Default')}
-							{/if}
-						</span>
-					{:else}
-						<span class="ml-2 self-center"> {$i18n.t('Custom')} </span>
-					{/if}
-				</button>
+							dispatch('change');
+						}}
+					/>
+				{:else}
+					<button
+						class="p-1 px-3 text-xs flex rounded-sm transition"
+						type="button"
+						on:click={() => {
+							valves[property] =
+								(valves[property] ?? null) === null
+									? (valvesSpec.properties[property]?.default ?? '')
+									: null;
+
+							dispatch('change');
+						}}
+					>
+						{#if (valves[property] ?? null) === null}
+							<span class="ml-2 self-center">
+								{#if (valvesSpec?.required ?? []).includes(property)}
+									{$i18n.t('None')}
+								{:else}
+									{$i18n.t('Default')}
+								{/if}
+							</span>
+						{:else}
+							<span class="ml-2 self-center"> {$i18n.t('Custom')} </span>
+						{/if}
+					</button>
+				{/if}
 			</div>
 
 			{#if (valves[property] ?? null) !== null}
@@ -100,6 +130,18 @@
 								}}
 							/>
 						{/if}
+					</div>
+				</div>
+			{:else if PORTKEY_FIELDS.includes(property)}
+				<div class="flex mt-0.5 mb-1.5 space-x-2">
+					<div class=" flex-1">
+						<input
+							class="w-full rounded-lg py-2 px-4 text-sm text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-900 outline-hidden border border-gray-100 dark:border-gray-850 cursor-not-allowed"
+							type="text"
+							value={workspaceValues[property] ?? ''}
+							disabled
+							readonly
+						/>
 					</div>
 				</div>
 			{/if}

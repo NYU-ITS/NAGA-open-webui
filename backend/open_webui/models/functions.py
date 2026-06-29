@@ -7,7 +7,7 @@ from open_webui.models.users import Users
 from open_webui.env import SRC_LOG_LEVELS
 from open_webui.utils.super_admin import is_super_admin
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import BigInteger, Boolean, Column, String, Text
+from sqlalchemy import BigInteger, Boolean, Column, String, Text, or_
 
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["MODELS"])
@@ -30,6 +30,7 @@ class Function(Base):
     valves = Column(JSONField)
     is_active = Column(Boolean)
     is_global = Column(Boolean)
+    is_system_default = Column(Boolean, default=False)
     updated_at = Column(BigInteger)
     created_at = Column(BigInteger)
 
@@ -49,6 +50,7 @@ class FunctionModel(BaseModel):
     meta: FunctionMeta
     is_active: bool = False
     is_global: bool = False
+    is_system_default: bool = False
     updated_at: int  # timestamp in epoch
     created_at: int  # timestamp in epoch
 
@@ -69,6 +71,7 @@ class FunctionResponse(BaseModel):
     meta: FunctionMeta
     is_active: bool
     is_global: bool
+    is_system_default: bool
     updated_at: int  # timestamp in epoch
     created_at: int  # timestamp in epoch
 
@@ -86,7 +89,13 @@ class FunctionValves(BaseModel):
 
 class FunctionsTable:
     def insert_new_function(
-        self, user_id: str, user_email: str, type: str, form_data: FunctionForm
+        self,
+        user_id: str,
+        user_email: str,
+        type: str,
+        form_data: FunctionForm,
+        is_active: bool = False,
+        is_system_default: bool = False,
     ) -> Optional[FunctionModel]:
         function = FunctionModel(
             **{
@@ -94,6 +103,8 @@ class FunctionsTable:
                 "user_id": user_id,
                 "created_by": user_email,
                 "type": type,
+                "is_active": is_active,
+                "is_system_default": is_system_default,
                 "updated_at": int(time.time()),
                 "created_at": int(time.time()),
             }
@@ -121,6 +132,16 @@ class FunctionsTable:
         except Exception:
             return None
 
+    def get_function_by_is_system_default(self) -> Optional[FunctionModel]:
+        try:
+            with get_db() as db:
+                function = (
+                    db.query(Function).filter_by(is_system_default=True).first()
+                )
+                return FunctionModel.model_validate(function)
+        except Exception:
+            return None
+
     # def get_functions(self, active_only=False) -> list[FunctionModel]:
     #     with get_db() as db:
     #         if active_only:
@@ -135,13 +156,18 @@ class FunctionsTable:
     #             ]
 
     def get_functions(self, user_email, active_only=False, user=None) -> list[FunctionModel]:
-        # Always return only user's own functions (for security)
+        # Always return only user's own functions, plus the shared System
+        # default function (created_by="system", visible to everyone)
         with get_db() as db:
+            visibility_filter = or_(
+                Function.created_by == user_email,
+                Function.is_system_default == True,
+            )
             if active_only:
                 return [
                     FunctionModel.model_validate(function)
                     for function in db.query(Function)
-                    .filter(Function.created_by == user_email)
+                    .filter(visibility_filter)
                     .filter_by(is_active=True)
                     .all()
                 ]
@@ -149,7 +175,7 @@ class FunctionsTable:
                 return [
                     FunctionModel.model_validate(function)
                     for function in db.query(Function)
-                    .filter(Function.created_by == user_email)
+                    .filter(visibility_filter)
                     .all()
                 ]
 

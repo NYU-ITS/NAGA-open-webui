@@ -510,6 +510,195 @@ def ensure_chat_group_id_column():
             print("Column 'group_id' already exists")
 
 
+def _sync_function_content(id: str):
+    """Update an existing function's content/type/manifest to the bundled
+    DEFAULT_SYSTEM_FUNCTION_CONTENT / DEFAULT_SYSTEM_FUNCTION_VERSION, preserving
+    its id, valves, and is_active state."""
+    from open_webui.config import DEFAULT_SYSTEM_FUNCTION_CONTENT
+    from open_webui.models.functions import Functions
+    from open_webui.utils.plugin import load_function_module_by_id, replace_imports
+
+    existing = Functions.get_function_by_id(id)
+    content = replace_imports(DEFAULT_SYSTEM_FUNCTION_CONTENT)
+    function_module, function_type, frontmatter = load_function_module_by_id(
+        id, content=content
+    )
+
+    Functions.update_function_by_id(
+        id,
+        {
+            "content": content,
+            "type": function_type,
+            "meta": {
+                **existing.meta.model_dump(),
+                "description": "System default LLM pipe",
+                "manifest": frontmatter,
+            },
+            # is_active and valves deliberately omitted - preserved as-is
+        },
+    )
+    return function_module
+
+
+def _insert_default_function(app: FastAPI, is_active: bool):
+    """Insert a fresh DEFAULT_SYSTEM_FUNCTION_ID row with bundled content.
+    Returns the inserted FunctionModel, or None if another pod already won
+    the PK-collision race."""
+    from pathlib import Path
+
+    from open_webui.config import (
+        CACHE_DIR,
+        DEFAULT_SYSTEM_FUNCTION_ID,
+        DEFAULT_SYSTEM_FUNCTION_CONTENT,
+    )
+    from open_webui.models.functions import Functions, FunctionForm, FunctionMeta
+    from open_webui.utils.plugin import load_function_module_by_id, replace_imports
+
+    try:
+        content = replace_imports(DEFAULT_SYSTEM_FUNCTION_CONTENT)
+        function_module, function_type, frontmatter = load_function_module_by_id(
+            DEFAULT_SYSTEM_FUNCTION_ID,
+            content=content,
+        )
+
+        app.state.FUNCTIONS[DEFAULT_SYSTEM_FUNCTION_ID] = function_module
+
+        inserted = Functions.insert_new_function(
+            user_id="system",
+            user_email="system",
+            type=function_type,
+            form_data=FunctionForm(
+                id=DEFAULT_SYSTEM_FUNCTION_ID,
+                name="LLM",
+                content=content,
+                meta=FunctionMeta(
+                    description="System default LLM pipe",
+                    manifest=frontmatter,
+                ),
+            ),
+            is_active=is_active,
+            is_system_default=True,
+        )
+
+        function_cache_dir = Path(CACHE_DIR) / "functions" / DEFAULT_SYSTEM_FUNCTION_ID
+        function_cache_dir.mkdir(parents=True, exist_ok=True)
+
+        log.info("Seeded default system function: %s", DEFAULT_SYSTEM_FUNCTION_ID)
+        return inserted
+    except Exception:
+        # Another pod won the race and inserted the row first (PK collision) - safe to skip.
+        log.debug("Default system function already seeded by another pod")
+        return None
+
+
+def seed_default_function(app: FastAPI):
+    from open_webui.config import DEFAULT_SYSTEM_FUNCTION_VERSION
+    from open_webui.models.functions import Functions
+
+    existing = Functions.get_function_by_is_system_default()
+
+    if existing is None:
+        # Only reachable if adopt_existing_llm_function() found nothing to
+        # adopt either, i.e. this is genuinely a new workspace.
+        _insert_default_function(app, is_active=True)
+    elif existing.meta.manifest.get("version") != DEFAULT_SYSTEM_FUNCTION_VERSION:
+        function_module = _sync_function_content(existing.id)
+        app.state.FUNCTIONS[existing.id] = function_module
+
+        log.info(
+            "Upgraded default system function %s to version %s",
+            existing.id,
+            DEFAULT_SYSTEM_FUNCTION_VERSION,
+        )
+    # version matches -> do nothing
+
+
+def _find_portkey_pipe_function():
+    """Find an existing pipe function that looks like the manually-configured
+    Portkey LLM pipe (Subcase A1/A2 detection). Prefers the active match; if
+    none of the matches are active, returns the first one. Returns None if no
+    function references the NYU Portkey gateway (Subcase B)."""
+    from open_webui.models.functions import Functions
+
+    matches = [
+        function
+        for function in Functions.get_functions_by_type("pipe")
+        if "ai-gateway.apps.cloud.rt.nyu.edu" in (function.content or "")
+    ]
+
+    if not matches:
+        return None
+
+    for function in matches:
+        if function.is_active:
+            return function
+
+    return matches[0]
+
+
+def _any_functions_exist() -> bool:
+    """True if any function row exists at all, regardless of type. Used to
+    distinguish a truly fresh workspace (Case 1) from Subcase B (some other
+    function exists, but none is the Portkey pipe)."""
+    from open_webui.internal.db import get_db
+    from open_webui.models.functions import Function
+
+    with get_db() as db:
+        return db.query(Function).first() is not None
+
+
+def _copy_portkey_key_to(id: str):
+    from open_webui.models.functions import Functions
+    from open_webui.utils.portkey import find_workspace_portkey_key
+
+    key = find_workspace_portkey_key()
+    if key:
+        Functions.update_function_valves_by_id(id, {"PORTKEY_API_KEY": key})
+
+
+def adopt_existing_llm_function(app: FastAPI):
+    """One-time migration: adopt a pre-existing manually-configured Portkey
+    pipe function (Subcase A1/A2) as the System default, or insert a disabled
+    pre-keyed default for workspaces with no such function (Subcase B). See
+    2_Dev_Tasks_PilotGenAI/2.1_Scope_for_Function/implementation/02_existing_workspace_adoption.md"""
+    from open_webui.config import DEFAULT_FUNCTION_ADOPTION_DONE
+    from open_webui.models.functions import Functions
+
+    if DEFAULT_FUNCTION_ADOPTION_DONE.value:
+        return
+
+    if Functions.get_function_by_is_system_default() is not None:
+        # Pass 1 already seeded (or a previous pod already adopted) - nothing to do.
+        DEFAULT_FUNCTION_ADOPTION_DONE.value = True
+        DEFAULT_FUNCTION_ADOPTION_DONE.save()
+        return
+
+    candidate = _find_portkey_pipe_function()
+
+    if candidate is not None:
+        # A1 / A2 - adopt in place, preserve id/valves/is_active
+        Functions.update_function_by_id(candidate.id, {"is_system_default": True})
+        function_module = _sync_function_content(candidate.id)
+        app.state.FUNCTIONS[candidate.id] = function_module
+
+        log.info("Adopted existing function %s as the system default", candidate.id)
+    elif _any_functions_exist():
+        # B - some other function(s) exist, none is the Portkey pipe.
+        # Insert new, disabled, try to copy key from workspace settings.
+        inserted = _insert_default_function(app, is_active=False)
+        if inserted:
+            _copy_portkey_key_to(inserted.id)
+            log.info(
+                "Inserted disabled system default function %s for existing workspace",
+                inserted.id,
+            )
+    # else: truly fresh workspace (no functions at all) - nothing to adopt;
+    # leave it to seed_default_function()'s normal Case 1 (active) insert.
+
+    DEFAULT_FUNCTION_ADOPTION_DONE.value = True
+    DEFAULT_FUNCTION_ADOPTION_DONE.save()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     start_logger()
@@ -578,6 +767,8 @@ async def lifespan(app: FastAPI):
     ensure_tool_created_by_column()
     ensure_function_created_by_column()
     ensure_chat_group_id_column()
+    adopt_existing_llm_function(app)
+    seed_default_function(app)
     # Cross-pod models cache invalidation via Redis pub/sub
     start_models_cache_invalidation_listener(app)
     # Cache KaTeX TTF fonts locally once on startup 
