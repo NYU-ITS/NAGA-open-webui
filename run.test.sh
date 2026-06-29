@@ -17,6 +17,11 @@ HOST_PORT=3001
 CONTAINER_PORT=8080
 
 build_image() {
+    # Ensure base image exists locally
+    if ! docker image inspect open-webui:latest &>/dev/null; then
+        echo "==> Base image open-webui:latest not found — building from Dockerfile"
+        docker build -t open-webui:latest -f Dockerfile .
+    fi
     echo "==> Building test image: ${IMAGE_NAME}"
     docker build -t "${IMAGE_NAME}" -f Dockerfile.test .
     echo "==> Build complete"
@@ -30,6 +35,7 @@ run_container() {
     # Mount tests/ dir for live editing, mount data volume for persistence
     docker run -d -p "${HOST_PORT}:${CONTAINER_PORT}" \
         --add-host=host.docker.internal:host-gateway \
+        --env-file .env.test \
         -v "${IMAGE_NAME}:/app/backend/data" \
         -v "$(pwd)/tests:/app/tests" \
         -v "$(pwd)/src:/app/src:ro" \
@@ -41,19 +47,7 @@ run_container() {
         "${IMAGE_NAME}" bash -c '
 set -e
 cd /app/backend
-# Pre-init DB to avoid config table error at startup
-export WEBUI_SECRET_KEY="test-secret"
-export SUPER_ADMIN_EMAILS="admin@test.com"
-export WEBUI_URL="http://localhost:3001"
-export E2E_BASE_URL="http://localhost:8080"
-export E2E_ADMIN_EMAIL="admin@test.com"
-export E2E_ADMIN_PASSWORD="changeme-e2e-admin"
-export E2E_USER_EMAIL="e2e-user@example.test"
-export E2E_USER_PASSWORD="changeme-e2e-user"
 PYTHONPATH=/app/backend python -c "
-import os
-os.environ.setdefault(\"WEBUI_SECRET_KEY\", \"test-secret\")
-os.environ.setdefault(\"SUPER_ADMIN_EMAILS\", \"admin@test.com\")
 from open_webui.internal.db import engine, Base
 Base.metadata.create_all(bind=engine)
 print(\"DB initialized with all tables\")

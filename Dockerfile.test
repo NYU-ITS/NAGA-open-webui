@@ -36,10 +36,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         xdg-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# Install frontend test devDependencies
+# Install frontend test devDependencies and generate .svelte-kit module resolution
 WORKDIR /app
-COPY package.json package-lock.json ./
-RUN npm install
+COPY package.json package-lock.json svelte.config.js vite.config.ts tsconfig.json ./
+COPY src ./src
+RUN npm ci && npx svelte-kit sync
 
 # Install Playwright Chromium browser
 RUN npx playwright install --with-deps chromium
@@ -47,9 +48,7 @@ RUN npx playwright install --with-deps chromium
 # Install pytest-asyncio for async backend tests
 RUN pip install pytest-asyncio
 
-# Copy test files into image (overlaid on top of open-webui:latest)
-COPY tests /app/tests
-COPY tests/unit/frontend/vitest.config.ts /app/tests/unit/frontend/vitest.config.ts
+# Tests are bind-mounted at runtime by run.test.sh (not copied into image)
 
 # Restore original WORKDIR for CMD to work
 WORKDIR /app/backend
