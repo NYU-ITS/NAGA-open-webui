@@ -13,8 +13,8 @@ export default defineConfig({
 		}
 	},
 	define: {
-		APP_VERSION: JSON.stringify('0.5.18'),
-		APP_BUILD_HASH: JSON.stringify('test-build')
+		APP_VERSION: JSON.stringify(process.env.npm_package_version),
+		APP_BUILD_HASH: JSON.stringify(process.env.APP_BUILD_HASH || 'test-build')
 	},
 	test: {
 		include: [
