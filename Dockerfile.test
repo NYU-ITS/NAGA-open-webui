@@ -1,6 +1,5 @@
 # syntax=docker/dockerfile:1
 # Dockerfile.test — extends open-webui:latest with test tooling
-# Not tracked by git (see .git/info/exclude)
 
 FROM open-webui:latest
 

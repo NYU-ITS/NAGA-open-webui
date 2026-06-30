@@ -1,6 +1,5 @@
 #!/bin/bash
 # run.test.sh — Build and run test image based on open-webui:latest
-# Not tracked by git (see .git/info/exclude)
 #
 # Usage:
 #   ./run.test.sh                         # Build test image and start container
