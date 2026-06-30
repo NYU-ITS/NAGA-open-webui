@@ -387,4 +387,6 @@ scratchpad/
 tests/e2e/.auth/*.json
 tests/e2e/test-results/
 tests/e2e/playwright-report/
+tests/e2e/tests/
+tests/integration/frontend/
 *.timestamp-*.mjs
