@@ -41,7 +41,7 @@ def _seed_pipe_function(func_id, created_by_email, user_id, active=True):
 
 
 class TestSuperAdminAssign:
-    """1I — Super admin auto-assign tests."""
+    """Super admin auto-assign tests."""
 
     async def test_super_admin_assigns_function_creator(
         self, async_client, mock_admin_user, seed_admin, seed_user_a

@@ -25,7 +25,7 @@ def _model_payload(id, name, access_control=None, base_model_id="some-base"):
 
 
 class TestAccessControl:
-    """1H — Access control cross-table integration tests."""
+    """Access control cross-table integration tests."""
 
     async def test_private_model_only_creator_can_read(
         self, async_client, mock_admin_user, mock_user_a, seed_admin, seed_user_a

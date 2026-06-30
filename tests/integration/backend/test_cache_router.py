@@ -25,7 +25,7 @@ def _model_payload(id="cache-model", name="Cache Model", base_model_id="some-bas
 
 
 class TestCacheRouterIntegration:
-    """1G — Cache + Router integration tests."""
+    """Cache + Router integration tests."""
 
     async def test_create_then_list(self, async_client, mock_admin_user):
         with mock_admin_user():
