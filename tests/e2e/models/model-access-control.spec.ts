@@ -14,7 +14,7 @@ async function ensureTestUser(request: import('@playwright/test').APIRequestCont
 
   const res = await request.post('/api/v1/auths/add', {
     headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
-    data: { name: 'E2E User', email: USER_EMAIL, password: USER_PASSWORD, role: 'admin' }
+    data: { name: 'E2E User', email: USER_EMAIL, password: USER_PASSWORD, role: 'user' }
   });
   if (res.ok()) return (await res.json()).token;
 
