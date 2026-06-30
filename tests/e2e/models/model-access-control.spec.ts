@@ -1,7 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { bootstrapAdmin, dismissModals, getAuthToken, loginAsAdmin, loginAsUser } from '../fixtures/auth';
-import { authHeaders, createModelViaAPI, deleteModelViaAPI, uniqueId } from '../fixtures/models';
-import { createGroupViaAPI, deleteGroupViaAPI, getCurrentUser } from '../fixtures/users';
+import { createModelViaAPI, deleteModelViaAPI, uniqueId } from '../fixtures/models';
 
 const USER_EMAIL = process.env.E2E_USER_EMAIL || 'e2e-user@example.test';
 const USER_PASSWORD = process.env.E2E_USER_PASSWORD || 'changeme-e2e-user';
