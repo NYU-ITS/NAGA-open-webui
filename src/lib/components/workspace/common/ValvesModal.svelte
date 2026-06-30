@@ -99,16 +99,19 @@
 				}
 			}
 
-			// On the system default function only, PORTKEY_API_KEY is managed
-			// exclusively by the Workspace Settings cascade and must never be
-			// editable here - remove from spec so it is not rendered. Custom,
-			// admin-created functions may deliberately set their own key, so
-			// the field stays editable for them.
-			if (isSystemDefault && 'PORTKEY_API_KEY' in (valvesSpec.properties ?? {})) {
-				delete valvesSpec.properties['PORTKEY_API_KEY'];
-				valvesSpec.required = (valvesSpec.required ?? []).filter(
-					(f) => f !== 'PORTKEY_API_KEY'
-				);
+			// On the system default function only, PORTKEY_API_KEY and
+			// PORTKEY_API_BASE_URL are managed exclusively by the Workspace
+			// Settings cascade and must never be editable here - remove from
+			// spec so they are not rendered. Custom, admin-created functions
+			// may deliberately set their own key/URL, so the fields stay
+			// editable for them.
+			if (isSystemDefault) {
+				for (const field of ['PORTKEY_API_KEY', 'PORTKEY_API_BASE_URL']) {
+					if (field in (valvesSpec.properties ?? {})) {
+						delete valvesSpec.properties[field];
+						valvesSpec.required = (valvesSpec.required ?? []).filter((f) => f !== field);
+					}
+				}
 			}
 		}
 

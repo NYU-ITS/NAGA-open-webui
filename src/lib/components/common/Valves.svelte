@@ -4,6 +4,8 @@
 	const i18n = getContext('i18n');
 
 	import Switch from './Switch.svelte';
+	import SensitiveInput from './SensitiveInput.svelte';
+	import { WORKSPACE_SETTINGS_PATH } from '$lib/constants';
 
 	export let valvesSpec = null;
 	export let valves = {};
@@ -46,16 +48,21 @@
 				</div>
 
 				{#if PORTKEY_FIELDS.includes(property)}
-					<Switch
-						bind:state={customToggles[property]}
-						on:change={() => {
-							valves[property] = customToggles[property]
-								? (valvesSpec.properties[property]?.default ?? '')
-								: null;
+					<div class="flex items-center gap-2">
+						<span class="text-xs text-gray-600 dark:text-gray-500">
+							{customToggles[property] ? $i18n.t('Custom') : $i18n.t('Reset')}
+						</span>
+						<Switch
+							bind:state={customToggles[property]}
+							on:change={() => {
+								valves[property] = customToggles[property]
+									? (valvesSpec.properties[property]?.default ?? '')
+									: null;
 
-							dispatch('change');
-						}}
-					/>
+								dispatch('change');
+							}}
+						/>
+					</div>
 				{:else}
 					<button
 						class="p-1 px-3 text-xs flex rounded-sm transition"
@@ -135,12 +142,10 @@
 			{:else if PORTKEY_FIELDS.includes(property)}
 				<div class="flex mt-0.5 mb-1.5 space-x-2">
 					<div class=" flex-1">
-						<input
-							class="w-full rounded-lg py-2 px-4 text-sm text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-900 outline-hidden border border-gray-100 dark:border-gray-850 cursor-not-allowed"
-							type="text"
+						<SensitiveInput
 							value={workspaceValues[property] ?? ''}
-							disabled
-							readonly
+							readOnly={true}
+							editHref={WORKSPACE_SETTINGS_PATH}
 						/>
 					</div>
 				</div>

@@ -138,9 +138,10 @@
 				}
 			});
 
-			// 3. Functions — cascade key + URL only to functions whose PORTKEY_API_KEY valve
-			// was tracking the previous workspace key (old key -> new key match). Functions
-			// with an independently-set key are left untouched.
+			// 3. Functions — cascade key + URL to functions whose PORTKEY_API_KEY valve
+			// was tracking the previous workspace key (old key -> new key match), or
+			// whose key was never set (empty - nothing yet to protect). Functions with
+			// a genuinely different, deliberately-set key are left untouched.
 			const functions = await getFunctions(localStorage.token);
 			const cascadedFunctionIds: string[] = [];
 			const failedFunctionNames: string[] = [];
@@ -149,7 +150,8 @@
 					try {
 						const currentValves = await getFunctionValvesById(localStorage.token, fn.id);
 						if (!currentValves || !('PORTKEY_API_KEY' in currentValves)) return;
-						if (currentValves['PORTKEY_API_KEY'] !== originalApiKey) return;
+						const currentKey = currentValves['PORTKEY_API_KEY'];
+						if (currentKey !== originalApiKey && currentKey !== '') return;
 
 						const updatedValves: Record<string, any> = { ...currentValves };
 						updatedValves['PORTKEY_API_KEY'] = apiKey;
@@ -240,13 +242,13 @@
 				</svg>
 			</div>
 			<div>
-				<p class="text-sm font-semibold dark:text-white">{$i18n.t('Are you sure you want to update the model engine?')}</p>
+				<p class="text-sm font-semibold dark:text-white">{$i18n.t('Are you sure you want to update the Portkey URL?')}</p>
 				<p class="text-xs text-gray-500 dark:text-gray-400 mt-1">{$i18n.t('This URL is used for embeddings, audio (STT/TTS), and the default LLM function. Changing it updates all three on Save.')}</p>
 			</div>
 		</div>
 
 		<div>
-			<div class="text-xs font-medium mb-1 dark:text-gray-300">{$i18n.t('Model Engine')}</div>
+			<div class="text-xs font-medium mb-1 dark:text-gray-300">{$i18n.t('Portkey URL')}</div>
 			<input
 				class="w-full rounded-lg py-1.5 px-3 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden border border-gray-200 dark:border-gray-700"
 				bind:value={pendingModelEngineUrl}
@@ -272,11 +274,8 @@
 </Modal>
 
 <!-- Main form -->
-<form
-	class="flex flex-col h-full justify-between space-y-3 text-sm"
-	on:submit|preventDefault={saveHandler}
->
-	<div class="space-y-4 overflow-y-scroll scrollbar-hidden h-full pr-1.5">
+<form class="flex flex-col space-y-3 text-sm" on:submit|preventDefault={saveHandler}>
+	<div class="space-y-4 pr-1.5">
 
 		<div class="mb-1">
 			<div class="text-xl font-semibold dark:text-white">{$i18n.t('Workspace settings')}</div>
@@ -286,7 +285,7 @@
 
 		<!-- Model engine -->
 		<div class="space-y-1.5">
-			<div class="text-xs font-medium dark:text-gray-300">{$i18n.t('Model engine')}</div>
+			<div class="text-xs font-medium dark:text-gray-300">{$i18n.t('Portkey URL')}</div>
 			<div class="flex items-center gap-2">
 				<input
 					class="flex-1 rounded-lg py-1.5 px-3 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
@@ -342,7 +341,7 @@
 					/>
 					<div class="flex justify-end">
 						<a
-							href="/admin/settings"
+							href="/admin/settings?tab=documents"
 							class="text-xs text-[#57068c] dark:text-purple-400 hover:underline"
 						>
 							{$i18n.t('Advanced settings')}
@@ -402,7 +401,7 @@
 
 					<div class="flex justify-end">
 						<a
-							href="/admin/settings"
+							href="/admin/settings?tab=audio"
 							class="text-xs text-[#57068c] dark:text-purple-400 hover:underline"
 						>
 							{$i18n.t('Advanced settings')}

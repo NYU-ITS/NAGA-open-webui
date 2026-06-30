@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { getContext, tick, onMount } from 'svelte';
 	import { toast } from 'svelte-sonner';
+	import { page } from '$app/stores';
 
 	import { config } from '$lib/stores';
 	import { getBackendConfig } from '$lib/apis';
@@ -36,7 +37,29 @@
 
 	const i18n = getContext('i18n');
 
+	const VALID_TABS = [
+		'general',
+		'connections',
+		'models',
+		'evaluations',
+		'documents',
+		'web',
+		'code-execution',
+		'interface',
+		'audio',
+		'images',
+		'pipelines',
+		'db'
+	];
+
 	let selectedTab = 'models';
+
+	// Allow deep-linking to a specific tab, e.g. /admin/settings?tab=audio
+	// (used by Workspace Settings' "Advanced settings" links).
+	const tabParam = $page.url.searchParams.get('tab');
+	if (tabParam && VALID_TABS.includes(tabParam)) {
+		selectedTab = tabParam;
+	}
 
 	onMount(async () => {
 		const containerElement = document.getElementById('admin-settings-tabs-container');
