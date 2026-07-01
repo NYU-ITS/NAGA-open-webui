@@ -1,7 +1,10 @@
 import { expect } from '@playwright/test';
 import type { APIRequestContext } from '@playwright/test';
 
-export const BASE_URL = process.env.BASE_URL ?? 'http://localhost:8080';
+export const BASE_URL =
+	process.env.PLAYWRIGHT_GROUPS_BASE_URL?.trim() ||
+	process.env.PLAYWRIGHT_BASE_URL?.trim() ||
+	'http://localhost:8080';
 
 export interface Credentials {
 	email: string;
@@ -16,17 +19,19 @@ export interface Session {
 }
 
 export function adminCredentials(): Credentials {
-	const email = process.env.ADMIN_EMAIL;
-	const password = process.env.ADMIN_PASSWORD;
+	const email = process.env.PLAYWRIGHT_ADMIN_EMAIL;
+	const password = process.env.PLAYWRIGHT_ADMIN_PASSWORD;
 	if (!email || !password) {
-		throw new Error('ADMIN_EMAIL and ADMIN_PASSWORD must be set. See tests/e2e/README.md.');
+		throw new Error(
+			'PLAYWRIGHT_ADMIN_EMAIL and PLAYWRIGHT_ADMIN_PASSWORD must be set. See README.md.'
+		);
 	}
 	return { email, password };
 }
 
-export function userCredentials(): Credentials | null {
-	const email = process.env.USER_EMAIL;
-	const password = process.env.USER_PASSWORD;
+export function studentCredentials(): Credentials | null {
+	const email = process.env.PLAYWRIGHT_STUDENT_EMAIL;
+	const password = process.env.PLAYWRIGHT_STUDENT_PASSWORD;
 	if (!email || !password) {
 		return null;
 	}

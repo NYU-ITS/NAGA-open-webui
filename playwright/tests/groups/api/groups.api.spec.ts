@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import type { APIRequestContext } from '@playwright/test';
-import { adminCredentials, userCredentials, signIn, authHeaders } from '../helpers/auth';
+import { adminCredentials, studentCredentials, signIn, authHeaders } from '../helpers/auth';
 import type { Session } from '../helpers/auth';
 
 const GROUPS = '/api/v1/groups';
@@ -223,8 +223,11 @@ test.describe('groups router - admin CRUD lifecycle', () => {
 });
 
 test.describe('groups router - role enforcement (non-admin)', () => {
-	const creds = userCredentials();
-	test.skip(!creds, 'Set USER_EMAIL and USER_PASSWORD to run non-admin role tests.');
+	const creds = studentCredentials();
+	test.skip(
+		!creds,
+		'Set PLAYWRIGHT_STUDENT_EMAIL and PLAYWRIGHT_STUDENT_PASSWORD to run non-admin role tests.'
+	);
 
 	let userToken: string;
 	let adminGroupId: string;

@@ -1,5 +1,26 @@
 # Open WebUI 👋
 
+## AI Tutor Testing and Observability
+
+This branch includes AI Tutor frontend testing and observability support for local runs, GitHub Actions, Grafana Cloud, and OpenShift dev build-triggered quality checks.
+
+Start here for the current state:
+
+- [AI_TUTOR_FRONTEND_TEST_REPORT.md](AI_TUTOR_FRONTEND_TEST_REPORT.md)
+- [k8s/quality-checks/README.md](k8s/quality-checks/README.md)
+- [playwright/README.md](playwright/README.md)
+
+Current setup:
+
+- Local: Vitest checks and mocked Playwright checks can be run from this repo.
+- GitHub Actions: `.github/workflows/ai-tutor-playwright-tests.yml` runs AI Tutor Vitest checks, mocked Playwright checks, uploads reports/videos, and can forward metrics to Grafana Cloud.
+- OpenShift dev: `ai-tutor-frontend-quality-checks` runs live Playwright after the tracked `open-webui:latest` ImageStream imports a new external frontend image digest.
+- OpenShift dev does not run Vitest or mocked Playwright because those already run in GitHub Actions.
+- The frontend app's external registry flow is preserved: the existing app build can still push `registry.cloud.rt.nyu.edu/rit-genai-poc/naga-open-webui:latest`, and the Helm-managed `StatefulSet/open-webui` can still pull it.
+- Grafana: `observability/grafana/dashboards/ai-tutor-frontend-github-quality.json` can be imported into Grafana Cloud.
+
+OpenShift Playwright is enabled for deployed-environment validation with one Chromium worker, video disabled, live credentials from `ai-tutor-playwright-live-secret`, and the tracked fixture at `playwright/fixtures/Math_HW.pdf`.
+
 ![GitHub stars](https://img.shields.io/github/stars/open-webui/open-webui?style=social)
 ![GitHub forks](https://img.shields.io/github/forks/open-webui/open-webui?style=social)
 ![GitHub watchers](https://img.shields.io/github/watchers/open-webui/open-webui?style=social)
