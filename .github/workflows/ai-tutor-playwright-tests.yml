@@ -2,7 +2,7 @@ name: AI Tutor Frontend Quality Checks
 
 on:
   push:
-    branches: [rs/ai-tutor-tests]
+    branches: [rs/ai-tutor-tests, users/arjunbajpai]
     paths:
       - "playwright/**"
       - "src/**"
