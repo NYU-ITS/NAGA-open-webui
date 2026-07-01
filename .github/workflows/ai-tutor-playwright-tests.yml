@@ -71,6 +71,7 @@ jobs:
           PLAYWRIGHT_STUDENT_EMAIL: ${{ secrets.PLAYWRIGHT_STUDENT_EMAIL }}
           PLAYWRIGHT_STUDENT_PASSWORD: ${{ secrets.PLAYWRIGHT_STUDENT_PASSWORD }}
           PLAYWRIGHT_HOMEWORK_PDF_PATH: ${{ secrets.PLAYWRIGHT_HOMEWORK_PDF_PATH }}
+          PLAYWRIGHT_GROUPS_BASE_URL: ${{ secrets.PLAYWRIGHT_BASE_URL }}
         run: |
           if [[ "${RUN_LIVE}" == "true" ]]; then
             if [[ -z "${PLAYWRIGHT_BASE_URL_SECRET}" ]]; then
@@ -79,7 +80,8 @@ jobs:
             fi
             export PLAYWRIGHT_RUN_LIVE=1
             export PLAYWRIGHT_BASE_URL="${PLAYWRIGHT_BASE_URL_SECRET}"
-            npx playwright test playwright/tests/ai-tutor-dashboard.mocked.spec.ts playwright/tests/ai-tutor-dashboard.live.spec.ts
+            npx playwright test playwright/tests/ai-tutor-dashboard.mocked.spec.ts playwright/tests/ai-tutor-dashboard.live.spec.ts playwright/tests/groups/api/groups.api.spec.ts playwright/tests/groups/ui/groups.ui.spec.ts
+
           else
             npx playwright test playwright/tests/ai-tutor-dashboard.mocked.spec.ts
           fi
