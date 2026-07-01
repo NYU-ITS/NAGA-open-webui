@@ -83,7 +83,7 @@ jobs:
             npx playwright test playwright/tests/ai-tutor-dashboard.mocked.spec.ts playwright/tests/ai-tutor-dashboard.live.spec.ts playwright/tests/groups/api/groups.api.spec.ts playwright/tests/groups/ui/groups.ui.spec.ts
 
           else
-            npx playwright test playwright/tests/ai-tutor-dashboard.mocked.spec.ts
+            npx playwright test playwright/tests/ai-tutor-dashboard.mocked.spec.ts playwright/tests/groups/api/groups.api.spec.ts playwright/tests/groups/ui/groups.ui.spec.ts
           fi
 
       - name: Upload Playwright report
