@@ -270,6 +270,7 @@ openshift/frontend/dev/index.json
 ```
 
 Artifact upload is best-effort. If the bucket secret/config is missing, the runner logs a clear skip and the quality result still comes from Playwright plus the pushed metrics.
+S3 requests use `S3_REQUEST_TIMEOUT_SECONDS=10` by default to fail fast when the OpenShift ObjectBucket service is unhealthy.
 
 The BuildConfig mounts only the ObjectBucket secret and sets the non-secret bucket host/name as build env. This avoids OpenShift build volume collisions while keeping access keys out of image layers and logs. `BUCKET_TLS_VERIFY=false` is used for the internal OpenShift S3 service because the in-cluster service presents a self-signed certificate chain.
 
@@ -324,6 +325,15 @@ Check quality pods:
 ```bash
 oc get pods -n rit-genai-naga-dev | grep quality
 ```
+
+Check ObjectBucket/S3 response from the namespace:
+
+```bash
+oc exec deploy/ai-tutor-quality-artifact-viewer -n rit-genai-naga-dev -- \
+  curl -vk --max-time 10 https://s3.openshift-storage.svc/
+```
+
+A healthy S3 endpoint should return an HTTP response, usually an S3 XML error for an unsigned request. If TCP/TLS succeeds but the request receives `0` bytes until timeout, the issue is in the OpenShift/NooBaa S3 serving layer rather than Playwright or the upload script.
 
 Common failures:
 

@@ -49,7 +49,16 @@ def s3_base_url() -> str:
     return f"{scheme}://{authority}/{required_env('BUCKET_NAME')}"
 
 
-def urlopen(request: urllib.request.Request, timeout: int = 60):
+def request_timeout_seconds() -> int:
+    raw = env("S3_REQUEST_TIMEOUT_SECONDS", "10")
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 10
+
+
+def urlopen(request: urllib.request.Request, timeout: int | None = None):
+    timeout = timeout or request_timeout_seconds()
     if urllib.parse.urlparse(request.full_url).scheme == "https" and env("BUCKET_TLS_VERIFY", "true").lower() in {"0", "false", "no"}:
         return urllib.request.urlopen(request, timeout=timeout, context=ssl._create_unverified_context())
     return urllib.request.urlopen(request, timeout=timeout)
@@ -102,7 +111,7 @@ def s3_request(method: str, key: str, body: bytes = b"", query: str = "", conten
             "Content-Type": content_type,
         },
     )
-    with urlopen(request, timeout=60) as response:
+    with urlopen(request) as response:
         return response.read()
 
 
