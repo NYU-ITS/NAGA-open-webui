@@ -5,6 +5,7 @@ on:
     branches: [rs/ai-tutor-tests]
     paths:
       - "playwright/**"
+      - "tests/e2e/**"
       - "src/**"
       - "package.json"
       - "package-lock.json"
@@ -84,6 +85,18 @@ jobs:
             npx playwright test playwright/tests/ai-tutor-dashboard.mocked.spec.ts
           fi
 
+      - name: Run custom model logic E2E tests
+        id: model_e2e
+        if: ${{ github.event.inputs.run_live == 'true' }}
+        continue-on-error: true
+        env:
+          E2E_BASE_URL: ${{ secrets.PLAYWRIGHT_BASE_URL }}
+          E2E_ADMIN_EMAIL: ${{ secrets.PLAYWRIGHT_ADMIN_EMAIL }}
+          E2E_ADMIN_PASSWORD: ${{ secrets.PLAYWRIGHT_ADMIN_PASSWORD }}
+          E2E_USER_EMAIL: ${{ secrets.PLAYWRIGHT_STUDENT_EMAIL }}
+          E2E_USER_PASSWORD: ${{ secrets.PLAYWRIGHT_STUDENT_PASSWORD }}
+        run: npx playwright test --config=tests/e2e/playwright.config.ts
+
       - name: Upload Playwright report
         if: always()
         uses: actions/upload-artifact@v4
@@ -158,5 +171,9 @@ jobs:
         run: |
           if [[ "${{ steps.frontend_unit.outcome }}" != "success" || "${{ steps.playwright_checks.outcome }}" != "success" ]]; then
             echo "One or more frontend quality checks failed. Metrics and artifacts were still published."
+            exit 1
+          fi
+          if [[ "${{ steps.model_e2e.outcome }}" == "failure" ]]; then
+            echo "Custom model logic E2E tests failed. Metrics and artifacts were still published."
             exit 1
           fi
