@@ -43,7 +43,6 @@ test.describe('custom model import and export', () => {
 
     await page.goto('/workspace/models');
     await dismissModals(page);
-    await page.getByRole('button', { name: 'Import Models' }).click({ force: true });
     await page.locator('#models-import-input').setInputFiles({
       name: 'models-import-new.json',
       mimeType: 'application/json',
@@ -74,7 +73,6 @@ test.describe('custom model import and export', () => {
 
     await page.goto('/workspace/models');
     await dismissModals(page);
-    await page.getByRole('button', { name: 'Import Models' }).click({ force: true });
     await page.locator('#models-import-input').setInputFiles({
       name: 'models-import-update.json',
       mimeType: 'application/json',
@@ -91,7 +89,6 @@ test.describe('custom model import and export', () => {
     await loginAsAdmin(page);
     await page.goto('/workspace/models');
     await dismissModals(page);
-    await page.getByRole('button', { name: 'Import Models' }).click({ force: true });
     await page.locator('#models-import-input').setInputFiles({
       name: 'models-import-skip.json',
       mimeType: 'application/json',
