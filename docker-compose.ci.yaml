@@ -17,3 +17,6 @@ services:
       - 'ENABLE_JOB_QUEUE=false'
       - 'ENABLE_OLLAMA_API=false'
       - 'GLOBAL_LOG_LEVEL=WARNING'
+
+volumes:
+  open-webui: {}
