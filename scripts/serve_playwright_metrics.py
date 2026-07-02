@@ -15,6 +15,7 @@ from xml.etree import ElementTree as ET
 
 
 PLAYWRIGHT_GROUP_LABELS = {
+    "custom_model_live": "Custom model E2E",
     "ui_live": "Live user workflows",
     "ui_mocked": "Controlled UI workflows",
 }
@@ -202,7 +203,12 @@ def parse_playwright_report(report_path: Path) -> list[str]:
                 status = "failed"
                 failed += 1
 
-            workflow_group = "ui_live" if "live.spec" in file_name else "ui_mocked"
+            if "tests/e2e/models/" in file_name or "model-" in file_name:
+                workflow_group = "custom_model_live"
+            elif "live.spec" in file_name:
+                workflow_group = "ui_live"
+            else:
+                workflow_group = "ui_mocked"
             display_group = PLAYWRIGHT_GROUP_LABELS[workflow_group]
             project = test.get("projectName", "unknown")
             workflow = test.get("title", "")

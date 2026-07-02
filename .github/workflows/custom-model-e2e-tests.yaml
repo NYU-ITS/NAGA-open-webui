@@ -10,7 +10,6 @@ on:
       - "tests/e2e/**"
       - "package.json"
       - "package-lock.json"
-      - "docker-compose.local.yaml"
       - "docker-compose.ci.yaml"
       - "Dockerfile"
       - ".github/workflows/custom-model-e2e-tests.yaml"
@@ -49,7 +48,7 @@ jobs:
       - name: Build and start app
         env:
           OPEN_WEBUI_PORT: "8080"
-        run: docker compose -f docker-compose.local.yaml -f docker-compose.ci.yaml up -d --build --wait
+        run: docker compose -f docker-compose.ci.yaml up -d --build --wait
 
       - name: Wait for app health
         run: |
@@ -62,7 +61,7 @@ jobs:
             sleep 2
           done
           echo "App failed to become healthy within 120s"
-          docker compose -f docker-compose.local.yaml -f docker-compose.ci.yaml logs
+          docker compose -f docker-compose.ci.yaml logs
           exit 1
 
       - name: Run Playwright tests against localhost
@@ -88,9 +87,57 @@ jobs:
           name: e2e-ci-app-test-results
           path: test-results/
 
+      - name: Generate quality metrics
+        if: always()
+        run: |
+          mkdir -p quality-metrics
+          python scripts/serve_playwright_metrics.py \
+            --report tests/e2e/playwright-report/index.html \
+            --host 127.0.0.1 &
+          exporter_pid=$!
+          trap 'kill ${exporter_pid} >/dev/null 2>&1 || true' EXIT
+          sleep 3
+          curl -fsS http://127.0.0.1:9109/metrics -o quality-metrics/custom-model-e2e-ci.prom
+
+      - name: Upload quality metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-ci-app-quality-metrics
+          path: quality-metrics/
+          retention-days: 14
+
+      - name: Forward quality metrics to Grafana Cloud
+        if: always()
+        env:
+          GRAFANA_CLOUD_PROMETHEUS_URL: ${{ secrets.GRAFANA_CLOUD_PROMETHEUS_URL }}
+          GRAFANA_CLOUD_PROMETHEUS_USER: ${{ secrets.GRAFANA_CLOUD_PROMETHEUS_USER }}
+          GRAFANA_CLOUD_PROMETHEUS_PASSWORD: ${{ secrets.GRAFANA_CLOUD_PROMETHEUS_PASSWORD }}
+          QUALITY_ENVIRONMENT: github-actions
+          QUALITY_REPOSITORY: NAGA-open-webui
+          QUALITY_BRANCH: ${{ github.ref_name }}
+          QUALITY_SOURCE: custom-model-e2e-ci
+          QUALITY_RUN_ID: ${{ github.run_id }}
+          QUALITY_COMMIT_SHA: ${{ github.sha }}
+          QUALITY_METRICS_TARGET: host.docker.internal:9109
+          QUALITY_FORWARD_SECONDS: "45"
+        run: |
+          if [[ -z "${GRAFANA_CLOUD_PROMETHEUS_URL}" || -z "${GRAFANA_CLOUD_PROMETHEUS_USER}" || -z "${GRAFANA_CLOUD_PROMETHEUS_PASSWORD}" ]]; then
+            echo "Grafana Cloud secrets are not configured; skipping metrics forwarding."
+            exit 0
+          fi
+          python scripts/serve_playwright_metrics.py \
+            --report tests/e2e/playwright-report/index.html \
+            --host 0.0.0.0 &
+          exporter_pid=$!
+          trap 'kill ${exporter_pid} >/dev/null 2>&1 || true' EXIT
+          sleep 3
+          curl -fsS http://127.0.0.1:9109/metrics >/dev/null
+          bash scripts/forward_metrics_to_grafana_cloud.sh
+
       - name: Collect container logs on failure
         if: failure()
-        run: docker compose -f docker-compose.local.yaml -f docker-compose.ci.yaml logs > container-logs.txt 2>&1
+        run: docker compose -f docker-compose.ci.yaml logs > container-logs.txt 2>&1
 
       - name: Upload container logs
         if: failure()
@@ -101,7 +148,7 @@ jobs:
 
       - name: Tear down
         if: always()
-        run: docker compose -f docker-compose.local.yaml -f docker-compose.ci.yaml down -v
+        run: docker compose -f docker-compose.ci.yaml down -v
 
   # Manual GitHub Actions smoke against deployed app.
   e2e-live:

@@ -1,5 +1,19 @@
 services:
   open-webui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/open-webui/open-webui:${WEBUI_DOCKER_TAG-main}
+    container_name: open-webui
+    volumes:
+      - open-webui:/app/backend/data
+    ports:
+      - ${OPEN_WEBUI_PORT-3000}:8080
     environment:
+      - 'WEBUI_SECRET_KEY=cdc5fcebf6b7ca3a5f89f23c0d6c98b5003dd932de3b92f30f9d4adac8bc7870'
+      - 'SUPER_ADMIN_EMAILS=admin@test.com'
       - 'DATABASE_URL=sqlite:////app/backend/data/webui.db'
       - 'VECTOR_DB=chroma'
+      - 'ENABLE_JOB_QUEUE=false'
+      - 'ENABLE_OLLAMA_API=false'
+      - 'GLOBAL_LOG_LEVEL=WARNING'
