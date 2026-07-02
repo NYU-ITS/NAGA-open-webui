@@ -1,0 +1,160 @@
+name: Custom Model E2E Tests
+
+on:
+  pull_request:
+    branches:
+      - rs/ai-tutor-tests
+    paths:
+      - "src/**"
+      - "tests/e2e/**"
+      - "package.json"
+      - "package-lock.json"
+      - "docker-compose.local.yaml"
+      - "Dockerfile"
+      - ".github/workflows/custom-model-e2e-tests.yaml"
+  push:
+    branches:
+      - rs/ai-tutor-tests
+      - tests/custom-models
+    paths:
+      - "src/**"
+      - "tests/e2e/**"
+      - "package.json"
+      - "package-lock.json"
+      - "docker-compose.local.yaml"
+      - "Dockerfile"
+      - ".github/workflows/custom-model-e2e-tests.yaml"
+  workflow_dispatch:
+    inputs:
+      run_live:
+        description: "Run live E2E tests against deployed OpenShift app"
+        required: false
+        default: "false"
+
+permissions:
+  contents: read
+  checks: write
+
+jobs:
+  e2e-ci-app:
+    name: "E2E – CI App"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps
+
+      - name: Build and start app
+        env:
+          OPEN_WEBUI_PORT: "8080"
+          DATABASE_URL: "sqlite:////app/backend/data/webui.db"
+        run: docker compose -f docker-compose.local.yaml up -d --build --wait
+
+      - name: Wait for app health
+        run: |
+          echo "Waiting for app to be healthy..."
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8080/health > /dev/null 2>&1; then
+              echo "App is healthy after ${i}s"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "App failed to become healthy within 120s"
+          docker compose -f docker-compose.local.yaml logs
+          exit 1
+
+      - name: Run Playwright tests against localhost
+        env:
+          E2E_BASE_URL: "http://localhost:8080"
+          E2E_ADMIN_EMAIL: "admin@test.com"
+          E2E_ADMIN_PASSWORD: "changeme-e2e-admin"
+          E2E_USER_EMAIL: "e2e-user@example.test"
+          E2E_USER_PASSWORD: "changeme-e2e-user"
+        run: npx playwright test --config=tests/e2e/playwright.config.ts
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-ci-app-playwright-report
+          path: tests/e2e/playwright-report/
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-ci-app-test-results
+          path: test-results/
+
+      - name: Collect container logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.local.yaml logs > container-logs.txt 2>&1
+
+      - name: Upload container logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-ci-app-container-logs
+          path: container-logs.txt
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.local.yaml down -v
+
+  # Manual GitHub Actions smoke against deployed app.
+  e2e-live:
+    name: "E2E – Live (OpenShift)"
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.run_live == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps
+
+      - name: Run Playwright tests against live app
+        env:
+          E2E_BASE_URL: ${{ secrets.PLAYWRIGHT_BASE_URL }}
+          E2E_ADMIN_EMAIL: ${{ secrets.PLAYWRIGHT_ADMIN_EMAIL }}
+          E2E_ADMIN_PASSWORD: ${{ secrets.PLAYWRIGHT_ADMIN_PASSWORD }}
+          E2E_USER_EMAIL: ${{ secrets.PLAYWRIGHT_STUDENT_EMAIL }}
+          E2E_USER_PASSWORD: ${{ secrets.PLAYWRIGHT_STUDENT_PASSWORD }}
+        run: npx playwright test --config=tests/e2e/playwright.config.ts
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-live-playwright-report
+          path: tests/e2e/playwright-report/
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-live-test-results
+          path: test-results/

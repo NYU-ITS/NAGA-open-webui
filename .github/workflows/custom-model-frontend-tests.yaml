@@ -1,0 +1,62 @@
+name: Custom Model Frontend Tests
+
+on:
+  pull_request:
+    branches:
+      - rs/ai-tutor-tests
+    paths:
+      - "src/**"
+      - "tests/unit/frontend/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/custom-model-frontend-tests.yaml"
+  push:
+    branches:
+      - rs/ai-tutor-tests
+      - tests/custom-models
+    paths:
+      - "src/**"
+      - "tests/unit/frontend/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/custom-model-frontend-tests.yaml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  checks: write
+
+jobs:
+  test-frontend:
+    name: 'Frontend Unit Tests'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run custom model frontend tests
+        run: npx vitest run --config=tests/unit/frontend/vitest.config.ts --reporter=default --reporter=junit --outputFile=test-results/results.xml
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results/
+
+      - name: Publish test results
+        if: always()
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        with:
+          files: test-results/results.xml
+          check_name: "Frontend Test Results"
+          comment_mode: "off"

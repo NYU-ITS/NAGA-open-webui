@@ -1,23 +1,36 @@
 name: Custom Model Backend Tests
 
 on:
+  pull_request:
+    branches:
+      - rs/ai-tutor-tests
+    paths:
+      - "backend/**"
+      - "tests/unit/backend/**"
+      - "tests/integration/backend/**"
+      - "tests/requirements-testing.txt"
+      - ".github/workflows/custom-model-backend-tests.yaml"
   push:
     branches:
+      - rs/ai-tutor-tests
       - tests/custom-models
     paths:
       - "backend/**"
       - "tests/unit/backend/**"
       - "tests/integration/backend/**"
+      - "tests/requirements-testing.txt"
+      - ".github/workflows/custom-model-backend-tests.yaml"
   workflow_dispatch:
+
+permissions:
+  contents: read
+  checks: write
 
 jobs:
   test-backend:
     name: 'Backend Unit & Integration Tests'
     runs-on: ubuntu-latest
-
-    strategy:
-      matrix:
-        python-version: [3.11]
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v4
@@ -25,15 +38,30 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt
-          pip install httpx pytest-asyncio
+          pip install -r tests/requirements-testing.txt
 
       - name: Run backend tests
         env:
           WEBUI_SECRET_KEY: test-secret-key
-        run: pytest tests/unit/backend/ tests/integration/backend/ -v
+        run: pytest tests/unit/backend/ tests/integration/backend/ -v --junitxml=test-results/results.xml --tb=short
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results/
+
+      - name: Publish test results
+        if: always()
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        with:
+          files: test-results/results.xml
+          check_name: "Backend Test Results"
+          comment_mode: "off"

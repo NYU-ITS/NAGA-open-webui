@@ -6,10 +6,10 @@ const authDir = path.resolve('tests/e2e/.auth');
 const userStatePath = path.join(authDir, 'user.json');
 const adminStatePath = path.join(authDir, 'admin.json');
 
-const ADMIN_EMAIL = process.env.E2E_ADMIN_EMAIL || 'admin@test.com';
-const ADMIN_PASSWORD = process.env.E2E_ADMIN_PASSWORD || 'changeme-e2e-admin';
-const USER_EMAIL = process.env.E2E_USER_EMAIL || 'e2e-user@example.test';
-const USER_PASSWORD = process.env.E2E_USER_PASSWORD || 'changeme-e2e-user';
+const ADMIN_EMAIL = process.env.E2E_ADMIN_EMAIL || process.env.PLAYWRIGHT_ADMIN_EMAIL || 'admin@test.com';
+const ADMIN_PASSWORD = process.env.E2E_ADMIN_PASSWORD || process.env.PLAYWRIGHT_ADMIN_PASSWORD || 'changeme-e2e-admin';
+const USER_EMAIL = process.env.E2E_USER_EMAIL || process.env.PLAYWRIGHT_STUDENT_EMAIL || 'e2e-user@example.test';
+const USER_PASSWORD = process.env.E2E_USER_PASSWORD || process.env.PLAYWRIGHT_STUDENT_PASSWORD || 'changeme-e2e-user';
 
 export async function bootstrapAdmin(request: APIRequestContext) {
   const res = await request.post('/api/v1/auths/signup', {

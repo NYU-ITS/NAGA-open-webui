@@ -6,7 +6,6 @@ on:
       - main
       - dev
       - GenAi-Dev
-      - tests/custom-models
   pull_request:
     branches:
       - main
@@ -61,6 +60,3 @@ jobs:
 
       - name: Run vitest
         run: npm run test:frontend
-
-      - name: Run custom model frontend tests
-        run: npx vitest run --config=tests/unit/frontend/vitest.config.ts

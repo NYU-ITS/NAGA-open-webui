@@ -72,6 +72,9 @@ jobs:
           PLAYWRIGHT_STUDENT_EMAIL: ${{ secrets.PLAYWRIGHT_STUDENT_EMAIL }}
           PLAYWRIGHT_STUDENT_PASSWORD: ${{ secrets.PLAYWRIGHT_STUDENT_PASSWORD }}
           PLAYWRIGHT_HOMEWORK_PDF_PATH: ${{ secrets.PLAYWRIGHT_HOMEWORK_PDF_PATH }}
+          PLAYWRIGHT_WORKERS: ${{ vars.PLAYWRIGHT_WORKERS || '2' }}
+          PLAYWRIGHT_RETRIES: ${{ vars.PLAYWRIGHT_RETRIES || '2' }}
+          PLAYWRIGHT_TIMEOUT: ${{ vars.PLAYWRIGHT_TIMEOUT || '30000' }}
         run: |
           if [[ "${RUN_LIVE}" == "true" ]]; then
             if [[ -z "${PLAYWRIGHT_BASE_URL_SECRET}" ]]; then
@@ -80,22 +83,15 @@ jobs:
             fi
             export PLAYWRIGHT_RUN_LIVE=1
             export PLAYWRIGHT_BASE_URL="${PLAYWRIGHT_BASE_URL_SECRET}"
-            npx playwright test playwright/tests/ai-tutor-dashboard.mocked.spec.ts playwright/tests/ai-tutor-dashboard.live.spec.ts
+            npx playwright test \
+              playwright/tests/ai-tutor-dashboard.mocked.spec.ts \
+              playwright/tests/ai-tutor-dashboard.live.spec.ts \
+              --workers="${PLAYWRIGHT_WORKERS}" \
+              --retries="${PLAYWRIGHT_RETRIES}" \
+              --timeout="${PLAYWRIGHT_TIMEOUT}"
           else
             npx playwright test playwright/tests/ai-tutor-dashboard.mocked.spec.ts
           fi
-
-      - name: Run custom model logic E2E tests
-        id: model_e2e
-        if: ${{ github.event.inputs.run_live == 'true' }}
-        continue-on-error: true
-        env:
-          E2E_BASE_URL: ${{ secrets.PLAYWRIGHT_BASE_URL }}
-          E2E_ADMIN_EMAIL: ${{ secrets.PLAYWRIGHT_ADMIN_EMAIL }}
-          E2E_ADMIN_PASSWORD: ${{ secrets.PLAYWRIGHT_ADMIN_PASSWORD }}
-          E2E_USER_EMAIL: ${{ secrets.PLAYWRIGHT_STUDENT_EMAIL }}
-          E2E_USER_PASSWORD: ${{ secrets.PLAYWRIGHT_STUDENT_PASSWORD }}
-        run: npx playwright test --config=tests/e2e/playwright.config.ts
 
       - name: Upload Playwright report
         if: always()
@@ -171,9 +167,5 @@ jobs:
         run: |
           if [[ "${{ steps.frontend_unit.outcome }}" != "success" || "${{ steps.playwright_checks.outcome }}" != "success" ]]; then
             echo "One or more frontend quality checks failed. Metrics and artifacts were still published."
-            exit 1
-          fi
-          if [[ "${{ steps.model_e2e.outcome }}" == "failure" ]]; then
-            echo "Custom model logic E2E tests failed. Metrics and artifacts were still published."
             exit 1
           fi
