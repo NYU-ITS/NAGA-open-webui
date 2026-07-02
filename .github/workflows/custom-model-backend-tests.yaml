@@ -43,7 +43,10 @@ jobs:
         env:
           WEBUI_SECRET_KEY: test-secret-key
           PYTHONPATH: backend
-        run: pytest tests/unit/backend/ tests/integration/backend/ -v --junitxml=test-results/results.xml --tb=short
+        run: |
+          mkdir -p test-results
+          pytest tests/unit/backend/ -v --junitxml=test-results/unit-results.xml --tb=short
+          pytest tests/integration/backend/ -v --junitxml=test-results/integration-results.xml --tb=short
 
       - name: Upload test results
         if: always()
@@ -56,6 +59,6 @@ jobs:
         if: always()
         uses: EnricoMi/publish-unit-test-result-action@v2
         with:
-          files: test-results/results.xml
+          files: test-results/*.xml
           check_name: "Backend Test Results"
           comment_mode: "off"
