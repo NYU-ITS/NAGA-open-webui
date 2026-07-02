@@ -1,15 +1,6 @@
 name: Custom Model Frontend Tests
 
 on:
-  pull_request:
-    branches:
-      - rs/ai-tutor-tests
-    paths:
-      - "src/**"
-      - "tests/unit/frontend/**"
-      - "package.json"
-      - "package-lock.json"
-      - ".github/workflows/custom-model-frontend-tests.yaml"
   push:
     branches:
       - rs/ai-tutor-tests

@@ -1,17 +1,6 @@
 name: Custom Model E2E Tests
 
 on:
-  pull_request:
-    branches:
-      - rs/ai-tutor-tests
-    paths:
-      - "src/**"
-      - "tests/e2e/**"
-      - "package.json"
-      - "package-lock.json"
-      - "docker-compose.local.yaml"
-      - "Dockerfile"
-      - ".github/workflows/custom-model-e2e-tests.yaml"
   push:
     branches:
       - rs/ai-tutor-tests
@@ -22,6 +11,7 @@ on:
       - "package.json"
       - "package-lock.json"
       - "docker-compose.local.yaml"
+      - "docker-compose.ci.yaml"
       - "Dockerfile"
       - ".github/workflows/custom-model-e2e-tests.yaml"
   workflow_dispatch:
@@ -59,8 +49,7 @@ jobs:
       - name: Build and start app
         env:
           OPEN_WEBUI_PORT: "8080"
-          DATABASE_URL: "sqlite:////app/backend/data/webui.db"
-        run: docker compose -f docker-compose.local.yaml up -d --build --wait
+        run: docker compose -f docker-compose.local.yaml -f docker-compose.ci.yaml up -d --build --wait
 
       - name: Wait for app health
         run: |
@@ -73,7 +62,7 @@ jobs:
             sleep 2
           done
           echo "App failed to become healthy within 120s"
-          docker compose -f docker-compose.local.yaml logs
+          docker compose -f docker-compose.local.yaml -f docker-compose.ci.yaml logs
           exit 1
 
       - name: Run Playwright tests against localhost
@@ -101,7 +90,7 @@ jobs:
 
       - name: Collect container logs on failure
         if: failure()
-        run: docker compose -f docker-compose.local.yaml logs > container-logs.txt 2>&1
+        run: docker compose -f docker-compose.local.yaml -f docker-compose.ci.yaml logs > container-logs.txt 2>&1
 
       - name: Upload container logs
         if: failure()
@@ -112,7 +101,7 @@ jobs:
 
       - name: Tear down
         if: always()
-        run: docker compose -f docker-compose.local.yaml down -v
+        run: docker compose -f docker-compose.local.yaml -f docker-compose.ci.yaml down -v
 
   # Manual GitHub Actions smoke against deployed app.
   e2e-live:

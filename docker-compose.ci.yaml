@@ -1,0 +1,5 @@
+services:
+  open-webui:
+    environment:
+      - 'DATABASE_URL=sqlite:////app/backend/data/webui.db'
+      - 'VECTOR_DB=chroma'

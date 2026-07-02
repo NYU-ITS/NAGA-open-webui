@@ -1,15 +1,6 @@
 name: Custom Model Backend Tests
 
 on:
-  pull_request:
-    branches:
-      - rs/ai-tutor-tests
-    paths:
-      - "backend/**"
-      - "tests/unit/backend/**"
-      - "tests/integration/backend/**"
-      - "tests/requirements-testing.txt"
-      - ".github/workflows/custom-model-backend-tests.yaml"
   push:
     branches:
       - rs/ai-tutor-tests
