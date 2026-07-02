@@ -2,3 +2,7 @@
 # packages that import pkg_resources while building metadata (for example
 # grpcio-tools pulled transitively by qdrant-client 1.12.x).
 setuptools<81
+
+# Pin transitive deps to stop pip resolver backtracking
+importlib-metadata<7,>=6.0
+opentelemetry-api<2,>=1.35
