@@ -1,0 +1,4 @@
+# Keep setuptools in pip build-isolation envs compatible with legacy setup.py
+# packages that import pkg_resources while building metadata (for example
+# grpcio-tools pulled transitively by qdrant-client 1.12.x).
+setuptools<81
