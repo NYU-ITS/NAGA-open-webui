@@ -106,3 +106,7 @@ export async function ensureTestAccounts(request: APIRequestContext): Promise<vo
 	const admin = await ensureAdmin(request);
 	await ensureStudent(request, admin.token);
 }
+
+export function authHeaders(token: string): Record<string, string> {
+	return { authorization: `Bearer ${token}`, Accept: 'application/json' };
+}

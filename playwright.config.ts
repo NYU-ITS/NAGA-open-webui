@@ -10,14 +10,6 @@ const SKIP_WEB_SERVER = process.env.PLAYWRIGHT_SKIP_WEB_SERVER === '1';
 const CI_RETRIES = Number(process.env.PLAYWRIGHT_RETRIES ?? 2);
 const CI_WORKERS = Number(process.env.PLAYWRIGHT_WORKERS ?? 2);
 
-// Groups e2e tests target a live Open WebUI instance (backend + frontend), not the dev server.
-// Kept separate from PLAYWRIGHT_BASE_URL so pointing groups at a live app does not redirect
-// the ai-tutor tests (which use the dev server / their own base URL).
-const GROUPS_BASE_URL =
-	process.env.PLAYWRIGHT_GROUPS_BASE_URL?.trim() ||
-	process.env.PLAYWRIGHT_BASE_URL?.trim() ||
-	'http://localhost:3000';
-
 /**
  * Video in the HTML report:
  * - Default `retain-on-failure`: video only kept when a test fails (smaller disk use).
@@ -55,40 +47,15 @@ export default defineConfig({
 	projects: [
 		{
 			name: 'chromium',
-			testIgnore: '**/groups/**',
 			use: { ...devices['Desktop Chrome'] }
 		},
 		{
 			name: 'firefox',
-			testIgnore: '**/groups/**',
 			use: { ...devices['Desktop Firefox'] }
 		},
 		{
 			name: 'webkit',
-			testIgnore: '**/groups/**',
 			use: { ...devices['Desktop Safari'] }
-		},
-		{
-			// Provisions one admin and one non-admin account before the groups tests run.
-			name: 'groups-setup',
-			testMatch: '**/groups/setup/*.setup.ts',
-			use: { baseURL: GROUPS_BASE_URL, extraHTTPHeaders: { Accept: 'application/json' } }
-		},
-		{
-			name: 'groups-api',
-			testMatch: '**/groups/api/*.spec.ts',
-			dependencies: ['groups-setup'],
-			use: { baseURL: GROUPS_BASE_URL, extraHTTPHeaders: { Accept: 'application/json' } }
-		},
-		{
-			name: 'groups-ui',
-			testMatch: '**/groups/ui/*.spec.ts',
-			dependencies: ['groups-setup'],
-			use: {
-				...devices['Desktop Chrome'],
-				baseURL: GROUPS_BASE_URL,
-				extraHTTPHeaders: { Accept: 'application/json' }
-			}
 		}
 	]
 });

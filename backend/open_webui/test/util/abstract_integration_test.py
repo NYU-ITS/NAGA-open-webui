@@ -76,6 +76,14 @@ class AbstractPostgresTest(AbstractIntegrationTest):
                 "POSTGRES_DB": "openwebui",
             }
             cls.docker_client = docker.from_env()
+            # Remove any leftover container from a previous (possibly crashed) run
+            # so re-running the suite does not fail with a name conflict.
+            try:
+                cls.docker_client.containers.get(cls.DOCKER_CONTAINER_NAME).remove(
+                    force=True
+                )
+            except Exception:
+                pass
             cls.docker_client.containers.run(
                 "postgres:16.2",
                 detach=True,

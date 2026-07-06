@@ -80,10 +80,10 @@ jobs:
             fi
             export PLAYWRIGHT_RUN_LIVE=1
             export PLAYWRIGHT_BASE_URL="${PLAYWRIGHT_BASE_URL_SECRET}"
-            npx playwright test playwright/tests/ai-tutor-dashboard.mocked.spec.ts playwright/tests/ai-tutor-dashboard.live.spec.ts playwright/tests/groups/api/groups.api.spec.ts playwright/tests/groups/ui/groups.ui.spec.ts
+            npx playwright test playwright/tests/ai-tutor-dashboard.mocked.spec.ts playwright/tests/ai-tutor-dashboard.live.spec.ts playwright/tests/groups/ui/groups.ui.mocked.spec.ts playwright/tests/groups/ui/groups.ui.live.spec.ts
 
           else
-            npx playwright test playwright/tests/ai-tutor-dashboard.mocked.spec.ts playwright/tests/groups/api/groups.api.spec.ts playwright/tests/groups/ui/groups.ui.spec.ts
+            npx playwright test playwright/tests/ai-tutor-dashboard.mocked.spec.ts playwright/tests/groups/ui/groups.ui.mocked.spec.ts
           fi
 
       - name: Upload Playwright report
