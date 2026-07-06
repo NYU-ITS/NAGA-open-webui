@@ -91,7 +91,8 @@ OpenShift also sets:
 - `PLAYWRIGHT_STRICT_LIVE_CHECKS=1`
 - `PLAYWRIGHT_WORKERS=1`
 - `PLAYWRIGHT_RETRIES=0`
-- `PLAYWRIGHT_VIDEO=off`
+- `PLAYWRIGHT_TIMEOUT=60000`
+- `PLAYWRIGHT_VIDEO=on`
 
 ## Homework PDF Fixture
 
@@ -164,8 +165,11 @@ export PLAYWRIGHT_STUDENT_PASSWORD="<student-password>"
 export PLAYWRIGHT_HOMEWORK_PDF_PATH="$(pwd)/playwright/fixtures/Math_HW.pdf"
 export PLAYWRIGHT_BROWSERS_PATH=0
 
-npm run test:e2e:ui -- --project=chromium playwright/tests/ai-tutor-dashboard.live.spec.ts
+npm run test:e2e:ui -- playwright/tests/ai-tutor-dashboard.live.spec.ts
 ```
+
+This matches OpenShift by running Chromium, Firefox, and WebKit. For a faster
+local smoke check only, add `--project=chromium`.
 
 Useful modes:
 
@@ -178,10 +182,14 @@ OpenShift sets the required env vars and runs:
 
 ```bash
 npx playwright test playwright/tests/ai-tutor-dashboard.live.spec.ts \
-  --project=chromium \
-  --workers=1 \
-  --retries=0
+  --workers="${PLAYWRIGHT_WORKERS}" \
+  --retries="${PLAYWRIGHT_RETRIES}" \
+  --timeout="${PLAYWRIGHT_TIMEOUT}"
 ```
+
+The OpenShift runner intentionally does not pass a `--project` filter. The live
+workflow therefore runs across the configured Chromium, Firefox, and WebKit
+projects.
 
 The OpenShift BuildConfig path:
 
@@ -219,13 +227,15 @@ oc create secret generic ai-tutor-playwright-live-secret \
 
 ## Report and Video
 
-By default, `playwright.config.ts` keeps video on failure. OpenShift overrides this with:
+By default, `playwright.config.ts` keeps video on failure. OpenShift overrides
+this with:
 
 ```bash
-PLAYWRIGHT_VIDEO=off
+PLAYWRIGHT_VIDEO=on
 ```
 
-to reduce storage and runtime cost.
+so passing live checks still produce videos for deployment verification and the
+artifact viewer. Keep an eye on artifact storage usage while this is enabled.
 
 To keep local videos for passing tests:
 
