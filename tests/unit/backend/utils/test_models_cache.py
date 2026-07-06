@@ -5,6 +5,8 @@ import threading
 from unittest.mock import patch, MagicMock
 from open_webui.utils.models import ModelsLRUCache, get_affected_user_ids_for_model
 
+pytestmark = pytest.mark.unit
+
 
 # Patch target: open_webui.models.groups.Groups.get_group_by_id
 # (imported inside get_affected_user_ids_for_model function)

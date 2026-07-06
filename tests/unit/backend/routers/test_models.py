@@ -5,7 +5,7 @@ Uses httpx.AsyncClient against the FastAPI app with auth overridden.
 
 import pytest
 
-pytestmark = pytest.mark.asyncio
+pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
 
 BASE_PATH = "/api/v1/models"
 

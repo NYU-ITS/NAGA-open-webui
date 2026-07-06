@@ -2,15 +2,43 @@
 
 Uses SQLite (same pattern as unit backend conftest). Sets env vars before
 any open_webui imports to avoid triggering real Postgres or Redis connections.
+
+ENV VARS (override via shell or CI — do NOT hardcode in production):
+  WEBUI_SECRET_KEY                       — required, fail-fast if missing in CI
+  SUPER_ADMIN_EMAILS                     — required, fail-fast if missing in CI
+  USER_PERMISSIONS_WORKSPACE_MODELS_ACCESS — optional, defaults to "true"
+  DATABASE_URL                           — optional, defaults to local SQLite
+
+NOTE: This conftest is intentionally separate from the unit conftest.
+      Different DATABASE_URL and SUPER_ADMIN_EMAILS prevent combining
+      unit + integration in a single pytest invocation.
 """
 
 import os
+import sys
+import time
 
-os.environ["WEBUI_SECRET_KEY"] = "test-secret-key-for-integration-tests"
-os.environ["SUPER_ADMIN_EMAILS"] = "admin@example.com"
+_CI = os.environ.get("CI", "").lower() in ("1", "true", "yes")
+
+
+def _require_env(name: str, default: str | None = None) -> str:
+    """Return env var value. Fail fast in CI if missing and no default."""
+    val = os.environ.get(name)
+    if val:
+        return val
+    if default is not None:
+        return default
+    if _CI:
+        print(f"FATAL: required env var {name} is not set", file=sys.stderr)
+        sys.exit(1)
+    return ""
+
+
+os.environ["WEBUI_SECRET_KEY"] = _require_env("WEBUI_SECRET_KEY", "test-secret-key-for-integration-tests")
+os.environ["SUPER_ADMIN_EMAILS"] = _require_env("SUPER_ADMIN_EMAILS", "admin@example.com")
 
 # Allow non-admin users to create models (workspace permission)
-os.environ["USER_PERMISSIONS_WORKSPACE_MODELS_ACCESS"] = "true"
+os.environ.setdefault("USER_PERMISSIONS_WORKSPACE_MODELS_ACCESS", "true")
 # Do NOT override REDIS_URL — let it use the default redis://localhost:6379/0
 # CacheManager gracefully handles connection failures via _check_redis_available()
 
@@ -19,14 +47,18 @@ _TEST_DB_PATH = os.path.join(
 )
 _TEST_DB_URI = f"sqlite:///{_TEST_DB_PATH}"
 open(_TEST_DB_PATH, "a").close()
-os.environ["DATABASE_URL"] = _TEST_DB_URI
+os.environ.setdefault("DATABASE_URL", _TEST_DB_URI)
 
 import pytest
 from contextlib import contextmanager
 
+# Unique prefix for this test run — all integration test data should use this
+TEST_RUN_PREFIX = f"test-custom-models-{int(time.time())}"
+
 
 def pytest_configure(config):
     config.option.asyncio_mode = "auto"
+    config.addinivalue_line("markers", "integration: integration tests (backend)")
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -224,3 +256,66 @@ def mock_user_b(app):
         app.dependency_overrides = {}
 
     return _mock
+
+
+@pytest.fixture
+def cleanup_groups():
+    """Track and clean up groups created during a test.
+
+    Usage:
+        def test_something(cleanup_groups):
+            group_id = cleanup_groups("my-group-id")
+            ... test logic ...
+            # group auto-deleted after test (even on failure)
+    """
+    created: list[str] = []
+
+    def _register(group_id: str) -> str:
+        created.append(group_id)
+        return group_id
+
+    yield _register
+
+    from open_webui.models.groups import Groups
+    for gid in created:
+        try:
+            Groups.delete_group_by_id(gid)
+        except Exception:
+            pass
+
+
+@pytest.fixture
+def cleanup_functions():
+    """Track and clean up functions created during a test.
+
+    Usage:
+        def test_something(cleanup_functions):
+            func_id = cleanup_functions("my-func-id")
+            ... test logic ...
+    """
+    created: list[str] = []
+
+    def _register(func_id: str) -> str:
+        created.append(func_id)
+        return func_id
+
+    yield _register
+
+    from open_webui.models.functions import Functions
+    for fid in created:
+        try:
+            Functions.delete_function_by_id(fid)
+        except Exception:
+            pass
+
+
+@pytest.fixture
+def unique_model_id():
+    """Generate a unique model ID for integration tests using the run prefix."""
+    def _make(suffix: str = "") -> str:
+        parts = [TEST_RUN_PREFIX]
+        if suffix:
+            parts.append(suffix)
+        return "-".join(parts)
+
+    return _make

@@ -5,10 +5,19 @@ pipe function, ownership is automatically assigned to the function's creator.
 """
 
 import pytest
+from tests.integration.backend.conftest import TEST_RUN_PREFIX
 
-pytestmark = pytest.mark.asyncio
+pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
 BASE = "/api/v1/models"
+
+
+def _mid(suffix: str) -> str:
+    return f"{TEST_RUN_PREFIX}-{suffix}"
+
+
+def _fid(suffix: str) -> str:
+    return f"{TEST_RUN_PREFIX}-func-{suffix}"
 
 
 def _model_payload(id, name, base_model_id=None):
@@ -44,15 +53,18 @@ class TestSuperAdminAssign:
     """Super admin auto-assign tests."""
 
     async def test_super_admin_assigns_function_creator(
-        self, async_client, mock_admin_user, seed_admin, seed_user_a
+        self, async_client, mock_admin_user, seed_admin, seed_user_a,
+        cleanup_functions,
     ):
-        """Super admin creates model with base_model_id=function_id → user_id set to function creator."""
-        func = _seed_pipe_function("pipe-1", "a@example.com", "user-a")
+        func_id = _fid("pipe-1")
+        model_id = _mid("assign-1")
+        _seed_pipe_function(func_id, "a@example.com", "user-a")
+        cleanup_functions(func_id)
 
         with mock_admin_user():
             resp = await async_client.post(
                 f"{BASE}/create",
-                json=_model_payload("assign-1", "Assigned", base_model_id="pipe-1"),
+                json=_model_payload(model_id, "Assigned", base_model_id=func_id),
             )
         assert resp.status_code == 200
         data = resp.json()
@@ -60,15 +72,18 @@ class TestSuperAdminAssign:
         assert data["created_by"] == "a@example.com"
 
     async def test_super_admin_assigns_on_prefix_match(
-        self, async_client, mock_admin_user, seed_admin, seed_user_a
+        self, async_client, mock_admin_user, seed_admin, seed_user_a,
+        cleanup_functions,
     ):
-        """base_model_id=func_id.slug also triggers auto-assign."""
-        _seed_pipe_function("pipe-2", "a@example.com", "user-a")
+        func_id = _fid("pipe-2")
+        model_id = _mid("assign-2")
+        _seed_pipe_function(func_id, "a@example.com", "user-a")
+        cleanup_functions(func_id)
 
         with mock_admin_user():
             resp = await async_client.post(
                 f"{BASE}/create",
-                json=_model_payload("assign-2", "Prefix Match", base_model_id="pipe-2.myslug"),
+                json=_model_payload(model_id, "Prefix Match", base_model_id=f"{func_id}.myslug"),
             )
         assert resp.status_code == 200
         data = resp.json()
@@ -76,15 +91,18 @@ class TestSuperAdminAssign:
         assert data["created_by"] == "a@example.com"
 
     async def test_no_assign_for_unrelated_base_model(
-        self, async_client, mock_admin_user, seed_admin
+        self, async_client, mock_admin_user, seed_admin,
+        cleanup_functions,
     ):
-        """Super admin creates model with unrelated base_model_id → user_id stays as super admin."""
-        _seed_pipe_function("pipe-3", "admin@example.com", "admin-1")
+        func_id = _fid("pipe-3")
+        model_id = _mid("no-assign")
+        _seed_pipe_function(func_id, "admin@example.com", "admin-1")
+        cleanup_functions(func_id)
 
         with mock_admin_user():
             resp = await async_client.post(
                 f"{BASE}/create",
-                json=_model_payload("no-assign", "No Assign", base_model_id="some-other-model"),
+                json=_model_payload(model_id, "No Assign", base_model_id="some-other-model"),
             )
         assert resp.status_code == 200
         data = resp.json()
@@ -92,31 +110,32 @@ class TestSuperAdminAssign:
         assert data["created_by"] == "admin@example.com"
 
     async def test_non_admin_no_auto_assign(
-        self, async_client, mock_user_a, seed_admin, seed_user_a
+        self, async_client, mock_user_a, seed_admin, seed_user_a,
+        cleanup_functions,
     ):
-        """Non-admin creates model with function base_model_id → no auto-assign."""
-        _seed_pipe_function("pipe-4", "a@example.com", "user-a")
+        func_id = _fid("pipe-4")
+        model_id = _mid("no-super")
+        _seed_pipe_function(func_id, "a@example.com", "user-a")
+        cleanup_functions(func_id)
 
         with mock_user_a():
             resp = await async_client.post(
                 f"{BASE}/create",
-                json=_model_payload("no-super", "No Super", base_model_id="pipe-4"),
+                json=_model_payload(model_id, "No Super", base_model_id=func_id),
             )
         assert resp.status_code == 200
         data = resp.json()
-        # user-a is NOT a super admin (email not in SUPER_ADMIN_EMAILS, not first user)
-        # so auto-assign does NOT trigger; user_id stays as the requester
         assert data["user_id"] == "user-a"
         assert data["created_by"] == "a@example.com"
 
     async def test_function_not_found_falls_back_to_admin(
         self, async_client, mock_admin_user, seed_admin
     ):
-        """base_model_id matches no function → user_id stays as super admin."""
+        model_id = _mid("fallback")
         with mock_admin_user():
             resp = await async_client.post(
                 f"{BASE}/create",
-                json=_model_payload("fallback", "Fallback", base_model_id="nonexistent-func"),
+                json=_model_payload(model_id, "Fallback", base_model_id="nonexistent-func"),
             )
         assert resp.status_code == 200
         data = resp.json()
@@ -126,11 +145,11 @@ class TestSuperAdminAssign:
     async def test_no_base_model_no_reassign(
         self, async_client, mock_admin_user, seed_admin
     ):
-        """Super admin creates model with no base_model_id → no re-assign."""
+        model_id = _mid("no-base")
         with mock_admin_user():
             resp = await async_client.post(
                 f"{BASE}/create",
-                json=_model_payload("no-base", "No Base"),
+                json=_model_payload(model_id, "No Base"),
             )
         assert resp.status_code == 200
         data = resp.json()
@@ -138,21 +157,21 @@ class TestSuperAdminAssign:
         assert data["created_by"] == "admin@example.com"
 
     async def test_inactive_function_not_matched(
-        self, async_client, mock_admin_user, seed_admin, seed_user_a
+        self, async_client, mock_admin_user, seed_admin, seed_user_a,
+        cleanup_functions,
     ):
-        """Inactive functions should not trigger auto-assign (get_functions_by_type active_only=True)."""
+        func_id = _fid("pipe-inactive")
+        model_id = _mid("inactive-func")
+        _seed_pipe_function(func_id, "a@example.com", "user-a")
         from open_webui.models.functions import Functions
-
-        func = _seed_pipe_function("pipe-inactive", "a@example.com", "user-a")
-        # Deactivate the function
-        Functions.update_function_by_id("pipe-inactive", {"is_active": False})
+        Functions.update_function_by_id(func_id, {"is_active": False})
+        cleanup_functions(func_id)
 
         with mock_admin_user():
             resp = await async_client.post(
                 f"{BASE}/create",
-                json=_model_payload("inactive-func", "Inactive", base_model_id="pipe-inactive"),
+                json=_model_payload(model_id, "Inactive", base_model_id=func_id),
             )
         assert resp.status_code == 200
         data = resp.json()
-        # Should NOT be reassigned because function is inactive
         assert data["user_id"] == "admin-1"

@@ -3,8 +3,10 @@ import { authHeaders, requireOk } from './auth';
 
 export type ModelPayloadOverrides = Partial<ReturnType<typeof generateModelPayload>>;
 
-export function uniqueId(prefix: string) {
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+const RUN_PREFIX = `test-custom-models-${Date.now()}`;
+
+export function uniqueId(suffix: string) {
+  return `${RUN_PREFIX}-${suffix}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 export function generateModelPayload(overrides: ModelPayloadOverrides = {}) {

@@ -3,6 +3,8 @@
 import pytest
 from open_webui.models.models import Models, ModelForm, ModelMeta, ModelParams
 
+pytestmark = pytest.mark.unit
+
 
 class TestModelsTable:
     """Tests for ModelsTable ORM methods against SQLite."""

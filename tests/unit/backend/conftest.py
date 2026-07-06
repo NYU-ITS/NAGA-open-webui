@@ -6,15 +6,36 @@ migrations at import time and needs a working database).
 
 The DB file is pre-created as an empty file so that alembic migrations
 can initialize it properly on first import.
+
+ENV VARS (override via shell or CI — do NOT hardcode in production):
+  WEBUI_SECRET_KEY    — required, fail-fast if missing in CI
+  SUPER_ADMIN_EMAILS  — required, fail-fast if missing in CI
+  DATABASE_URL        — optional, defaults to local SQLite
 """
 
 import os
+import sys
+import time
+
+_CI = os.environ.get("CI", "").lower() in ("1", "true", "yes")
+
+
+def _require_env(name: str, default: str | None = None) -> str:
+    """Return env var value. Fail fast in CI if missing and no default."""
+    val = os.environ.get(name)
+    if val:
+        return val
+    if default is not None:
+        return default
+    if _CI:
+        print(f"FATAL: required env var {name} is not set", file=sys.stderr)
+        sys.exit(1)
+    return ""
+
 
 # Use direct assignment — Dockerfile sets WEBUI_SECRET_KEY="" which prevents setdefault from working
-os.environ["WEBUI_SECRET_KEY"] = "test-secret-key-for-unit-tests"
-
-# Set SUPER_ADMIN_EMAILS so first user check uses our test email, not ms15138@nyu.edu
-os.environ["SUPER_ADMIN_EMAILS"] = "test@example.com"
+os.environ["WEBUI_SECRET_KEY"] = _require_env("WEBUI_SECRET_KEY", "test-secret-key-for-unit-tests")
+os.environ["SUPER_ADMIN_EMAILS"] = _require_env("SUPER_ADMIN_EMAILS", "test@example.com")
 
 # Create empty DB file before setting DATABASE_URL — alembic migrations
 # run at open_webui import time and need the file to exist
@@ -22,15 +43,20 @@ _TEST_DB_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "..", "test_
 _TEST_DB_URI = f"sqlite:///{_TEST_DB_PATH}"
 # Touch the file
 open(_TEST_DB_PATH, "a").close()
-os.environ["DATABASE_URL"] = _TEST_DB_URI
+os.environ.setdefault("DATABASE_URL", _TEST_DB_URI)
 
 import pytest
 from contextlib import contextmanager
 
 
+# Unique prefix for this test run — used by integration tests to tag test data
+TEST_RUN_PREFIX = f"test-unit-{int(time.time())}"
+
+
 # Set asyncio_mode to auto so class-level @pytest.mark.asyncio propagates to methods
 def pytest_configure(config):
     config.option.asyncio_mode = "auto"
+    config.addinivalue_line("markers", "unit: unit tests (backend)")
 
 
 @pytest.fixture(scope="session", autouse=True)
