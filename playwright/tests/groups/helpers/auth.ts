@@ -1,10 +1,11 @@
 import { expect } from '@playwright/test';
 import type { APIRequestContext } from '@playwright/test';
+import { ADMIN, STUDENT } from './accounts';
 
 export const BASE_URL =
 	process.env.PLAYWRIGHT_GROUPS_BASE_URL?.trim() ||
 	process.env.PLAYWRIGHT_BASE_URL?.trim() ||
-	'http://localhost:8080';
+	'http://localhost:3000';
 
 export interface Credentials {
 	email: string;
@@ -18,24 +19,13 @@ export interface Session {
 	role: string;
 }
 
+// Credentials for the accounts provisioned by the setup step (helpers/accounts.ts).
 export function adminCredentials(): Credentials {
-	const email = process.env.PLAYWRIGHT_ADMIN_EMAIL;
-	const password = process.env.PLAYWRIGHT_ADMIN_PASSWORD;
-	if (!email || !password) {
-		throw new Error(
-			'PLAYWRIGHT_ADMIN_EMAIL and PLAYWRIGHT_ADMIN_PASSWORD must be set. See README.md.'
-		);
-	}
-	return { email, password };
+	return { email: ADMIN.email, password: ADMIN.password };
 }
 
-export function studentCredentials(): Credentials | null {
-	const email = process.env.PLAYWRIGHT_STUDENT_EMAIL;
-	const password = process.env.PLAYWRIGHT_STUDENT_PASSWORD;
-	if (!email || !password) {
-		return null;
-	}
-	return { email, password };
+export function studentCredentials(): Credentials {
+	return { email: STUDENT.email, password: STUDENT.password };
 }
 
 export async function signIn(

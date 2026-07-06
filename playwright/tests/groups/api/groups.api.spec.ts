@@ -224,17 +224,13 @@ test.describe('groups router - admin CRUD lifecycle', () => {
 
 test.describe('groups router - role enforcement (non-admin)', () => {
 	const creds = studentCredentials();
-	test.skip(
-		!creds,
-		'Set PLAYWRIGHT_STUDENT_EMAIL and PLAYWRIGHT_STUDENT_PASSWORD to run non-admin role tests.'
-	);
 
 	let userToken: string;
 	let adminGroupId: string;
 	let userIsAdmin = false;
 
 	test.beforeAll(async ({ request }) => {
-		const session = await signIn(request, creds!);
+		const session = await signIn(request, creds);
 		userToken = session.token;
 		userIsAdmin = session.role === 'admin';
 		if (userIsAdmin) return;

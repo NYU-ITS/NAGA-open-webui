@@ -16,7 +16,7 @@ const CI_WORKERS = Number(process.env.PLAYWRIGHT_WORKERS ?? 2);
 const GROUPS_BASE_URL =
 	process.env.PLAYWRIGHT_GROUPS_BASE_URL?.trim() ||
 	process.env.PLAYWRIGHT_BASE_URL?.trim() ||
-	'http://localhost:8080';
+	'http://localhost:3000';
 
 /**
  * Video in the HTML report:
@@ -69,13 +69,21 @@ export default defineConfig({
 			use: { ...devices['Desktop Safari'] }
 		},
 		{
+			// Provisions one admin and one non-admin account before the groups tests run.
+			name: 'groups-setup',
+			testMatch: '**/groups/setup/*.setup.ts',
+			use: { baseURL: GROUPS_BASE_URL, extraHTTPHeaders: { Accept: 'application/json' } }
+		},
+		{
 			name: 'groups-api',
 			testMatch: '**/groups/api/*.spec.ts',
+			dependencies: ['groups-setup'],
 			use: { baseURL: GROUPS_BASE_URL, extraHTTPHeaders: { Accept: 'application/json' } }
 		},
 		{
 			name: 'groups-ui',
 			testMatch: '**/groups/ui/*.spec.ts',
+			dependencies: ['groups-setup'],
 			use: {
 				...devices['Desktop Chrome'],
 				baseURL: GROUPS_BASE_URL,
