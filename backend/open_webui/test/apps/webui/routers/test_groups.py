@@ -1,4 +1,6 @@
+import itertools
 import os
+import time
 
 # The first user inserted must be in the super-admin allow-list (fork gating).
 os.environ["SUPER_ADMIN_EMAILS"] = "admin@test.com"
@@ -6,6 +8,16 @@ os.environ["SUPER_ADMIN_EMAILS"] = "admin@test.com"
 from contextlib import contextmanager
 
 from test.util.abstract_integration_test import AbstractPostgresTest
+
+# Every group created by the tests is named with this prefix so stale groups can
+# be found and cleaned up. Timestamped per run to avoid collisions.
+TEST_GROUP_PREFIX = "test-groups-"
+_RUN_PREFIX = f"{TEST_GROUP_PREFIX}{int(time.time())}"
+_counter = itertools.count()
+
+
+def unique_group_name() -> str:
+    return f"{_RUN_PREFIX}-{next(_counter)}"
 
 
 @contextmanager
@@ -56,18 +68,31 @@ class TestGroups(AbstractPostgresTest):
         )
 
     def teardown_method(self):
-        self.groups.delete_all_groups()
+        # Cleanup runs even when a test fails. Only removes groups this suite created.
+        self._cleanup_test_groups()
         super().teardown_method()
+
+    def _cleanup_test_groups(self):
+        try:
+            for group in self.groups.get_groups():
+                if group.name.startswith(TEST_GROUP_PREFIX):
+                    self.groups.delete_group_by_id(group.id)
+        except Exception:
+            pass
 
     @property
     def app(self):
         return self.fast_api_client.app
 
-    def _create(self, name="QA", description="desc", **extra):
+    def _create(self, name=None, description="desc", **extra):
         with as_user(self.app, id="admin", role="admin", email="admin@test.com"):
             return self.fast_api_client.post(
                 self.create_url("/create"),
-                json={"name": name, "description": description, **extra},
+                json={
+                    "name": name or unique_group_name(),
+                    "description": description,
+                    **extra,
+                },
             )
 
     # ---- authentication ----
@@ -93,11 +118,12 @@ class TestGroups(AbstractPostgresTest):
     # ---- admin CRUD ----
 
     def test_create_stamps_ownership_and_defaults(self):
-        response = self._create()
+        name = unique_group_name()
+        response = self._create(name=name)
         assert response.status_code == 200, response.text
         group = response.json()
         assert group["id"]
-        assert group["name"] == "QA"
+        assert group["name"] == name
         assert group["description"] == "desc"
         assert group["created_by"] == "admin@test.com"
         assert group["user_id"] == "admin"
@@ -121,38 +147,47 @@ class TestGroups(AbstractPostgresTest):
 
     def test_update_name_description_permissions(self):
         group_id = self._create().json()["id"]
+        updated_name = unique_group_name()
         permissions = {"workspace": {"models": True}}
         with as_user(self.app, id="admin", role="admin", email="admin@test.com"):
             response = self.fast_api_client.post(
                 self.create_url(f"/id/{group_id}/update"),
                 json={
-                    "name": "QA-updated",
+                    "name": updated_name,
                     "description": "updated",
                     "permissions": permissions,
                 },
             )
         assert response.status_code == 200, response.text
         group = response.json()
-        assert group["name"] == "QA-updated"
+        assert group["name"] == updated_name
         assert group["description"] == "updated"
         assert group["permissions"] == permissions
 
     def test_update_membership_with_valid_user(self):
-        group_id = self._create().json()["id"]
+        group = self._create().json()
         with as_user(self.app, id="admin", role="admin", email="admin@test.com"):
             response = self.fast_api_client.post(
-                self.create_url(f"/id/{group_id}/update"),
-                json={"name": "QA", "description": "desc", "user_ids": ["member"]},
+                self.create_url(f"/id/{group['id']}/update"),
+                json={
+                    "name": group["name"],
+                    "description": "desc",
+                    "user_ids": ["member"],
+                },
             )
         assert response.status_code == 200, response.text
         assert "member" in response.json()["user_ids"]
 
     def test_invalid_user_ids_are_filtered(self):
-        group_id = self._create().json()["id"]
+        group = self._create().json()
         with as_user(self.app, id="admin", role="admin", email="admin@test.com"):
             response = self.fast_api_client.post(
-                self.create_url(f"/id/{group_id}/update"),
-                json={"name": "QA", "description": "desc", "user_ids": ["ghost"]},
+                self.create_url(f"/id/{group['id']}/update"),
+                json={
+                    "name": group["name"],
+                    "description": "desc",
+                    "user_ids": ["ghost"],
+                },
             )
         assert response.status_code == 200, response.text
         assert "ghost" not in response.json()["user_ids"]
@@ -161,7 +196,7 @@ class TestGroups(AbstractPostgresTest):
         with as_user(self.app, id="admin", role="admin", email="admin@test.com"):
             response = self.fast_api_client.post(
                 self.create_url("/id/missing/update"),
-                json={"name": "x", "description": "y"},
+                json={"name": unique_group_name(), "description": "y"},
             )
         assert response.status_code == 400
 
@@ -182,7 +217,8 @@ class TestGroups(AbstractPostgresTest):
     def test_non_admin_cannot_create(self):
         with as_user(self.app, id="member", role="user", email="member@test.com"):
             response = self.fast_api_client.post(
-                self.create_url("/create"), json={"name": "x", "description": "y"}
+                self.create_url("/create"),
+                json={"name": unique_group_name(), "description": "y"},
             )
         assert response.status_code == 401
 
@@ -197,7 +233,7 @@ class TestGroups(AbstractPostgresTest):
         with as_user(self.app, id="member", role="user", email="member@test.com"):
             response = self.fast_api_client.post(
                 self.create_url(f"/id/{group_id}/update"),
-                json={"name": "x", "description": "y"},
+                json={"name": unique_group_name(), "description": "y"},
             )
         assert response.status_code == 401
 

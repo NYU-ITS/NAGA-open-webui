@@ -1,0 +1,60 @@
+name: Groups Backend Tests
+
+on:
+  push:
+    branches:
+      - rs/ai-tutor-tests
+      - users/arjunbajpai
+    paths:
+      - "backend/**"
+      - "pyproject.toml"
+      - ".github/workflows/groups-backend-tests.yaml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  checks: write
+
+jobs:
+  test-groups-backend:
+    name: "Groups Router & Model Tests"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip "setuptools<81" wheel uv
+          printf 'setuptools<81\nwheel\n' > /tmp/build-constraints.txt
+          uv pip install --system --build-constraints /tmp/build-constraints.txt \
+            -r backend/requirements.txt pytest pytest-docker docker
+
+      - name: Run groups backend tests
+        env:
+          WEBUI_SECRET_KEY: test-secret-key
+        run: |
+          mkdir -p test-results
+          pytest backend/open_webui/test/apps/webui/routers/test_groups.py \
+            -v --junitxml=test-results/groups-results.xml --tb=short
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: groups-backend-test-results
+          path: test-results/
+
+      - name: Publish test results
+        if: always()
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        with:
+          files: test-results/*.xml
+          check_name: "Groups Backend Test Results"
+          comment_mode: "off"
