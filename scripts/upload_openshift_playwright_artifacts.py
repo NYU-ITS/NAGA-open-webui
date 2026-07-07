@@ -14,7 +14,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 def env(name: str, default: str = "") -> str:
@@ -49,7 +49,16 @@ def s3_base_url() -> str:
     return f"{scheme}://{authority}/{required_env('BUCKET_NAME')}"
 
 
-def urlopen(request: urllib.request.Request, timeout: int = 60):
+def request_timeout_seconds() -> int:
+    raw = env("S3_REQUEST_TIMEOUT_SECONDS", "10")
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 10
+
+
+def urlopen(request: urllib.request.Request, timeout: int | None = None):
+    timeout = timeout or request_timeout_seconds()
     if urllib.parse.urlparse(request.full_url).scheme == "https" and env("BUCKET_TLS_VERIFY", "true").lower() in {"0", "false", "no"}:
         return urllib.request.urlopen(request, timeout=timeout, context=ssl._create_unverified_context())
     return urllib.request.urlopen(request, timeout=timeout)
@@ -102,8 +111,43 @@ def s3_request(method: str, key: str, body: bytes = b"", query: str = "", conten
             "Content-Type": content_type,
         },
     )
-    with urlopen(request, timeout=60) as response:
+    with urlopen(request) as response:
         return response.read()
+
+
+def storage_backend() -> str:
+    backend = env("ARTIFACT_STORAGE_BACKEND", "filesystem").lower() or "filesystem"
+    if backend not in {"filesystem", "s3"}:
+        raise RuntimeError(f"Unsupported ARTIFACT_STORAGE_BACKEND: {backend}")
+    return backend
+
+
+def artifact_root() -> Path:
+    return Path(env("ARTIFACT_ROOT", "/artifacts"))
+
+
+def artifact_key_path(key: str) -> Path:
+    pure = PurePosixPath(key)
+    if pure.is_absolute() or not pure.parts or ".." in pure.parts:
+        raise ValueError(f"Unsafe artifact key: {key!r}")
+    return artifact_root().joinpath(*pure.parts)
+
+
+def put_bytes(key: str, body: bytes, content_type: str = "application/octet-stream") -> None:
+    if storage_backend() == "s3":
+        s3_request("PUT", key, body, content_type=content_type)
+        return
+    path = artifact_key_path(key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    temp_path.write_bytes(body)
+    os.replace(temp_path, path)
+
+
+def get_bytes(key: str) -> bytes:
+    if storage_backend() == "s3":
+        return s3_request("GET", key)
+    return artifact_key_path(key).read_bytes()
 
 
 def safe_files(root: Path) -> list[Path]:
@@ -116,7 +160,7 @@ def safe_files(root: Path) -> list[Path]:
 
 def read_json_or_default(key: str, default: object) -> object:
     try:
-        return json.loads(s3_request("GET", key).decode("utf-8"))
+        return json.loads(get_bytes(key).decode("utf-8"))
     except Exception:
         return default
 
@@ -130,7 +174,7 @@ def status_from_counts(passed: int, failed: int, skipped: int, errors: int) -> s
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Upload OpenShift Playwright quality artifacts to S3/ObjectBucket.")
+    parser = argparse.ArgumentParser(description="Upload OpenShift Playwright quality artifacts to the artifact store (PVC filesystem or S3).")
     parser.add_argument("--report-dir", default="playwright-report")
     parser.add_argument("--results-dir", default="test-results")
     parser.add_argument("--metrics-file", default="/tmp/ai-tutor-frontend-quality-metrics.prom")
@@ -167,7 +211,7 @@ def main() -> None:
         for path in safe_files(root):
             rel = path.relative_to(root).as_posix() if root.is_dir() else path.name
             key = f"{run_prefix}/{root.name}/{rel}"
-            s3_request("PUT", key, path.read_bytes(), content_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream")
+            put_bytes(key, path.read_bytes(), content_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream")
             uploaded += 1
 
     created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -188,15 +232,15 @@ def main() -> None:
         "report_path": report_path,
     }
 
-    s3_request("PUT", f"{run_prefix}/metadata.json", json.dumps(metadata, indent=2).encode("utf-8"), content_type="application/json")
-    s3_request("PUT", f"{prefix}/latest.json", json.dumps(metadata, indent=2).encode("utf-8"), content_type="application/json")
+    put_bytes(f"{run_prefix}/metadata.json", json.dumps(metadata, indent=2).encode("utf-8"), content_type="application/json")
+    put_bytes(f"{prefix}/latest.json", json.dumps(metadata, indent=2).encode("utf-8"), content_type="application/json")
     index_key = f"{prefix}/index.json"
     index = read_json_or_default(index_key, [])
     if not isinstance(index, list):
         index = []
     index = [item for item in index if item.get("run_id") != run_id]
     index.insert(0, metadata)
-    s3_request("PUT", index_key, json.dumps(index[: args.history_limit], indent=2).encode("utf-8"), content_type="application/json")
+    put_bytes(index_key, json.dumps(index[: args.history_limit], indent=2).encode("utf-8"), content_type="application/json")
     print(f"Uploaded {uploaded} OpenShift Playwright artifact file(s) to {run_prefix}.")
 
 

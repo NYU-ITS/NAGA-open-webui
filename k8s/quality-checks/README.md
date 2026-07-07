@@ -67,7 +67,7 @@ quality_checks/Dockerfile builds the Playwright quality-check image
 postCommit runs scripts/run_openshift_frontend_quality_checks_from_build.sh
 live Playwright runs against http://open-webui.rit-genai-naga-dev.svc:80
 metrics are pushed to ai-tutor-quality-pushgateway
-Playwright reports/results are uploaded to ObjectBucket/S3 when bucket credentials are available
+artifact upload stays disabled in the build (build pods cannot mount the artifact PVC)
 build succeeds or fails with the Playwright result
 ```
 
@@ -250,7 +250,7 @@ Metrics must remain telemetry only. Do not export credentials, uploaded file con
 
 ## Artifact Upload
 
-After metrics are scraped locally, the runner uploads heavy Playwright artifacts when ObjectBucket/S3 credentials are available:
+After metrics are scraped locally, the post-deploy Job uploads heavy Playwright artifacts to the shared `ai-tutor-quality-artifacts` PVC, mounted at `/artifacts` with `ARTIFACT_STORAGE_BACKEND=filesystem` and `ARTIFACT_ROOT=/artifacts`:
 
 - `playwright-report/`
 - `test-results/`
@@ -269,9 +269,13 @@ openshift/frontend/dev/latest.json
 openshift/frontend/dev/index.json
 ```
 
-Artifact upload is best-effort. If the bucket secret/config is missing, the runner logs a clear skip and the quality result still comes from Playwright plus the pushed metrics.
+Artifact upload is best-effort. If artifact storage is unavailable, the runner logs a clear skip and the quality result still comes from Playwright plus the pushed metrics.
 
-The BuildConfig mounts only the ObjectBucket secret and sets the non-secret bucket host/name as build env. This avoids OpenShift build volume collisions while keeping access keys out of image layers and logs. `BUCKET_TLS_VERIFY=false` is used for the internal OpenShift S3 service because the in-cluster service presents a self-signed certificate chain.
+Storage wiring:
+
+- The explicit Job mounts the `ai-tutor-quality-artifacts` PVC (created by `AI_Tutor_Analysis/k8s/observability/01-artifact-pvc.yaml` in the same namespace). Retention is a daily 30-day cleanup CronJob owned by the backend repo.
+- The BuildConfig sets `QUALITY_UPLOAD_ARTIFACTS=0` because build pods cannot mount PVCs; build-triggered runs publish metrics only.
+- The previous ObjectBucket/S3 wiring (`ai-tutor-test-artifacts-bucket` secret, `BUCKET_*` env, `S3_REQUEST_TIMEOUT_SECONDS`) is retired, but the uploader keeps the `s3` code path behind `ARTIFACT_STORAGE_BACKEND=s3` for a future object-storage migration.
 
 ## Resources
 
@@ -324,6 +328,16 @@ Check quality pods:
 ```bash
 oc get pods -n rit-genai-naga-dev | grep quality
 ```
+
+Check the artifact PVC and viewer from the namespace:
+
+```bash
+oc get pvc ai-tutor-quality-artifacts -n rit-genai-naga-dev
+oc exec deploy/ai-tutor-quality-artifact-viewer -n rit-genai-naga-dev -- \
+  ls /artifacts/openshift/frontend/dev
+```
+
+If the PVC is `Bound` and the viewer pod can list `/artifacts`, artifact serving is healthy; missing run directories just mean no upload has happened yet. (The retired ObjectBucket/S3 endpoint check `curl -vk --max-time 10 https://s3.openshift-storage.svc/` only matters if the `s3` backend is re-enabled later.)
 
 Common failures:
 
