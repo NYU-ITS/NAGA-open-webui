@@ -287,7 +287,7 @@ Quality build:
 - request: `500m CPU`, `1Gi memory`
 - limit: `2 CPU`, `4Gi memory`
 - browsers: Chromium, Firefox, WebKit
-- expected checks per run: `3 workflows x 3 browsers = 9`
+- expected checks per run: `7 workflows x 3 browsers = 21`
 
 Explicit Job:
 

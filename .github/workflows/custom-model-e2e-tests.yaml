@@ -9,8 +9,6 @@ on:
       - "src/**"
       - "package.json"
       - "package-lock.json"
-      - "docker-compose.ci.yaml"
-      - "Dockerfile"
       - ".github/workflows/custom-model-e2e-tests.yaml"
   pull_request:
     branches:
@@ -20,8 +18,6 @@ on:
       - "src/**"
       - "package.json"
       - "package-lock.json"
-      - "docker-compose.ci.yaml"
-      - "Dockerfile"
       - ".github/workflows/custom-model-e2e-tests.yaml"
   workflow_dispatch:
     inputs:
@@ -36,9 +32,9 @@ permissions:
 
 jobs:
   e2e-ci-app:
-    name: "E2E – CI App"
+    name: "E2E – CI (Mocked)"
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v4
@@ -55,34 +51,10 @@ jobs:
       - name: Install Playwright browsers
         run: npx playwright install --with-deps
 
-      - name: Build and start app
+      - name: Run mocked Playwright tests
         env:
-          OPEN_WEBUI_PORT: "8080"
-        run: docker compose -f docker-compose.ci.yaml up -d --build --wait
-
-      - name: Wait for app health
-        run: |
-          echo "Waiting for app to be healthy..."
-          for i in $(seq 1 60); do
-            if curl -sf http://localhost:8080/health > /dev/null 2>&1; then
-              echo "App is healthy after ${i}s"
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "App failed to become healthy within 120s"
-          docker compose -f docker-compose.ci.yaml logs
-          exit 1
-
-      - name: Run Playwright tests against localhost
-        env:
-          PLAYWRIGHT_BASE_URL: "http://localhost:8080"
-          PLAYWRIGHT_ADMIN_EMAIL: "admin@test.com"
-          PLAYWRIGHT_ADMIN_PASSWORD: "changeme-e2e-admin"
-          PLAYWRIGHT_STUDENT_EMAIL: "e2e-user@example.test"
-          PLAYWRIGHT_STUDENT_PASSWORD: "changeme-e2e-user"
           PLAYWRIGHT_SKIP_WEB_SERVER: "1"
-        run: npx playwright test playwright/tests/models/
+        run: npx playwright test playwright/tests/models/*.mocked.spec.ts
 
       - name: Upload Playwright report
         if: always()
@@ -97,41 +69,6 @@ jobs:
         with:
           name: e2e-ci-app-test-results
           path: test-results/
-
-      - name: Generate quality metrics
-        if: always()
-        run: |
-          mkdir -p quality-metrics
-          python scripts/serve_playwright_metrics.py \
-            --report playwright-report/index.html \
-            --host 127.0.0.1 &
-          exporter_pid=$!
-          trap 'kill ${exporter_pid} >/dev/null 2>&1 || true' EXIT
-          sleep 3
-          curl -fsS http://127.0.0.1:9109/metrics -o quality-metrics/custom-model-e2e-ci.prom
-
-      - name: Upload quality metrics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: e2e-ci-app-quality-metrics
-          path: quality-metrics/
-          retention-days: 14
-
-      - name: Collect container logs on failure
-        if: failure()
-        run: docker compose -f docker-compose.ci.yaml logs > container-logs.txt 2>&1
-
-      - name: Upload container logs
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: e2e-ci-app-container-logs
-          path: container-logs.txt
-
-      - name: Tear down
-        if: always()
-        run: docker compose -f docker-compose.ci.yaml down -v
 
   # Manual GitHub Actions smoke against deployed app.
   e2e-live:
@@ -155,14 +92,15 @@ jobs:
       - name: Install Playwright browsers
         run: npx playwright install --with-deps
 
-      - name: Run Playwright tests against live app
+      - name: Run live Playwright tests
         env:
+          PLAYWRIGHT_RUN_LIVE: "1"
           PLAYWRIGHT_BASE_URL: ${{ secrets.PLAYWRIGHT_BASE_URL }}
           PLAYWRIGHT_ADMIN_EMAIL: ${{ secrets.PLAYWRIGHT_ADMIN_EMAIL }}
           PLAYWRIGHT_ADMIN_PASSWORD: ${{ secrets.PLAYWRIGHT_ADMIN_PASSWORD }}
           PLAYWRIGHT_STUDENT_EMAIL: ${{ secrets.PLAYWRIGHT_STUDENT_EMAIL }}
           PLAYWRIGHT_STUDENT_PASSWORD: ${{ secrets.PLAYWRIGHT_STUDENT_PASSWORD }}
-        run: npx playwright test playwright/tests/models/
+        run: npx playwright test playwright/tests/models/*.live.spec.ts
 
       - name: Upload Playwright report
         if: always()
