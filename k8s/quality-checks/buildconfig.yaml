@@ -44,22 +44,12 @@ spec:
               secretName: ai-tutor-playwright-live-secret
           mounts:
             - destinationPath: /var/run/ai-tutor-playwright-live-secret
-        - name: ai-tutor-test-artifacts-bucket-secret
-          source:
-            type: Secret
-            secret:
-              secretName: ai-tutor-test-artifacts-bucket
-          mounts:
-            - destinationPath: /var/run/ai-tutor-artifacts-secret
       env:
-        - name: BUCKET_HOST
-          value: s3.openshift-storage.svc
-        - name: BUCKET_NAME
-          value: ai-tutor-test-artifacts-9d35ede8-55f6-4d72-8a4c-8881b0d844f3
-        - name: BUCKET_PORT
-          value: "443"
-        - name: BUCKET_TLS_VERIFY
-          value: "false"
+        # Build pods cannot mount PVCs, so build-triggered Playwright checks
+        # publish metrics only; artifacts are written by the post-deploy Job,
+        # which mounts the ai-tutor-quality-artifacts PVC.
+        - name: QUALITY_UPLOAD_ARTIFACTS
+          value: "0"
   output:
     to:
       kind: ImageStreamTag

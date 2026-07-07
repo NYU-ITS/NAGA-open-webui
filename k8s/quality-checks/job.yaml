@@ -17,13 +17,6 @@ spec:
         - name: frontend-post-deploy-quality-checks
           image: image-registry.openshift-image-registry.svc:5000/rit-genai-naga-dev/ai-tutor-frontend-quality-checks:latest
           imagePullPolicy: Always
-          envFrom:
-            - secretRef:
-                name: ai-tutor-test-artifacts-bucket
-                optional: true
-            - configMapRef:
-                name: ai-tutor-test-artifacts-bucket
-                optional: true
           env:
             - name: QUALITY_ENVIRONMENT
               value: openshift-dev
@@ -59,8 +52,10 @@ spec:
               value: "60000"
             - name: PLAYWRIGHT_HOMEWORK_PDF_PATH
               value: /workspace/playwright/fixtures/Math_HW.pdf
-            - name: BUCKET_TLS_VERIFY
-              value: "false"
+            - name: ARTIFACT_STORAGE_BACKEND
+              value: filesystem
+            - name: ARTIFACT_ROOT
+              value: /artifacts
             - name: PLAYWRIGHT_ADMIN_EMAIL
               valueFrom:
                 secretKeyRef:
@@ -83,6 +78,9 @@ spec:
                   key: student-password
             - name: QUALITY_PUSHGATEWAY_URL
               value: http://ai-tutor-quality-pushgateway:9091
+          volumeMounts:
+            - name: quality-artifacts
+              mountPath: /artifacts
           resources:
             requests:
               cpu: "1"
@@ -98,3 +96,9 @@ spec:
             runAsNonRoot: true
             seccompProfile:
               type: RuntimeDefault
+      volumes:
+        # Created by AI_Tutor_Analysis/k8s/observability/01-artifact-pvc.yaml in the
+        # same namespace; shared artifact store served by the artifact viewer.
+        - name: quality-artifacts
+          persistentVolumeClaim:
+            claimName: ai-tutor-quality-artifacts
