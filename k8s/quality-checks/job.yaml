@@ -56,6 +56,11 @@ spec:
               value: filesystem
             - name: ARTIFACT_ROOT
               value: /artifacts
+            # The quality image bakes QUALITY_UPLOAD_ARTIFACTS=0 from the
+            # BuildConfig (build pods cannot mount PVCs); re-enable it here where
+            # the PVC is mounted.
+            - name: QUALITY_UPLOAD_ARTIFACTS
+              value: "1"
             - name: PLAYWRIGHT_ADMIN_EMAIL
               valueFrom:
                 secretKeyRef:
