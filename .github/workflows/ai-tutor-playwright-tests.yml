@@ -11,6 +11,16 @@ on:
       - "playwright.config.ts"
       - "scripts/**"
       - ".github/workflows/ai-tutor-playwright-tests.yml"
+  pull_request:
+    branches: [rs/ai-tutor-tests]
+    paths:
+      - "playwright/**"
+      - "src/**"
+      - "package.json"
+      - "package-lock.json"
+      - "playwright.config.ts"
+      - "scripts/**"
+      - ".github/workflows/ai-tutor-playwright-tests.yml"
   workflow_dispatch:
     inputs:
       run_live:
@@ -20,6 +30,7 @@ on:
 
 permissions:
   contents: read
+  checks: write
 
 jobs:
   playwright:
@@ -85,11 +96,14 @@ jobs:
             npx playwright test \
               playwright/tests/ai-tutor-dashboard.mocked.spec.ts \
               playwright/tests/ai-tutor-dashboard.live.spec.ts \
+              playwright/tests/models/*.live.spec.ts \
               --workers="${PLAYWRIGHT_WORKERS}" \
               --retries="${PLAYWRIGHT_RETRIES}" \
               --timeout="${PLAYWRIGHT_TIMEOUT}"
           else
-            npx playwright test playwright/tests/ai-tutor-dashboard.mocked.spec.ts
+            npx playwright test \
+              playwright/tests/ai-tutor-dashboard.mocked.spec.ts \
+              playwright/tests/models/*.mocked.spec.ts
           fi
 
       - name: Upload Playwright report
