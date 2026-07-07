@@ -274,7 +274,7 @@ Artifact upload is best-effort. If artifact storage is unavailable, the runner l
 Storage wiring:
 
 - The explicit Job mounts the `ai-tutor-quality-artifacts` PVC (created by `AI_Tutor_Analysis/k8s/observability/01-artifact-pvc.yaml` in the same namespace). Retention is a daily 30-day cleanup CronJob owned by the backend repo.
-- The BuildConfig sets `QUALITY_UPLOAD_ARTIFACTS=0` because build pods cannot mount PVCs; build-triggered runs publish metrics only.
+- The BuildConfig sets `QUALITY_UPLOAD_ARTIFACTS=0` because build pods cannot mount PVCs; build-triggered runs publish metrics only. That value is baked into the image (OpenShift Docker-strategy env), so the post-deploy Job explicitly overrides it back to `1`. Change the flag in both places.
 - The previous ObjectBucket/S3 wiring (`ai-tutor-test-artifacts-bucket` secret, `BUCKET_*` env, `S3_REQUEST_TIMEOUT_SECONDS`) is retired, but the uploader keeps the `s3` code path behind `ARTIFACT_STORAGE_BACKEND=s3` for a future object-storage migration.
 
 ## Resources
