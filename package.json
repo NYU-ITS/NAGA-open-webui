@@ -19,11 +19,13 @@
 		"cy:open": "cypress open",
 		"test:frontend": "vitest --passWithNoTests",
 		"test:frontend:custom-models": "vitest run --config tests/unit/frontend/vitest.config.ts",
-		"test:e2e": "playwright test --config tests/e2e/playwright.config.ts",
-		"test:e2e:headed": "playwright test --config tests/e2e/playwright.config.ts --headed",
+		"test:e2e": "playwright test",
+		"test:e2e:headed": "playwright test --headed",
 		"test:e2e:ui": "playwright test",
 		"test:e2e:ui:headed": "playwright test --headed",
 		"test:e2e:ui:debug": "playwright test --debug",
+		"test:e2e:models:mocked": "playwright test playwright/tests/models/*.mocked.spec.ts",
+		"test:e2e:models:live": "PLAYWRIGHT_RUN_LIVE=1 playwright test playwright/tests/models/*.live.spec.ts",
 		"pyodide:fetch": "node scripts/prepare-pyodide.js"
 	},
 	"devDependencies": {
