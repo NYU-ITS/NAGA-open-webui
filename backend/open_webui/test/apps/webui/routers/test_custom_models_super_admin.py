@@ -5,7 +5,7 @@ pipe function, ownership is automatically assigned to the function's creator.
 """
 
 import pytest
-from tests.integration.backend.conftest import TEST_RUN_PREFIX
+from open_webui.test.conftest import TEST_RUN_PREFIX
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 

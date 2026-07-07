@@ -105,7 +105,7 @@ def seed_admin(db_session):
 
 
 @pytest.fixture
-def seed_user(db_session):
+def seed_user(db_session, seed_admin):
     from open_webui.models.users import Users
     user = Users.insert_new_user(
         id="test-user-1",
@@ -119,7 +119,7 @@ def seed_user(db_session):
 
 
 @pytest.fixture
-def seed_user_2(db_session):
+def seed_user_2(db_session, seed_admin):
     from open_webui.models.users import Users
     user = Users.insert_new_user(
         id="test-user-2",

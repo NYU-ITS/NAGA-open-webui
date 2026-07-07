@@ -5,7 +5,7 @@ ModelsLRUCache and subsequent reads return fresh data from the DB.
 """
 
 import pytest
-from tests.integration.backend.conftest import TEST_RUN_PREFIX
+from open_webui.test.conftest import TEST_RUN_PREFIX
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 

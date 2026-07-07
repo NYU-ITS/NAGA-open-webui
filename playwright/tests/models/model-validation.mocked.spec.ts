@@ -33,7 +33,10 @@ async function mockModelApis(page: Page) {
 		if (path === '/api/v1/users/is-super-admin' && method === 'GET') {
 			return json(route, true);
 		}
-		if (path === '/api/v1/models/' && method === 'GET') {
+		if ((path === '/api/models' || path === '/api/v1/models/') && method === 'GET') {
+			return json(route, []);
+		}
+		if (path === '/api/models/base' && method === 'GET') {
 			return json(route, []);
 		}
 		if (path === '/api/v1/models/create' && method === 'POST') {

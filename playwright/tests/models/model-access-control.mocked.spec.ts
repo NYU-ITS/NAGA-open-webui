@@ -53,11 +53,14 @@ async function mockAccessControlApis(page: Page, currentUser: typeof mockAdmin) 
 		if (path === '/api/v1/users/is-super-admin' && method === 'GET') {
 			return json(route, currentUser.role === 'admin');
 		}
-		if (path === '/api/v1/models/' && method === 'GET') {
+		if ((path === '/api/models' || path === '/api/v1/models/') && method === 'GET') {
 			const visible = currentUser.role === 'admin'
 				? mockModels
 				: mockModels.filter((m) => m.user_id === currentUser.id);
 			return json(route, visible);
+		}
+		if (path === '/api/models/base' && method === 'GET') {
+			return json(route, []);
 		}
 		if (path.startsWith('/api/v1/')) {
 			return json(route, []);
