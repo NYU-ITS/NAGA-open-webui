@@ -90,7 +90,7 @@ The OpenShift runner executes:
 ```bash
 npx playwright test \
   playwright/tests/ai-tutor-dashboard.live.spec.ts \
-  tests/e2e/models/*.spec.ts \
+  playwright/tests/models/ \
   --workers="${PLAYWRIGHT_WORKERS}" \
   --retries="${PLAYWRIGHT_RETRIES}" \
   --timeout="${PLAYWRIGHT_TIMEOUT}"

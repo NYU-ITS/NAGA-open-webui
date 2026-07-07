@@ -4,7 +4,16 @@ on:
   push:
     branches:
       - rs/ai-tutor-tests
-      - tests/custom-models
+    paths:
+      - "backend/**"
+      - "tests/unit/backend/**"
+      - "tests/integration/backend/**"
+      - "tests/requirements-testing.txt"
+      - "tests/constraints-ci.txt"
+      - ".github/workflows/custom-model-backend-tests.yaml"
+  pull_request:
+    branches:
+      - rs/ai-tutor-tests
     paths:
       - "backend/**"
       - "tests/unit/backend/**"

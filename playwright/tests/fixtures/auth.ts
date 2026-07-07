@@ -2,16 +2,54 @@ import { APIRequestContext, Page, expect } from '@playwright/test';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-const authDir = path.resolve('tests/e2e/.auth');
+const authDir = path.resolve('playwright/tests/.auth');
 const userStatePath = path.join(authDir, 'user.json');
 const adminStatePath = path.join(authDir, 'admin.json');
 
-const ADMIN_EMAIL = process.env.E2E_ADMIN_EMAIL || process.env.PLAYWRIGHT_ADMIN_EMAIL || 'admin@test.com';
-const ADMIN_PASSWORD = process.env.E2E_ADMIN_PASSWORD || process.env.PLAYWRIGHT_ADMIN_PASSWORD || 'changeme-e2e-admin';
-const USER_EMAIL = process.env.E2E_USER_EMAIL || process.env.PLAYWRIGHT_STUDENT_EMAIL || 'e2e-user@example.test';
-const USER_PASSWORD = process.env.E2E_USER_PASSWORD || process.env.PLAYWRIGHT_STUDENT_PASSWORD || 'changeme-e2e-user';
+function isLiveMode(): boolean {
+  if (process.env.PLAYWRIGHT_RUN_LIVE === '1') return true;
+  const baseUrl = process.env.E2E_BASE_URL || process.env.PLAYWRIGHT_BASE_URL || '';
+  if (!baseUrl) return false;
+  try {
+    const host = new URL(baseUrl).hostname;
+    return host !== 'localhost' && host !== '127.0.0.1';
+  } catch {
+    return false;
+  }
+}
+
+const live = isLiveMode();
+
+if (live) {
+  const missing = [
+    ['E2E_ADMIN_EMAIL / PLAYWRIGHT_ADMIN_EMAIL', process.env.E2E_ADMIN_EMAIL || process.env.PLAYWRIGHT_ADMIN_EMAIL],
+    ['E2E_ADMIN_PASSWORD / PLAYWRIGHT_ADMIN_PASSWORD', process.env.E2E_ADMIN_PASSWORD || process.env.PLAYWRIGHT_ADMIN_PASSWORD],
+    ['E2E_USER_EMAIL / PLAYWRIGHT_STUDENT_EMAIL', process.env.E2E_USER_EMAIL || process.env.PLAYWRIGHT_STUDENT_EMAIL],
+    ['E2E_USER_PASSWORD / PLAYWRIGHT_STUDENT_PASSWORD', process.env.E2E_USER_PASSWORD || process.env.PLAYWRIGHT_STUDENT_PASSWORD],
+  ].filter(([, val]) => !val).map(([name]) => name);
+
+  if (missing.length > 0) {
+    throw new Error(
+      `Live mode requires credential env vars (no fallbacks allowed). Missing: ${missing.join(', ')}`
+    );
+  }
+}
+
+export const ADMIN_EMAIL = live
+  ? (process.env.E2E_ADMIN_EMAIL || process.env.PLAYWRIGHT_ADMIN_EMAIL)!
+  : process.env.E2E_ADMIN_EMAIL || process.env.PLAYWRIGHT_ADMIN_EMAIL || 'admin@test.com';
+export const ADMIN_PASSWORD = live
+  ? (process.env.E2E_ADMIN_PASSWORD || process.env.PLAYWRIGHT_ADMIN_PASSWORD)!
+  : process.env.E2E_ADMIN_PASSWORD || process.env.PLAYWRIGHT_ADMIN_PASSWORD || 'changeme-e2e-admin';
+export const USER_EMAIL = live
+  ? (process.env.E2E_USER_EMAIL || process.env.PLAYWRIGHT_STUDENT_EMAIL)!
+  : process.env.E2E_USER_EMAIL || process.env.PLAYWRIGHT_STUDENT_EMAIL || 'e2e-user@example.test';
+export const USER_PASSWORD = live
+  ? (process.env.E2E_USER_PASSWORD || process.env.PLAYWRIGHT_STUDENT_PASSWORD)!
+  : process.env.E2E_USER_PASSWORD || process.env.PLAYWRIGHT_STUDENT_PASSWORD || 'changeme-e2e-user';
 
 export async function bootstrapAdmin(request: APIRequestContext) {
+  if (live) return;
   const res = await request.post('/api/v1/auths/signup', {
     data: {
       name: 'E2E Admin',

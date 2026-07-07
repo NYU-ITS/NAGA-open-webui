@@ -10,7 +10,7 @@ services:
     ports:
       - ${OPEN_WEBUI_PORT-3000}:8080
     environment:
-      - 'WEBUI_SECRET_KEY=cdc5fcebf6b7ca3a5f89f23c0d6c98b5003dd932de3b92f30f9d4adac8bc7870'
+      - 'WEBUI_SECRET_KEY=ci-only-dummy-secret'
       - 'SUPER_ADMIN_EMAILS=admin@test.com'
       - 'DATABASE_URL=sqlite:////app/backend/data/webui.db'
       - 'VECTOR_DB=chroma'

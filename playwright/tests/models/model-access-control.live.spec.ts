@@ -1,13 +1,11 @@
 import { expect, test } from '@playwright/test';
 import { bootstrapAdmin, dismissModals, getAuthToken, loginAsAdmin, loginAsUser } from '../fixtures/auth';
 import { createModelViaAPI, deleteModelViaAPI, uniqueId } from '../fixtures/models';
-
-const USER_EMAIL = process.env.E2E_USER_EMAIL || 'e2e-user@example.test';
-const USER_PASSWORD = process.env.E2E_USER_PASSWORD || 'changeme-e2e-user';
+import { ADMIN_EMAIL, ADMIN_PASSWORD, USER_EMAIL, USER_PASSWORD } from '../fixtures/auth';
 
 async function ensureTestUser(request: import('@playwright/test').APIRequestContext): Promise<string | null> {
   const signinRes = await request.post('/api/v1/auths/signin', {
-    data: { email: process.env.E2E_ADMIN_EMAIL || 'admin@test.com', password: process.env.E2E_ADMIN_PASSWORD || 'changeme-e2e-admin' }
+    data: { email: ADMIN_EMAIL, password: ADMIN_PASSWORD }
   });
   if (!signinRes.ok()) return null;
   const { token: adminToken } = await signinRes.json();

@@ -5,7 +5,6 @@ on:
     branches: [rs/ai-tutor-tests]
     paths:
       - "playwright/**"
-      - "tests/e2e/**"
       - "src/**"
       - "package.json"
       - "package-lock.json"
