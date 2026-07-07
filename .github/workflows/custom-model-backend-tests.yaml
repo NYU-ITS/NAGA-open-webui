@@ -6,8 +6,6 @@ on:
       - rs/ai-tutor-tests
     paths:
       - "backend/**"
-      - "tests/unit/backend/**"
-      - "tests/integration/backend/**"
       - "tests/requirements-testing.txt"
       - "tests/constraints-ci.txt"
       - ".github/workflows/custom-model-backend-tests.yaml"
@@ -16,8 +14,6 @@ on:
       - rs/ai-tutor-tests
     paths:
       - "backend/**"
-      - "tests/unit/backend/**"
-      - "tests/integration/backend/**"
       - "tests/requirements-testing.txt"
       - "tests/constraints-ci.txt"
       - ".github/workflows/custom-model-backend-tests.yaml"
@@ -48,14 +44,20 @@ jobs:
           python -m pip install --upgrade pip "setuptools<81" wheel uv
           uv pip install --system -r backend/requirements.txt -r tests/requirements-testing.txt -c tests/constraints-ci.txt
 
-      - name: Run backend tests
+      - name: Run backend unit tests
         env:
           WEBUI_SECRET_KEY: test-secret-key
           PYTHONPATH: backend
         run: |
           mkdir -p test-results
-          pytest tests/unit/backend/ -v --junitxml=test-results/unit-results.xml --tb=short
-          pytest tests/integration/backend/ -v --junitxml=test-results/integration-results.xml --tb=short
+          pytest backend/open_webui/test/ -v -m unit --junitxml=test-results/unit-results.xml --tb=short
+
+      - name: Run backend integration tests
+        env:
+          WEBUI_SECRET_KEY: test-secret-key
+          PYTHONPATH: backend
+        run: |
+          pytest backend/open_webui/test/ -v -m integration --junitxml=test-results/integration-results.xml --tb=short
 
       - name: Upload test results
         if: always()
