@@ -1,6 +1,6 @@
 # AI Tutor Frontend Testing and Observability
 
-Last updated: 2026-05-08
+Last updated: 2026-07-06
 
 This document is the frontend source of truth for AI Tutor testing in `NAGA-open-webui`.
 
@@ -27,7 +27,7 @@ GitHub Actions runs:
 - AI Tutor Vitest unit/component checks
 - mocked Playwright dashboard workflows
 - artifacts for frontend results, Playwright reports, videos, and quality metrics
-- Grafana Cloud forwarding when Grafana secrets are configured
+- optional legacy Grafana Cloud forwarding when repository secrets are configured
 
 OpenShift runs:
 
@@ -78,8 +78,12 @@ PLAYWRIGHT_STUDENT_EMAIL="<student-email>" \
 PLAYWRIGHT_STUDENT_PASSWORD="<student-password>" \
 PLAYWRIGHT_HOMEWORK_PDF_PATH="$(pwd)/playwright/fixtures/Math_HW.pdf" \
 PLAYWRIGHT_BROWSERS_PATH=0 \
-npm run test:e2e:ui -- --project=chromium playwright/tests/ai-tutor-dashboard.live.spec.ts
+npm run test:e2e:ui -- playwright/tests/ai-tutor-dashboard.live.spec.ts
 ```
+
+This matches OpenShift by running all configured Playwright projects: Chromium,
+Firefox, and WebKit. For a faster local smoke check only, add
+`--project=chromium`.
 
 ## GitHub Actions
 
@@ -101,7 +105,7 @@ Default checks:
 - uploads Playwright report and videos
 - uploads Vitest JUnit results
 - creates a quality metrics artifact
-- forwards metrics to Grafana Cloud when secrets are configured
+- can forward metrics to Grafana Cloud only when the optional legacy secrets are configured
 
 Optional live GitHub mode:
 
@@ -109,7 +113,7 @@ Optional live GitHub mode:
 - requires live Playwright secrets and a reachable `PLAYWRIGHT_BASE_URL`
 - not the default path for OpenShift dev validation
 
-Required Grafana Cloud GitHub secrets:
+Optional legacy Grafana Cloud GitHub secrets:
 
 - `GRAFANA_CLOUD_PROMETHEUS_URL`
 - `GRAFANA_CLOUD_PROMETHEUS_USER`
@@ -184,7 +188,8 @@ Default non-secret env:
 - `PLAYWRIGHT_BASE_URL=http://open-webui.rit-genai-naga-dev.svc:80`
 - `PLAYWRIGHT_WORKERS=1`
 - `PLAYWRIGHT_RETRIES=0`
-- `PLAYWRIGHT_VIDEO=off`
+- `PLAYWRIGHT_TIMEOUT=60000`
+- `PLAYWRIGHT_VIDEO=on`
 - `PLAYWRIGHT_HOMEWORK_PDF_PATH=/workspace/playwright/fixtures/Math_HW.pdf`
 - `QUALITY_ENVIRONMENT=openshift-dev`
 - `QUALITY_REPOSITORY=NAGA-open-webui`
@@ -314,11 +319,13 @@ Explicit Job runner:
 - request: `1 CPU`, `2Gi memory`
 - limit: `2 CPU`, `4Gi memory`
 - `PLAYWRIGHT_WORKERS=1`
-- `PLAYWRIGHT_VIDEO=off`
+- `PLAYWRIGHT_VIDEO=on`
 - `ttlSecondsAfterFinished: 3600`
 - `backoffLimit: 0`
 
-These values are intentionally conservative for a single Chromium worker. Increase them only after checking actual OpenShift run usage.
+These values are intentionally conservative while the live workflows run across
+Chromium, Firefox, and WebKit with one worker. Increase them only after checking
+actual OpenShift run usage.
 
 ## Operational Commands
 
