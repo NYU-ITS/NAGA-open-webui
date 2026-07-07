@@ -8,7 +8,7 @@ const adminStatePath = path.join(authDir, 'admin.json');
 
 function isLiveMode(): boolean {
   if (process.env.PLAYWRIGHT_RUN_LIVE === '1') return true;
-  const baseUrl = process.env.E2E_BASE_URL || process.env.PLAYWRIGHT_BASE_URL || '';
+  const baseUrl = process.env.PLAYWRIGHT_BASE_URL || '';
   if (!baseUrl) return false;
   try {
     const host = new URL(baseUrl).hostname;
@@ -22,10 +22,10 @@ const live = isLiveMode();
 
 if (live) {
   const missing = [
-    ['E2E_ADMIN_EMAIL / PLAYWRIGHT_ADMIN_EMAIL', process.env.E2E_ADMIN_EMAIL || process.env.PLAYWRIGHT_ADMIN_EMAIL],
-    ['E2E_ADMIN_PASSWORD / PLAYWRIGHT_ADMIN_PASSWORD', process.env.E2E_ADMIN_PASSWORD || process.env.PLAYWRIGHT_ADMIN_PASSWORD],
-    ['E2E_USER_EMAIL / PLAYWRIGHT_STUDENT_EMAIL', process.env.E2E_USER_EMAIL || process.env.PLAYWRIGHT_STUDENT_EMAIL],
-    ['E2E_USER_PASSWORD / PLAYWRIGHT_STUDENT_PASSWORD', process.env.E2E_USER_PASSWORD || process.env.PLAYWRIGHT_STUDENT_PASSWORD],
+    ['PLAYWRIGHT_ADMIN_EMAIL', process.env.PLAYWRIGHT_ADMIN_EMAIL],
+    ['PLAYWRIGHT_ADMIN_PASSWORD', process.env.PLAYWRIGHT_ADMIN_PASSWORD],
+    ['PLAYWRIGHT_STUDENT_EMAIL', process.env.PLAYWRIGHT_STUDENT_EMAIL],
+    ['PLAYWRIGHT_STUDENT_PASSWORD', process.env.PLAYWRIGHT_STUDENT_PASSWORD],
   ].filter(([, val]) => !val).map(([name]) => name);
 
   if (missing.length > 0) {
@@ -36,17 +36,17 @@ if (live) {
 }
 
 export const ADMIN_EMAIL = live
-  ? (process.env.E2E_ADMIN_EMAIL || process.env.PLAYWRIGHT_ADMIN_EMAIL)!
-  : process.env.E2E_ADMIN_EMAIL || process.env.PLAYWRIGHT_ADMIN_EMAIL || 'admin@test.com';
+  ? process.env.PLAYWRIGHT_ADMIN_EMAIL!
+  : process.env.PLAYWRIGHT_ADMIN_EMAIL || 'admin@test.com';
 export const ADMIN_PASSWORD = live
-  ? (process.env.E2E_ADMIN_PASSWORD || process.env.PLAYWRIGHT_ADMIN_PASSWORD)!
-  : process.env.E2E_ADMIN_PASSWORD || process.env.PLAYWRIGHT_ADMIN_PASSWORD || 'changeme-e2e-admin';
+  ? process.env.PLAYWRIGHT_ADMIN_PASSWORD!
+  : process.env.PLAYWRIGHT_ADMIN_PASSWORD || 'changeme-e2e-admin';
 export const USER_EMAIL = live
-  ? (process.env.E2E_USER_EMAIL || process.env.PLAYWRIGHT_STUDENT_EMAIL)!
-  : process.env.E2E_USER_EMAIL || process.env.PLAYWRIGHT_STUDENT_EMAIL || 'e2e-user@example.test';
+  ? process.env.PLAYWRIGHT_STUDENT_EMAIL!
+  : process.env.PLAYWRIGHT_STUDENT_EMAIL || 'e2e-user@example.test';
 export const USER_PASSWORD = live
-  ? (process.env.E2E_USER_PASSWORD || process.env.PLAYWRIGHT_STUDENT_PASSWORD)!
-  : process.env.E2E_USER_PASSWORD || process.env.PLAYWRIGHT_STUDENT_PASSWORD || 'changeme-e2e-user';
+  ? process.env.PLAYWRIGHT_STUDENT_PASSWORD!
+  : process.env.PLAYWRIGHT_STUDENT_PASSWORD || 'changeme-e2e-user';
 
 export async function bootstrapAdmin(request: APIRequestContext) {
   if (live) return;

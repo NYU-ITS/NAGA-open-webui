@@ -76,11 +76,11 @@ jobs:
 
       - name: Run Playwright tests against localhost
         env:
-          E2E_BASE_URL: "http://localhost:8080"
-          E2E_ADMIN_EMAIL: "admin@test.com"
-          E2E_ADMIN_PASSWORD: "changeme-e2e-admin"
-          E2E_USER_EMAIL: "e2e-user@example.test"
-          E2E_USER_PASSWORD: "changeme-e2e-user"
+          PLAYWRIGHT_BASE_URL: "http://localhost:8080"
+          PLAYWRIGHT_ADMIN_EMAIL: "admin@test.com"
+          PLAYWRIGHT_ADMIN_PASSWORD: "changeme-e2e-admin"
+          PLAYWRIGHT_STUDENT_EMAIL: "e2e-user@example.test"
+          PLAYWRIGHT_STUDENT_PASSWORD: "changeme-e2e-user"
           PLAYWRIGHT_SKIP_WEB_SERVER: "1"
         run: npx playwright test playwright/tests/models/
 
@@ -157,11 +157,11 @@ jobs:
 
       - name: Run Playwright tests against live app
         env:
-          E2E_BASE_URL: ${{ secrets.PLAYWRIGHT_BASE_URL }}
-          E2E_ADMIN_EMAIL: ${{ secrets.PLAYWRIGHT_ADMIN_EMAIL }}
-          E2E_ADMIN_PASSWORD: ${{ secrets.PLAYWRIGHT_ADMIN_PASSWORD }}
-          E2E_USER_EMAIL: ${{ secrets.PLAYWRIGHT_STUDENT_EMAIL }}
-          E2E_USER_PASSWORD: ${{ secrets.PLAYWRIGHT_STUDENT_PASSWORD }}
+          PLAYWRIGHT_BASE_URL: ${{ secrets.PLAYWRIGHT_BASE_URL }}
+          PLAYWRIGHT_ADMIN_EMAIL: ${{ secrets.PLAYWRIGHT_ADMIN_EMAIL }}
+          PLAYWRIGHT_ADMIN_PASSWORD: ${{ secrets.PLAYWRIGHT_ADMIN_PASSWORD }}
+          PLAYWRIGHT_STUDENT_EMAIL: ${{ secrets.PLAYWRIGHT_STUDENT_EMAIL }}
+          PLAYWRIGHT_STUDENT_PASSWORD: ${{ secrets.PLAYWRIGHT_STUDENT_PASSWORD }}
         run: npx playwright test playwright/tests/models/
 
       - name: Upload Playwright report
