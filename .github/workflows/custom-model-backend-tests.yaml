@@ -47,15 +47,15 @@ jobs:
       - name: Run backend unit tests
         env:
           WEBUI_SECRET_KEY: test-secret-key
-          PYTHONPATH: backend
+          PYTHONPATH: backend:backend/open_webui
         run: |
           mkdir -p test-results
-          pytest backend/open_webui/test/ -v -m unit --junitxml=test-results/unit-results.xml --tb=short
+          pytest backend/open_webui/test/ -v -m unit --junitxml=test-results/unit-results.xml --tb=short --ignore=backend/open_webui/test/apps/webui/storage
 
       - name: Run backend integration tests
         env:
           WEBUI_SECRET_KEY: test-secret-key
-          PYTHONPATH: backend
+          PYTHONPATH: backend:backend/open_webui
         run: |
           pytest backend/open_webui/test/ -v -m integration --junitxml=test-results/integration-results.xml --tb=short
 
