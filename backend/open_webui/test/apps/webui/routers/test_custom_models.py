@@ -3,8 +3,6 @@
 Uses httpx.AsyncClient against the FastAPI app with auth overridden.
 """
 
-import os
-
 import pytest
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
@@ -251,8 +249,12 @@ class TestModelsRouter:
         assert resp.status_code == 200
         assert any(m["id"] == "base-1" for m in resp.json())
 
-    async def test_unauthorized_user_blocked_from_create(self, async_client, mock_regular_user):
-        old_val = os.environ.pop("USER_PERMISSIONS_WORKSPACE_MODELS_ACCESS", None)
+    async def test_unauthorized_user_blocked_from_create(self, async_client, app, mock_regular_user):
+        old_permissions = app.state.config.USER_PERMISSIONS
+        app.state.config.USER_PERMISSIONS = {
+            **old_permissions,
+            "workspace": {**old_permissions.get("workspace", {}), "models": False},
+        }
         try:
             with mock_regular_user():
                 resp = await async_client.post(
@@ -266,5 +268,4 @@ class TestModelsRouter:
                 )
             assert resp.status_code == 401
         finally:
-            if old_val is not None:
-                os.environ["USER_PERMISSIONS_WORKSPACE_MODELS_ACCESS"] = old_val
+            app.state.config.USER_PERMISSIONS = old_permissions

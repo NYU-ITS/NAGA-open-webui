@@ -8,7 +8,25 @@ const mockUser = {
 	token: 'playwright-token'
 };
 
-const mockModels: Array<{ id: string; name: string; base_model_id: string }> = [];
+const mockModels: Array<{
+	id: string;
+	name: string;
+	base_model_id: string;
+	user_id: string;
+	created_by: string;
+	access_control: {
+		read: { group_ids: string[]; user_ids: string[] };
+		write: { group_ids: string[]; user_ids: string[] };
+	};
+}> = [];
+const mockBaseModels = [
+	{
+		id: 'base-model',
+		name: 'Base Model',
+		owned_by: 'openai',
+		created_by: 'admin@example.com'
+	}
+];
 
 const json = (route: Route, payload: unknown, status = 200) =>
 	route.fulfill({
@@ -35,15 +53,25 @@ async function mockModelApis(page: Page) {
 		if (path === '/api/v1/users/is-super-admin' && method === 'GET') {
 			return json(route, true);
 		}
-		if ((path === '/api/models' || path === '/api/v1/models/') && method === 'GET') {
+		if (path === '/api/models' && method === 'GET') {
+			return json(route, mockBaseModels);
+		}
+		if (path === '/api/v1/models/' && method === 'GET') {
 			return json(route, mockModels);
 		}
 		if (path === '/api/models/base' && method === 'GET') {
-			return json(route, []);
+			return json(route, mockBaseModels);
 		}
 		if (path === '/api/v1/models/create' && method === 'POST') {
 			const body = JSON.parse(route.request().postData() || '{}');
-			const model = { id: body.id, name: body.name, base_model_id: body.base_model_id };
+			const model = {
+				id: body.id,
+				name: body.name,
+				base_model_id: body.base_model_id,
+				user_id: mockUser.id,
+				created_by: mockUser.email,
+				access_control: { read: { group_ids: [], user_ids: [] }, write: { group_ids: [], user_ids: [] } }
+			};
 			mockModels.push(model);
 			return json(route, model);
 		}
@@ -70,15 +98,16 @@ test.beforeEach(async ({ page }) => {
 });
 
 test.describe('custom model CRUD (mocked)', () => {
-	test('lists and deletes a custom model', async ({ page }) => {
+	test('creates and lists a custom model', async ({ page }) => {
 		await mockModelApis(page);
 
-		await page.goto('/workspace/models');
-		await expect(page.getByRole('button', { name: /create/i })).toBeVisible();
+		await page.goto('/workspace/models/create');
 
 		await page.getByPlaceholder('Model Name').fill('Test CRUD Model');
+		await page.locator('select[placeholder="Select a base model"]').selectOption('base-model');
 		await page.locator('form').evaluate((form) => form.requestSubmit());
 
+		await expect(page).toHaveURL(/\/workspace\/models$/);
 		await expect(page.locator('#model-item-Test-CRUD-Model')).toBeVisible();
 	});
 });
