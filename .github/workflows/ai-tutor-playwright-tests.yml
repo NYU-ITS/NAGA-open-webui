@@ -95,6 +95,8 @@ jobs:
             npx playwright test \
               playwright/tests/ai-tutor-dashboard.mocked.spec.ts \
               playwright/tests/ai-tutor-dashboard.live.spec.ts \
+              playwright/tests/groups/ui/groups.ui.mocked.spec.ts \
+              playwright/tests/groups/ui/groups.ui.live.spec.ts \
               playwright/tests/models/*.live.spec.ts \
               --workers="${PLAYWRIGHT_WORKERS}" \
               --retries="${PLAYWRIGHT_RETRIES}" \
@@ -102,6 +104,7 @@ jobs:
           else
             npx playwright test \
               playwright/tests/ai-tutor-dashboard.mocked.spec.ts \
+              playwright/tests/groups/ui/groups.ui.mocked.spec.ts \
               playwright/tests/models/*.mocked.spec.ts
           fi
 

@@ -74,6 +74,7 @@ forward_metrics_to_grafana_cloud() {
 playwright_status=0
 npx playwright test \
   playwright/tests/ai-tutor-dashboard.live.spec.ts \
+  playwright/tests/groups/ui/groups.ui.live.spec.ts \
   playwright/tests/models/*.live.spec.ts \
   --workers="${PLAYWRIGHT_WORKERS}" \
   --retries="${PLAYWRIGHT_RETRIES}" \

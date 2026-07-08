@@ -382,6 +382,10 @@ llm_portkey.py
 QWEN.md
 _check_db.py
 
+# Playwright
+playwright-report/
+playwright/.cache/
+.playwright/
 scratchpad/
 
 playwright/tests/.auth/*.json

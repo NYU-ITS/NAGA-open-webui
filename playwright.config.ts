@@ -4,7 +4,8 @@ const PORT = Number(process.env.PLAYWRIGHT_PORT ?? 4173);
 const HOST = process.env.PLAYWRIGHT_HOST ?? '127.0.0.1';
 const BASE_URL = process.env.PLAYWRIGHT_BASE_URL?.trim() || `http://${HOST}:${PORT}`;
 const WEB_SERVER_COMMAND =
-	process.env.PLAYWRIGHT_WEB_SERVER_COMMAND?.trim() || `npm run dev -- --host ${HOST} --port ${PORT}`;
+	process.env.PLAYWRIGHT_WEB_SERVER_COMMAND?.trim() ||
+	`npm run dev -- --host ${HOST} --port ${PORT}`;
 const SKIP_WEB_SERVER = process.env.PLAYWRIGHT_SKIP_WEB_SERVER === '1';
 const CI_RETRIES = Number(process.env.PLAYWRIGHT_RETRIES ?? 2);
 const CI_WORKERS = Number(process.env.PLAYWRIGHT_WORKERS ?? 2);

@@ -186,3 +186,13 @@ skip = '.git*,*.svg,package-lock.json,i18n,*.lock,*.css,*-bundle.js,locales,exam
 check-hidden = true
 # ignore-regex = ''
 ignore-words-list = 'ans'
+
+[tool.pytest.ini_options]
+pythonpath = ["backend/open_webui"]
+# test_provider.py needs storage emulators (gcp/azure/boto) that aren't installed;
+# ignore it so test discovery does not fail on its import error.
+addopts = "--ignore=backend/open_webui/test/apps/webui/storage/test_provider.py"
+markers = [
+    "workers: mark test as a worker test",
+    "integration: mark test as an integration test (requires external services)",
+]

@@ -22,8 +22,11 @@
 		"test:e2e": "playwright test",
 		"test:e2e:headed": "playwright test --headed",
 		"test:e2e:ui": "playwright test",
+		"test:e2e:report": "playwright show-report",
 		"test:e2e:ui:headed": "playwright test --headed",
 		"test:e2e:ui:debug": "playwright test --debug",
+		"test:e2e:groups:mocked": "playwright test playwright/tests/groups/ui/groups.ui.mocked.spec.ts",
+		"test:e2e:groups:live": "PLAYWRIGHT_RUN_LIVE=1 playwright test playwright/tests/groups/ui/groups.ui.live.spec.ts",
 		"test:e2e:models:mocked": "playwright test playwright/tests/models/*.mocked.spec.ts",
 		"test:e2e:models:live": "PLAYWRIGHT_RUN_LIVE=1 playwright test playwright/tests/models/*.live.spec.ts",
 		"pyodide:fetch": "node scripts/prepare-pyodide.js"
