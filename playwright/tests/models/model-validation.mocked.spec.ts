@@ -16,9 +16,12 @@ const json = (route: Route, payload: unknown, status = 200) =>
 	});
 
 async function mockModelApis(page: Page) {
-	await page.route('**/api/**', async (route) => {
+	await page.route('**/*', async (route) => {
 		const url = new URL(route.request().url());
 		const path = url.pathname;
+		if (!path.startsWith('/api/')) {
+			return route.continue();
+		}
 		const method = route.request().method();
 
 		if (path === '/api/config' && method === 'GET') {
@@ -33,7 +36,13 @@ async function mockModelApis(page: Page) {
 		if (path === '/api/v1/users/is-super-admin' && method === 'GET') {
 			return json(route, true);
 		}
-		if ((path === '/api/models' || path === '/api/v1/models/') && method === 'GET') {
+		if (path === '/api/v1/users/' && method === 'GET') {
+			return json(route, [mockUser]);
+		}
+		if (path === '/api/models' && method === 'GET') {
+			return json(route, { data: [] });
+		}
+		if (path === '/api/v1/models/' && method === 'GET') {
 			return json(route, []);
 		}
 		if (path === '/api/models/base' && method === 'GET') {
@@ -65,6 +74,7 @@ test.describe('custom model validation UX (mocked)', () => {
 	test('blocks submission when name is empty', async ({ page }) => {
 		await mockModelApis(page);
 		await page.goto('/workspace/models/create');
+		await expect(page.locator('#splash-screen')).toHaveCount(0, { timeout: 15000 });
 		await page.locator('form').evaluate((form) => form.requestSubmit());
 		await expect(page).toHaveURL(/\/workspace\/models\/create/);
 	});
@@ -72,6 +82,7 @@ test.describe('custom model validation UX (mocked)', () => {
 	test('shows duplicate id error without redirecting', async ({ page }) => {
 		await mockModelApis(page);
 		await page.goto('/workspace/models/create');
+		await expect(page.locator('#splash-screen')).toHaveCount(0, { timeout: 15000 });
 		await page.getByPlaceholder('Model Name').fill('Duplicate Model');
 		await page.getByPlaceholder('Model ID').fill('existing-id');
 		await page.locator('form').evaluate((form) => form.requestSubmit());
@@ -81,6 +92,7 @@ test.describe('custom model validation UX (mocked)', () => {
 	test('base model field prevents submission when empty', async ({ page }) => {
 		await mockModelApis(page);
 		await page.goto('/workspace/models/create');
+		await expect(page.locator('#splash-screen')).toHaveCount(0, { timeout: 15000 });
 		await page.getByPlaceholder('Model Name').fill('No Base Model');
 		await page.locator('form').evaluate((form) => form.requestSubmit());
 		await expect(page).toHaveURL(/\/workspace\/models\/create/);

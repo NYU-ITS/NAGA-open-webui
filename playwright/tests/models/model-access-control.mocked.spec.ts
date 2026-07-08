@@ -33,9 +33,12 @@ const json = (route: Route, payload: unknown, status = 200) =>
 	});
 
 async function mockAccessControlApis(page: Page, currentUser: typeof mockAdmin) {
-	await page.route('**/api/**', async (route) => {
+	await page.route('**/*', async (route) => {
 		const url = new URL(route.request().url());
 		const path = url.pathname;
+		if (!path.startsWith('/api/')) {
+			return route.continue();
+		}
 		const method = route.request().method();
 
 		if (path === '/api/config' && method === 'GET') {
@@ -53,7 +56,16 @@ async function mockAccessControlApis(page: Page, currentUser: typeof mockAdmin) 
 		if (path === '/api/v1/users/is-super-admin' && method === 'GET') {
 			return json(route, currentUser.role === 'admin');
 		}
-		if ((path === '/api/models' || path === '/api/v1/models/') && method === 'GET') {
+		if (path === '/api/v1/users/' && method === 'GET') {
+			return json(route, [currentUser]);
+		}
+		if (path === '/api/models' && method === 'GET') {
+			const visible = currentUser.role === 'admin'
+				? mockModels
+				: mockModels.filter((m) => m.user_id === currentUser.id);
+			return json(route, { data: visible });
+		}
+		if (path === '/api/v1/models/' && method === 'GET') {
 			const visible = currentUser.role === 'admin'
 				? mockModels
 				: mockModels.filter((m) => m.user_id === currentUser.id);
@@ -81,12 +93,14 @@ test.describe('custom model access control (mocked)', () => {
 	test('admin sees all models', async ({ page }) => {
 		await mockAccessControlApis(page, mockAdmin);
 		await page.goto('/workspace/models');
+		await expect(page.locator('#splash-screen')).toHaveCount(0, { timeout: 15000 });
 		await expect(page.locator('#model-item-admin-private-model')).toBeVisible();
 	});
 
 	test('regular user sees only own models', async ({ page }) => {
 		await mockAccessControlApis(page, mockUser);
 		await page.goto('/workspace/models');
+		await expect(page.locator('#splash-screen')).toHaveCount(0, { timeout: 15000 });
 		await expect(page.locator('#model-item-admin-private-model')).toHaveCount(0);
 	});
 });

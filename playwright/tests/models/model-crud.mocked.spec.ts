@@ -36,9 +36,12 @@ const json = (route: Route, payload: unknown, status = 200) =>
 	});
 
 async function mockModelApis(page: Page) {
-	await page.route('**/api/**', async (route) => {
+	await page.route('**/*', async (route) => {
 		const url = new URL(route.request().url());
 		const path = url.pathname;
+		if (!path.startsWith('/api/')) {
+			return route.continue();
+		}
 		const method = route.request().method();
 
 		if (path === '/api/config' && method === 'GET') {
@@ -50,11 +53,14 @@ async function mockModelApis(page: Page) {
 		if (path === '/api/v1/users/user/settings' && method === 'GET') {
 			return json(route, { ui: { version: 'test' } });
 		}
+		if (path === '/api/v1/users/' && method === 'GET') {
+			return json(route, [mockUser]);
+		}
 		if (path === '/api/v1/users/is-super-admin' && method === 'GET') {
 			return json(route, true);
 		}
 		if (path === '/api/models' && method === 'GET') {
-			return json(route, mockBaseModels);
+			return json(route, { data: mockBaseModels });
 		}
 		if (path === '/api/v1/models/' && method === 'GET') {
 			return json(route, mockModels);
@@ -102,12 +108,13 @@ test.describe('custom model CRUD (mocked)', () => {
 		await mockModelApis(page);
 
 		await page.goto('/workspace/models/create');
+		await expect(page.locator('#splash-screen')).toHaveCount(0, { timeout: 15000 });
 
 		await page.getByPlaceholder('Model Name').fill('Test CRUD Model');
 		await page.locator('select[placeholder="Select a base model"]').selectOption('base-model');
 		await page.locator('form').evaluate((form) => form.requestSubmit());
 
 		await expect(page).toHaveURL(/\/workspace\/models$/);
-		await expect(page.locator('#model-item-Test-CRUD-Model')).toBeVisible();
+		await expect(page.locator('#model-item-test-crud-model')).toBeVisible();
 	});
 });

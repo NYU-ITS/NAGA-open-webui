@@ -21,9 +21,12 @@ const json = (route: Route, payload: unknown, status = 200) =>
 	});
 
 async function mockImportExportApis(page: Page) {
-	await page.route('**/api/**', async (route) => {
+	await page.route('**/*', async (route) => {
 		const url = new URL(route.request().url());
 		const path = url.pathname;
+		if (!path.startsWith('/api/')) {
+			return route.continue();
+		}
 		const method = route.request().method();
 
 		if (path === '/api/config' && method === 'GET') {
@@ -38,7 +41,13 @@ async function mockImportExportApis(page: Page) {
 		if (path === '/api/v1/users/is-super-admin' && method === 'GET') {
 			return json(route, true);
 		}
-		if ((path === '/api/models' || path === '/api/v1/models/') && method === 'GET') {
+		if (path === '/api/v1/users/' && method === 'GET') {
+			return json(route, [mockUser]);
+		}
+		if (path === '/api/models' && method === 'GET') {
+			return json(route, { data: mockModels });
+		}
+		if (path === '/api/v1/models/' && method === 'GET') {
 			return json(route, mockModels);
 		}
 		if (path === '/api/models/base' && method === 'GET') {
@@ -74,6 +83,7 @@ test.describe('custom model import and export (mocked)', () => {
 	test('exports all models from list page', async ({ page }) => {
 		await mockImportExportApis(page);
 		await page.goto('/workspace/models');
+		await expect(page.locator('#splash-screen')).toHaveCount(0, { timeout: 15000 });
 		const downloadPromise = page.waitForEvent('download');
 		await page.getByRole('button', { name: 'Export Models' }).click({ force: true });
 		const download = await downloadPromise;
@@ -83,6 +93,7 @@ test.describe('custom model import and export (mocked)', () => {
 	test('imports valid JSON as new model', async ({ page }) => {
 		await mockImportExportApis(page);
 		await page.goto('/workspace/models');
+		await expect(page.locator('#splash-screen')).toHaveCount(0, { timeout: 15000 });
 		await page.locator('#models-import-input').setInputFiles({
 			name: 'models-import-new.json',
 			mimeType: 'application/json',
@@ -94,6 +105,7 @@ test.describe('custom model import and export (mocked)', () => {
 	test('skips entries missing model.info safely', async ({ page }) => {
 		await mockImportExportApis(page);
 		await page.goto('/workspace/models');
+		await expect(page.locator('#splash-screen')).toHaveCount(0, { timeout: 15000 });
 		await page.locator('#models-import-input').setInputFiles({
 			name: 'models-import-skip.json',
 			mimeType: 'application/json',
