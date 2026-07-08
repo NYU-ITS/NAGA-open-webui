@@ -8,6 +8,9 @@ on:
       - "backend/**"
       - "pyproject.toml"
       - ".github/workflows/groups-backend-tests.yaml"
+  pull_request:
+    branches:
+      - rs/ai-tutor-tests
   workflow_dispatch:
 
 permissions:
