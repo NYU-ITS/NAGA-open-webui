@@ -7,7 +7,7 @@ const missing = [
 	['PLAYWRIGHT_STUDENT_PASSWORD', process.env.PLAYWRIGHT_STUDENT_PASSWORD]
 ].filter(([, val]) => !val).map(([name]) => name);
 
-if (missing.length > 0) {
+if (process.env.PLAYWRIGHT_RUN_LIVE === '1' && missing.length > 0) {
 	throw new Error(
 		`Live mode requires credential env vars (no fallbacks allowed). Missing: ${missing.join(', ')}`
 	);

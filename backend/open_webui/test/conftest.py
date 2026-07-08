@@ -60,8 +60,15 @@ def setup_db():
             pass
 
 
+_CUSTOM_MODEL_PATTERNS = ("test_custom_models", "test_models_table", "test_models_cache")
+
+
 @pytest.fixture(autouse=True)
-def cleanup_tables():
+def cleanup_tables(request):
+    test_file = str(request.node.fspath)
+    if not any(p in test_file for p in _CUSTOM_MODEL_PATTERNS):
+        yield
+        return
     from open_webui.internal.db import engine, Base
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
