@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { loginViaApi, dismissModals, getAuthToken, ADMIN_EMAIL, ADMIN_PASSWORD } from '../../fixtures/auth';
+import { loginViaApi, dismissModals, getAuthToken, signInViaApi, ADMIN_EMAIL, ADMIN_PASSWORD } from '../../fixtures/auth';
 import { createModelViaAPI, deleteModelViaAPI, uniqueId } from '../../fixtures/models';
 
 test.skip(process.env.PLAYWRIGHT_RUN_LIVE !== '1', 'Set PLAYWRIGHT_RUN_LIVE=1 to run live E2E workflows.');
@@ -8,11 +8,8 @@ const createdIds: string[] = [];
 
 test.afterAll(async ({ request }) => {
 	if (createdIds.length === 0) return;
-	const adminRes = await request.post('/api/v1/auths/signin', {
-		data: { email: ADMIN_EMAIL, password: ADMIN_PASSWORD }
-	});
-	if (!adminRes.ok()) return;
-	const { token } = await adminRes.json();
+	const token = await signInViaApi(request, ADMIN_EMAIL, ADMIN_PASSWORD).catch(() => null);
+	if (!token) return;
 	for (const id of createdIds) {
 		await deleteModelViaAPI(request, token, id).catch(() => {});
 	}
@@ -33,6 +30,7 @@ test.describe('custom model validation UX', () => {
 		const id = uniqueId('e2e-dupe');
 		createdIds.push(id);
 		await createModelViaAPI(request, token, { id, name: `Existing ${id}` });
+		await page.reload();
 
 		await page.goto('/workspace/models/create');
 		await dismissModals(page);

@@ -6,7 +6,8 @@ import {
 	ADMIN_EMAIL,
 	ADMIN_PASSWORD,
 	USER_EMAIL,
-	USER_PASSWORD
+	USER_PASSWORD,
+	signInViaApi
 } from '../../fixtures/auth';
 import { createModelViaAPI, deleteModelViaAPI, uniqueId } from '../../fixtures/models';
 
@@ -16,11 +17,8 @@ const createdIds: string[] = [];
 
 test.afterAll(async ({ request }) => {
 	if (createdIds.length === 0) return;
-	const adminRes = await request.post('/api/v1/auths/signin', {
-		data: { email: ADMIN_EMAIL, password: ADMIN_PASSWORD }
-	});
-	if (!adminRes.ok()) return;
-	const { token } = await adminRes.json();
+	const token = await signInViaApi(request, ADMIN_EMAIL, ADMIN_PASSWORD).catch(() => null);
+	if (!token) return;
 	for (const id of createdIds) {
 		await deleteModelViaAPI(request, token, id).catch(() => {});
 	}
@@ -33,6 +31,7 @@ test.describe('custom model access control visibility', () => {
 		const id = uniqueId('e2e-private');
 		createdIds.push(id);
 		await createModelViaAPI(page.request, adminToken, { id, name: `Private ${id}` });
+		await page.reload();
 
 		const userContext = await browser.newContext();
 		const userPage = await userContext.newPage();
@@ -50,6 +49,7 @@ test.describe('custom model access control visibility', () => {
 		const id = uniqueId('e2e-no-write');
 		createdIds.push(id);
 		await createModelViaAPI(page.request, adminToken, { id, name: `No Write ${id}` });
+		await page.reload();
 
 		const userContext = await browser.newContext();
 		const userPage = await userContext.newPage();

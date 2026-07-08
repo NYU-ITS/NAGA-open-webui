@@ -1,4 +1,4 @@
-import { APIRequestContext, Page, expect } from '@playwright/test';
+import { APIRequestContext, APIResponse, Page, expect } from '@playwright/test';
 
 const missing = [
 	['PLAYWRIGHT_ADMIN_EMAIL', process.env.PLAYWRIGHT_ADMIN_EMAIL],
@@ -18,16 +18,14 @@ export const ADMIN_PASSWORD = process.env.PLAYWRIGHT_ADMIN_PASSWORD!;
 export const USER_EMAIL = process.env.PLAYWRIGHT_STUDENT_EMAIL!;
 export const USER_PASSWORD = process.env.PLAYWRIGHT_STUDENT_PASSWORD!;
 
-export async function loginViaApi(page: Page, email: string, password: string) {
-	const response = await page.request.post('/api/v1/auths/signin', {
-		data: { email, password }
-	});
+export async function signInViaApi(request: APIRequestContext, email: string, password: string) {
+	const response = await retryApiRequest(
+		() => request.post('/api/v1/auths/signin', { data: { email, password } }),
+		`signin ${email}`
+	);
 
 	if (!response.ok()) {
-		throw new Error(
-			`Login failed (${response.status()}): ${await response.text()}\n` +
-				`Verify these credentials can sign in manually at ${page.url().split('/').slice(0, 3).join('/')}/auth`
-		);
+		throw new Error(`Login failed (${response.status()}): ${await response.text()}`);
 	}
 
 	const data = (await response.json()) as any;
@@ -40,6 +38,20 @@ export async function loginViaApi(page: Page, email: string, password: string) {
 
 	if (!token) {
 		throw new Error(`Login response missing token: ${JSON.stringify(data)}`);
+	}
+
+	return token;
+}
+
+export async function loginViaApi(page: Page, email: string, password: string) {
+	let token: string;
+	try {
+		token = await signInViaApi(page.request, email, password);
+	} catch (error) {
+		throw new Error(
+			`${error instanceof Error ? error.message : String(error)}\n` +
+				`Verify these credentials can sign in manually at ${page.url().split('/').slice(0, 3).join('/')}/auth`
+		);
 	}
 
 	await page.addInitScript((t) => {
@@ -83,10 +95,41 @@ export async function authHeaders(token: string) {
 	};
 }
 
-export async function requireOk(
-	response: Awaited<ReturnType<APIRequestContext['get']>>,
-	label: string
+const TRANSIENT_STATUS = new Set([408, 429, 500, 502, 503, 504]);
+const TRANSIENT_ERROR_RE = /(ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|socket hang up|network|timeout|Target page, context or browser has been closed)/i;
+
+function sleep(ms: number) {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function retryApiRequest(
+	operation: () => Promise<APIResponse>,
+	label: string,
+	options: { attempts?: number; baseDelayMs?: number } = {}
 ) {
+	const attempts = options.attempts ?? 4;
+	const baseDelayMs = options.baseDelayMs ?? 500;
+	let lastError: unknown;
+	let lastResponse: APIResponse | undefined;
+
+	for (let attempt = 1; attempt <= attempts; attempt++) {
+		try {
+			const response = await operation();
+			if (!TRANSIENT_STATUS.has(response.status()) || attempt === attempts) return response;
+			lastResponse = response;
+		} catch (error) {
+			lastError = error;
+			if (attempt === attempts || !TRANSIENT_ERROR_RE.test(String(error))) throw error;
+		}
+
+		await sleep(baseDelayMs * 2 ** (attempt - 1));
+	}
+
+	if (lastResponse) return lastResponse;
+	throw lastError ?? new Error(`${label} failed before response`);
+}
+
+export async function requireOk(response: APIResponse, label: string) {
 	if (!response.ok()) {
 		throw new Error(`${label} failed: ${response.status()} ${await response.text()}`);
 	}

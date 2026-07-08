@@ -1,5 +1,5 @@
 import { APIRequestContext } from '@playwright/test';
-import { authHeaders, requireOk } from './auth';
+import { authHeaders, requireOk, retryApiRequest } from './auth';
 
 export type ModelPayloadOverrides = Partial<ReturnType<typeof generateModelPayload>>;
 
@@ -36,24 +36,46 @@ export function generateModelPayload(overrides: ModelPayloadOverrides = {}) {
 
 export async function createModelViaAPI(request: APIRequestContext, token: string, overrides: ModelPayloadOverrides = {}) {
   const payload = generateModelPayload(overrides);
-  const response = await request.post('/api/v1/models/create', {
-    headers: await authHeaders(token),
-    data: payload
+  const response = await retryApiRequest(
+    async () => request.post('/api/v1/models/create', {
+      headers: await authHeaders(token),
+      data: payload
+    }),
+    `create model ${payload.id}`
+  ).catch(async (error) => {
+    if (await modelExists(request, token, payload.id)) return null;
+    throw error;
   });
-  await requireOk(response, `create model ${payload.id}`);
+  if (!response) return payload;
+  if (!response.ok()) {
+    if ([400, 409].includes(response.status()) && await modelExists(request, token, payload.id)) return payload;
+    await requireOk(response, `create model ${payload.id}`);
+  }
   return payload;
 }
 
 export async function deleteModelViaAPI(request: APIRequestContext, token: string, id: string) {
-  const response = await request.delete(`/api/v1/models/model/delete?id=${encodeURIComponent(id)}`, {
-    headers: await authHeaders(token)
-  });
+  const response = await retryApiRequest(
+    async () => request.delete(`/api/v1/models/model/delete?id=${encodeURIComponent(id)}`, {
+      headers: await authHeaders(token)
+    }),
+    `delete model ${id}`
+  );
   if (response.status() === 404 || response.status() === 401) return;
   await requireOk(response, `delete model ${id}`);
 }
 
 export async function getModelsViaAPI(request: APIRequestContext, token: string) {
-  const response = await request.get('/api/v1/models/', { headers: await authHeaders(token) });
+  const response = await retryApiRequest(
+    async () => request.get('/api/v1/models/', { headers: await authHeaders(token) }),
+    'get models'
+  );
   await requireOk(response, 'get models');
   return response.json();
+}
+
+async function modelExists(request: APIRequestContext, token: string, id: string) {
+  const models = await getModelsViaAPI(request, token).catch(() => []);
+  const list = Array.isArray(models) ? models : Object.values(models ?? {});
+  return list.some((model: any) => model?.id === id);
 }

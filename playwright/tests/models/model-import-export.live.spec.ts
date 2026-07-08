@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { loginViaApi, dismissModals, getAuthToken, ADMIN_EMAIL, ADMIN_PASSWORD } from '../../fixtures/auth';
+import { loginViaApi, dismissModals, getAuthToken, signInViaApi, ADMIN_EMAIL, ADMIN_PASSWORD } from '../../fixtures/auth';
 import { createModelViaAPI, deleteModelViaAPI, generateModelPayload, uniqueId } from '../../fixtures/models';
 
 test.skip(process.env.PLAYWRIGHT_RUN_LIVE !== '1', 'Set PLAYWRIGHT_RUN_LIVE=1 to run live E2E workflows.');
@@ -8,11 +8,8 @@ const createdIds: string[] = [];
 
 test.afterAll(async ({ request }) => {
 	if (createdIds.length === 0) return;
-	const adminRes = await request.post('/api/v1/auths/signin', {
-		data: { email: ADMIN_EMAIL, password: ADMIN_PASSWORD }
-	});
-	if (!adminRes.ok()) return;
-	const { token } = await adminRes.json();
+	const token = await signInViaApi(request, ADMIN_EMAIL, ADMIN_PASSWORD).catch(() => null);
+	if (!token) return;
 	for (const id of createdIds) {
 		await deleteModelViaAPI(request, token, id).catch(() => {});
 	}
@@ -35,11 +32,12 @@ test.describe('custom model import and export', () => {
 		const id = uniqueId('e2e-export-one');
 		createdIds.push(id);
 		await createModelViaAPI(request, token, { id, name: `Export One ${id}` });
+		await page.reload();
 
 		await page.goto('/workspace/models');
 		await dismissModals(page);
 		const card = page.locator(`#model-item-${id}`);
-		await expect(card).toBeVisible();
+		await expect(card).toBeVisible({ timeout: 15_000 });
 		await card.getByRole('button').first().click({ force: true });
 		const downloadPromise = page.waitForEvent('download');
 		await page.getByRole('menuitem', { name: 'Export' }).click({ force: true });
@@ -56,13 +54,19 @@ test.describe('custom model import and export', () => {
 
 		await page.goto('/workspace/models');
 		await dismissModals(page);
+
+		const modelsResponsePromise = page.waitForResponse(
+			(resp) => resp.url().includes('/api/v1/models/') && resp.status() === 200
+		);
 		await page.locator('#models-import-input').setInputFiles({
 			name: 'models-import-new.json',
 			mimeType: 'application/json',
 			buffer: Buffer.from(JSON.stringify([{ id, info: payload }]))
 		});
+		await modelsResponsePromise;
+		await page.waitForLoadState('networkidle');
 
-		await expect(page.locator(`#model-item-${id}`)).toBeVisible();
+		await expect(page.locator(`#model-item-${id}`)).toBeVisible({ timeout: 15_000 });
 	});
 
 	test('imports existing id as update instead of duplicate', async ({ page, request }) => {
@@ -71,6 +75,8 @@ test.describe('custom model import and export', () => {
 		const id = uniqueId('e2e-import-update');
 		createdIds.push(id);
 		await createModelViaAPI(request, token, { id, name: `Before ${id}` });
+		await page.reload();
+
 		const payload = generateModelPayload({
 			id,
 			name: `After ${id}`,
@@ -85,13 +91,19 @@ test.describe('custom model import and export', () => {
 
 		await page.goto('/workspace/models');
 		await dismissModals(page);
+
+		const modelsResponsePromise = page.waitForResponse(
+			(resp) => resp.url().includes('/api/v1/models/') && resp.status() === 200
+		);
 		await page.locator('#models-import-input').setInputFiles({
 			name: 'models-import-update.json',
 			mimeType: 'application/json',
 			buffer: Buffer.from(JSON.stringify([{ id, info: payload }]))
 		});
+		await modelsResponsePromise;
+		await page.waitForLoadState('networkidle');
 
-		await expect(page.locator(`#model-item-${id}`)).toContainText(`After ${id}`);
+		await expect(page.locator(`#model-item-${id}`)).toContainText(`After ${id}`, { timeout: 15_000 });
 		await expect(page.locator(`#model-item-${id}`)).toHaveCount(1);
 	});
 
@@ -104,7 +116,8 @@ test.describe('custom model import and export', () => {
 			mimeType: 'application/json',
 			buffer: Buffer.from(JSON.stringify([{ id: uniqueId('e2e-skip') }]))
 		});
+		await page.waitForLoadState('networkidle');
 		await expect(page.getByText(/SyntaxError|TypeError|Unhandled/i)).toHaveCount(0);
-		await expect(page.getByRole('button', { name: 'Export Models' })).toBeVisible();
+		await expect(page.getByRole('button', { name: 'Export Models' })).toBeVisible({ timeout: 15_000 });
 	});
 });
