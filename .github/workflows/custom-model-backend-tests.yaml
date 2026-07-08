@@ -1,0 +1,75 @@
+name: Custom Model Backend Tests
+
+on:
+  push:
+    branches:
+      - rs/ai-tutor-tests
+    paths:
+      - "backend/**"
+      - "tests/requirements-testing.txt"
+      - "tests/constraints-ci.txt"
+      - ".github/workflows/custom-model-backend-tests.yaml"
+  pull_request:
+    branches:
+      - rs/ai-tutor-tests
+    paths:
+      - "backend/**"
+      - "tests/requirements-testing.txt"
+      - "tests/constraints-ci.txt"
+      - ".github/workflows/custom-model-backend-tests.yaml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  checks: write
+
+jobs:
+  test-backend:
+    name: 'Backend Unit & Integration Tests'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        env:
+          PIP_CONSTRAINT: tests/constraints-ci.txt
+        run: |
+          python -m pip install --upgrade pip "setuptools<81" wheel uv
+          uv pip install --system -r backend/requirements.txt -r tests/requirements-testing.txt -c tests/constraints-ci.txt
+
+      - name: Run backend unit tests
+        env:
+          WEBUI_SECRET_KEY: test-secret-key
+          PYTHONPATH: backend:backend/open_webui
+        run: |
+          mkdir -p test-results
+          pytest backend/open_webui/test/ -v -m unit --junitxml=test-results/unit-results.xml --tb=short --ignore=backend/open_webui/test/apps/webui/storage
+
+      - name: Run backend integration tests
+        env:
+          WEBUI_SECRET_KEY: test-secret-key
+          PYTHONPATH: backend:backend/open_webui
+        run: |
+          pytest backend/open_webui/test/ -v -m integration --junitxml=test-results/integration-results.xml --tb=short --ignore=backend/open_webui/test/apps/webui/storage
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results/
+
+      - name: Publish test results
+        if: always()
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        with:
+          files: test-results/*.xml
+          check_name: "Custom Model Backend Test Results"
+          comment_mode: "off"

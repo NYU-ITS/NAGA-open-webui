@@ -11,6 +11,16 @@ on:
       - "playwright.config.ts"
       - "scripts/**"
       - ".github/workflows/ai-tutor-playwright-tests.yml"
+  pull_request:
+    branches: [rs/ai-tutor-tests]
+    paths:
+      - "playwright/**"
+      - "src/**"
+      - "package.json"
+      - "package-lock.json"
+      - "playwright.config.ts"
+      - "scripts/**"
+      - ".github/workflows/ai-tutor-playwright-tests.yml"
   workflow_dispatch:
     inputs:
       run_live:
@@ -71,6 +81,9 @@ jobs:
           PLAYWRIGHT_STUDENT_EMAIL: ${{ secrets.PLAYWRIGHT_STUDENT_EMAIL }}
           PLAYWRIGHT_STUDENT_PASSWORD: ${{ secrets.PLAYWRIGHT_STUDENT_PASSWORD }}
           PLAYWRIGHT_HOMEWORK_PDF_PATH: ${{ secrets.PLAYWRIGHT_HOMEWORK_PDF_PATH }}
+          PLAYWRIGHT_WORKERS: ${{ vars.PLAYWRIGHT_WORKERS || '2' }}
+          PLAYWRIGHT_RETRIES: ${{ vars.PLAYWRIGHT_RETRIES || '2' }}
+          PLAYWRIGHT_TIMEOUT: ${{ vars.PLAYWRIGHT_TIMEOUT || '30000' }}
         run: |
           if [[ "${RUN_LIVE}" == "true" ]]; then
             if [[ -z "${PLAYWRIGHT_BASE_URL_SECRET}" ]]; then
@@ -79,9 +92,17 @@ jobs:
             fi
             export PLAYWRIGHT_RUN_LIVE=1
             export PLAYWRIGHT_BASE_URL="${PLAYWRIGHT_BASE_URL_SECRET}"
-            npx playwright test playwright/tests/ai-tutor-dashboard.mocked.spec.ts playwright/tests/ai-tutor-dashboard.live.spec.ts
+            npx playwright test \
+              playwright/tests/ai-tutor-dashboard.mocked.spec.ts \
+              playwright/tests/ai-tutor-dashboard.live.spec.ts \
+              playwright/tests/models/*.live.spec.ts \
+              --workers="${PLAYWRIGHT_WORKERS}" \
+              --retries="${PLAYWRIGHT_RETRIES}" \
+              --timeout="${PLAYWRIGHT_TIMEOUT}"
           else
-            npx playwright test playwright/tests/ai-tutor-dashboard.mocked.spec.ts
+            npx playwright test \
+              playwright/tests/ai-tutor-dashboard.mocked.spec.ts \
+              playwright/tests/models/*.mocked.spec.ts
           fi
 
       - name: Upload Playwright report

@@ -6,6 +6,7 @@ node_modules
 .env
 .env.*
 !.env.example
+!.env.test.example
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 # Byte-compiled / optimized / DLL files
@@ -380,3 +381,10 @@ llm_portkey.py
 .env.local-ai-tutor
 QWEN.md
 _check_db.py
+
+scratchpad/
+
+playwright/tests/.auth/*.json
+test-results/
+tests/integration/frontend/
+*.timestamp-*.mjs

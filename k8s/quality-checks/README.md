@@ -88,19 +88,22 @@ For a strict "build, rollout, then test" gate, move this into OpenShift Pipeline
 The OpenShift runner executes:
 
 ```bash
-npx playwright test playwright/tests/ai-tutor-dashboard.live.spec.ts \
+npx playwright test \
+  playwright/tests/ai-tutor-dashboard.live.spec.ts \
+  playwright/tests/models/ \
   --workers="${PLAYWRIGHT_WORKERS}" \
   --retries="${PLAYWRIGHT_RETRIES}" \
   --timeout="${PLAYWRIGHT_TIMEOUT}"
 ```
 
-The Playwright config defines `chromium`, `firefox`, and `webkit` projects, and the OpenShift runner intentionally does not pass a `--project` filter. That means each live workflow runs once per browser. With the current three workflows, a clean OpenShift run executes nine browser checks.
+The Playwright config defines `chromium`, `firefox`, and `webkit` projects, and the OpenShift runner intentionally does not pass a `--project` filter. That means each live workflow runs once per browser. With the current test suites, a clean OpenShift run executes multiple browser checks across workflows.
 
 OpenShift runs:
 
 - live admin/instructor homework upload workflow
 - live student chat workflow
 - live admin/instructor analytics dashboard workflow
+- live custom model CRUD/validation/access-control/import-export workflows
 
 OpenShift does not run:
 
@@ -284,7 +287,7 @@ Quality build:
 - request: `500m CPU`, `1Gi memory`
 - limit: `2 CPU`, `4Gi memory`
 - browsers: Chromium, Firefox, WebKit
-- expected checks per run: `3 workflows x 3 browsers = 9`
+- expected checks per run: `7 workflows x 3 browsers = 21`
 
 Explicit Job:
 
