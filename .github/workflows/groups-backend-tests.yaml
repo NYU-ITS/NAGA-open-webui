@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - rs/ai-tutor-tests
-      - users/arjunbajpai
     paths:
       - "backend/**"
       - "pyproject.toml"

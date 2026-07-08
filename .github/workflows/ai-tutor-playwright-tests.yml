@@ -2,7 +2,7 @@ name: AI Tutor Frontend Quality Checks
 
 on:
   push:
-    branches: [rs/ai-tutor-tests, users/arjunbajpai]
+    branches: [rs/ai-tutor-tests]
     paths:
       - "playwright/**"
       - "src/**"
@@ -81,7 +81,6 @@ jobs:
           PLAYWRIGHT_STUDENT_EMAIL: ${{ secrets.PLAYWRIGHT_STUDENT_EMAIL }}
           PLAYWRIGHT_STUDENT_PASSWORD: ${{ secrets.PLAYWRIGHT_STUDENT_PASSWORD }}
           PLAYWRIGHT_HOMEWORK_PDF_PATH: ${{ secrets.PLAYWRIGHT_HOMEWORK_PDF_PATH }}
-          PLAYWRIGHT_GROUPS_BASE_URL: ${{ secrets.PLAYWRIGHT_BASE_URL }}
           PLAYWRIGHT_WORKERS: ${{ vars.PLAYWRIGHT_WORKERS || '2' }}
           PLAYWRIGHT_RETRIES: ${{ vars.PLAYWRIGHT_RETRIES || '2' }}
           PLAYWRIGHT_TIMEOUT: ${{ vars.PLAYWRIGHT_TIMEOUT || '30000' }}

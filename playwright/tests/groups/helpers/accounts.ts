@@ -18,6 +18,29 @@ function superAdminEmail(): string {
 
 const DEFAULT_PASSWORD = 'password123';
 
+const IS_LIVE = process.env.PLAYWRIGHT_RUN_LIVE === '1';
+
+// On a live run the accounts come from the ai-tutor-playwright-live-secret in
+// OpenShift. Never fall back to hardcoded defaults or sign up against a deployed
+// instance: require all four credentials up front and fail fast if any is unset.
+const LIVE_CREDENTIAL_VARS = [
+	'PLAYWRIGHT_ADMIN_EMAIL',
+	'PLAYWRIGHT_ADMIN_PASSWORD',
+	'PLAYWRIGHT_STUDENT_EMAIL',
+	'PLAYWRIGHT_STUDENT_PASSWORD'
+] as const;
+
+function assertLiveCredentials(): void {
+	const missing = LIVE_CREDENTIAL_VARS.filter((name) => !process.env[name]?.trim());
+	if (missing.length > 0) {
+		throw new Error(
+			`Live Playwright runs (PLAYWRIGHT_RUN_LIVE=1) require credentials to be provided ` +
+				`via the ai-tutor-playwright-live-secret; missing: ${missing.join(', ')}. ` +
+				`Hardcoded fallbacks are only allowed for local/fresh instances.`
+		);
+	}
+}
+
 export const ADMIN: TestAccount = {
 	email: process.env.PLAYWRIGHT_ADMIN_EMAIL?.trim() || superAdminEmail(),
 	password: process.env.PLAYWRIGHT_ADMIN_PASSWORD?.trim() || DEFAULT_PASSWORD,
@@ -54,6 +77,13 @@ async function ensureAdmin(request: APIRequestContext): Promise<SigninResult> {
 		return existing;
 	}
 
+	if (IS_LIVE) {
+		throw new Error(
+			`Live run: could not sign in as admin (${ADMIN.email}). The deployed instance must ` +
+				`already have this account; signup is disabled for live runs.`
+		);
+	}
+
 	// On a fresh instance the first signup becomes the admin.
 	const res = await request.post('/api/v1/auths/signup', {
 		data: { name: ADMIN.name, email: ADMIN.email, password: ADMIN.password }
@@ -73,6 +103,13 @@ async function ensureAdmin(request: APIRequestContext): Promise<SigninResult> {
 
 async function ensureStudent(request: APIRequestContext, adminToken: string): Promise<void> {
 	let student = await signin(request, STUDENT.email, STUDENT.password);
+
+	if (!student && IS_LIVE) {
+		throw new Error(
+			`Live run: could not sign in as the student (${STUDENT.email}). The deployed instance ` +
+				`must already have this account; account creation is disabled for live runs.`
+		);
+	}
 
 	if (!student) {
 		const add = await request.post('/api/v1/auths/add', {
@@ -103,6 +140,9 @@ async function ensureStudent(request: APIRequestContext, adminToken: string): Pr
 // Ensure one admin and one verified non-admin ("user") account exist, creating
 // them if the instance is fresh. Idempotent: re-running just signs in.
 export async function ensureTestAccounts(request: APIRequestContext): Promise<void> {
+	if (IS_LIVE) {
+		assertLiveCredentials();
+	}
 	const admin = await ensureAdmin(request);
 	await ensureStudent(request, admin.token);
 }

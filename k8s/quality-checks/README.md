@@ -90,6 +90,7 @@ The OpenShift runner executes:
 ```bash
 npx playwright test \
   playwright/tests/ai-tutor-dashboard.live.spec.ts \
+  playwright/tests/groups/ui/groups.ui.live.spec.ts \
   playwright/tests/models/ \
   --workers="${PLAYWRIGHT_WORKERS}" \
   --retries="${PLAYWRIGHT_RETRIES}" \
@@ -104,6 +105,7 @@ OpenShift runs:
 - live student chat workflow
 - live admin/instructor analytics dashboard workflow
 - live custom model CRUD/validation/access-control/import-export workflows
+- live groups management UI workflow
 
 OpenShift does not run:
 
@@ -287,7 +289,7 @@ Quality build:
 - request: `500m CPU`, `1Gi memory`
 - limit: `2 CPU`, `4Gi memory`
 - browsers: Chromium, Firefox, WebKit
-- expected checks per run: `7 workflows x 3 browsers = 21`
+- expected checks per run: `11 workflows x 3 browsers = 33`
 
 Explicit Job:
 
