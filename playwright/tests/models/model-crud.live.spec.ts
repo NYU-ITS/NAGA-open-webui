@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { loginViaApi, dismissModals, getAuthToken, signInViaApi, ADMIN_EMAIL, ADMIN_PASSWORD } from '../../fixtures/auth';
-import { createModelViaAPI, deleteModelViaAPI, uniqueId } from '../../fixtures/models';
+import { createModelViaAPI, deleteModelViaAPI, uniqueId, waitForModelViaAPI, attachModelPageDiagnostics } from '../../fixtures/models';
 
 test.skip(process.env.PLAYWRIGHT_RUN_LIVE !== '1', 'Set PLAYWRIGHT_RUN_LIVE=1 to run live E2E workflows.');
 
@@ -24,11 +24,13 @@ test.describe('custom model CRUD', () => {
 		createdIds.push(id);
 
 		await createModelViaAPI(request, token, { id, name });
+		await waitForModelViaAPI(request, token, id);
 		await page.reload();
 
 		await test.step('list model card', async () => {
 			await page.goto('/workspace/models');
 			await dismissModals(page);
+			await attachModelPageDiagnostics(page, id, token);
 			await expect(page.locator(`#model-item-${id}`)).toBeVisible({ timeout: 15_000 });
 			await expect(page.locator(`#model-item-${id}`)).toContainText(name);
 		});

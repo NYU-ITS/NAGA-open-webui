@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { loginViaApi, dismissModals, getAuthToken, signInViaApi, ADMIN_EMAIL, ADMIN_PASSWORD } from '../../fixtures/auth';
-import { createModelViaAPI, deleteModelViaAPI, generateModelPayload, uniqueId } from '../../fixtures/models';
+import { createModelViaAPI, deleteModelViaAPI, generateModelPayload, uniqueId, waitForModelViaAPI, attachModelPageDiagnostics } from '../../fixtures/models';
 
 test.skip(process.env.PLAYWRIGHT_RUN_LIVE !== '1', 'Set PLAYWRIGHT_RUN_LIVE=1 to run live E2E workflows.');
 
@@ -32,10 +32,12 @@ test.describe('custom model import and export', () => {
 		const id = uniqueId('e2e-export-one');
 		createdIds.push(id);
 		await createModelViaAPI(request, token, { id, name: `Export One ${id}` });
+		await waitForModelViaAPI(request, token, id);
 		await page.reload();
 
 		await page.goto('/workspace/models');
 		await dismissModals(page);
+		await attachModelPageDiagnostics(page, id, token);
 		const card = page.locator(`#model-item-${id}`);
 		await expect(card).toBeVisible({ timeout: 15_000 });
 		await card.getByRole('button').first().click({ force: true });
@@ -64,7 +66,9 @@ test.describe('custom model import and export', () => {
 			buffer: Buffer.from(JSON.stringify([{ id, info: payload }]))
 		});
 		await modelsResponsePromise;
+		await waitForModelViaAPI(page.request, token, id);
 		await page.waitForLoadState('networkidle');
+		await attachModelPageDiagnostics(page, id, token);
 
 		await expect(page.locator(`#model-item-${id}`)).toBeVisible({ timeout: 15_000 });
 	});
@@ -75,6 +79,7 @@ test.describe('custom model import and export', () => {
 		const id = uniqueId('e2e-import-update');
 		createdIds.push(id);
 		await createModelViaAPI(request, token, { id, name: `Before ${id}` });
+		await waitForModelViaAPI(request, token, id);
 		await page.reload();
 
 		const payload = generateModelPayload({
@@ -101,7 +106,9 @@ test.describe('custom model import and export', () => {
 			buffer: Buffer.from(JSON.stringify([{ id, info: payload }]))
 		});
 		await modelsResponsePromise;
+		await waitForModelViaAPI(page.request, token, id);
 		await page.waitForLoadState('networkidle');
+		await attachModelPageDiagnostics(page, id, token);
 
 		await expect(page.locator(`#model-item-${id}`)).toContainText(`After ${id}`, { timeout: 15_000 });
 		await expect(page.locator(`#model-item-${id}`)).toHaveCount(1);

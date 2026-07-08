@@ -9,7 +9,7 @@ import {
 	USER_PASSWORD,
 	signInViaApi
 } from '../../fixtures/auth';
-import { createModelViaAPI, deleteModelViaAPI, uniqueId } from '../../fixtures/models';
+import { createModelViaAPI, deleteModelViaAPI, uniqueId, waitForModelViaAPI } from '../../fixtures/models';
 
 test.skip(process.env.PLAYWRIGHT_RUN_LIVE !== '1', 'Set PLAYWRIGHT_RUN_LIVE=1 to run live E2E workflows.');
 
@@ -31,6 +31,7 @@ test.describe('custom model access control visibility', () => {
 		const id = uniqueId('e2e-private');
 		createdIds.push(id);
 		await createModelViaAPI(page.request, adminToken, { id, name: `Private ${id}` });
+		await waitForModelViaAPI(page.request, adminToken, id);
 		await page.reload();
 
 		const userContext = await browser.newContext();
@@ -49,6 +50,7 @@ test.describe('custom model access control visibility', () => {
 		const id = uniqueId('e2e-no-write');
 		createdIds.push(id);
 		await createModelViaAPI(page.request, adminToken, { id, name: `No Write ${id}` });
+		await waitForModelViaAPI(page.request, adminToken, id);
 		await page.reload();
 
 		const userContext = await browser.newContext();
