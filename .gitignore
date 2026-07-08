@@ -385,5 +385,6 @@ _check_db.py
 scratchpad/
 
 playwright/tests/.auth/*.json
+test-results/
 tests/integration/frontend/
 *.timestamp-*.mjs
