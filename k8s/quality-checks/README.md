@@ -88,19 +88,22 @@ For a strict "build, rollout, then test" gate, move this into OpenShift Pipeline
 The OpenShift runner executes:
 
 ```bash
-npx playwright test playwright/tests/ai-tutor-dashboard.live.spec.ts \
+npx playwright test \
+  playwright/tests/ai-tutor-dashboard.live.spec.ts \
+  playwright/tests/models/ \
   --workers="${PLAYWRIGHT_WORKERS}" \
   --retries="${PLAYWRIGHT_RETRIES}" \
   --timeout="${PLAYWRIGHT_TIMEOUT}"
 ```
 
-The Playwright config defines `chromium`, `firefox`, and `webkit` projects, and the OpenShift runner intentionally does not pass a `--project` filter. That means each live workflow runs once per browser. With the current three workflows, a clean OpenShift run executes nine browser checks.
+The Playwright config defines `chromium`, `firefox`, and `webkit` projects, and the OpenShift runner intentionally does not pass a `--project` filter. That means each live workflow runs once per browser. With the current test suites, a clean OpenShift run executes multiple browser checks across workflows.
 
 OpenShift runs:
 
 - live admin/instructor homework upload workflow
 - live student chat workflow
 - live admin/instructor analytics dashboard workflow
+- live custom model CRUD/validation/access-control/import-export workflows
 
 OpenShift does not run:
 
@@ -274,7 +277,7 @@ Artifact upload is best-effort. If artifact storage is unavailable, the runner l
 Storage wiring:
 
 - The explicit Job mounts the `ai-tutor-quality-artifacts` PVC (created by `AI_Tutor_Analysis/k8s/observability/01-artifact-pvc.yaml` in the same namespace). Retention is a daily 30-day cleanup CronJob owned by the backend repo.
-- The BuildConfig sets `QUALITY_UPLOAD_ARTIFACTS=0` because build pods cannot mount PVCs; build-triggered runs publish metrics only.
+- The BuildConfig sets `QUALITY_UPLOAD_ARTIFACTS=0` because build pods cannot mount PVCs; build-triggered runs publish metrics only. That value is baked into the image (OpenShift Docker-strategy env), so the post-deploy Job explicitly overrides it back to `1`. Change the flag in both places.
 - The previous ObjectBucket/S3 wiring (`ai-tutor-test-artifacts-bucket` secret, `BUCKET_*` env, `S3_REQUEST_TIMEOUT_SECONDS`) is retired, but the uploader keeps the `s3` code path behind `ARTIFACT_STORAGE_BACKEND=s3` for a future object-storage migration.
 
 ## Resources
@@ -284,7 +287,7 @@ Quality build:
 - request: `500m CPU`, `1Gi memory`
 - limit: `2 CPU`, `4Gi memory`
 - browsers: Chromium, Firefox, WebKit
-- expected checks per run: `3 workflows x 3 browsers = 9`
+- expected checks per run: `7 workflows x 3 browsers = 21`
 
 Explicit Job:
 

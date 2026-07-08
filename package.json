@@ -18,13 +18,17 @@
 		"i18n:parse": "i18next --config i18next-parser.config.ts && prettier --write \"src/lib/i18n/**/*.{js,json}\"",
 		"cy:open": "cypress open",
 		"test:frontend": "vitest --passWithNoTests",
+		"test:frontend:custom-models": "vitest run --config tests/unit/frontend/vitest.config.ts",
 		"test:e2e": "playwright test",
+		"test:e2e:headed": "playwright test --headed",
 		"test:e2e:ui": "playwright test",
 		"test:e2e:report": "playwright show-report",
 		"test:e2e:ui:headed": "playwright test --headed",
 		"test:e2e:ui:debug": "playwright test --debug",
 		"test:e2e:groups:mocked": "playwright test playwright/tests/groups/ui/groups.ui.mocked.spec.ts",
 		"test:e2e:groups:live": "PLAYWRIGHT_RUN_LIVE=1 playwright test playwright/tests/groups/ui/groups.ui.live.spec.ts",
+		"test:e2e:models:mocked": "playwright test playwright/tests/models/*.mocked.spec.ts",
+		"test:e2e:models:live": "PLAYWRIGHT_RUN_LIVE=1 playwright test playwright/tests/models/*.live.spec.ts",
 		"pyodide:fetch": "node scripts/prepare-pyodide.js"
 	},
 	"devDependencies": {
@@ -56,7 +60,9 @@
 		"tslib": "^2.4.1",
 		"typescript": "^5.5.4",
 		"vite": "^5.4.14",
-		"vitest": "^1.6.1"
+		"vitest": "^1.6.1",
+		"@testing-library/svelte": "^4.2.0",
+		"@testing-library/jest-dom": "^6.4.0"
 	},
 	"type": "module",
 	"dependencies": {
