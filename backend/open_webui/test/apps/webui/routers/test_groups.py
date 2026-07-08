@@ -2,9 +2,6 @@ import itertools
 import os
 import time
 
-# The first user inserted must be in the super-admin allow-list (fork gating).
-os.environ["SUPER_ADMIN_EMAILS"] = "admin@test.com"
-
 from contextlib import contextmanager
 
 from test.util.abstract_integration_test import AbstractPostgresTest
@@ -51,12 +48,25 @@ class TestGroups(AbstractPostgresTest):
 
     @classmethod
     def setup_class(cls):
+        # The first user inserted must be in the super-admin allow-list (fork
+        # gating). Set it here rather than at import time so collecting this
+        # module does not clobber SUPER_ADMIN_EMAILS for other test files.
+        cls._prev_super_admin_emails = os.environ.get("SUPER_ADMIN_EMAILS")
+        os.environ["SUPER_ADMIN_EMAILS"] = "admin@test.com"
         super().setup_class()
         from open_webui.models.groups import Groups
         from open_webui.models.users import Users
 
         cls.groups = Groups
         cls.users = Users
+
+    @classmethod
+    def teardown_class(cls):
+        super().teardown_class()
+        if cls._prev_super_admin_emails is None:
+            os.environ.pop("SUPER_ADMIN_EMAILS", None)
+        else:
+            os.environ["SUPER_ADMIN_EMAILS"] = cls._prev_super_admin_emails
 
     def setup_method(self):
         super().setup_method()
