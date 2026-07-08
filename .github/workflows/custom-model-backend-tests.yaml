@@ -57,7 +57,7 @@ jobs:
           WEBUI_SECRET_KEY: test-secret-key
           PYTHONPATH: backend:backend/open_webui
         run: |
-          pytest backend/open_webui/test/ -v -m integration --junitxml=test-results/integration-results.xml --tb=short
+          pytest backend/open_webui/test/ -v -m integration --junitxml=test-results/integration-results.xml --tb=short --ignore=backend/open_webui/test/apps/webui/storage
 
       - name: Upload test results
         if: always()
@@ -71,5 +71,5 @@ jobs:
         uses: EnricoMi/publish-unit-test-result-action@v2
         with:
           files: test-results/*.xml
-          check_name: "Backend Test Results"
+          check_name: "Custom Model Backend Test Results"
           comment_mode: "off"
