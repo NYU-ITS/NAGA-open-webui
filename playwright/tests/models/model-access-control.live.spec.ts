@@ -13,15 +13,15 @@ import { createModelViaAPI, deleteModelViaAPI, uniqueId, waitForModelViaAPI } fr
 
 test.skip(process.env.PLAYWRIGHT_RUN_LIVE !== '1', 'Set PLAYWRIGHT_RUN_LIVE=1 to run live E2E workflows.');
 
-const createdIds: string[] = [];
+let createdId: string | null = null;
 
-test.afterAll(async ({ request }) => {
-	if (createdIds.length === 0) return;
+test.afterEach(async ({ request }) => {
+	if (!createdId) return;
+	const id = createdId;
+	createdId = null;
 	const token = await signInViaApi(request, ADMIN_EMAIL, ADMIN_PASSWORD).catch(() => null);
 	if (!token) return;
-	for (const id of createdIds) {
-		await deleteModelViaAPI(request, token, id).catch(() => {});
-	}
+	await deleteModelViaAPI(request, token, id).catch(() => {});
 });
 
 test.describe('custom model access control visibility', () => {
@@ -29,7 +29,7 @@ test.describe('custom model access control visibility', () => {
 		await loginViaApi(page, ADMIN_EMAIL, ADMIN_PASSWORD);
 		const adminToken = await getAuthToken(page);
 		const id = uniqueId('e2e-private');
-		createdIds.push(id);
+		createdId = id;
 		await createModelViaAPI(page.request, adminToken, { id, name: `Private ${id}` });
 		await waitForModelViaAPI(page.request, adminToken, id, { name: `Private ${id}` });
 
@@ -47,7 +47,7 @@ test.describe('custom model access control visibility', () => {
 		await loginViaApi(page, ADMIN_EMAIL, ADMIN_PASSWORD);
 		const adminToken = await getAuthToken(page);
 		const id = uniqueId('e2e-no-write');
-		createdIds.push(id);
+		createdId = id;
 		await createModelViaAPI(page.request, adminToken, { id, name: `No Write ${id}` });
 		await waitForModelViaAPI(page.request, adminToken, id, { name: `No Write ${id}` });
 

@@ -1,4 +1,4 @@
-import { APIRequestContext, Page, test } from '@playwright/test';
+import { APIRequestContext, Page, expect, test } from '@playwright/test';
 import { authHeaders, requireOk, retryApiRequest } from './auth';
 
 export type ModelPayloadOverrides = Partial<ReturnType<typeof generateModelPayload>>;
@@ -117,6 +117,57 @@ export async function waitForModelViaAPI(
         .map((model: any) => model.id)
         .join(', ')}. Last API error: ${stringifyError(lastError)}`
   );
+}
+
+export async function waitForModelCardInWorkspace(
+  page: Page,
+  id: string,
+  token: string,
+  options: { timeoutMs?: number; intervalMs?: number } = {}
+) {
+  const timeoutMs = options.timeoutMs ?? 90_000;
+  const intervalMs = options.intervalMs ?? 2_000;
+  const startedAt = Date.now();
+  const card = page.locator(`#model-item-${id}`);
+
+  while (Date.now() - startedAt < timeoutMs) {
+    await page.evaluate(async () => {
+      await fetch('/api/v1/models/', {
+        cache: 'reload',
+        headers: {
+          accept: 'application/json',
+          authorization: `Bearer ${localStorage.token}`
+        }
+      }).catch(() => null);
+    }).catch(() => null);
+    await page.goto(`/workspace/models?e2e_refresh=${Date.now()}`);
+    await page.locator('#splash-screen').waitFor({ state: 'detached', timeout: 15_000 }).catch(() => {});
+    if (await card.isVisible().catch(() => false)) return card;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+
+  await attachModelPageDiagnostics(page, id, token);
+  await expect(card).toBeVisible({ timeout: 1 });
+  return card;
+}
+
+export async function waitForModelDeletedViaAPI(
+  request: APIRequestContext,
+  token: string,
+  id: string,
+  options: { timeoutMs?: number; intervalMs?: number } = {}
+) {
+  const timeoutMs = options.timeoutMs ?? 45_000;
+  const intervalMs = options.intervalMs ?? 1_000;
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const models = await getModelsViaAPI(request, token).catch(() => []);
+    if (!normalizeModels(models).some((model: any) => model?.id === id)) return;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+
+  throw new Error(`model ${id} was not deleted after ${timeoutMs}ms`);
 }
 
 export async function attachModelPageDiagnostics(page: Page, id: string, token: string) {

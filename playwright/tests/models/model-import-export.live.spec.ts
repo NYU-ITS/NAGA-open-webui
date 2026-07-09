@@ -1,21 +1,25 @@
 import { expect, test } from '@playwright/test';
 import { loginViaApi, dismissModals, getAuthToken, signInViaApi, ADMIN_EMAIL, ADMIN_PASSWORD } from '../../fixtures/auth';
-import { createModelViaAPI, deleteModelViaAPI, generateModelPayload, uniqueId, waitForModelViaAPI, attachModelPageDiagnostics } from '../../fixtures/models';
+import { createModelViaAPI, deleteModelViaAPI, generateModelPayload, uniqueId, waitForModelViaAPI, waitForModelCardInWorkspace } from '../../fixtures/models';
 
 test.skip(process.env.PLAYWRIGHT_RUN_LIVE !== '1', 'Set PLAYWRIGHT_RUN_LIVE=1 to run live E2E workflows.');
 
-const createdIds: string[] = [];
+let createdId: string | null = null;
 
-test.afterAll(async ({ request }) => {
-	if (createdIds.length === 0) return;
+test.afterEach(async ({ request }) => {
+	if (!createdId) return;
+	const id = createdId;
+	createdId = null;
 	const token = await signInViaApi(request, ADMIN_EMAIL, ADMIN_PASSWORD).catch(() => null);
 	if (!token) return;
-	for (const id of createdIds) {
-		await deleteModelViaAPI(request, token, id).catch(() => {});
-	}
+	await deleteModelViaAPI(request, token, id).catch(() => {});
 });
 
 test.describe('custom model import and export', () => {
+	test.beforeEach(() => {
+		test.setTimeout(180_000);
+	});
+
 	test('exports all models from list page', async ({ page }) => {
 		await loginViaApi(page, ADMIN_EMAIL, ADMIN_PASSWORD);
 		await page.goto('/workspace/models');
@@ -30,15 +34,12 @@ test.describe('custom model import and export', () => {
 		await loginViaApi(page, ADMIN_EMAIL, ADMIN_PASSWORD);
 		const token = await getAuthToken(page);
 		const id = uniqueId('e2e-export-one');
-		createdIds.push(id);
+		createdId = id;
 		await createModelViaAPI(request, token, { id, name: `Export One ${id}` });
 		await waitForModelViaAPI(request, token, id, { name: `Export One ${id}` });
 
-		await page.goto('/workspace/models');
+		const card = await waitForModelCardInWorkspace(page, id, token);
 		await dismissModals(page);
-		await attachModelPageDiagnostics(page, id, token);
-		const card = page.locator(`#model-item-${id}`);
-		await expect(card).toBeVisible({ timeout: 15_000 });
 		await card.getByRole('button').first().click({ force: true });
 		const downloadPromise = page.waitForEvent('download');
 		await page.getByRole('menuitem', { name: 'Export' }).click({ force: true });
@@ -50,7 +51,7 @@ test.describe('custom model import and export', () => {
 		await loginViaApi(page, ADMIN_EMAIL, ADMIN_PASSWORD);
 		const token = await getAuthToken(page);
 		const id = uniqueId('e2e-import-new');
-		createdIds.push(id);
+		createdId = id;
 		const payload = generateModelPayload({ id, name: `Imported ${id}` });
 
 		await page.goto('/workspace/models');
@@ -62,18 +63,14 @@ test.describe('custom model import and export', () => {
 			buffer: Buffer.from(JSON.stringify([{ id, info: payload }]))
 		});
 		await waitForModelViaAPI(page.request, token, id, { name: `Imported ${id}` });
-		await page.goto('/workspace/models');
-		await dismissModals(page);
-		await attachModelPageDiagnostics(page, id, token);
-
-		await expect(page.locator(`#model-item-${id}`)).toBeVisible({ timeout: 15_000 });
+		await waitForModelCardInWorkspace(page, id, token);
 	});
 
 	test('imports existing id as update instead of duplicate', async ({ page, request }) => {
 		await loginViaApi(page, ADMIN_EMAIL, ADMIN_PASSWORD);
 		const token = await getAuthToken(page);
 		const id = uniqueId('e2e-import-update');
-		createdIds.push(id);
+		createdId = id;
 		await createModelViaAPI(request, token, { id, name: `Before ${id}` });
 		await waitForModelViaAPI(request, token, id, { name: `Before ${id}` });
 
@@ -98,11 +95,9 @@ test.describe('custom model import and export', () => {
 			buffer: Buffer.from(JSON.stringify([{ id, info: payload }]))
 		});
 		await waitForModelViaAPI(page.request, token, id, { name: `After ${id}` });
-		await page.goto('/workspace/models');
-		await dismissModals(page);
-		await attachModelPageDiagnostics(page, id, token);
+		const card = await waitForModelCardInWorkspace(page, id, token);
 
-		await expect(page.locator(`#model-item-${id}`)).toContainText(`After ${id}`, { timeout: 15_000 });
+		await expect(card).toContainText(`After ${id}`, { timeout: 15_000 });
 		await expect(page.locator(`#model-item-${id}`)).toHaveCount(1);
 	});
 

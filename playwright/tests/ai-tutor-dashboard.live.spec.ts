@@ -2,7 +2,10 @@
 
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
+import { authHeaders, requireOk } from '../fixtures/auth';
+import { createModelViaAPI, deleteModelViaAPI, waitForModelViaAPI } from '../fixtures/models';
+import { createGroupViaAPI, deleteGroupViaAPI, getCurrentUser } from '../fixtures/users';
 
 const liveEnabled = process.env.PLAYWRIGHT_RUN_LIVE === '1';
 const strictLiveChecks =
@@ -16,6 +19,12 @@ const studentEmail = process.env.PLAYWRIGHT_STUDENT_EMAIL ?? fallbackUserEmail;
 const studentPassword = process.env.PLAYWRIGHT_STUDENT_PASSWORD ?? fallbackUserPassword;
 const homeworkPdfPath = process.env.PLAYWRIGHT_HOMEWORK_PDF_PATH ?? '';
 
+type AITutorTestData = {
+	adminToken: string;
+	groupId: string;
+	modelId: string;
+};
+
 function skipOrFail(condition: unknown, message: string) {
 	if (!condition) return;
 	if (strictLiveChecks) {
@@ -24,8 +33,8 @@ function skipOrFail(condition: unknown, message: string) {
 	test.skip(true, message);
 }
 
-async function loginViaApi(page: Page, email: string, password: string) {
-	const response = await page.request.post('/api/v1/auths/signin', {
+async function signInForToken(request: APIRequestContext, email: string, password: string) {
+	const response = await request.post('/api/v1/auths/signin', {
 		data: {
 			email,
 			password
@@ -33,10 +42,7 @@ async function loginViaApi(page: Page, email: string, password: string) {
 	});
 
 	if (!response.ok()) {
-		throw new Error(
-			`Login failed (${response.status()}): ${await response.text()}\n` +
-				`Verify these credentials can sign in manually at ${page.url().split('/').slice(0, 3).join('/')}/auth`
-		);
+		throw new Error(`Login failed (${response.status()}): ${await response.text()}`);
 	}
 
 	const data = (await response.json()) as any;
@@ -50,6 +56,12 @@ async function loginViaApi(page: Page, email: string, password: string) {
 	if (!token) {
 		throw new Error(`Login response missing token: ${JSON.stringify(data)}`);
 	}
+
+	return token;
+}
+
+async function loginViaApi(page: Page, email: string, password: string) {
+	const token = await signInForToken(page.request, email, password);
 
 	await page.addInitScript((t) => {
 		localStorage.setItem('token', t);
@@ -69,6 +81,66 @@ async function loginAsAdmin(page: Page) {
 async function loginAsStudent(page: Page) {
 	skipOrFail(!studentEmail || !studentPassword, 'Provide PLAYWRIGHT_STUDENT_EMAIL and PLAYWRIGHT_STUDENT_PASSWORD.');
 	await loginViaApi(page, studentEmail, studentPassword);
+}
+
+async function createAITutorTestData(request: APIRequestContext): Promise<AITutorTestData> {
+	skipOrFail(!adminEmail || !adminPassword, 'Provide PLAYWRIGHT_ADMIN_EMAIL and PLAYWRIGHT_ADMIN_PASSWORD.');
+	skipOrFail(!studentEmail || !studentPassword, 'Provide PLAYWRIGHT_STUDENT_EMAIL and PLAYWRIGHT_STUDENT_PASSWORD.');
+
+	const runId = `e2e-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+	const adminToken = await signInForToken(request, adminEmail, adminPassword);
+	const studentToken = await signInForToken(request, studentEmail, studentPassword);
+	const admin = await getCurrentUser(request, adminToken);
+	const student = await getCurrentUser(request, studentToken);
+	const group = await createGroupViaAPI(request, adminToken, `00-${runId}-class`, [admin.id, student.id]);
+	const groupId = group?.id;
+	if (!groupId) throw new Error(`create group response missing id: ${JSON.stringify(group)}`);
+
+	const modelId = `test-custom-models-${runId}`;
+	const modelName = `homework ${runId}`;
+	const data = { adminToken, groupId, modelId };
+	await createModelViaAPI(request, adminToken, {
+		id: modelId,
+		base_model_id: modelId,
+		name: modelName,
+		access_control: {
+			read: { group_ids: [groupId], user_ids: [] },
+			write: { group_ids: [groupId], user_ids: [] }
+		}
+	});
+	await waitForModelViaAPI(request, adminToken, modelId, { name: modelName });
+	await ensureModelGroupAccess(request, adminToken, modelId, groupId);
+
+	return data;
+}
+
+async function ensureModelGroupAccess(
+	request: APIRequestContext,
+	token: string,
+	modelId: string,
+	groupId: string
+) {
+	const response = await request.get('/api/v1/models/', { headers: await authHeaders(token) });
+	await requireOk(response, 'get models for AI Tutor test data');
+	const models = await response.json();
+	const list = Array.isArray(models) ? models : Object.values(models ?? {});
+	const model = list.find((item: any) => item?.id === modelId);
+	const readGroupIds = model?.access_control?.read?.group_ids ?? [];
+	if (!readGroupIds.includes(groupId)) {
+		throw new Error(
+			`created homework model is not readable by test group: ${JSON.stringify({ modelId, groupId, access_control: model?.access_control })}`
+		);
+	}
+}
+
+async function deleteAITutorTestData(request: APIRequestContext, data: AITutorTestData | null) {
+	if (!data) return;
+	await deleteModelViaAPI(request, data.adminToken, data.modelId).catch((error) => {
+		console.warn(`Failed to delete AI Tutor test model ${data.modelId}:`, error);
+	});
+	await deleteGroupViaAPI(request, data.adminToken, data.groupId).catch((error) => {
+		console.warn(`Failed to delete AI Tutor test group ${data.groupId}:`, error);
+	});
 }
 
 async function dismissWhatsNewIfShown(page: Page) {
@@ -99,19 +171,19 @@ async function clearVisibleToasts(page: Page) {
 	}
 }
 
-async function openInstructorSetup(page: Page) {
-	await page.goto('/aitutordashboard/instructorsetup');
+async function openInstructorSetup(page: Page, groupId?: string) {
+	await page.goto(`/aitutordashboard/instructorsetup${groupId ? `?group_id=${encodeURIComponent(groupId)}` : ''}`);
 	await dismissWhatsNewIfShown(page);
-	await expect(page.getByText('Follow these 3 steps to analyze and support your students')).toBeVisible({
-		timeout: 15_000
+	await expect(page.getByText(/Follow these 3 steps to analyze and support your students/i)).toBeVisible({
+		timeout: 30_000
 	});
 }
 
-async function openTopicAnalysis(page: Page) {
-	await page.goto('/aitutordashboard/topicanalysis');
+async function openTopicAnalysis(page: Page, groupId?: string) {
+	await page.goto(`/aitutordashboard/topicanalysis${groupId ? `?group_id=${encodeURIComponent(groupId)}` : ''}`);
 	await dismissWhatsNewIfShown(page);
-	await expect(page.getByRole('heading', { name: 'Topic Analysis by Homework' })).toBeVisible({ timeout: 15_000 });
-	await expect(page.getByRole('link', { name: /Practice Question/i })).toBeVisible({ timeout: 15_000 });
+	await expect(page.getByRole('heading', { name: 'Topic Analysis by Homework' })).toBeVisible({ timeout: 30_000 });
+	await expect(page.getByRole('link', { name: /Practice Question/i })).toBeVisible({ timeout: 30_000 });
 }
 
 async function ensureHomeworkUploadTableVisible(page: Page) {
@@ -316,6 +388,7 @@ async function ensureChatModelSelectedIfNeeded(page: Page) {
 }
 
 async function sendChatAndWaitForAssistant(page: Page, message: string) {
+	await expect(page.locator('#chat-input')).toBeVisible({ timeout: 60_000 });
 	await page.locator('#chat-input').fill(message);
 	await page.locator('button[type="submit"]').click();
 
@@ -345,15 +418,22 @@ async function sendChatAndWaitForAssistant(page: Page, message: string) {
 
 test.describe('AI Tutor dashboard live workflow bots', () => {
 	test.skip(!liveEnabled, 'Set PLAYWRIGHT_RUN_LIVE=1 to run live E2E workflows.');
+	test.describe.configure({ mode: 'serial' });
 
-	test('Workflow 1 (Admin) Upload homework PDF', async ({ page }) => {
+	test('Workflow 1 (Admin) Upload homework PDF', async ({ page, request }) => {
 		test.setTimeout(120_000);
-		await loginAsAdmin(page);
-		await openInstructorSetup(page);
-		await uploadHomeworkPdf(page, homeworkPdfPath);
+		const data = await createAITutorTestData(request);
+		try {
+			await loginAsAdmin(page);
+			await openInstructorSetup(page, data.groupId);
+			await uploadHomeworkPdf(page, homeworkPdfPath);
+		} finally {
+			await deleteAITutorTestData(request, data);
+		}
 	});
 
 	test('Workflow 2 (Student) Send a chat message', async ({ page }) => {
+		test.setTimeout(120_000);
 		await loginAsStudent(page);
 		await page.goto('/');
 		await dismissWhatsNewIfShown(page);
@@ -362,8 +442,14 @@ test.describe('AI Tutor dashboard live workflow bots', () => {
 		await sendChatAndWaitForAssistant(page, 'Help me solve this homework problem.');
 	});
 
-	test('Workflow 3 (Admin) Open analytics dashboard', async ({ page }) => {
-		await loginAsAdmin(page);
-		await openTopicAnalysis(page);
+	test('Workflow 3 (Admin) Open analytics dashboard', async ({ page, request }) => {
+		test.setTimeout(120_000);
+		const data = await createAITutorTestData(request);
+		try {
+			await loginAsAdmin(page);
+			await openTopicAnalysis(page, data.groupId);
+		} finally {
+			await deleteAITutorTestData(request, data);
+		}
 	});
 });

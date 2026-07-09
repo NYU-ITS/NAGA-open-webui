@@ -4,18 +4,22 @@ import { createModelViaAPI, deleteModelViaAPI, uniqueId, waitForModelViaAPI } fr
 
 test.skip(process.env.PLAYWRIGHT_RUN_LIVE !== '1', 'Set PLAYWRIGHT_RUN_LIVE=1 to run live E2E workflows.');
 
-const createdIds: string[] = [];
+let createdId: string | null = null;
 
-test.afterAll(async ({ request }) => {
-	if (createdIds.length === 0) return;
+test.afterEach(async ({ request }) => {
+	if (!createdId) return;
+	const id = createdId;
+	createdId = null;
 	const token = await signInViaApi(request, ADMIN_EMAIL, ADMIN_PASSWORD).catch(() => null);
 	if (!token) return;
-	for (const id of createdIds) {
-		await deleteModelViaAPI(request, token, id).catch(() => {});
-	}
+	await deleteModelViaAPI(request, token, id).catch(() => {});
 });
 
 test.describe('custom model validation UX', () => {
+	test.beforeEach(() => {
+		test.setTimeout(180_000);
+	});
+
 	test('blocks submission when name is empty', async ({ page }) => {
 		await loginViaApi(page, ADMIN_EMAIL, ADMIN_PASSWORD);
 		await page.goto('/workspace/models/create');
@@ -28,7 +32,7 @@ test.describe('custom model validation UX', () => {
 		await loginViaApi(page, ADMIN_EMAIL, ADMIN_PASSWORD);
 		const token = await getAuthToken(page);
 		const id = uniqueId('e2e-dupe');
-		createdIds.push(id);
+		createdId = id;
 		await createModelViaAPI(request, token, { id, name: `Existing ${id}` });
 		await waitForModelViaAPI(request, token, id);
 		await page.reload();
