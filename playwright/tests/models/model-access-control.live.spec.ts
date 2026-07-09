@@ -31,8 +31,7 @@ test.describe('custom model access control visibility', () => {
 		const id = uniqueId('e2e-private');
 		createdIds.push(id);
 		await createModelViaAPI(page.request, adminToken, { id, name: `Private ${id}` });
-		await waitForModelViaAPI(page.request, adminToken, id);
-		await page.reload();
+		await waitForModelViaAPI(page.request, adminToken, id, { name: `Private ${id}` });
 
 		const userContext = await browser.newContext();
 		const userPage = await userContext.newPage();
@@ -50,8 +49,7 @@ test.describe('custom model access control visibility', () => {
 		const id = uniqueId('e2e-no-write');
 		createdIds.push(id);
 		await createModelViaAPI(page.request, adminToken, { id, name: `No Write ${id}` });
-		await waitForModelViaAPI(page.request, adminToken, id);
-		await page.reload();
+		await waitForModelViaAPI(page.request, adminToken, id, { name: `No Write ${id}` });
 
 		const userContext = await browser.newContext();
 		const userPage = await userContext.newPage();

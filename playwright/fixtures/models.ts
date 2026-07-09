@@ -78,20 +78,22 @@ export async function waitForModelViaAPI(
   request: APIRequestContext,
   token: string,
   id: string,
-  options: { timeoutMs?: number; intervalMs?: number } = {}
+  options: { timeoutMs?: number; intervalMs?: number; name?: string } = {}
 ) {
   const timeoutMs = options.timeoutMs ?? 30_000;
   const intervalMs = options.intervalMs ?? 1_000;
   const startedAt = Date.now();
   let lastModels: any[] = [];
   let lastError: unknown;
+  let lastTarget: any = null;
 
   while (Date.now() - startedAt < timeoutMs) {
     try {
       const models = await getModelsViaAPI(request, token);
       lastModels = normalizeModels(models);
       const model = lastModels.find((item: any) => item?.id === id);
-      if (model) return model;
+      lastTarget = model ?? null;
+      if (model && (!options.name || model.name === options.name)) return model;
     } catch (error) {
       lastError = error;
     }
@@ -100,13 +102,16 @@ export async function waitForModelViaAPI(
 
   await attachModelDiagnostics(`api-models-${id}`, {
     id,
+    expectedName: options.name ?? null,
+    lastTarget: summarizeModel(lastTarget),
     lastError: stringifyError(lastError),
     visibleTestModels: summarizeModels(lastModels.filter((model: any) => String(model?.id ?? '').startsWith('test-custom-models-'))),
     visibleModelCount: lastModels.length
   });
 
   throw new Error(
-    `model ${id} was not visible from /api/v1/models/ after ${timeoutMs}ms. ` +
+    `model ${id} did not reach expected API state after ${timeoutMs}ms. ` +
+      `Expected name: ${options.name ?? '(any)'}. Last target: ${JSON.stringify(summarizeModel(lastTarget))}. ` +
       `Visible test models: ${lastModels
         .filter((model: any) => String(model?.id ?? '').startsWith('test-custom-models-'))
         .map((model: any) => model.id)

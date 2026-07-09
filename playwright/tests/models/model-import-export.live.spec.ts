@@ -32,8 +32,7 @@ test.describe('custom model import and export', () => {
 		const id = uniqueId('e2e-export-one');
 		createdIds.push(id);
 		await createModelViaAPI(request, token, { id, name: `Export One ${id}` });
-		await waitForModelViaAPI(request, token, id);
-		await page.reload();
+		await waitForModelViaAPI(request, token, id, { name: `Export One ${id}` });
 
 		await page.goto('/workspace/models');
 		await dismissModals(page);
@@ -57,17 +56,14 @@ test.describe('custom model import and export', () => {
 		await page.goto('/workspace/models');
 		await dismissModals(page);
 
-		const modelsResponsePromise = page.waitForResponse(
-			(resp) => resp.url().includes('/api/v1/models/') && resp.status() === 200
-		);
 		await page.locator('#models-import-input').setInputFiles({
 			name: 'models-import-new.json',
 			mimeType: 'application/json',
 			buffer: Buffer.from(JSON.stringify([{ id, info: payload }]))
 		});
-		await modelsResponsePromise;
-		await waitForModelViaAPI(page.request, token, id);
-		await page.waitForLoadState('networkidle');
+		await waitForModelViaAPI(page.request, token, id, { name: `Imported ${id}` });
+		await page.goto('/workspace/models');
+		await dismissModals(page);
 		await attachModelPageDiagnostics(page, id, token);
 
 		await expect(page.locator(`#model-item-${id}`)).toBeVisible({ timeout: 15_000 });
@@ -79,8 +75,7 @@ test.describe('custom model import and export', () => {
 		const id = uniqueId('e2e-import-update');
 		createdIds.push(id);
 		await createModelViaAPI(request, token, { id, name: `Before ${id}` });
-		await waitForModelViaAPI(request, token, id);
-		await page.reload();
+		await waitForModelViaAPI(request, token, id, { name: `Before ${id}` });
 
 		const payload = generateModelPayload({
 			id,
@@ -97,17 +92,14 @@ test.describe('custom model import and export', () => {
 		await page.goto('/workspace/models');
 		await dismissModals(page);
 
-		const modelsResponsePromise = page.waitForResponse(
-			(resp) => resp.url().includes('/api/v1/models/') && resp.status() === 200
-		);
 		await page.locator('#models-import-input').setInputFiles({
 			name: 'models-import-update.json',
 			mimeType: 'application/json',
 			buffer: Buffer.from(JSON.stringify([{ id, info: payload }]))
 		});
-		await modelsResponsePromise;
-		await waitForModelViaAPI(page.request, token, id);
-		await page.waitForLoadState('networkidle');
+		await waitForModelViaAPI(page.request, token, id, { name: `After ${id}` });
+		await page.goto('/workspace/models');
+		await dismissModals(page);
 		await attachModelPageDiagnostics(page, id, token);
 
 		await expect(page.locator(`#model-item-${id}`)).toContainText(`After ${id}`, { timeout: 15_000 });
@@ -123,7 +115,6 @@ test.describe('custom model import and export', () => {
 			mimeType: 'application/json',
 			buffer: Buffer.from(JSON.stringify([{ id: uniqueId('e2e-skip') }]))
 		});
-		await page.waitForLoadState('networkidle');
 		await expect(page.getByText(/SyntaxError|TypeError|Unhandled/i)).toHaveCount(0);
 		await expect(page.getByRole('button', { name: 'Export Models' })).toBeVisible({ timeout: 15_000 });
 	});

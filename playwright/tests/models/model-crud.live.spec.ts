@@ -24,8 +24,7 @@ test.describe('custom model CRUD', () => {
 		createdIds.push(id);
 
 		await createModelViaAPI(request, token, { id, name });
-		await waitForModelViaAPI(request, token, id);
-		await page.reload();
+		await waitForModelViaAPI(request, token, id, { name });
 
 		await test.step('list model card', async () => {
 			await page.goto('/workspace/models');
