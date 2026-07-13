@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { loginViaApi, dismissModals, getAuthToken, signInViaApi, ADMIN_EMAIL, ADMIN_PASSWORD } from '../../fixtures/auth';
-import { cleanupTestModelsViaAPI, createModelViaAPI, deleteModelViaAPI, uniqueId, waitForModelDeletedViaAPI, waitForModelViaAPI, waitForModelCardInWorkspace } from '../../fixtures/models';
+import { createModelViaAPI, deleteModelViaAPI, uniqueId, waitForModelDeletedViaAPI, waitForModelViaAPI, waitForModelCardInWorkspace } from '../../fixtures/models';
 
 test.skip(process.env.PLAYWRIGHT_RUN_LIVE !== '1', 'Set PLAYWRIGHT_RUN_LIVE=1 to run live E2E workflows.');
 
@@ -12,7 +12,8 @@ test.afterEach(async ({ request }) => {
 	createdId = null;
 	const token = await signInViaApi(request, ADMIN_EMAIL, ADMIN_PASSWORD).catch(() => null);
 	if (!token) return;
-	await deleteModelViaAPI(request, token, id).catch(() => {});
+	await deleteModelViaAPI(request, token, id);
+	await waitForModelDeletedViaAPI(request, token, id);
 });
 
 test.describe('custom model CRUD', () => {
@@ -23,7 +24,6 @@ test.describe('custom model CRUD', () => {
 	test('lists and deletes a custom model', async ({ page, request }) => {
 		await loginViaApi(page, ADMIN_EMAIL, ADMIN_PASSWORD);
 		const token = await getAuthToken(page);
-		await cleanupTestModelsViaAPI(request, token);
 		const id = uniqueId('e2e-crud');
 		const name = `E2E CRUD ${id}`;
 		createdId = id;

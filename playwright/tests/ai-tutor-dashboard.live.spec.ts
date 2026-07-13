@@ -3,8 +3,8 @@
 import { readFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
-import { authHeaders, requireOk } from '../fixtures/auth';
-import { createModelViaAPI, deleteModelViaAPI, waitForModelViaAPI } from '../fixtures/models';
+import { authHeaders, loginViaApi, requireOk, retryApiRequest, signInViaApi } from '../fixtures/auth';
+import { createModelViaAPI, deleteModelViaAPI, waitForModelDeletedViaAPI, waitForModelViaAPI } from '../fixtures/models';
 import { createGroupViaAPI, deleteGroupViaAPI, getCurrentUser } from '../fixtures/users';
 
 const liveEnabled = process.env.PLAYWRIGHT_RUN_LIVE === '1';
@@ -25,52 +25,14 @@ type AITutorTestData = {
 	modelId: string;
 };
 
+type AITutorOwnedResources = Partial<AITutorTestData>;
+
 function skipOrFail(condition: unknown, message: string) {
 	if (!condition) return;
 	if (strictLiveChecks) {
 		throw new Error(message);
 	}
 	test.skip(true, message);
-}
-
-async function signInForToken(request: APIRequestContext, email: string, password: string) {
-	const response = await request.post('/api/v1/auths/signin', {
-		data: {
-			email,
-			password
-		}
-	});
-
-	if (!response.ok()) {
-		throw new Error(`Login failed (${response.status()}): ${await response.text()}`);
-	}
-
-	const data = (await response.json()) as any;
-	const token =
-		data?.token ??
-		data?.access_token ??
-		data?.data?.token ??
-		data?.data?.access_token ??
-		'';
-
-	if (!token) {
-		throw new Error(`Login response missing token: ${JSON.stringify(data)}`);
-	}
-
-	return token;
-}
-
-async function loginViaApi(page: Page, email: string, password: string) {
-	const token = await signInForToken(page.request, email, password);
-
-	await page.addInitScript((t) => {
-		localStorage.setItem('token', t);
-		localStorage.setItem('locale', 'en-US');
-	}, token);
-
-	// Ensure app loads with token present.
-	await page.goto('/');
-	await expect(page).not.toHaveURL(/\/auth$/);
 }
 
 async function loginAsAdmin(page: Page) {
@@ -83,22 +45,26 @@ async function loginAsStudent(page: Page) {
 	await loginViaApi(page, studentEmail, studentPassword);
 }
 
-async function createAITutorTestData(request: APIRequestContext): Promise<AITutorTestData> {
+async function createAITutorTestData(
+	request: APIRequestContext,
+	owned: AITutorOwnedResources
+): Promise<AITutorTestData> {
 	skipOrFail(!adminEmail || !adminPassword, 'Provide PLAYWRIGHT_ADMIN_EMAIL and PLAYWRIGHT_ADMIN_PASSWORD.');
 	skipOrFail(!studentEmail || !studentPassword, 'Provide PLAYWRIGHT_STUDENT_EMAIL and PLAYWRIGHT_STUDENT_PASSWORD.');
 
 	const runId = `e2e-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-	const adminToken = await signInForToken(request, adminEmail, adminPassword);
-	const studentToken = await signInForToken(request, studentEmail, studentPassword);
+	const adminToken = await signInViaApi(request, adminEmail, adminPassword);
+	owned.adminToken = adminToken;
+	const studentToken = await signInViaApi(request, studentEmail, studentPassword);
 	const admin = await getCurrentUser(request, adminToken);
 	const student = await getCurrentUser(request, studentToken);
 	const group = await createGroupViaAPI(request, adminToken, `00-${runId}-class`, [admin.id, student.id]);
 	const groupId = group?.id;
 	if (!groupId) throw new Error(`create group response missing id: ${JSON.stringify(group)}`);
+	owned.groupId = groupId;
 
 	const modelId = `test-custom-models-${runId}`;
 	const modelName = `homework ${runId}`;
-	const data = { adminToken, groupId, modelId };
 	await createModelViaAPI(request, adminToken, {
 		id: modelId,
 		base_model_id: modelId,
@@ -108,10 +74,11 @@ async function createAITutorTestData(request: APIRequestContext): Promise<AITuto
 			write: { group_ids: [groupId], user_ids: [] }
 		}
 	});
+	owned.modelId = modelId;
 	await waitForModelViaAPI(request, adminToken, modelId, { name: modelName });
 	await ensureModelGroupAccess(request, adminToken, modelId, groupId);
 
-	return data;
+	return { adminToken, groupId, modelId };
 }
 
 async function ensureModelGroupAccess(
@@ -120,7 +87,10 @@ async function ensureModelGroupAccess(
 	modelId: string,
 	groupId: string
 ) {
-	const response = await request.get('/api/v1/models/', { headers: await authHeaders(token) });
+	const response = await retryApiRequest(
+		() => request.get('/api/v1/models/', { headers: authHeaders(token) }),
+		'get models for AI Tutor test data'
+	);
 	await requireOk(response, 'get models for AI Tutor test data');
 	const models = await response.json();
 	const list = Array.isArray(models) ? models : Object.values(models ?? {});
@@ -133,14 +103,33 @@ async function ensureModelGroupAccess(
 	}
 }
 
-async function deleteAITutorTestData(request: APIRequestContext, data: AITutorTestData | null) {
-	if (!data) return;
-	await deleteModelViaAPI(request, data.adminToken, data.modelId).catch((error) => {
-		console.warn(`Failed to delete AI Tutor test model ${data.modelId}:`, error);
-	});
-	await deleteGroupViaAPI(request, data.adminToken, data.groupId).catch((error) => {
-		console.warn(`Failed to delete AI Tutor test group ${data.groupId}:`, error);
-	});
+async function deleteAITutorTestData(request: APIRequestContext, owned: AITutorOwnedResources) {
+	if (!owned.adminToken) return;
+	const cleanupErrors: string[] = [];
+
+	if (owned.modelId) {
+		try {
+			await deleteModelViaAPI(request, owned.adminToken, owned.modelId);
+			await waitForModelDeletedViaAPI(request, owned.adminToken, owned.modelId);
+		} catch (error) {
+			cleanupErrors.push(`model ${owned.modelId}: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+	if (owned.groupId) {
+		try {
+			await deleteGroupViaAPI(request, owned.adminToken, owned.groupId);
+		} catch (error) {
+			cleanupErrors.push(`group ${owned.groupId}: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
+	if (cleanupErrors.length > 0) {
+		await test.info().attach('ai-tutor-cleanup', {
+			body: cleanupErrors.join('\n'),
+			contentType: 'text/plain'
+		});
+		if (test.info().status === 'passed') throw new Error(`AI Tutor cleanup failed: ${cleanupErrors.join('; ')}`);
+	}
 }
 
 async function dismissWhatsNewIfShown(page: Page) {
@@ -422,13 +411,14 @@ test.describe('AI Tutor dashboard live workflow bots', () => {
 
 	test('Workflow 1 (Admin) Upload homework PDF', async ({ page, request }) => {
 		test.setTimeout(120_000);
-		const data = await createAITutorTestData(request);
+		const owned: AITutorOwnedResources = {};
 		try {
+			const data = await createAITutorTestData(request, owned);
 			await loginAsAdmin(page);
 			await openInstructorSetup(page, data.groupId);
 			await uploadHomeworkPdf(page, homeworkPdfPath);
 		} finally {
-			await deleteAITutorTestData(request, data);
+			await deleteAITutorTestData(request, owned);
 		}
 	});
 
@@ -444,12 +434,13 @@ test.describe('AI Tutor dashboard live workflow bots', () => {
 
 	test('Workflow 3 (Admin) Open analytics dashboard', async ({ page, request }) => {
 		test.setTimeout(120_000);
-		const data = await createAITutorTestData(request);
+		const owned: AITutorOwnedResources = {};
 		try {
+			const data = await createAITutorTestData(request, owned);
 			await loginAsAdmin(page);
 			await openTopicAnalysis(page, data.groupId);
 		} finally {
-			await deleteAITutorTestData(request, data);
+			await deleteAITutorTestData(request, owned);
 		}
 	});
 });

@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { loginViaApi, dismissModals, getAuthToken, signInViaApi, ADMIN_EMAIL, ADMIN_PASSWORD } from '../../fixtures/auth';
-import { createModelViaAPI, deleteModelViaAPI, uniqueId, waitForModelViaAPI } from '../../fixtures/models';
+import { createModelViaAPI, deleteModelViaAPI, uniqueId, waitForModelDeletedViaAPI, waitForModelViaAPI } from '../../fixtures/models';
 
 test.skip(process.env.PLAYWRIGHT_RUN_LIVE !== '1', 'Set PLAYWRIGHT_RUN_LIVE=1 to run live E2E workflows.');
 
@@ -12,7 +12,8 @@ test.afterEach(async ({ request }) => {
 	createdId = null;
 	const token = await signInViaApi(request, ADMIN_EMAIL, ADMIN_PASSWORD).catch(() => null);
 	if (!token) return;
-	await deleteModelViaAPI(request, token, id).catch(() => {});
+	await deleteModelViaAPI(request, token, id);
+	await waitForModelDeletedViaAPI(request, token, id);
 });
 
 test.describe('custom model validation UX', () => {

@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { loginViaApi, dismissModals, getAuthToken, signInViaApi, ADMIN_EMAIL, ADMIN_PASSWORD } from '../../fixtures/auth';
-import { cleanupTestModelsViaAPI, createModelViaAPI, deleteModelViaAPI, generateModelPayload, uniqueId, waitForModelViaAPI, waitForModelCardInWorkspace } from '../../fixtures/models';
+import { createModelViaAPI, deleteModelViaAPI, generateModelPayload, uniqueId, waitForModelDeletedViaAPI, waitForModelViaAPI, waitForModelCardInWorkspace } from '../../fixtures/models';
 
 test.skip(process.env.PLAYWRIGHT_RUN_LIVE !== '1', 'Set PLAYWRIGHT_RUN_LIVE=1 to run live E2E workflows.');
 
@@ -12,7 +12,8 @@ test.afterEach(async ({ request }) => {
 	createdId = null;
 	const token = await signInViaApi(request, ADMIN_EMAIL, ADMIN_PASSWORD).catch(() => null);
 	if (!token) return;
-	await deleteModelViaAPI(request, token, id).catch(() => {});
+	await deleteModelViaAPI(request, token, id);
+	await waitForModelDeletedViaAPI(request, token, id);
 });
 
 test.describe('custom model import and export', () => {
@@ -33,7 +34,6 @@ test.describe('custom model import and export', () => {
 	test('exports a single model from card menu', async ({ page, request }) => {
 		await loginViaApi(page, ADMIN_EMAIL, ADMIN_PASSWORD);
 		const token = await getAuthToken(page);
-		await cleanupTestModelsViaAPI(request, token);
 		const id = uniqueId('e2e-export-one');
 		createdId = id;
 		await createModelViaAPI(request, token, { id, name: `Export One ${id}` });
@@ -48,10 +48,9 @@ test.describe('custom model import and export', () => {
 		expect(download.suggestedFilename()).toMatch(new RegExp(`^${id}-\\d+\\.json$`));
 	});
 
-	test('imports valid JSON as new model', async ({ page, request }) => {
+	test('imports valid JSON as new model', async ({ page }) => {
 		await loginViaApi(page, ADMIN_EMAIL, ADMIN_PASSWORD);
 		const token = await getAuthToken(page);
-		await cleanupTestModelsViaAPI(request, token);
 		const id = uniqueId('e2e-import-new');
 		createdId = id;
 		const payload = generateModelPayload({ id, name: `Imported ${id}` });
@@ -71,7 +70,6 @@ test.describe('custom model import and export', () => {
 	test('imports existing id as update instead of duplicate', async ({ page, request }) => {
 		await loginViaApi(page, ADMIN_EMAIL, ADMIN_PASSWORD);
 		const token = await getAuthToken(page);
-		await cleanupTestModelsViaAPI(request, token);
 		const id = uniqueId('e2e-import-update');
 		createdId = id;
 		await createModelViaAPI(request, token, { id, name: `Before ${id}` });

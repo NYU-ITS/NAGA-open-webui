@@ -87,7 +87,7 @@ export async function getAuthToken(page: Page) {
 	return token;
 }
 
-export async function authHeaders(token: string) {
+export function authHeaders(token: string) {
 	return {
 		authorization: `Bearer ${token}`,
 		accept: 'application/json',
