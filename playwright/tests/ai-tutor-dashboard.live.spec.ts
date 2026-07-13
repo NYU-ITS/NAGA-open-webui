@@ -1,7 +1,7 @@
 /// <reference types="node" />
 
 import { readFile } from 'node:fs/promises';
-import { basename } from 'node:path';
+import { basename, resolve } from 'node:path';
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
 import { authHeaders, requireOk } from '../fixtures/auth';
 import { createModelViaAPI, deleteModelViaAPI, waitForModelViaAPI } from '../fixtures/models';
@@ -17,7 +17,7 @@ const adminEmail = process.env.PLAYWRIGHT_ADMIN_EMAIL ?? fallbackUserEmail;
 const adminPassword = process.env.PLAYWRIGHT_ADMIN_PASSWORD ?? fallbackUserPassword;
 const studentEmail = process.env.PLAYWRIGHT_STUDENT_EMAIL ?? fallbackUserEmail;
 const studentPassword = process.env.PLAYWRIGHT_STUDENT_PASSWORD ?? fallbackUserPassword;
-const homeworkPdfPath = process.env.PLAYWRIGHT_HOMEWORK_PDF_PATH ?? '';
+const homeworkPdfPath = process.env.PLAYWRIGHT_HOMEWORK_PDF_PATH ?? resolve(process.cwd(), 'playwright/fixtures/Math_HW.pdf');
 
 type AITutorTestData = {
 	adminToken: string;

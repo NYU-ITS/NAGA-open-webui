@@ -65,6 +65,14 @@ export async function deleteModelViaAPI(request: APIRequestContext, token: strin
   await requireOk(response, `delete model ${id}`);
 }
 
+export async function cleanupTestModelsViaAPI(request: APIRequestContext, token: string) {
+  const models = normalizeModels(await getModelsViaAPI(request, token).catch(() => []));
+  const testModels = models.filter((model: any) => String(model?.id ?? '').startsWith('test-custom-models-'));
+  for (const model of testModels) {
+    await deleteModelViaAPI(request, token, model.id).catch(() => {});
+  }
+}
+
 export async function getModelsViaAPI(request: APIRequestContext, token: string) {
   const response = await retryApiRequest(
     async () => request.get('/api/v1/models/', { headers: await authHeaders(token) }),
@@ -129,6 +137,7 @@ export async function waitForModelCardInWorkspace(
   const intervalMs = options.intervalMs ?? 2_000;
   const startedAt = Date.now();
   const card = page.locator(`#model-item-${id}`);
+  const cardByText = page.getByText(id).first().locator('xpath=ancestor::div[.//button][1]');
 
   while (Date.now() - startedAt < timeoutMs) {
     await page.evaluate(async () => {
@@ -142,11 +151,17 @@ export async function waitForModelCardInWorkspace(
     }).catch(() => null);
     await page.goto(`/workspace/models?e2e_refresh=${Date.now()}`);
     await page.locator('#splash-screen').waitFor({ state: 'detached', timeout: 15_000 }).catch(() => {});
+    const search = page.getByPlaceholder('Search Models');
+    if (await search.isVisible({ timeout: 5_000 }).catch(() => false)) {
+      await search.fill(id);
+    }
     if (await card.isVisible().catch(() => false)) return card;
+    if (await cardByText.isVisible().catch(() => false)) return cardByText;
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
   }
 
   await attachModelPageDiagnostics(page, id, token);
+  if (await cardByText.isVisible().catch(() => false)) return cardByText;
   await expect(card).toBeVisible({ timeout: 1 });
   return card;
 }
