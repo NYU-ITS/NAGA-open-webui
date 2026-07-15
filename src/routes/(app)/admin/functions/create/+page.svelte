@@ -35,7 +35,6 @@
 		}
 
 		const res = await createNewFunction(localStorage.token, {
-			id: data.id,
 			name: data.name,
 			meta: data.meta,
 			content: data.content
@@ -90,7 +89,6 @@
 {#if mounted}
 	{#key func?.content}
 		<FunctionEditor
-			id={func?.id ?? ''}
 			name={func?.name ?? ''}
 			meta={func?.meta ?? { description: '' }}
 			content={func?.content ?? ''}

@@ -419,6 +419,28 @@ export const getUserValvesSpecById = async (token: string, id: string) => {
 	return res;
 };
 
+export const ensureAdminSystemDefault = async (token: string, apiKey: string) => {
+	const res = await fetch(`${WEBUI_API_BASE_URL}/functions/system-default/ensure`, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify({ api_key: apiKey })
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			console.error('Failed to ensure admin system default function:', err);
+			return null;
+		});
+
+	return res;
+};
+
 export const updateUserValvesById = async (token: string, id: string, valves: object) => {
 	let error = null;
 

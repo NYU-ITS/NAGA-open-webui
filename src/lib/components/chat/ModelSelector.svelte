@@ -4,6 +4,7 @@
 	import { toast } from 'svelte-sonner';
 	import Selector from './ModelSelector/Selector.svelte';
 	import Tooltip from '../common/Tooltip.svelte';
+	import { WORKSPACE_SETTINGS_PATH } from '$lib/constants';
 
 	import { updateUserSettings } from '$lib/apis/users';
 	const i18n = getContext('i18n');
@@ -109,6 +110,13 @@
 		</div>
 	{/each}
 </div>
+
+{#if $user?.role === 'admin' && !$models.some((m) => m?.pipe)}
+	<div class="absolute mt-[1px] ml-1 text-[0.7rem] text-amber-600 dark:text-amber-400 font-primary">
+		{$i18n.t('No LLM configured.')}
+		<a href={WORKSPACE_SETTINGS_PATH} class="underline">{$i18n.t('Set up your API key')}</a>
+	</div>
+{/if}
 
 {#if showSetDefault}
 	<div

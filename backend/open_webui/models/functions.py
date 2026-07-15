@@ -7,7 +7,7 @@ from open_webui.models.users import Users
 from open_webui.env import SRC_LOG_LEVELS
 from open_webui.utils.super_admin import is_super_admin
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import BigInteger, Boolean, Column, String, Text, or_
+from sqlalchemy import BigInteger, Boolean, Column, String, Text, and_, false, or_
 
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["MODELS"])
@@ -77,7 +77,7 @@ class FunctionResponse(BaseModel):
 
 
 class FunctionForm(BaseModel):
-    id: str
+    id: str = ""
     name: str
     content: str
     meta: FunctionMeta
@@ -142,6 +142,31 @@ class FunctionsTable:
         except Exception:
             return None
 
+    def get_all_system_default_functions(self) -> list[FunctionModel]:
+        try:
+            with get_db() as db:
+                return [
+                    FunctionModel.model_validate(f)
+                    for f in db.query(Function).filter_by(is_system_default=True).all()
+                ]
+        except Exception:
+            return []
+
+    def get_admin_system_default_function(self, admin_email: str) -> Optional[FunctionModel]:
+        """Return the is_system_default=True function owned by this admin, or None."""
+        try:
+            with get_db() as db:
+                function = (
+                    db.query(Function)
+                    .filter_by(created_by=admin_email, is_system_default=True)
+                    .first()
+                )
+                if function is None:
+                    return None
+                return FunctionModel.model_validate(function)
+        except Exception:
+            return None
+
     # def get_functions(self, active_only=False) -> list[FunctionModel]:
     #     with get_db() as db:
     #         if active_only:
@@ -156,13 +181,42 @@ class FunctionsTable:
     #             ]
 
     def get_functions(self, user_email, active_only=False, user=None) -> list[FunctionModel]:
-        # Always return only user's own functions, plus the shared System
-        # default function (created_by="system", visible to everyone)
+        # Resolve group membership before opening the DB session to avoid
+        # nesting a second get_db() call inside the outer session.
+        if user is not None and user.role != "admin":
+            from open_webui.models.groups import Groups
+            group_admin_emails = [
+                g.created_by for g in Groups.get_groups_by_member_id(user.id)
+            ]
+        else:
+            group_admin_emails = []
+
         with get_db() as db:
-            visibility_filter = or_(
-                Function.created_by == user_email,
-                Function.is_system_default == True,
-            )
+            if user is None:
+                # Internal/legacy callers (startup, tests): global system-default visibility.
+                visibility_filter = or_(
+                    Function.created_by == user_email,
+                    Function.is_system_default == True,
+                )
+            elif user.role == "admin":
+                # Admins see only their own functions. Each admin's per-admin
+                # system-default copy has created_by == admin email, so it's
+                # included here without needing the is_system_default flag.
+                visibility_filter = Function.created_by == user_email
+            else:
+                # Non-admin users: own functions + is_system_default=True rows
+                # from their group admins only (prevents cross-admin key leakage).
+                if group_admin_emails:
+                    visibility_filter = or_(
+                        Function.created_by == user_email,
+                        and_(
+                            Function.is_system_default == True,
+                            Function.created_by.in_(group_admin_emails),
+                        ),
+                    )
+                else:
+                    visibility_filter = Function.created_by == user_email
+
             if active_only:
                 return [
                     FunctionModel.model_validate(function)

@@ -595,22 +595,24 @@ def seed_default_function(app: FastAPI):
     from open_webui.config import DEFAULT_SYSTEM_FUNCTION_VERSION
     from open_webui.models.functions import Functions
 
-    existing = Functions.get_function_by_is_system_default()
+    all_defaults = Functions.get_all_system_default_functions()
 
-    if existing is None:
+    if not all_defaults:
         # Only reachable if adopt_existing_llm_function() found nothing to
         # adopt either, i.e. this is genuinely a new workspace.
         _insert_default_function(app, is_active=True)
-    elif existing.meta.manifest.get("version") != DEFAULT_SYSTEM_FUNCTION_VERSION:
-        function_module = _sync_function_content(existing.id)
-        app.state.FUNCTIONS[existing.id] = function_module
+        return
 
-        log.info(
-            "Upgraded default system function %s to version %s",
-            existing.id,
-            DEFAULT_SYSTEM_FUNCTION_VERSION,
-        )
-    # version matches -> do nothing
+    for existing in all_defaults:
+        if existing.meta.manifest.get("version") != DEFAULT_SYSTEM_FUNCTION_VERSION:
+            function_module = _sync_function_content(existing.id)
+            app.state.FUNCTIONS[existing.id] = function_module
+
+            log.info(
+                "Upgraded default system function %s to version %s",
+                existing.id,
+                DEFAULT_SYSTEM_FUNCTION_VERSION,
+            )
 
 
 def _find_portkey_pipe_function():
@@ -647,15 +649,6 @@ def _any_functions_exist() -> bool:
         return db.query(Function).first() is not None
 
 
-def _copy_portkey_key_to(id: str):
-    from open_webui.models.functions import Functions
-    from open_webui.utils.portkey import find_workspace_portkey_key
-
-    key = find_workspace_portkey_key()
-    if key:
-        Functions.update_function_valves_by_id(id, {"PORTKEY_API_KEY": key})
-
-
 def adopt_existing_llm_function(app: FastAPI):
     """One-time migration: adopt a pre-existing manually-configured Portkey
     pipe function (Subcase A1/A2) as the System default, or insert a disabled
@@ -684,10 +677,10 @@ def adopt_existing_llm_function(app: FastAPI):
         log.info("Adopted existing function %s as the system default", candidate.id)
     elif _any_functions_exist():
         # B - some other function(s) exist, none is the Portkey pipe.
-        # Insert new, disabled, try to copy key from workspace settings.
+        # Insert new, disabled. The valve is left empty; it will be populated
+        # the next time this admin saves their Workspace Settings (via /ensure).
         inserted = _insert_default_function(app, is_active=False)
         if inserted:
-            _copy_portkey_key_to(inserted.id)
             log.info(
                 "Inserted disabled system default function %s for existing workspace",
                 inserted.id,

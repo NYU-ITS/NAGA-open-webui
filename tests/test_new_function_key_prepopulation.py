@@ -38,6 +38,9 @@ def run_scenario(tmp_path, scenario):
         "PYTHONPATH": str(BACKEND_DIR),
         # Avoid the global VECTOR_DB=pgvector requiring a Postgres DATABASE_URL.
         "VECTOR_DB": "chroma",
+        # docker-compose.yaml sets WEBUI_SECRET_KEY='' (empty); env.py raises
+        # ValueError when WEBUI_AUTH=True and the key is empty.
+        "WEBUI_SECRET_KEY": os.environ.get("WEBUI_SECRET_KEY") or "test-secret-key-for-scenario-tests",
     }
 
     result = subprocess.run(

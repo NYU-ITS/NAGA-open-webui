@@ -36,7 +36,7 @@
 		}
 
 		const res = await updateFunctionById(localStorage.token, func.id, {
-			id: data.id,
+			id: func.id,
 			name: data.name,
 			meta: data.meta,
 			content: data.content
@@ -76,7 +76,7 @@
 {#if func}
 	<FunctionEditor
 		edit={true}
-		id={func.id}
+		readonly={func.is_system_default ?? false}
 		name={func.name}
 		meta={func.meta}
 		content={func.content}

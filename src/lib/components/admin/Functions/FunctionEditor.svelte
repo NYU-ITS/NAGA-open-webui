@@ -19,8 +19,8 @@
 
 	export let edit = false;
 	export let clone = false;
+	export let readonly = false;
 
-	export let id = '';
 	export let name = '';
 	export let meta = {
 		description: ''
@@ -35,10 +35,6 @@
 	const updateContent = () => {
 		_content = content;
 	};
-
-	$: if (name && !edit && !clone) {
-		id = name.replace(/\s+/g, '_').toLowerCase();
-	}
 
 	let codeEditor;
 	let boilerplate = `"""
@@ -258,15 +254,7 @@ class Pipe:
 
 	const saveHandler = async () => {
 		loading = true;
-		let emailPrefix = $user?.email?.split('@')[0]
-		// let finalName = (edit || name.endsWith(`_${emailPrefix}`)) ? name : `${name}_${emailPrefix}`;
-		const finalName = (!edit && !clone && !name.endsWith(`_${emailPrefix}`))? `${name}_${emailPrefix}`: name;
-		onSave({
-			id: finalName,
-			name: finalName,
-			meta,
-			content
-		});
+		onSave({ name, meta, content });
 	};
 
 	const submitHandler = async () => {
@@ -337,23 +325,6 @@ class Pipe:
 					</div>
 
 					<div class=" flex gap-2 px-1 items-center">
-						{#if edit}
-							<div class="text-sm text-gray-500 shrink-0">
-								{id}
-							</div>
-						{:else}
-							<Tooltip className="w-full" content={$i18n.t('e.g. my_filter')} placement="top-start">
-								<input
-									class="w-full text-sm disabled:text-gray-500 bg-transparent outline-hidden"
-									type="text"
-									placeholder={$i18n.t('Function ID')}
-									bind:value={id}
-									required
-									disabled={edit}
-								/>
-							</Tooltip>
-						{/if}
-
 						<Tooltip
 							className="w-full self-center items-center flex"
 							content={$i18n.t('e.g. A filter to remove profanity from text')}
@@ -370,7 +341,13 @@ class Pipe:
 					</div>
 				</div>
 
-				<div class="mb-2 flex-1 overflow-auto h-0 rounded-lg">
+				{#if readonly}
+					<div class="mb-2 text-xs text-amber-600 dark:text-amber-400 px-1">
+						{$i18n.t('System default functions are read-only. Clone this function to make changes.')}
+					</div>
+				{/if}
+
+				<div class="mb-2 flex-1 overflow-auto h-0 rounded-lg {readonly ? 'pointer-events-none opacity-70' : ''}">
 					<CodeEditor
 						bind:this={codeEditor}
 						value={content}
@@ -398,12 +375,14 @@ class Pipe:
 						</div>
 					</div>
 
-					<button
-						class="px-3.5 py-1.5 text-sm font-medium bg-black hover:bg-gray-900 text-white dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-full"
-						type="submit"
-					>
-						{$i18n.t('Save')}
-					</button>
+					{#if !readonly}
+						<button
+							class="px-3.5 py-1.5 text-sm font-medium bg-black hover:bg-gray-900 text-white dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-full"
+							type="submit"
+						>
+							{$i18n.t('Save')}
+						</button>
+					{/if}
 				</div>
 			</div>
 		</form>

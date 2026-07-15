@@ -43,6 +43,9 @@ def run_scenario(tmp_path, scenario, rerun=False):
         "PYTHONPATH": str(BACKEND_DIR),
         # Avoid the global VECTOR_DB=pgvector requiring a Postgres DATABASE_URL.
         "VECTOR_DB": "chroma",
+        # docker-compose.yaml sets WEBUI_SECRET_KEY='' (empty); env.py raises
+        # ValueError when WEBUI_AUTH=True and the key is empty.
+        "WEBUI_SECRET_KEY": os.environ.get("WEBUI_SECRET_KEY") or "test-secret-key-for-scenario-tests",
     }
 
     args = [sys.executable, str(RUNNER), scenario]
@@ -118,9 +121,11 @@ def test_a2_inactive_portkey_pipe_adopted_other_untouched(tmp_path):
     assert data["adoption_done"] is True
 
 
-def test_b_no_portkey_pipe_inserts_disabled_prekeyed(tmp_path):
-    """Subcase B: no Portkey pipe -> new disabled system_default_llm,
-    pre-keyed from the config table; other active function untouched."""
+def test_b_no_portkey_pipe_inserts_disabled_no_valve_key(tmp_path):
+    """Subcase B: no Portkey pipe -> new disabled system_default_llm inserted;
+    other active function untouched. The system default valve must NOT contain
+    PORTKEY_API_KEY at adoption time — the key is written by the /ensure endpoint
+    when the admin next saves their Workspace Settings, not at startup."""
     data = run_scenario(tmp_path, "B")
     functions = data["functions"]
 
@@ -130,7 +135,9 @@ def test_b_no_portkey_pipe_inserts_disabled_prekeyed(tmp_path):
     assert inserted["is_active"] is False
     assert inserted["is_system_default"] is True
     assert inserted["version"] == DEFAULT_SYSTEM_FUNCTION_VERSION
-    assert inserted["valves"] == {"PORTKEY_API_KEY": "workspace-key-456"}
+    # CRITICAL: adoption must never write any admin's key into the shared valve.
+    # The key arrives via /ensure when the admin saves Workspace Settings.
+    assert "PORTKEY_API_KEY" not in (inserted["valves"] or {})
 
     other = by_id(functions, "other_pipe")
     assert other["is_active"] is True

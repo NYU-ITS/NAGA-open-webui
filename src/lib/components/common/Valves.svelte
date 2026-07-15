@@ -23,7 +23,16 @@
 	$: if (valvesSpec) {
 		for (const property of Object.keys(valvesSpec.properties ?? {})) {
 			if (PORTKEY_FIELDS.includes(property) && !(property in customToggles)) {
-				customToggles[property] = (valves[property] ?? null) !== null;
+				const _v = valves[property] ?? null;
+				const _ws = workspaceValues[property] ?? null;
+				// Custom only when non-null, non-empty, AND differs from the workspace value.
+				// A cascaded valve holds the workspace key directly — that should read as Workspace.
+				customToggles[property] = _v !== null && _v !== '' && _v !== _ws;
+			}
+			// Pre-populate non-Portkey null fields from the Pydantic default so the
+			// editable input always renders (no Default/Custom toggle needed).
+			if (!PORTKEY_FIELDS.includes(property) && (valves[property] ?? null) === null) {
+				valves[property] = valvesSpec.properties[property]?.default ?? '';
 			}
 		}
 	}
@@ -32,8 +41,8 @@
 {#if valvesSpec && Object.keys(valvesSpec?.properties ?? {}).length}
 	{#each Object.keys(valvesSpec.properties) as property, idx}
 		<div class=" py-0.5 w-full justify-between">
-			<div class="flex w-full justify-between">
-				<div class=" self-center text-xs font-medium">
+			<div class="flex w-full justify-between gap-2">
+				<div class="min-w-0 self-center text-xs font-medium">
 					{valvesSpec.properties[property].title}
 
 					{#if (valvesSpec?.required ?? []).includes(property)}
@@ -48,9 +57,13 @@
 				</div>
 
 				{#if PORTKEY_FIELDS.includes(property)}
-					<div class="flex items-center gap-2">
-						<span class="text-xs text-gray-600 dark:text-gray-500">
-							{customToggles[property] ? $i18n.t('Custom') : $i18n.t('Reset')}
+					<div class="flex shrink-0 items-center gap-1.5">
+						<span
+							class="text-xs whitespace-nowrap transition-colors {!customToggles[property]
+								? 'text-gray-900 dark:text-gray-100 font-medium'
+								: 'text-gray-400 dark:text-gray-500'}"
+						>
+							{$i18n.t('Workspace')}
 						</span>
 						<Switch
 							bind:state={customToggles[property]}
@@ -58,36 +71,17 @@
 								valves[property] = customToggles[property]
 									? (valvesSpec.properties[property]?.default ?? '')
 									: null;
-
 								dispatch('change');
 							}}
 						/>
+						<span
+							class="text-xs whitespace-nowrap transition-colors {customToggles[property]
+								? 'text-gray-900 dark:text-gray-100 font-medium'
+								: 'text-gray-400 dark:text-gray-500'}"
+						>
+							{$i18n.t('Custom')}
+						</span>
 					</div>
-				{:else}
-					<button
-						class="p-1 px-3 text-xs flex rounded-sm transition"
-						type="button"
-						on:click={() => {
-							valves[property] =
-								(valves[property] ?? null) === null
-									? (valvesSpec.properties[property]?.default ?? '')
-									: null;
-
-							dispatch('change');
-						}}
-					>
-						{#if (valves[property] ?? null) === null}
-							<span class="ml-2 self-center">
-								{#if (valvesSpec?.required ?? []).includes(property)}
-									{$i18n.t('None')}
-								{:else}
-									{$i18n.t('Default')}
-								{/if}
-							</span>
-						{:else}
-							<span class="ml-2 self-center"> {$i18n.t('Custom')} </span>
-						{/if}
-					</button>
 				{/if}
 			</div>
 

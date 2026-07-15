@@ -3092,7 +3092,9 @@ This pipe provides seamless access to multiple AI providers
 through our enhanced Pilot-GenAI platform, with secure
 API Gateway from Portkey AI.
 
-Paste your Portkey API Key in the Valves section to get started.
+Your Portkey API Key is managed via Admin > Settings > Workspace Settings.
+Saving your key there propagates it here automatically — no manual
+configuration in the Valves section is required.
 
 Ready to build amazing AI applications with Pilot-GenAI!
 ================================================================
@@ -3107,13 +3109,16 @@ class Pipe:
    class Valves(BaseModel):
        PORTKEY_API_KEY: str = Field(
            default="",
-           description="Paste you Portkey API Key here",
+           description="Paste your Portkey API Key here",
+       )
+       PORTKEY_API_BASE_URL: str = Field(
+           default="https://ai-gateway.apps.cloud.rt.nyu.edu/v1",
+           description="Portkey gateway base URL",
        )
 
    def __init__(self):
        self.valves = self.Valves()
        self.DEBUG = False
-       self.PORTKEY_API_BASE_URL = "https://ai-gateway.apps.cloud.rt.nyu.edu/v1"
        self.PORTKEY_MODELS_API_URL = "https://api.portkey.ai/v2"
 
    def pipes(self):
@@ -3174,6 +3179,12 @@ class Pipe:
 
 
    def pipe(self, body: dict, __user__: dict):
+       if not self.valves.PORTKEY_API_KEY:
+           return (
+               "Error: No Portkey API key configured for your account. "
+               "Go to Admin > Settings > Workspace Settings and save your Portkey API key."
+           )
+
        if self.DEBUG:
            print(f"[DEBUG] pipe() called")
            print(f"[DEBUG] User: {__user__.get('name', 'Unknown')} (ID: {__user__.get('id', 'Unknown')})")
@@ -3214,13 +3225,13 @@ class Pipe:
            }
 
            if self.DEBUG:
-               print(f"[DEBUG] Sending request to: {self.PORTKEY_API_BASE_URL}/chat/completions")
+               print(f"[DEBUG] Sending request to: {self.valves.PORTKEY_API_BASE_URL}/chat/completions")
                print(f"[DEBUG] Payload keys: {list(payload.keys())}")
                if 'messages' in payload:
                    print(f"[DEBUG] First message: {payload['messages'][0] if payload['messages'] else 'No messages'}")
 
            response = requests.post(
-               url=f"{self.PORTKEY_API_BASE_URL}/chat/completions",
+               url=f"{self.valves.PORTKEY_API_BASE_URL}/chat/completions",
                json=payload,
                headers=headers,
                stream=True,

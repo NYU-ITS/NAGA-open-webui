@@ -144,8 +144,35 @@ def get_function_module_by_id(request: Request, pipe_id: str):
         function_module = request.app.state.FUNCTIONS[pipe_id]
 
     if hasattr(function_module, "valves") and hasattr(function_module, "Valves"):
-        valves = Functions.get_function_valves_by_id(pipe_id)
-        function_module.valves = function_module.Valves(**(valves if valves else {}))
+        valves = Functions.get_function_valves_by_id(pipe_id) or {}
+        # Null or empty Portkey fields mean "track workspace value". Substitute the
+        # real workspace value so the function reaches the gateway with a valid key.
+        # None = explicitly set to Workspace mode (new behavior).
+        # ""   = never configured or old Workspace mode equivalent (pre-null-preservation).
+        _PORTKEY_FIELDS = {"PORTKEY_API_KEY", "PORTKEY_API_BASE_URL"}
+        if any((v is None or v == "") and k in _PORTKEY_FIELDS for k, v in valves.items()):
+            from open_webui.utils.portkey import (
+                find_workspace_portkey_key,
+                find_workspace_portkey_url,
+            )
+            fn_meta = Functions.get_function_by_id(pipe_id)
+            admin_email = fn_meta.created_by if fn_meta else None
+            resolved = {}
+            for k, v in valves.items():
+                if (v is None or v == "") and k in _PORTKEY_FIELDS:
+                    if k == "PORTKEY_API_KEY":
+                        ws = find_workspace_portkey_key(admin_email)
+                        if ws:
+                            resolved[k] = ws
+                        # omit → Pydantic default ("")
+                    else:  # PORTKEY_API_BASE_URL
+                        resolved[k] = find_workspace_portkey_url()
+                elif v is None:
+                    pass  # non-Portkey None → omit → Pydantic default
+                else:
+                    resolved[k] = v
+            valves = resolved
+        function_module.valves = function_module.Valves(**valves)
     return function_module
 
 

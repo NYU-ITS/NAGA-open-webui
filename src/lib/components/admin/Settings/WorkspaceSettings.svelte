@@ -5,7 +5,7 @@
 	import { user } from '$lib/stores';
 	import { getEmbeddingConfig, updateEmbeddingConfig, updateRAGConfig } from '$lib/apis/retrieval';
 	import { getAudioConfig, updateAudioConfig } from '$lib/apis/audio';
-	import { getFunctions, getFunctionValvesById, updateFunctionValvesById } from '$lib/apis/functions';
+	import { ensureAdminSystemDefault, getFunctions, getFunctionValvesById, updateFunctionValvesById } from '$lib/apis/functions';
 	import { verifyOpenAIConnection } from '$lib/apis/openai';
 	import { WORKSPACE_CASCADED_FUNCTIONS_KEY } from '$lib/constants';
 
@@ -86,6 +86,19 @@
 	const saveHandler = async () => {
 		isSaving = true;
 		try {
+			const keyChanged = apiKey !== originalApiKey;
+
+			// Issue #2: Verify connection before writing anything when the key changed.
+			// Skips the network round-trip when the key is unchanged.
+			if (keyChanged && apiKey) {
+				const ok = await verifyOpenAIConnection(localStorage.token, modelEngineUrl, apiKey)
+					.catch(() => null);
+				if (!ok) {
+					toast.error($i18n.t('Could not verify connection — check your API key and URL. Settings not saved.'));
+					return;
+				}
+			}
+
 			// 1. Embeddings — always cascade key + URL; toggle controls active model + BYPASS flag
 			await updateEmbeddingConfig(localStorage.token, {
 				email: $user.email,
@@ -138,48 +151,66 @@
 				}
 			});
 
-			// 3. Functions — cascade key + URL to functions whose PORTKEY_API_KEY valve
-			// was tracking the previous workspace key (old key -> new key match), or
-			// whose key was never set (empty - nothing yet to protect). Functions with
-			// a genuinely different, deliberately-set key are left untouched.
-			const functions = await getFunctions(localStorage.token);
-			const cascadedFunctionIds: string[] = [];
-			const failedFunctionNames: string[] = [];
-			await Promise.allSettled(
-				(functions ?? []).map(async (fn: any) => {
+			// Issue #12: gate ensure + cascade on key change only to avoid spurious badges
+			if (keyChanged) {
+				const cascadedFunctionIds: string[] = [];
+				const failedFunctionNames: string[] = [];
+
+				// Issue #3: capture the system-default function's ID so its badge appears too
+				if (apiKey) {
 					try {
-						const currentValves = await getFunctionValvesById(localStorage.token, fn.id);
-						if (!currentValves || !('PORTKEY_API_KEY' in currentValves)) return;
-						const currentKey = currentValves['PORTKEY_API_KEY'];
-						if (currentKey !== originalApiKey && currentKey !== '') return;
-
-						const updatedValves: Record<string, any> = { ...currentValves };
-						updatedValves['PORTKEY_API_KEY'] = apiKey;
-						if ('PORTKEY_API_BASE_URL' in updatedValves) {
-							updatedValves['PORTKEY_API_BASE_URL'] = modelEngineUrl;
+						const ensuredFn = await ensureAdminSystemDefault(localStorage.token, apiKey);
+						if (ensuredFn?.id) {
+							cascadedFunctionIds.push(ensuredFn.id);
 						}
-						await updateFunctionValvesById(localStorage.token, fn.id, updatedValves);
-						cascadedFunctionIds.push(fn.id);
-					} catch (_) {
-						failedFunctionNames.push(fn.name ?? fn.id);
+					} catch (e) {
+						console.error('Failed to ensure admin system default function:', e);
 					}
-				})
-			);
-			localStorage.setItem(WORKSPACE_CASCADED_FUNCTIONS_KEY, JSON.stringify(cascadedFunctionIds));
+				}
 
-			// Update the snapshot so subsequent saves in this session compare against the
-			// key that is now live, not the one loaded on initial mount.
-			originalApiKey = apiKey;
+				// Cascade key + URL to functions whose PORTKEY_API_KEY valve was tracking
+				// the previous workspace key (old key -> new key match), or whose key was
+				// never set (empty). Functions with a deliberately-different key are left untouched.
+				const allFunctions = await getFunctions(localStorage.token);
+				await Promise.allSettled(
+					(allFunctions ?? []).map(async (fn: any) => {
+						try {
+							const currentValves = await getFunctionValvesById(localStorage.token, fn.id);
+							if (!currentValves || !('PORTKEY_API_KEY' in currentValves)) return;
+							const currentKey = currentValves['PORTKEY_API_KEY'];
+							if (currentKey !== originalApiKey && currentKey !== '') return;
 
-			toast.success($i18n.t('Workspace settings saved successfully!'));
-
-			if (failedFunctionNames.length > 0) {
-				toast.warning(
-					$i18n.t('Could not sync the API key to: {{names}}', {
-						names: failedFunctionNames.join(', ')
+							const updatedValves: Record<string, any> = { ...currentValves };
+							updatedValves['PORTKEY_API_KEY'] = apiKey;
+							if ('PORTKEY_API_BASE_URL' in updatedValves) {
+								updatedValves['PORTKEY_API_BASE_URL'] = modelEngineUrl;
+							}
+							await updateFunctionValvesById(localStorage.token, fn.id, updatedValves);
+							cascadedFunctionIds.push(fn.id);
+						} catch (_) {
+							failedFunctionNames.push(fn.name ?? fn.id);
+						}
 					})
 				);
+
+				localStorage.setItem(WORKSPACE_CASCADED_FUNCTIONS_KEY, JSON.stringify(cascadedFunctionIds));
+				if (failedFunctionNames.length === 0) {
+					originalApiKey = apiKey;
+				}
+
+				if (failedFunctionNames.length > 0) {
+					toast.warning(
+						$i18n.t('Could not sync the API key to: {{names}}', {
+							names: failedFunctionNames.join(', ')
+						})
+					);
+				}
+			} else {
+				// Key unchanged — clear stale badges from a previous session
+				localStorage.setItem(WORKSPACE_CASCADED_FUNCTIONS_KEY, JSON.stringify([]));
 			}
+
+			toast.success($i18n.t('Workspace settings saved successfully!'));
 		} catch (e) {
 			toast.error(`${e}`);
 		} finally {

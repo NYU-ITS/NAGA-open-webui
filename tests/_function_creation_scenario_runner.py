@@ -89,7 +89,7 @@ def create_function(scenario):
         ),
     )
 
-    _prepopulate_portkey_valves(function.id, function_module)
+    _prepopulate_portkey_valves(function.id, function_module, user_email="admin@nyu.edu")
     return function.id
 
 
