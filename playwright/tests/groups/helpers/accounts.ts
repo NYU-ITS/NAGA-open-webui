@@ -1,4 +1,7 @@
 import { type APIRequestContext, expect } from '@playwright/test';
+import { retryApiRequest } from '../../../fixtures/auth';
+
+export { authHeaders } from '../../../fixtures/auth';
 
 // Fixed test accounts. Defaults are provisioned by the setup step against a
 // fresh instance; override via env to point at pre-existing accounts.
@@ -60,13 +63,21 @@ interface SigninResult {
 	email: string;
 }
 
+let lastSigninFailure = '';
+
 async function signin(
 	request: APIRequestContext,
 	email: string,
 	password: string
 ): Promise<SigninResult | null> {
-	const res = await request.post('/api/v1/auths/signin', { data: { email, password } });
-	if (!res.ok()) return null;
+	const res = await retryApiRequest(
+		() => request.post('/api/v1/auths/signin', { data: { email, password } }),
+		`signin ${email}`
+	);
+	if (!res.ok()) {
+		lastSigninFailure = `HTTP ${res.status()} from ${res.url()}: ${await res.text()}`;
+		return null;
+	}
 	return res.json();
 }
 
@@ -79,8 +90,9 @@ async function ensureAdmin(request: APIRequestContext): Promise<SigninResult> {
 
 	if (IS_LIVE) {
 		throw new Error(
-			`Live run: could not sign in as admin (${ADMIN.email}). The deployed instance must ` +
-				`already have this account; signup is disabled for live runs.`
+			`Live run: could not sign in as admin (${ADMIN.email}). ${lastSigninFailure}\n` +
+				`A 400 means the account or password is wrong. A 5xx means the deployed instance ` +
+				`was not serving the request. Signup is disabled for live runs either way.`
 		);
 	}
 
@@ -106,8 +118,8 @@ async function ensureStudent(request: APIRequestContext, adminToken: string): Pr
 
 	if (!student && IS_LIVE) {
 		throw new Error(
-			`Live run: could not sign in as the student (${STUDENT.email}). The deployed instance ` +
-				`must already have this account; account creation is disabled for live runs.`
+			`Live run: could not sign in as the student (${STUDENT.email}). ${lastSigninFailure}\n` +
+				`Account creation is disabled for live runs.`
 		);
 	}
 
@@ -145,8 +157,4 @@ export async function ensureTestAccounts(request: APIRequestContext): Promise<vo
 	}
 	const admin = await ensureAdmin(request);
 	await ensureStudent(request, admin.token);
-}
-
-export function authHeaders(token: string): Record<string, string> {
-	return { authorization: `Bearer ${token}`, Accept: 'application/json' };
 }

@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { toast } from 'svelte-sonner';
-	import { getContext, onMount } from 'svelte';
+	import { getContext } from 'svelte';
 	const i18n = getContext('i18n');
 
 	import Modal from '$lib/components/common/Modal.svelte';
@@ -226,12 +226,19 @@ import { updateGroupById, getGroupById } from '$lib/apis/groups';
 		editingModel = null;
 	}
 
-	onMount(async () => {
+	// Fetch lazily on first open: this modal is mounted once per group row, so
+	// an onMount fetch fires one expensive /api/v1/models/ call per group as
+	// soon as the Groups panel renders, which can overwhelm the backend.
+	$: if (show && !resourcesLoaded && !loading) {
+		loadResources();
+	}
+
+	const loadResources = async () => {
 		loading = true;
-		
+
 		try {
 			allModels = await getModels(localStorage.token);
-			
+
 			resourcesLoaded = true;
 		} catch (error) {
 			console.error('Error loading resources:', error);
@@ -239,7 +246,7 @@ import { updateGroupById, getGroupById } from '$lib/apis/groups';
 		} finally {
 			loading = false;
 		}
-	});
+	};
 </script>
 
 <Modal size="lg" bind:show>

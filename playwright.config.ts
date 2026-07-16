@@ -9,6 +9,7 @@ const WEB_SERVER_COMMAND =
 const SKIP_WEB_SERVER = process.env.PLAYWRIGHT_SKIP_WEB_SERVER === '1';
 const CI_RETRIES = Number(process.env.PLAYWRIGHT_RETRIES ?? 2);
 const CI_WORKERS = Number(process.env.PLAYWRIGHT_WORKERS ?? 2);
+const IS_LIVE = process.env.PLAYWRIGHT_RUN_LIVE === '1';
 
 /**
  * Video in the HTML report:
@@ -28,7 +29,11 @@ export default defineConfig({
 	fullyParallel: true,
 	forbidOnly: !!process.env.CI,
 	retries: process.env.CI ? CI_RETRIES : 0,
-	workers: process.env.CI ? CI_WORKERS : undefined,
+	// Live runs (PLAYWRIGHT_RUN_LIVE=1) share one deployed backend and admin
+	// account across browsers, so they must run one test at a time; a single
+	// worker also stops projects from racing each other. Mocked/local runs keep
+	// the parallel defaults. Override with PLAYWRIGHT_WORKERS if needed.
+	workers: IS_LIVE ? Number(process.env.PLAYWRIGHT_WORKERS ?? 1) : process.env.CI ? CI_WORKERS : undefined,
 	reporter: [['list'], ['html', { open: 'never' }]],
 	use: {
 		baseURL: BASE_URL,
