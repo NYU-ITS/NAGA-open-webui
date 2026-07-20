@@ -23,6 +23,7 @@
 	import ConversationHistoryModal from './ConversationHistoryModal.svelte';
 	import EditGroupWorkSpaceModal from './EditGroupWorkSpaceModal.svelte';
 	import { getChatById } from '$lib/apis/chats';
+	import { schoolAbbreviation } from './naming';
 	export let users = [];
 	export let group = {
 		name: 'Admins',
@@ -30,6 +31,8 @@
 	};
 
 	export let setGroups = () => {};
+
+	$: naming = group?.meta?.naming;
 
 	let showEdit = false;
 	let showHistory = false;
@@ -95,11 +98,43 @@
 		showEdit = true;
 	}}
 >
-	<div class="flex items-center gap-1.5 w-288 font-medium text-left">
-		<div>
-			<UserCircleSolid className="size-4" />
+	<div class="flex flex-col gap-0.5 w-288 text-left">
+		<div class="flex items-center gap-1.5 font-medium">
+			<div>
+				<UserCircleSolid className="size-4" />
+			</div>
+			<span>{group.name}</span>
 		</div>
-		{group.name}
+		{#if naming && (naming.category || naming.school || naming.tool_type || naming.tool_name || naming.owner)}
+			<div class="flex flex-wrap items-center gap-1 pl-[1.375rem] text-[10px]">
+				{#if naming.category}
+					<span
+						class="px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400"
+					>
+						{naming.category}
+					</span>
+				{/if}
+				{#if naming.school}
+					<span
+						class="px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400"
+					>
+						{schoolAbbreviation(naming.school)}
+					</span>
+				{/if}
+				{#if naming.tool_name || naming.tool_type}
+					<span
+						class="px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400"
+					>
+						{naming.tool_name || naming.tool_type}
+					</span>
+				{/if}
+				{#if naming.owner}
+					<span class="text-gray-500 dark:text-gray-500 whitespace-nowrap">
+						{$i18n.t('Owner')}: {naming.owner}
+					</span>
+				{/if}
+			</div>
+		{/if}
 	</div>
 
 	<div class="flex items-center gap-1.5 w-76 font-medium text-left">

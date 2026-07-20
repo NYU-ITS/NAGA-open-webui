@@ -24,6 +24,7 @@
 	import AddGroupModal from './Groups/AddGroupModal.svelte';
 	import { createNewGroup, getGroups } from '$lib/apis/groups';
 	import { getUserDefaultPermissions, updateUserDefaultPermissions } from '$lib/apis/users';
+	import { groupSearchText } from './Groups/naming';
 
 	const i18n = getContext('i18n');
 
@@ -34,17 +35,57 @@
 	let groups = [];
 	let filteredGroups;
 
-	$: filteredGroups = groups.filter((user) => {
-		if (search === '') {
-			return true;
-		} else {
-			let name = user.name.toLowerCase();
-			const query = search.toLowerCase();
-			return name.includes(query);
-		}
+	let search = '';
+	let categoryFilter = '';
+	let schoolFilter = '';
+	let toolFilter = '';
+	let ownerFilter = '';
+
+	const distinctNamingValues = (groups, key) =>
+		[...new Set(groups.map((group) => group?.meta?.naming?.[key]).filter(Boolean))].sort();
+
+	$: categoryOptions = distinctNamingValues(groups, 'category');
+	$: schoolOptions = distinctNamingValues(groups, 'school');
+	$: toolOptions = [
+		...new Set(
+			groups
+				.map((group) => {
+					const naming = group?.meta?.naming;
+					return naming?.tool_name || naming?.tool_type;
+				})
+				.filter(Boolean)
+		)
+	].sort();
+	$: ownerOptions = distinctNamingValues(groups, 'owner');
+
+	$: hasNamingMetadata = groups.some((group) => {
+		const naming = group?.meta?.naming ?? {};
+		return (
+			naming.category || naming.school || naming.tool_type || naming.tool_name || naming.owner
+		);
 	});
 
-	let search = '';
+	$: filteredGroups = groups.filter((group) => {
+		if (search !== '' && !groupSearchText(group).includes(search.toLowerCase())) {
+			return false;
+		}
+
+		const naming = group?.meta?.naming ?? {};
+		if (categoryFilter !== '' && naming.category !== categoryFilter) {
+			return false;
+		}
+		if (schoolFilter !== '' && naming.school !== schoolFilter) {
+			return false;
+		}
+		if (toolFilter !== '' && (naming.tool_name || naming.tool_type) !== toolFilter) {
+			return false;
+		}
+		if (ownerFilter !== '' && naming.owner !== ownerFilter) {
+			return false;
+		}
+
+		return true;
+	});
 	let defaultPermissions = {
 		workspace: {
 			models: false,
@@ -113,13 +154,19 @@
 </script>
 
 {#if loaded}
-	<AddGroupModal bind:show={showCreateGroupModal} onSubmit={addGroupHandler} />
+	<AddGroupModal bind:show={showCreateGroupModal} onSubmit={addGroupHandler} existingGroups={groups} />
 	<div class="mt-0.5 mb-2 gap-1 flex flex-col md:flex-row justify-between">
 		<div class="flex md:self-center text-lg font-medium px-0.5">
 			{$i18n.t('Groups')}
 			<div class="flex self-center w-[1px] h-6 mx-2.5 bg-gray-50 dark:bg-gray-850" />
 
-			<span class="text-lg font-medium text-gray-500 dark:text-gray-300">{groups.length}</span>
+			<span class="text-lg font-medium text-gray-500 dark:text-gray-300">
+				{#if filteredGroups.length !== groups.length}
+					{filteredGroups.length} / {groups.length}
+				{:else}
+					{groups.length}
+				{/if}
+			</span>
 		</div>
 
 		<div class="flex gap-1">
@@ -162,6 +209,80 @@
 			</div>
 		</div>
 	</div>
+
+	{#if hasNamingMetadata}
+		<div class="mb-2 flex flex-wrap items-center gap-1.5 px-0.5 text-xs">
+			<select
+				class="max-w-40 pr-6 py-0.5 rounded-lg text-xs bg-gray-50 dark:bg-gray-850 outline-hidden {categoryFilter ===
+				''
+					? 'text-gray-500 dark:text-gray-400'
+					: ''}"
+				bind:value={categoryFilter}
+				aria-label={$i18n.t('Filter by category')}
+			>
+				<option value="">{$i18n.t('All categories')}</option>
+				{#each categoryOptions as option}
+					<option value={option}>{option}</option>
+				{/each}
+			</select>
+
+			<select
+				class="max-w-48 pr-6 py-0.5 rounded-lg text-xs bg-gray-50 dark:bg-gray-850 outline-hidden {schoolFilter ===
+				''
+					? 'text-gray-500 dark:text-gray-400'
+					: ''}"
+				bind:value={schoolFilter}
+				aria-label={$i18n.t('Filter by school')}
+			>
+				<option value="">{$i18n.t('All schools')}</option>
+				{#each schoolOptions as option}
+					<option value={option}>{option}</option>
+				{/each}
+			</select>
+
+			<select
+				class="max-w-40 pr-6 py-0.5 rounded-lg text-xs bg-gray-50 dark:bg-gray-850 outline-hidden {toolFilter ===
+				''
+					? 'text-gray-500 dark:text-gray-400'
+					: ''}"
+				bind:value={toolFilter}
+				aria-label={$i18n.t('Filter by tool')}
+			>
+				<option value="">{$i18n.t('All tools')}</option>
+				{#each toolOptions as option}
+					<option value={option}>{option}</option>
+				{/each}
+			</select>
+
+			<select
+				class="max-w-40 pr-6 py-0.5 rounded-lg text-xs bg-gray-50 dark:bg-gray-850 outline-hidden {ownerFilter ===
+				''
+					? 'text-gray-500 dark:text-gray-400'
+					: ''}"
+				bind:value={ownerFilter}
+				aria-label={$i18n.t('Filter by owner')}
+			>
+				<option value="">{$i18n.t('All owners')}</option>
+				{#each ownerOptions as option}
+					<option value={option}>{option}</option>
+				{/each}
+			</select>
+
+			{#if categoryFilter !== '' || schoolFilter !== '' || toolFilter !== '' || ownerFilter !== ''}
+				<button
+					class="px-2 py-0.5 rounded-lg text-xs text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-850 transition"
+					on:click={() => {
+						categoryFilter = '';
+						schoolFilter = '';
+						toolFilter = '';
+						ownerFilter = '';
+					}}
+				>
+					{$i18n.t('Clear filters')}
+				</button>
+			{/if}
+		</div>
+	{/if}
 
 	<div>
 		{#if filteredGroups.length === 0}

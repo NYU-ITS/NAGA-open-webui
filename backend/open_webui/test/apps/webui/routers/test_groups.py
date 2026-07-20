@@ -174,6 +174,59 @@ class TestGroups(AbstractPostgresTest):
         assert group["description"] == "updated"
         assert group["permissions"] == permissions
 
+    def test_create_stores_structured_naming_meta(self):
+        meta = {
+            "naming": {
+                "category": "Instruction",
+                "school": "School of Professional Studies (SPS)",
+                "department": "Math",
+                "tool_type": "AI Tutor",
+                "tool_name": "Calculus AI Tutor",
+                "owner": "John Smith",
+                "custom": True,
+            }
+        }
+        response = self._create(name=unique_group_name(), meta=meta)
+        assert response.status_code == 200, response.text
+        group = response.json()
+        assert group["meta"] == meta
+
+        with as_user(self.app, id="admin", role="admin", email="admin@test.com"):
+            fetched = self.fast_api_client.get(self.create_url(f"/id/{group['id']}"))
+        assert fetched.status_code == 200
+        assert fetched.json()["meta"] == meta
+
+    def test_update_without_meta_preserves_stored_meta(self):
+        meta = {"naming": {"category": "Research", "school": "NYU IT"}}
+        group = self._create(name=unique_group_name(), meta=meta).json()
+        with as_user(self.app, id="admin", role="admin", email="admin@test.com"):
+            response = self.fast_api_client.post(
+                self.create_url(f"/id/{group['id']}/update"),
+                json={"name": group["name"], "description": "updated"},
+            )
+        assert response.status_code == 200, response.text
+        assert response.json()["meta"] == meta
+
+    def test_update_replaces_meta_when_sent(self):
+        group = self._create(
+            name=unique_group_name(),
+            meta={"naming": {"category": "Research", "school": "NYU IT"}},
+        ).json()
+        updated_meta = {
+            "naming": {"category": "Administration", "school": "School of Law"}
+        }
+        with as_user(self.app, id="admin", role="admin", email="admin@test.com"):
+            response = self.fast_api_client.post(
+                self.create_url(f"/id/{group['id']}/update"),
+                json={
+                    "name": group["name"],
+                    "description": "desc",
+                    "meta": updated_meta,
+                },
+            )
+        assert response.status_code == 200, response.text
+        assert response.json()["meta"] == updated_meta
+
     def test_update_membership_with_valid_user(self):
         group = self._create().json()
         with as_user(self.app, id="admin", role="admin", email="admin@test.com"):

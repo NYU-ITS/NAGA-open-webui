@@ -1,25 +1,108 @@
 <script lang="ts">
 	import { toast } from 'svelte-sonner';
-	import { getContext, onMount } from 'svelte';
+	import { getContext } from 'svelte';
 	const i18n = getContext('i18n');
+
+	import { user } from '$lib/stores';
 
 	import Modal from '$lib/components/common/Modal.svelte';
 	import Textarea from '$lib/components/common/Textarea.svelte';
+	import {
+		CATEGORY_OPTIONS,
+		SCHOOL_OPTIONS,
+		TOOL_TYPE_OPTIONS,
+		generateGroupName
+	} from './naming';
+
 	export let onSubmit: Function = () => {};
 	export let show = false;
+	export let existingGroups: { name?: string }[] = [];
 
-	let name = '';
+	const OTHER_SCHOOL = '__other__';
+
+	let category = '';
+	let school = '';
+	let customSchool = '';
+	let department = '';
+	let toolType = '';
+	let toolName = '';
+	let owner = '';
+	let customName = '';
 	let description = '';
-	let userIds = [];
 
 	let loading = false;
 
+	let wasShown = false;
+	$: if (show && !wasShown) {
+		resetFields();
+		wasShown = true;
+	} else if (!show) {
+		wasShown = false;
+	}
+
+	const resetFields = () => {
+		category = '';
+		school = '';
+		customSchool = '';
+		department = '';
+		toolType = '';
+		toolName = '';
+		owner = $user?.name ?? '';
+		customName = '';
+		description = '';
+	};
+
+	$: effectiveSchool = school === OTHER_SCHOOL ? customSchool.trim() : school;
+
+	$: generatedName = generateGroupName({
+		category,
+		school: effectiveSchool,
+		department,
+		toolType,
+		toolName,
+		owner
+	});
+
+	$: hasClassification =
+		category !== '' ||
+		effectiveSchool !== '' ||
+		department.trim() !== '' ||
+		toolType !== '' ||
+		toolName.trim() !== '';
+
+	$: displayName =
+		customName.trim() !== '' ? customName.trim() : hasClassification ? generatedName : '';
+
+	$: isDuplicate =
+		displayName !== '' &&
+		existingGroups.some((group) => group?.name?.toLowerCase() === displayName.toLowerCase());
+
 	const submitHandler = async () => {
+		if (customName.trim() === '' && (!category || !effectiveSchool || !toolType)) {
+			toast.error(
+				$i18n.t(
+					'Select a category, school, and tool type to generate a name, or enter a custom group name.'
+				)
+			);
+			return;
+		}
+
 		loading = true;
 
 		const group = {
-			name,
-			description
+			name: displayName,
+			description,
+			meta: {
+				naming: {
+					category,
+					school: effectiveSchool,
+					department: department.trim(),
+					tool_type: toolType,
+					tool_name: toolName.trim(),
+					owner: owner.trim() || ($user?.name ?? ''),
+					custom: customName.trim() !== ''
+				}
+			}
 		};
 
 		await onSubmit(group);
@@ -27,17 +110,11 @@
 		loading = false;
 		show = false;
 
-		name = '';
-		description = '';
-		userIds = [];
+		resetFields();
 	};
-
-	onMount(() => {
-		console.log('mounted');
-	});
 </script>
 
-<Modal size="sm" bind:show>
+<Modal size="md" bind:show>
 	<div>
 		<div class=" flex justify-between dark:text-gray-100 px-5 pt-4 mb-1.5">
 			<div class=" text-lg font-medium self-center font-primary">
@@ -72,23 +149,171 @@
 					}}
 				>
 					<div class="px-1 flex flex-col w-full">
-						<div class="flex gap-2">
+						<div class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase mb-1.5">
+							{$i18n.t('Classification')}
+						</div>
+
+						<div class="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2">
 							<div class="flex flex-col w-full">
 								<div class=" mb-0.5 text-xs text-gray-600 dark:text-gray-500">
-									{$i18n.t('Name')}
+									{$i18n.t('Category')} <span class="text-gray-400 dark:text-gray-600">*</span>
 								</div>
+								<select
+									class="w-full text-sm bg-transparent dark:bg-gray-900 outline-hidden py-0.5 {category ===
+									''
+										? 'text-gray-400 dark:text-gray-500'
+										: ''}"
+									bind:value={category}
+									aria-label={$i18n.t('Category')}
+								>
+									<option value="" disabled>{$i18n.t('Select a category')}</option>
+									{#each CATEGORY_OPTIONS as option}
+										<option value={option.value}>{option.value}</option>
+									{/each}
+								</select>
+							</div>
 
-								<div class="flex-1">
+							<div class="flex flex-col w-full">
+								<div class=" mb-0.5 text-xs text-gray-600 dark:text-gray-500">
+									{$i18n.t('School / Unit')}
+									<span class="text-gray-400 dark:text-gray-600">*</span>
+								</div>
+								<select
+									class="w-full text-sm bg-transparent dark:bg-gray-900 outline-hidden py-0.5 {school ===
+									''
+										? 'text-gray-400 dark:text-gray-500'
+										: ''}"
+									bind:value={school}
+									aria-label={$i18n.t('School / Unit')}
+								>
+									<option value="" disabled>{$i18n.t('Select a school or unit')}</option>
+									{#each SCHOOL_OPTIONS as option}
+										<option value={option.value}>{option.value}</option>
+									{/each}
+									<option value={OTHER_SCHOOL}>{$i18n.t('Other (enter below)')}</option>
+								</select>
+								{#if school === OTHER_SCHOOL}
 									<input
-										class="w-full text-sm bg-transparent placeholder:text-gray-300 dark:placeholder:text-gray-700 outline-hidden"
+										class="w-full text-sm bg-transparent placeholder:text-gray-300 dark:placeholder:text-gray-700 outline-hidden py-0.5 mt-1"
 										type="text"
-										bind:value={name}
-										placeholder={$i18n.t('Group Name')}
+										bind:value={customSchool}
+										placeholder={$i18n.t('School or unit name')}
 										autocomplete="off"
-										required
 									/>
+								{/if}
+							</div>
+
+							<div class="flex flex-col w-full">
+								<div class=" mb-0.5 text-xs text-gray-600 dark:text-gray-500">
+									{$i18n.t('Department')}
+								</div>
+								<input
+									class="w-full text-sm bg-transparent placeholder:text-gray-300 dark:placeholder:text-gray-700 outline-hidden py-0.5"
+									type="text"
+									bind:value={department}
+									placeholder={$i18n.t('e.g. Computer Science (optional)')}
+									autocomplete="off"
+								/>
+							</div>
+
+							<div class="flex flex-col w-full">
+								<div class=" mb-0.5 text-xs text-gray-600 dark:text-gray-500">
+									{$i18n.t('Tool Type')} <span class="text-gray-400 dark:text-gray-600">*</span>
+								</div>
+								<select
+									class="w-full text-sm bg-transparent dark:bg-gray-900 outline-hidden py-0.5 {toolType ===
+									''
+										? 'text-gray-400 dark:text-gray-500'
+										: ''}"
+									bind:value={toolType}
+									aria-label={$i18n.t('Tool Type')}
+								>
+									<option value="" disabled>{$i18n.t('Select a tool type')}</option>
+									{#each TOOL_TYPE_OPTIONS as option}
+										<option value={option}>{option}</option>
+									{/each}
+								</select>
+							</div>
+
+							<div class="flex flex-col w-full">
+								<div class=" mb-0.5 text-xs text-gray-600 dark:text-gray-500">
+									{$i18n.t('Tool Name')}
+								</div>
+								<input
+									class="w-full text-sm bg-transparent placeholder:text-gray-300 dark:placeholder:text-gray-700 outline-hidden py-0.5"
+									type="text"
+									bind:value={toolName}
+									placeholder={$i18n.t('e.g. Calculus AI Tutor (optional)')}
+									autocomplete="off"
+								/>
+							</div>
+
+							<div class="flex flex-col w-full">
+								<div class=" mb-0.5 text-xs text-gray-600 dark:text-gray-500">
+									{$i18n.t('Group Owner / Admin')}
+									<span class="text-gray-400 dark:text-gray-600">*</span>
+								</div>
+								<input
+									class="w-full text-sm bg-transparent placeholder:text-gray-300 dark:placeholder:text-gray-700 outline-hidden py-0.5"
+									type="text"
+									bind:value={owner}
+									placeholder={$i18n.t('Owner name')}
+									autocomplete="off"
+								/>
+							</div>
+						</div>
+
+						<hr class="my-3 border-gray-100 dark:border-gray-850" />
+
+						<div class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase mb-1.5">
+							{$i18n.t('Naming')}
+						</div>
+
+						<div class="flex flex-col w-full">
+							<div class=" mb-0.5 text-xs text-gray-600 dark:text-gray-500">
+								{$i18n.t('Custom Group Name')}
+							</div>
+							<input
+								class="w-full text-sm bg-transparent placeholder:text-gray-300 dark:placeholder:text-gray-700 outline-hidden py-0.5"
+								type="text"
+								bind:value={customName}
+								placeholder={$i18n.t('Group Name')}
+								autocomplete="off"
+							/>
+							<div class="mt-0.5 text-xs text-gray-400 dark:text-gray-600">
+								{$i18n.t('Leave empty to use the automatically generated name below.')}
+							</div>
+						</div>
+
+						<div
+							class="mt-2 px-3 py-2 rounded-xl bg-gray-50 dark:bg-gray-850 border border-gray-100 dark:border-gray-800"
+						>
+							<div class="flex items-center justify-between">
+								<div class="text-xs text-gray-500 dark:text-gray-400">
+									{$i18n.t('Group will be created as')}
+								</div>
+								<div
+									class="text-[10px] px-1.5 py-0.5 rounded-full {customName.trim() !== ''
+										? 'bg-amber-100 text-amber-800 dark:bg-amber-900/50 dark:text-amber-200'
+										: 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400'}"
+								>
+									{customName.trim() !== '' ? $i18n.t('Custom name') : $i18n.t('Auto-generated')}
 								</div>
 							</div>
+							<div class="mt-0.5 text-sm font-medium dark:text-gray-100 min-h-5">
+								{#if displayName !== ''}
+									{displayName}
+								{:else}
+									<span class="text-gray-400 dark:text-gray-600">
+										{$i18n.t('Fill in the fields above to generate a name')}
+									</span>
+								{/if}
+							</div>
+							{#if isDuplicate}
+								<div class="mt-1 text-xs text-amber-600 dark:text-amber-400">
+									{$i18n.t('A group with this name already exists.')}
+								</div>
+							{/if}
 						</div>
 
 						<div class="flex flex-col w-full mt-2">

@@ -13,6 +13,7 @@
 	import ConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
 	import GarbageBin from '$lib/components/icons/GarbageBin.svelte';
 	import { WEBUI_BASE_URL } from '$lib/constants';
+	import { emptyNaming } from './naming';
 
 	export let onSubmit: Function = () => {};
 	export let onDelete: Function = () => {};
@@ -43,6 +44,8 @@
 
 	export let co_admin_user_ids: string[] = [];
 	export let co_admin_emails: string[] = [];
+
+	let naming = emptyNaming();
 
 
 	export let permissions = {
@@ -83,16 +86,20 @@ $: {
 	const submitHandler = async () => {
 		loading = true;
 
-		const group = {
+		const updatedGroup = {
 			name,
 			description,
 			permissions,
-			user_ids: userIds
+			user_ids: userIds,
+			meta: {
+				...(group?.meta ?? {}),
+				naming
+			}
 
 			// Currently no need to add creator name here
 		};
 
-		await onSubmit(group);
+		await onSubmit(updatedGroup);
 
 		loading = false;
 		show = false;
@@ -227,6 +234,7 @@ $: {
 			name = group.name;
 			description = group.description;
 			permissions = group?.permissions ?? {};
+			naming = { ...emptyNaming(), ...(group?.meta?.naming ?? {}) };
 			created_by = group?.created_by ?? 'Unknown';
 			// user_ids_before_identify = group.user_ids
 			
@@ -401,6 +409,7 @@ $: {
 								<Display
 									bind:name
 									bind:description
+									bind:naming
 									bind:created_by
 									bind:created_at
 									bind:updated_at
