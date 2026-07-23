@@ -1,5 +1,7 @@
 export type GroupNaming = {
 	category: string;
+	semester: string;
+	year: string;
 	school: string;
 	department: string;
 	tool_type: string;
@@ -16,6 +18,8 @@ export type GroupWithNaming = {
 
 export const emptyNaming = (): GroupNaming => ({
 	category: '',
+	semester: '',
+	year: '',
 	school: '',
 	department: '',
 	tool_type: '',
@@ -33,7 +37,13 @@ export const CATEGORY_OPTIONS = [
 export const SCHOOL_OPTIONS = [
 	{ value: 'Arts & Science', abbreviation: 'A&S' },
 	{ value: 'College of Dentistry', abbreviation: 'Dentistry' },
+	{ value: 'Courant Institute School of Mathematics, Computing, and Data Science', abbreviation: 'Courant' },
+	{ value: 'Gallatin School of Individualized Study', abbreviation: 'Gallatin' },
 	{ value: 'Grossman School of Medicine', abbreviation: 'Grossman' },
+	{ value: 'Institute of Fine Arts', abbreviation: 'IFA' },
+	{ value: 'Institute for the Study of the Ancient World', abbreviation: 'ISAW' },
+	{ value: 'NYU Abu Dhabi', abbreviation: 'NYUAD' },
+	{ value: 'NYU Shanghai', abbreviation: 'NYUSH' },
 	{ value: 'NYU IT', abbreviation: 'NYU IT' },
 	{ value: 'Rory Meyers College of Nursing', abbreviation: 'Meyers' },
 	{ value: 'School of Global Public Health', abbreviation: 'GPH' },
@@ -44,31 +54,44 @@ export const SCHOOL_OPTIONS = [
 		abbreviation: 'Steinhardt'
 	},
 	{ value: 'Stern School of Business', abbreviation: 'Stern' },
-	{ value: 'Tandon School of Engineering', abbreviation: 'Tandon' }
+	{ value: 'Tandon School of Engineering', abbreviation: 'Tandon' },
+	{ value: 'Tisch School of the Arts', abbreviation: 'Tisch' },
 ];
 
-export const TOOL_TYPE_OPTIONS = [
-	'AI Tutor',
-	'AI Chatbot',
-	'Research Assistant',
-	'Administrative Assistant',
-	'Data Pipeline',
-	'Knowledge Base Assistant',
-	'Document Assistant',
-	'Analytics Assistant',
-	'Workflow Automation',
-	'Custom Tool'
-];
+export const TOOL_TYPE_OPTIONS = ['AI Tutor', 'AI Chatbot', 'Data Pipeline'];
+
+export const SEMESTER_OPTIONS = ['Fall', 'Summer', 'Spring'];
+
+// Years span three back through five ahead of the current year (e.g. 2023–2031
+// in 2026), covering historical groups and pre-created future terms.
+export const yearOptions = (): number[] => {
+	const current = new Date().getFullYear();
+	const years: number[] = [];
+	for (let y = current - 3; y <= current + 5; y++) years.push(y);
+	return years;
+};
+
+// A term renders as e.g. FALL2026. Year alone renders as just the year; a
+// semester with no year contributes nothing (the UI requires a year when a
+// semester is chosen).
+export const termToken = (semester?: string, year?: string): string => {
+	if (year && semester) return `${semester.toUpperCase()}${year}`;
+	if (year) return `${year}`;
+	return '';
+};
 
 const abbreviate = (options: { value: string; abbreviation: string }[], value: string) =>
 	options.find((option) => option.value === value)?.abbreviation ?? value;
 
 export const schoolAbbreviation = (school: string) => abbreviate(SCHOOL_OPTIONS, school);
 
-// [Category] - [School] - [Department] - [Tool Name or Tool Type] - [Owner],
-// skipping any part that is empty.
+// [Category] - [Term] - [School] - [Department] - [Tool Type] - [Tool Name] - [Owner],
+// skipping any part that is empty. Tool Type and Tool Name appear side by side
+// rather than one replacing the other.
 export const generateGroupName = (fields: {
 	category?: string;
+	semester?: string;
+	year?: string;
 	school?: string;
 	department?: string;
 	toolType?: string;
@@ -77,9 +100,11 @@ export const generateGroupName = (fields: {
 }): string => {
 	const parts = [
 		fields.category ? abbreviate(CATEGORY_OPTIONS, fields.category) : '',
+		termToken(fields.semester, fields.year),
 		fields.school ? abbreviate(SCHOOL_OPTIONS, fields.school) : '',
 		fields.department?.trim() ?? '',
-		fields.toolName?.trim() || fields.toolType || '',
+		fields.toolType?.trim() ?? '',
+		fields.toolName?.trim() ?? '',
 		fields.owner?.trim() ?? ''
 	].filter((part) => part !== '');
 
@@ -95,6 +120,9 @@ export const groupSearchText = (group: GroupWithNaming): string => {
 	return [
 		group?.name,
 		naming.category,
+		termToken(naming.semester, naming.year),
+		naming.semester,
+		naming.year,
 		naming.school,
 		naming.school ? schoolAbbreviation(naming.school) : '',
 		naming.department,

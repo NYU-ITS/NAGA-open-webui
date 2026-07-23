@@ -84,6 +84,11 @@ $: {
 }
 
 	const submitHandler = async () => {
+		if (naming.semester !== '' && naming.year === '') {
+			toast.error($i18n.t('Select a year for the chosen semester.'));
+			return;
+		}
+
 		loading = true;
 
 		const updatedGroup = {

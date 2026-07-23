@@ -160,7 +160,7 @@
 			{$i18n.t('Groups')}
 			<div class="flex self-center w-[1px] h-6 mx-2.5 bg-gray-50 dark:bg-gray-850" />
 
-			<span class="text-lg font-medium text-gray-500 dark:text-gray-300">
+			<span class="text-lg font-medium text-gray-600 dark:text-gray-300">
 				{#if filteredGroups.length !== groups.length}
 					{filteredGroups.length} / {groups.length}
 				{:else}
@@ -213,9 +213,9 @@
 	{#if hasNamingMetadata}
 		<div class="mb-2 flex flex-wrap items-center gap-1.5 px-0.5 text-xs">
 			<select
-				class="max-w-40 pr-6 py-0.5 rounded-lg text-xs bg-gray-50 dark:bg-gray-850 outline-hidden {categoryFilter ===
+				class="max-w-40 pl-2 pr-6 py-0.5 rounded-lg text-xs bg-gray-50 dark:bg-gray-850 outline-hidden {categoryFilter ===
 				''
-					? 'text-gray-500 dark:text-gray-400'
+					? 'text-gray-600 dark:text-gray-400'
 					: ''}"
 				bind:value={categoryFilter}
 				aria-label={$i18n.t('Filter by category')}
@@ -227,9 +227,9 @@
 			</select>
 
 			<select
-				class="max-w-48 pr-6 py-0.5 rounded-lg text-xs bg-gray-50 dark:bg-gray-850 outline-hidden {schoolFilter ===
+				class="max-w-48 pl-2 pr-6 py-0.5 rounded-lg text-xs bg-gray-50 dark:bg-gray-850 outline-hidden {schoolFilter ===
 				''
-					? 'text-gray-500 dark:text-gray-400'
+					? 'text-gray-600 dark:text-gray-400'
 					: ''}"
 				bind:value={schoolFilter}
 				aria-label={$i18n.t('Filter by school')}
@@ -241,9 +241,9 @@
 			</select>
 
 			<select
-				class="max-w-40 pr-6 py-0.5 rounded-lg text-xs bg-gray-50 dark:bg-gray-850 outline-hidden {toolFilter ===
+				class="max-w-40 pl-2 pr-6 py-0.5 rounded-lg text-xs bg-gray-50 dark:bg-gray-850 outline-hidden {toolFilter ===
 				''
-					? 'text-gray-500 dark:text-gray-400'
+					? 'text-gray-600 dark:text-gray-400'
 					: ''}"
 				bind:value={toolFilter}
 				aria-label={$i18n.t('Filter by tool')}
@@ -255,9 +255,9 @@
 			</select>
 
 			<select
-				class="max-w-40 pr-6 py-0.5 rounded-lg text-xs bg-gray-50 dark:bg-gray-850 outline-hidden {ownerFilter ===
+				class="max-w-40 pl-2 pr-6 py-0.5 rounded-lg text-xs bg-gray-50 dark:bg-gray-850 outline-hidden {ownerFilter ===
 				''
-					? 'text-gray-500 dark:text-gray-400'
+					? 'text-gray-600 dark:text-gray-400'
 					: ''}"
 				bind:value={ownerFilter}
 				aria-label={$i18n.t('Filter by owner')}
@@ -270,7 +270,7 @@
 
 			{#if categoryFilter !== '' || schoolFilter !== '' || toolFilter !== '' || ownerFilter !== ''}
 				<button
-					class="px-2 py-0.5 rounded-lg text-xs text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-850 transition"
+					class="px-2 py-0.5 rounded-lg text-xs text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-850 transition"
 					on:click={() => {
 						categoryFilter = '';
 						schoolFilter = '';
@@ -309,15 +309,15 @@
 			</div>
 		{:else}
 			<div>
-				<div class=" flex items-center gap-3 justify-between text-xs uppercase px-1 font-bold">
-					<div class="w-288">Group</div>
+				<div class=" flex items-center gap-3 text-xs uppercase px-1 font-bold">
+					<div class="flex-1 min-w-0">Group</div>
 
-					<div class="w-76">Users</div>
+					<div class="w-16 shrink-0">Users</div>
 
-					<div class="w-136">Last Active</div>
+					<div class="w-24 shrink-0">Last Active</div>
 
-					<div class="w-136">Created At</div>
-					<div class="w-full">Actions</div>
+					<div class="w-24 shrink-0">Created At</div>
+					<div class="w-[320px] shrink-0 text-right">Actions</div>
 				</div>
 
 				<hr class="mt-1.5 border-gray-100 dark:border-gray-850" />
