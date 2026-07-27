@@ -199,9 +199,8 @@ def enqueue_file_processing_job(
     collection_name: Optional[str] = None,
     knowledge_id: Optional[str] = None,
     user_id: Optional[str] = None,
-    owner_email: Optional[str] = None,
-    embedding_model: Optional[str] = None,
-    embedding_api_key: Optional[str] = None,
+    admin_id: Optional[str] = None,
+    embedding_model_id: Optional[str] = None,
     job_timeout: int = DEFAULT_JOB_TIMEOUT,
 ) -> Optional[str]:
     """
@@ -213,9 +212,8 @@ def enqueue_file_processing_job(
         collection_name: Optional collection name for embeddings (must be JSON-serializable)
         knowledge_id: Optional knowledge base ID (must be JSON-serializable)
         user_id: User ID who initiated the processing (must be JSON-serializable)
-        owner_email: Email of the admin who owns the KB/file (for RBAC - per-admin model/key lookup)
-        embedding_model: Per-admin embedding model name (resolved at enqueue time for RBAC)
-        embedding_api_key: API key for embedding service (per-user, from admin config)
+        admin_id: Frozen admin user ID for credential-safe resolution (must be JSON-serializable)
+        embedding_model_id: Frozen embedding model ID for credential-safe resolution (must be JSON-serializable)
         job_timeout: Job timeout in seconds (default: 1 hour)
         
     Returns:
@@ -237,9 +235,8 @@ def enqueue_file_processing_job(
             "collection_name": collection_name,
             "knowledge_id": knowledge_id,
             "user_id": user_id,
-            "owner_email": owner_email,
-            "embedding_model": embedding_model,
-            "embedding_api_key": embedding_api_key,
+            "admin_id": admin_id,
+            "embedding_model_id": embedding_model_id,
         })
     except (TypeError, ValueError) as e:
         log.error(f"Job arguments are not JSON-serializable for file_id={file_id}: {e}")
@@ -307,16 +304,15 @@ def enqueue_file_processing_job(
                 trace_context = {}
         
         # Prepare job arguments (serializable data only)
-        # RBAC: Include owner_email and embedding_model for per-admin model/key resolution in worker
+        # Credential-safe: Only pass stable IDs, no credentials
         job_kwargs = {
             "file_id": file_id,
             "content": content,
             "collection_name": collection_name,
             "knowledge_id": knowledge_id,
             "user_id": user_id,
-            "owner_email": owner_email,  # KB owner or uploader (for RBAC)
-            "embedding_model": embedding_model,  # Per-admin model name (resolved at enqueue time)
-            "embedding_api_key": embedding_api_key,
+            "admin_id": admin_id,  # Frozen admin ID for credential-safe resolution
+            "embedding_model_id": embedding_model_id,  # Frozen model ID for credential-safe resolution
         }
         
         # Add trace context to job metadata if available

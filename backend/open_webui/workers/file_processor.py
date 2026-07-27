@@ -226,24 +226,24 @@ class MockRequest:
     Mock Request object for workers that need app.state.config.
     Workers run in separate processes and don't have access to the FastAPI Request object.
     """
-    def __init__(self, embedding_api_key: Optional[str] = None):
-        self.app = MockApp(embedding_api_key=embedding_api_key)
+    def __init__(self):
+        self.app = MockApp()
 
 
 class MockApp:
     """
     Mock app object that provides access to config and other app state.
     """
-    def __init__(self, embedding_api_key: Optional[str] = None):
+    def __init__(self):
         # Initialize config (this reads from environment and database)
-        self.state = MockState(embedding_api_key=embedding_api_key)
+        self.state = MockState()
 
 
 class MockState:
     """
     Mock state object that provides access to configuration and embedding functions.
     """
-    def __init__(self, embedding_api_key: Optional[str] = None):
+    def __init__(self):
         # Use cached worker config (initialized once at worker startup)
         # This avoids creating a new AppConfig() for every job, which prevents
         # unnecessary database connection overhead and improves performance
@@ -260,8 +260,9 @@ class MockState:
             # This allows the worker to continue but with limited functionality
             self.config = _create_fallback_config()
         
-        # Store embedding_api_key for per-job initialization
-        self._embedding_api_key = embedding_api_key
+        # Credential-safe: Store frozen IDs for later use by embedding service
+        self._admin_id = None
+        self._embedding_model_id = None
         
         # Initialize base embedding functions (ef, rf) - these don't need API key
         # EMBEDDING_FUNCTION will be initialized per-job with the correct API key
@@ -294,93 +295,30 @@ class MockState:
             self.ef = None
             self.rf = None
         
-        # EMBEDDING_FUNCTION will be initialized per-job with the correct per-user API key
+        # Credential-safe: No EMBEDDING_FUNCTION initialization here
         self.EMBEDDING_FUNCTION = None
     
-    def initialize_embedding_function(self, embedding_api_key: Optional[str] = None, embedding_model: Optional[str] = None):
+    def initialize_embedding_function(self):
         """
-        Initialize EMBEDDING_FUNCTION with the correct per-user/per-admin API key and model.
-        This is called per-job to ensure RBAC-protected API keys and models are used.
-        
-        Args:
-            embedding_api_key: Per-user/per-admin API key from job (RBAC-protected)
-            embedding_model: Per-user/per-admin model name from job (RBAC-protected)
+        Initialize EMBEDDING_FUNCTION using the credential-safe embedding service.
+        This is called per-job to ensure credential-safe resolution.
         """
-        # Use the passed API key (from job) or the one stored during initialization
-        api_key = embedding_api_key or self._embedding_api_key
-        
         try:
-            # Determine API URL and key based on engine type
-            if self.config.RAG_EMBEDDING_ENGINE in ["openai", "portkey"]:
-                base_url_config = self.config.RAG_OPENAI_API_BASE_URL
-                api_url = (
-                    base_url_config.value
-                    if hasattr(base_url_config, 'value')
-                    else str(base_url_config)
-                )
-                
-                # Fallback to default if empty (from config.py default)
-                if not api_url or api_url.strip() == "" or api_url == "None":
-                    api_url = "https://ai-gateway.apps.cloud.rt.nyu.edu/v1"
-                    log.warning(f"Base URL was empty/None, using default: {api_url}")
-                
-                # CRITICAL: Use per-user/per-admin API key from job (RBAC-protected)
-                # Do NOT fall back to env var - that would break RBAC
-                if not api_key or not api_key.strip():
-                    error_msg = (
-                        "No embedding API key provided in job! "
-                        "Embedding will fail. This key should come from admin config (RBAC-protected). "
-                        "Please ensure the admin has configured an API key in Settings > Documents > Embedding."
-                    )
-                    log.error(error_msg)
-                    raise ValueError(error_msg)
-            else:
-                base_url_config = self.config.RAG_OLLAMA_BASE_URL
-                api_url = (
-                    base_url_config.value
-                    if hasattr(base_url_config, 'value')
-                    else str(base_url_config)
-                )
-                api_key = self.config.RAG_OLLAMA_API_KEY
-                
-                # For local engines (sentence-transformers), ef must not be None
-                if self.ef is None:
-                    error_msg = "Cannot initialize EMBEDDING_FUNCTION: ef (embedding function model) is None for local engine"
-                    log.error(error_msg)
-                    raise ValueError(error_msg)
+            # Credential-safe: Use the embedding service instead of direct credential handling
+            from open_webui.retrieval.embedding.service import EmbeddingService
             
-            # CRITICAL RBAC: Use embedding_model from job parameter, not config
-            # Config may have fallback/env var values that break RBAC
-            model_to_use = embedding_model if embedding_model else self.config.RAG_EMBEDDING_MODEL
-            if not model_to_use or not model_to_use.strip():
-                error_msg = (
-                    "No embedding model provided! "
-                    "Embedding will fail. This model should come from admin config (RBAC-protected). "
-                    "Please ensure the admin has configured a model in Settings > Documents > Embedding."
-                )
-                log.error(error_msg)
-                raise ValueError(error_msg)
+            # Create embedding service
+            service = EmbeddingService(self.config)
             
-            log.info(f"[RBAC] Using embedding model from job: {model_to_use} (RBAC-protected)")
+            # Store the service for later use
+            self._embedding_service = service
             
-            self.EMBEDDING_FUNCTION = get_embedding_function(
-                self.config.RAG_EMBEDDING_ENGINE,
-                model_to_use,  # Use job parameter, not config (RBAC-protected)
-                self.ef,  # Can be None for API-based engines
-                api_url,
-                api_key,
-                self.config.RAG_EMBEDDING_BATCH_SIZE,
-            )
-            
-            if self.EMBEDDING_FUNCTION is None:
-                error_msg = "Failed to create embedding function - get_embedding_function returned None"
-                log.error(error_msg)
-                raise ValueError(error_msg)
+            log.info(f"Embedding service initialized for credential-safe embedding")
             
         except Exception as embedding_error:
-            error_msg = f"Failed to initialize EMBEDDING_FUNCTION per-job: {embedding_error}"
+            error_msg = f"Failed to initialize embedding service: {embedding_error}"
             log.error(error_msg, exc_info=True)
-            self.EMBEDDING_FUNCTION = None
+            self._embedding_service = None
             raise  # Re-raise to fail fast
 
 
@@ -488,9 +426,8 @@ def process_file_job(
     collection_name: Optional[str] = None,
     knowledge_id: Optional[str] = None,
     user_id: Optional[str] = None,
-    owner_email: Optional[str] = None,
-    embedding_model: Optional[str] = None,
-    embedding_api_key: Optional[str] = None,
+    admin_id: Optional[str] = None,
+    embedding_model_id: Optional[str] = None,
     _otel_trace_context: Optional[dict] = None,
 ) -> dict:
     """
@@ -502,9 +439,8 @@ def process_file_job(
         collection_name: Optional collection name for embeddings
         knowledge_id: Optional knowledge base ID
         user_id: User ID who initiated the processing
-        owner_email: Email of the admin who owns the KB/file (for RBAC - per-admin model/key lookup)
-        embedding_model: Per-admin embedding model name (resolved at enqueue time for RBAC)
-        embedding_api_key: API key for embedding service (per-user, from admin config)
+        admin_id: Frozen admin user ID for credential-safe resolution
+        embedding_model_id: Frozen embedding model ID for credential-safe resolution
         _otel_trace_context: Optional trace context for distributed tracing (internal use)
         
     Returns:
@@ -518,9 +454,8 @@ def process_file_job(
     log.debug(f"  knowledge_id: {knowledge_id}")
     log.debug(f"  collection_name: {collection_name}")
     log.debug(f"  content provided: {bool(content)}")
-    log.debug(f"  owner_email: {owner_email}")
-    log.debug(f"  embedding_model: {embedding_model}")
-    log.debug(f"  embedding_api_key provided: {bool(embedding_api_key)}")
+    log.debug(f"  admin_id: {admin_id}")
+    log.debug(f"  embedding_model_id: {embedding_model_id}")
     log.debug("=" * 80)
     
     start_time = time.time()
@@ -569,67 +504,37 @@ def process_file_job(
                 request = None
                 
                 # Create mock request object for compatibility with existing code
-                # Pass the embedding_api_key so it can initialize the embedding function per-job
+                # Credential-safe: Use frozen admin_id and embedding_model_id
                 try:
-                    request = MockRequest(embedding_api_key=embedding_api_key)
+                    request = MockRequest()
                     
-                    # RBAC: Validate owner_email, embedding_model, and API key BEFORE initialization
-                    if not owner_email or not owner_email.strip():
+                    # Validate frozen IDs
+                    if not admin_id or not admin_id.strip():
                         error_msg = (
-                            f"No owner_email provided in job for file_id={file_id}! "
-                            f"This is required for RBAC (per-admin model/key lookup)."
+                            f"No admin_id provided in job for file_id={file_id}! "
+                            f"This is required for credential-safe resolution."
                         )
                         log.error(error_msg)
                         raise ValueError(error_msg)
                     
-                    if not embedding_model or not embedding_model.strip():
+                    if not embedding_model_id or not embedding_model_id.strip():
                         error_msg = (
-                            f"No embedding_model provided in job for file_id={file_id}! "
-                            f"This is required for RBAC (per-admin model). "
-                            f"Owner: {owner_email}"
-                        )
-                        log.error(error_msg)
-                        raise ValueError(error_msg)
-                    
-                    if not embedding_api_key or not embedding_api_key.strip():
-                        error_msg = (
-                            f"No embedding API key provided in job for file_id={file_id}! "
-                            f"This will cause embedding generation to fail. "
-                            f"The API key should have been retrieved from admin config and passed to the job. "
-                            f"Owner: {owner_email}"
+                            f"No embedding_model_id provided in job for file_id={file_id}! "
+                            f"This is required for credential-safe resolution. "
+                            f"Admin: {admin_id}"
                         )
                         log.error(error_msg)
                         raise ValueError(error_msg)
                     
                     log.info(
-                        f"[JOB] RBAC Config: owner_email={owner_email}, "
-                        f"embedding_model={embedding_model}, "
-                        f"api_key_length={len(embedding_api_key) if embedding_api_key else 0}"
+                        f"[JOB] Credential-safe config: admin_id={admin_id}, "
+                        f"embedding_model_id={embedding_model_id}"
                     )
                     
-                    # CRITICAL: Initialize EMBEDDING_FUNCTION per-job with the correct per-user/per-admin API key and model
-                    # This ensures RBAC-protected API keys and models are used (each admin has their own key/model)
-                    try:
-                        request.app.state.initialize_embedding_function(
-                            embedding_api_key=embedding_api_key,
-                            embedding_model=embedding_model  # Pass job parameter (RBAC-protected)
-                        )
-                        
-                        if request.app.state.EMBEDDING_FUNCTION is None:
-                            error_msg = (
-                                f"EMBEDDING_FUNCTION is None after initialization for file_id={file_id}. "
-                                f"This will cause embedding generation to fail. "
-                                f"Check: 1) API key is valid, 2) Base URL is correct, 3) Embedding model is configured"
-                            )
-                            log.error(error_msg)
-                            raise ValueError(error_msg)
-                    except ValueError as ve:
-                        # Re-raise validation errors
-                        raise
-                    except Exception as init_error:
-                        error_msg = f"Failed to initialize EMBEDDING_FUNCTION: {init_error}"
-                        log.error(error_msg, exc_info=True)
-                        raise
+                    # Store frozen IDs for later use by embedding service
+                    request.app.state._admin_id = admin_id
+                    request.app.state._embedding_model_id = embedding_model_id
+                    
                 except Exception as init_error:
                     log.error(f"Failed to initialize MockRequest for file_id={file_id}: {init_error}", exc_info=True)
                     raise
@@ -646,27 +551,7 @@ def process_file_job(
                                     "processing without user context"
                                 )
                             else:
-                                # RBAC: Set the owner's model and API key in the config for save_docs_to_vector_db
-                                # This ensures RBAC-protected model/key are used (each admin has their own)
-                                # Users inherit from their group admin's model/key
-                                if owner_email and embedding_model and embedding_api_key:
-                                    try:
-                                        # Update the config with the owner's model and key to ensure consistency
-                                        # This is important because save_docs_to_vector_db retrieves from config
-                                        if request.app.state.config.RAG_EMBEDDING_ENGINE in ["openai", "portkey"]:
-                                            # Set the owner's model and API key in the config (RBAC-protected)
-                                            request.app.state.config.RAG_EMBEDDING_MODEL_USER.set(owner_email, embedding_model)
-                                            request.app.state.config.RAG_OPENAI_API_KEY.set(owner_email, embedding_api_key)
-                                            log.info(
-                                                f"***** BACKGROUND JOB SETTING API KEY ***** "
-                                                f"The file processor background job is setting API key for owner '{owner_email}'. "
-                                                f"Model = '{embedding_model}', API Key = '{embedding_api_key}'. "
-                                                f"This happens during file embedding in the background queue."
-                                            )
-                                    except Exception as config_update_error:
-                                        # Critical - model/key must be set for RBAC
-                                        log.error(f"Could not update config with owner model/key: {config_update_error}")
-                                        raise
+                                log.info(f"User {user.email} (role: {user.role}) retrieved for file processing")
                         except Exception as user_error:
                             log.warning(
                                 f"Error retrieving user {user_id} for file processing (file_id={file_id}): {user_error}, "
@@ -1122,21 +1007,28 @@ def process_file_job(
                 hash = calculate_sha256_string(text_content)
                 Files.update_file_hash_by_id(file.id, hash)
 
-                # Safely access BYPASS_EMBEDDING_AND_RETRIEVAL - use hasattr() first because AppConfig.__getattr__ raises KeyError for missing keys
+                # Safely access BYPASS_EMBEDDING_AND_RETRIEVAL
                 bypass_embedding = getattr(request.app.state.config, 'BYPASS_EMBEDDING_AND_RETRIEVAL', False) if hasattr(request.app.state.config, 'BYPASS_EMBEDDING_AND_RETRIEVAL') else False
                 
                 if not bypass_embedding:
                     embed_start = time.time()
                     filename = getattr(file, "filename", "") or ""
-                    log.info(f"[RAG File] file_id={file.id} | filename={filename} | docs_pre_split={len(docs)} (chunking and embedding next)")
-                    log.info(f"[EMBED] START | file_id={file.id} | filename={filename} | docs_pre_split={len(docs)} | timestamp={embed_start:.3f}")
+                    log.info(f"[EMBED] START | file_id={file.id} | filename={filename}")
+                    
+                    # Credential-safe: Create embedding function from frozen IDs
+                    from open_webui.retrieval.embedding.service import EmbeddingService
+                    from open_webui.retrieval.embedding.compatibility import make_embedding_function_with_storage_guard
+                    
+                    service = EmbeddingService(request.app.state.config)
+                    embedding_function = make_embedding_function_with_storage_guard(
+                        service, admin_id=admin_id, embedding_model_id=embedding_model_id
+                    )
+                    
                     try:
-                        # If knowledge_id is provided, we're adding to both collections at once
                         if knowledge_id:
                             file_collection = f"file-{file.id}"
                             collections = [file_collection, knowledge_id]
 
-                            # RBAC: Pass owner_email so save_docs_to_multiple_collections uses per-admin model/key
                             result = save_docs_to_multiple_collections(
                                 request,
                                 docs=docs,
@@ -1146,15 +1038,12 @@ def process_file_job(
                                     "name": file.filename,
                                     "hash": hash,
                                 },
-                                user=user,  # Use user object if available
-                                owner_email=owner_email,  # RBAC: Per-admin model/key lookup
+                                embedding_function=embedding_function,
+                                user=user,
                             )
 
-                            # Use file collection name for file metadata
                             if result:
-                                embed_end = time.time()
-                                embed_duration = embed_end - embed_start
-                                log.info(f"[EMBED] SUCCESS | file_id={file.id} | filename={filename} | collections={collections} | docs_pre_split={len(docs)} | duration={embed_duration:.2f}s | timestamp={embed_end:.3f}")
+                                log.info(f"[EMBED] SUCCESS | file_id={file.id} | collections={collections}")
                                 safe_add_span_event("job.embedding.completed", {"status": "success", "collection_name": file_collection})
                                 Files.update_file_metadata_by_id(
                                     file.id,
@@ -1165,7 +1054,7 @@ def process_file_job(
                                     },
                                 )
                             else:
-                                log.error(f"[EMBED] FAILED | file_id={file.id} | filename={filename} | reason=SAVE_TO_VDB_FAILED")
+                                log.error(f"[EMBED] FAILED | file_id={file.id}")
                                 Files.update_file_metadata_by_id(
                                     file.id,
                                     {
@@ -1175,8 +1064,8 @@ def process_file_job(
                                 )
                         else:
                             file_collection = f"file-{file.id}"
-                            log.info(f"[EMBED] SINGLE_COLLECTION | file_id={file.id} | filename={filename} | collection={file_collection} | docs_pre_split={len(docs)} | timestamp={time.time():.3f}")
-                            # RBAC: Pass owner_email so save_docs_to_vector_db uses per-admin model/key
+                            log.info(f"[EMBED] SINGLE_COLLECTION | file_id={file.id} | collection={collection_name}")
+                            
                             result = save_docs_to_vector_db(
                                 request,
                                 docs=docs,
@@ -1187,14 +1076,12 @@ def process_file_job(
                                     "hash": hash,
                                 },
                                 add=(True if collection_name else False),
-                                user=user,  # Use user object if available
-                                owner_email=owner_email,  # RBAC: Per-admin model/key lookup
+                                embedding_function=embedding_function,
+                                user=user,
                             )
 
                             if result:
-                                embed_end = time.time()
-                                embed_duration = embed_end - embed_start
-                                log.info(f"[EMBED] SUCCESS | file_id={file.id} | filename={filename} | collection={collection_name} | docs_pre_split={len(docs)} | duration={embed_duration:.2f}s | timestamp={embed_end:.3f}")
+                                log.info(f"[EMBED] SUCCESS | file_id={file.id} | collection={collection_name}")
                                 Files.update_file_metadata_by_id(
                                     file.id,
                                     {
@@ -1204,7 +1091,7 @@ def process_file_job(
                                     },
                                 )
                             else:
-                                log.error(f"[EMBED] FAILED | file_id={file.id} | filename={filename} | reason=SAVE_TO_VDB_FAILED")
+                                log.error(f"[EMBED] FAILED | file_id={file.id}")
                                 Files.update_file_metadata_by_id(
                                     file.id,
                                     {
