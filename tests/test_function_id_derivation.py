@@ -10,6 +10,8 @@ Verifies that:
 - PORTKEY_API_BASE_URL is included in stored valves when the Valves class defines it
 - Explicit null is preserved through the valve update route (not replaced by Pydantic default '')
 - /ensure writes PORTKEY_API_BASE_URL alongside PORTKEY_API_KEY
+- /ensure is idempotent (safe to call on every workspace settings save)
+- _prepopulate_portkey_valves finds Valves nested inside Pipe (not just top-level Valves)
 
 Run locally (from project root):
 
@@ -178,3 +180,38 @@ def test_ensure_includes_url(tmp_path):
     assert data["has_portkey_url"] is True, "system default valve must have PORTKEY_API_BASE_URL"
     assert data["key_is_set"] is True, "PORTKEY_API_KEY must be non-empty"
     assert data["url_is_set"] is True, "PORTKEY_API_BASE_URL must be non-empty"
+
+
+# ── 10: /ensure is idempotent (safe to call on every workspace settings save) ─
+
+def test_ensure_idempotent(tmp_path):
+    """WorkspaceSettings.svelte now calls ensureAdminSystemDefault on every save
+    (not just when the key changes) so old admin accounts get their system default
+    function without needing to change their key. The ensure logic must be
+    idempotent: two consecutive calls with the same key must leave exactly one
+    system default function with the correct valve."""
+    data = run_scenario(tmp_path, "ENSURE_IDEMPOTENT")
+    assert data["first_call_succeeded"] is True, "first ensure call must return a function"
+    assert data["second_call_succeeded"] is True, "second ensure call must return a function"
+    assert data["same_id"] is True, "both calls must return the same function ID"
+    assert data["key_preserved"] is True, "PORTKEY_API_KEY must equal the key passed to ensure"
+    assert data["exactly_one_system_default"] is True, (
+        "ensure must not create a duplicate system default — exactly one must exist"
+    )
+
+
+# ── 11: _prepopulate_portkey_valves finds Valves nested inside Pipe ───────────
+
+def test_pipe_nested_valves_prepopulated(tmp_path):
+    """The system default source has Valves nested inside Pipe (not top-level).
+    _prepopulate_portkey_valves must check Pipe.Valves as a fallback so clones
+    of the system default get their PORTKEY_API_KEY pre-populated at creation."""
+    data = run_scenario(tmp_path, "PIPE_NESTED_VALVES_PREPOPULATED")
+    assert data["has_portkey_key"] is True, (
+        "_prepopulate must find PORTKEY_API_KEY even when Valves is inside Pipe"
+    )
+    assert data["key_is_set"] is True, "PORTKEY_API_KEY must be non-empty after pre-population"
+    assert data["key_value_correct"] is True, "pre-populated key must match workspace key"
+    assert data["has_portkey_url"] is True, (
+        "_prepopulate must also set PORTKEY_API_BASE_URL when defined in Pipe.Valves"
+    )

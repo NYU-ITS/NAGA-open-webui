@@ -21,6 +21,7 @@
 
 	export let boilerplate = '';
 	export let value = '';
+	export let readonly = false;
 
 	export let onSave = () => {};
 	export let onChange = () => {};
@@ -54,6 +55,16 @@
 	let isDarkMode = false;
 	let editorTheme = new Compartment();
 	let editorLanguage = new Compartment();
+	let editorReadOnly = new Compartment();
+
+	$: if (codeEditor) {
+		codeEditor.dispatch({
+			effects: editorReadOnly.reconfigure([
+				EditorState.readOnly.of(readonly),
+				EditorView.editable.of(!readonly)
+			])
+		});
+	}
 
 	languages.push(
 		LanguageDescription.of({
@@ -108,7 +119,8 @@
 			}
 		}),
 		editorTheme.of([]),
-		editorLanguage.of([])
+		editorLanguage.of([]),
+		editorReadOnly.of([EditorState.readOnly.of(false), EditorView.editable.of(true)])
 	];
 
 	$: if (lang) {
@@ -143,6 +155,18 @@
 			}),
 			parent: document.getElementById(`code-textarea-${id}`)
 		});
+
+		// Apply readonly immediately and synchronously — the reactive $: block fires
+		// asynchronously via Svelte's flush cycle, which is too late (editor is already
+		// interactive). Dispatching here guarantees the state is set before first paint.
+		if (readonly) {
+			codeEditor.dispatch({
+				effects: editorReadOnly.reconfigure([
+					EditorState.readOnly.of(true),
+					EditorView.editable.of(false)
+				])
+			});
+		}
 
 		if (isDarkMode) {
 			codeEditor.dispatch({

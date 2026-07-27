@@ -28,6 +28,14 @@
 				// Custom only when non-null, non-empty, AND differs from the workspace value.
 				// A cascaded valve holds the workspace key directly — that should read as Workspace.
 				customToggles[property] = _v !== null && _v !== '' && _v !== _ws;
+				// Sync the two representations of "Workspace state" in the same tick so the
+				// SensitiveInput read-only block renders immediately on open (not after a
+				// toggle cycle). The renderer uses null as the signal for masked workspace view;
+				// without this, a cascaded non-null value causes the plain editable input to
+				// render first before Switch's reactive dispatch can correct it.
+				if (!customToggles[property]) {
+					valves[property] = null;
+				}
 			}
 			// Pre-populate non-Portkey null fields from the Pydantic default so the
 			// editable input always renders (no Default/Custom toggle needed).
@@ -49,7 +57,7 @@
 						<span class=" text-gray-500">*required</span>
 					{/if}
 
-					{#if syncedFields.has(property)}
+					{#if syncedFields.has(property) && !customToggles[property]}
 						<span class="ml-1.5 text-[10px] font-normal text-[#57068c] dark:text-purple-400">
 							{$i18n.t('Synced with Workspace Settings')}
 						</span>
@@ -139,7 +147,11 @@
 						<SensitiveInput
 							value={workspaceValues[property] ?? ''}
 							readOnly={true}
+							masked={property === 'PORTKEY_API_KEY'}
 							editHref={WORKSPACE_SETTINGS_PATH}
+							editTooltip={property === 'PORTKEY_API_KEY'
+								? $i18n.t('API key is managed via Workspace Settings')
+								: $i18n.t('URL is managed via Workspace Settings')}
 						/>
 					</div>
 				</div>

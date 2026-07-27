@@ -13,6 +13,7 @@
 		updateFunctionValvesById
 	} from '$lib/apis/functions';
 	import { getToolValvesById, getToolValvesSpecById, updateToolValvesById } from '$lib/apis/tools';
+	import { verifyOpenAIConnection } from '$lib/apis/openai';
 	import Spinner from '../../common/Spinner.svelte';
 	import Switch from '$lib/components/common/Switch.svelte';
 	import Valves from '$lib/components/common/Valves.svelte';
@@ -42,6 +43,25 @@
 
 	const submitHandler = async () => {
 		saving = true;
+
+		// Validate a custom Portkey key before persisting — mirrors the same check
+		// in WorkspaceSettings.svelte so a bad key is caught at entry, not at runtime.
+		const portKeyVal = valves['PORTKEY_API_KEY'] ?? null;
+		if (portKeyVal !== null && portKeyVal !== '') {
+			const portUrl =
+				(valves['PORTKEY_API_BASE_URL'] ?? null) ??
+				(workspaceValues['PORTKEY_API_BASE_URL'] ?? '');
+			const ok = await verifyOpenAIConnection(localStorage.token, portUrl, portKeyVal).catch(
+				() => null
+			);
+			if (!ok) {
+				toast.error(
+					$i18n.t('Could not verify connection — check your Portkey API key. Valve not saved.')
+				);
+				saving = false;
+				return;
+			}
+		}
 
 		if (valvesSpec) {
 			// Convert string to array

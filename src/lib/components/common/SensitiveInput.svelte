@@ -5,7 +5,9 @@
 	export let placeholder = '';
 	export let required = true;
 	export let readOnly = false;
+	export let masked = true;
 	export let editHref: string | undefined = undefined;
+	export let editTooltip = 'Managed via Workspace Settings';
 	export let outerClassName = 'flex flex-1 bg-transparent';
 	export let inputClassName =
 		'w-full text-sm py-0.5 placeholder:text-gray-300 dark:placeholder:text-gray-700 bg-transparent outline-hidden';
@@ -18,7 +20,7 @@
 
 <div class={outerClassName}>
 	<input
-		class={`${inputClassName} ${show ? '' : 'password'}`}
+		class={`${inputClassName} ${show || !masked ? '' : 'password'}`}
 		{placeholder}
 		bind:value
 		required={required && !isReadOnly}
@@ -27,7 +29,7 @@
 		type="text"
 	/>
 	{#if editHref}
-		<Tooltip content="API key is managed via Workspace Settings" placement="top" className="flex items-center">
+		<Tooltip content={editTooltip} placement="top" className="flex items-center">
 			<a
 				href={editHref}
 				aria-label="Edit in Workspace Settings"
@@ -40,6 +42,7 @@
 			</a>
 		</Tooltip>
 	{/if}
+	{#if masked}
 	<button
 		aria-label="Show Button"
 		class={showButtonClassName}
@@ -81,4 +84,5 @@
 			</svg>
 		{/if}
 	</button>
+	{/if}
 </div>

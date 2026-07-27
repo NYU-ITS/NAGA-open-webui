@@ -55,10 +55,12 @@ def _prepopulate_portkey_valves(
     if existing and existing.is_system_default:
         return
 
-    if not hasattr(function_module, "Valves"):
+    Valves = getattr(function_module, "Valves", None) or getattr(
+        getattr(function_module, "Pipe", None), "Valves", None
+    )
+    if Valves is None:
         return
 
-    Valves = function_module.Valves
     if not hasattr(Valves, "model_fields") or "PORTKEY_API_KEY" not in Valves.model_fields:
         return
 

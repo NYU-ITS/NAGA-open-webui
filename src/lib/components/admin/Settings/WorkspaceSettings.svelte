@@ -151,26 +151,28 @@
 				}
 			});
 
-			// Issue #12: gate ensure + cascade on key change only to avoid spurious badges
-			if (keyChanged) {
-				const cascadedFunctionIds: string[] = [];
-				const failedFunctionNames: string[] = [];
+			const cascadedFunctionIds: string[] = [];
+			const failedFunctionNames: string[] = [];
 
-				// Issue #3: capture the system-default function's ID so its badge appears too
-				if (apiKey) {
-					try {
-						const ensuredFn = await ensureAdminSystemDefault(localStorage.token, apiKey);
-						if (ensuredFn?.id) {
-							cascadedFunctionIds.push(ensuredFn.id);
-						}
-					} catch (e) {
-						console.error('Failed to ensure admin system default function:', e);
+			// Always ensure system default exists (idempotent — creates if missing for an
+			// old admin account, updates key if it already exists). Badge only when key changed.
+			if (apiKey) {
+				try {
+					const ensuredFn = await ensureAdminSystemDefault(localStorage.token, apiKey);
+					if (ensuredFn?.id && keyChanged) {
+						cascadedFunctionIds.push(ensuredFn.id);
 					}
+				} catch (e) {
+					console.error('Failed to ensure admin system default function:', e);
 				}
+			}
 
+			// Gate cascade on key change only to avoid spurious badges on every save.
+			if (keyChanged) {
 				// Cascade key + URL to functions whose PORTKEY_API_KEY valve was tracking
-				// the previous workspace key (old key -> new key match), or whose key was
-				// never set (empty). Functions with a deliberately-different key are left untouched.
+				// the previous workspace key (old key -> new key match), was never set
+				// (empty string), or is null (workspace-resolved at runtime). Functions
+				// with a deliberately-different non-null key are left untouched.
 				const allFunctions = await getFunctions(localStorage.token);
 				await Promise.allSettled(
 					(allFunctions ?? []).map(async (fn: any) => {
@@ -178,7 +180,7 @@
 							const currentValves = await getFunctionValvesById(localStorage.token, fn.id);
 							if (!currentValves || !('PORTKEY_API_KEY' in currentValves)) return;
 							const currentKey = currentValves['PORTKEY_API_KEY'];
-							if (currentKey !== originalApiKey && currentKey !== '') return;
+							if (currentKey !== originalApiKey && currentKey !== '' && currentKey !== null) return;
 
 							const updatedValves: Record<string, any> = { ...currentValves };
 							updatedValves['PORTKEY_API_KEY'] = apiKey;
@@ -193,7 +195,6 @@
 					})
 				);
 
-				localStorage.setItem(WORKSPACE_CASCADED_FUNCTIONS_KEY, JSON.stringify(cascadedFunctionIds));
 				if (failedFunctionNames.length === 0) {
 					originalApiKey = apiKey;
 				}
@@ -205,10 +206,9 @@
 						})
 					);
 				}
-			} else {
-				// Key unchanged — clear stale badges from a previous session
-				localStorage.setItem(WORKSPACE_CASCADED_FUNCTIONS_KEY, JSON.stringify([]));
 			}
+
+			localStorage.setItem(WORKSPACE_CASCADED_FUNCTIONS_KEY, JSON.stringify(cascadedFunctionIds));
 
 			toast.success($i18n.t('Workspace settings saved successfully!'));
 		} catch (e) {

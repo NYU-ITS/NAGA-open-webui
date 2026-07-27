@@ -11,15 +11,17 @@ Run as a subprocess:
     python3 _function_id_runner.py <SCENARIO>
 
 Scenarios:
-  DERIVES_ID_FROM_NAME       - name with special chars becomes sanitized__net_id; DB name unchanged
-  SPECIAL_CHARS_FALLBACK     - all-special-char name falls back to 'function__net_id'
-  DUPLICATE_NAME_REJECTED    - second function with same name (case-insensitive) is rejected
-  ID_COLLISION_REJECTED      - "My Function" then "My-Function" collide on same derived ID
-  ENSURE_USES_NET_ID         - /ensure creates system_default_llm__<net_id>, not UUID
-  SCOPED_KEY_ISOLATION       - find_workspace_portkey_key returns only the queried admin's key
-  PORTKEY_URL_IN_VALVE       - created function valve includes PORTKEY_API_BASE_URL
-  NULL_PORTKEY_PRESERVED     - update_function_valves_by_id with null preserves null in DB
-  ENSURE_INCLUDES_URL        - /ensure writes PORTKEY_API_BASE_URL into system default valve
+  DERIVES_ID_FROM_NAME           - name with special chars becomes sanitized__net_id; DB name unchanged
+  SPECIAL_CHARS_FALLBACK         - all-special-char name falls back to 'function__net_id'
+  DUPLICATE_NAME_REJECTED        - second function with same name (case-insensitive) is rejected
+  ID_COLLISION_REJECTED          - "My Function" then "My-Function" collide on same derived ID
+  ENSURE_USES_NET_ID             - /ensure creates system_default_llm__<net_id>, not UUID
+  SCOPED_KEY_ISOLATION           - find_workspace_portkey_key returns only the queried admin's key
+  PORTKEY_URL_IN_VALVE           - created function valve includes PORTKEY_API_BASE_URL
+  NULL_PORTKEY_PRESERVED         - update_function_valves_by_id with null preserves null in DB
+  ENSURE_INCLUDES_URL            - /ensure writes PORTKEY_API_BASE_URL into system default valve
+  ENSURE_IDEMPOTENT              - calling ensure twice with same key succeeds and function still exists
+  PIPE_NESTED_VALVES_PREPOPULATED - _prepopulate finds Valves nested inside Pipe class
 """
 import json
 import sys
@@ -424,6 +426,112 @@ def scenario_ensure_includes_url():
     }))
 
 
+# ── Scenario: ENSURE_IDEMPOTENT ──────────────────────────────────────────────
+
+def scenario_ensure_idempotent():
+    """Calling ensure_admin_system_default twice with the same key must succeed
+    (idempotent). The function must exist and hold the key after both calls.
+    This covers the WorkspaceSettings.svelte change that calls ensure on every
+    save (not just when the key changes) so old admins get their function."""
+    from open_webui.config import DEFAULT_SYSTEM_FUNCTION_CONTENT, DEFAULT_SYSTEM_FUNCTION_ID
+    from open_webui.models.functions import Functions, FunctionForm, FunctionMeta
+    from open_webui.utils.plugin import load_function_module_by_id, replace_imports
+
+    net_id = "aa12947"
+    email = f"{net_id}@nyu.edu"
+    user_id = f"{net_id}-uid"
+    _seed_user(email, user_id)
+    _seed_config(email, "idempotent-key")
+
+    function_id = f"{DEFAULT_SYSTEM_FUNCTION_ID}__{net_id}"
+    content = replace_imports(DEFAULT_SYSTEM_FUNCTION_CONTENT)
+    function_module, function_type, frontmatter = load_function_module_by_id(
+        function_id, content=content
+    )
+
+    def _ensure():
+        existing = Functions.get_admin_system_default_function(email)
+        valve_update = {
+            "PORTKEY_API_KEY": "idempotent-key",
+            "PORTKEY_API_BASE_URL": "https://ai-gateway.apps.cloud.rt.nyu.edu/v1",
+        }
+        if existing:
+            existing_valves = Functions.get_function_valves_by_id(existing.id) or {}
+            Functions.update_function_valves_by_id(existing.id, {**existing_valves, **valve_update})
+            return Functions.get_function_by_id(existing.id)
+        fn = Functions.insert_new_function(
+            user_id=user_id,
+            user_email=email,
+            type=function_type,
+            form_data=FunctionForm(
+                id=function_id,
+                name="LLM",
+                content=content,
+                meta=FunctionMeta(description="System default LLM pipe", manifest=frontmatter),
+            ),
+            is_active=True,
+            is_system_default=True,
+        )
+        Functions.update_function_valves_by_id(fn.id, valve_update)
+        return Functions.get_function_by_id(fn.id)
+
+    fn1 = _ensure()
+    fn2 = _ensure()  # second call — must not raise or create a duplicate
+
+    valves = Functions.get_function_valves_by_id(function_id) or {}
+    all_system_defaults = [
+        f for f in Functions.get_functions(email) if f.is_system_default
+    ]
+    print(json.dumps({
+        "first_call_succeeded": fn1 is not None,
+        "second_call_succeeded": fn2 is not None,
+        "same_id": fn1 is not None and fn2 is not None and fn1.id == fn2.id,
+        "key_preserved": valves.get("PORTKEY_API_KEY") == "idempotent-key",
+        "exactly_one_system_default": len(all_system_defaults) == 1,
+    }))
+
+
+# ── Scenario: PIPE_NESTED_VALVES_PREPOPULATED ────────────────────────────────
+
+def scenario_pipe_nested_valves_prepopulated():
+    """_prepopulate_portkey_valves must find Valves nested inside Pipe (not just
+    top-level Valves). This is the structure of the system default source so all
+    clones of it must have their PORTKEY_API_KEY pre-populated at creation."""
+    from open_webui.routers.functions import _derive_function_id, _prepopulate_portkey_valves
+    from open_webui.models.functions import Functions, FunctionForm, FunctionMeta
+    from open_webui.utils.plugin import load_function_module_by_id
+
+    net_id = "aa12947"
+    email = f"{net_id}@nyu.edu"
+    _seed_user(email, f"{net_id}-uid")
+    _seed_config(email, "pipe-key", api_base_url="https://ai-gateway.apps.cloud.rt.nyu.edu/v1")
+
+    function_id = _derive_function_id("Nested Pipe Clone", net_id)
+    content = TEST_PIPE_WITH_PORTKEY
+    function_module, function_type, frontmatter = load_function_module_by_id(
+        function_id, content=content
+    )
+    function = Functions.insert_new_function(
+        user_id=f"{net_id}-uid",
+        user_email=email,
+        type=function_type,
+        form_data=FunctionForm(
+            id=function_id,
+            name="Nested Pipe Clone",
+            content=content,
+            meta=FunctionMeta(description="test", manifest=frontmatter),
+        ),
+    )
+    _prepopulate_portkey_valves(function.id, function_module, user_email=email)
+    valves = Functions.get_function_valves_by_id(function.id) or {}
+    print(json.dumps({
+        "has_portkey_key": "PORTKEY_API_KEY" in valves,
+        "key_is_set": bool(valves.get("PORTKEY_API_KEY")),
+        "key_value_correct": valves.get("PORTKEY_API_KEY") == "pipe-key",
+        "has_portkey_url": "PORTKEY_API_BASE_URL" in valves,
+    }))
+
+
 # ── Dispatch ──────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -438,4 +546,6 @@ if __name__ == "__main__":
         "PORTKEY_URL_IN_VALVE": scenario_portkey_url_in_valve,
         "NULL_PORTKEY_PRESERVED": scenario_null_portkey_preserved,
         "ENSURE_INCLUDES_URL": scenario_ensure_includes_url,
+        "ENSURE_IDEMPOTENT": scenario_ensure_idempotent,
+        "PIPE_NESTED_VALVES_PREPOPULATED": scenario_pipe_nested_valves_prepopulated,
     }[scenario]()

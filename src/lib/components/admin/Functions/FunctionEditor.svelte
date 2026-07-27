@@ -262,7 +262,7 @@ class Pipe:
 			content = _content;
 			await tick();
 
-			const res = await codeEditor.formatPythonCodeHandler();
+			const res = await codeEditor.formatPythonCodeHandler(true);
 			await tick();
 
 			content = _content;
@@ -315,6 +315,7 @@ class Pipe:
 									placeholder={$i18n.t('Function Name')}
 									bind:value={name}
 									required
+									disabled={readonly}
 								/>
 							</Tooltip>
 						</div>
@@ -336,6 +337,7 @@ class Pipe:
 								placeholder={$i18n.t('Function Description')}
 								bind:value={meta.description}
 								required
+								disabled={readonly}
 							/>
 						</Tooltip>
 					</div>
@@ -347,12 +349,13 @@ class Pipe:
 					</div>
 				{/if}
 
-				<div class="mb-2 flex-1 overflow-auto h-0 rounded-lg {readonly ? 'pointer-events-none opacity-70' : ''}">
+				<div class="mb-2 flex-1 overflow-auto h-0 rounded-lg {readonly ? 'opacity-70' : ''}">
 					<CodeEditor
 						bind:this={codeEditor}
 						value={content}
 						lang="python"
 						{boilerplate}
+						{readonly}
 						onChange={(e) => {
 							_content = e;
 						}}
