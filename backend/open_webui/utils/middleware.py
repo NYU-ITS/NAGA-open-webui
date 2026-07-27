@@ -618,52 +618,18 @@ async def chat_completion_files_handler(
             # This ensures each user uses their own (or their group admin's) model/key
             user_email = user.email if user else None
             if not user_email:
-                log.error("No user email available for RAG query - cannot determine per-admin model/key")
+                log.error("No user email available for RAG query")
                 sources = []
             else:
-                # Get per-admin model and key for the user
-                owner_model = request.app.state.config.RAG_EMBEDDING_MODEL_USER.get(user_email)
-                owner_key = request.app.state.config.RAG_OPENAI_API_KEY.get(user_email)
+                # Credential-safe: Create embedding service and callable
+                from open_webui.retrieval.embedding.service import EmbeddingService
+                from open_webui.retrieval.embedding.compatibility import make_embedding_function
                 
-                # Validate both are present (no fallback)
-                if not owner_model or not owner_model.strip():
-                    log.error(
-                        f"No embedding model configured for user {user_email}. "
-                        f"RAG query will fail. Please configure in Settings > Documents."
-                    )
-                    sources = []
-                elif not owner_key or not owner_key.strip():
-                    log.error(
-                        f"No embedding API key configured for user {user_email}. "
-                        f"RAG query will fail. Please configure in Settings > Documents."
-                    )
-                    sources = []
-                else:
-                    # Get base URL (global, with fallback)
-                    base_url_config = request.app.state.config.RAG_OPENAI_API_BASE_URL
-                    base_url = (
-                        base_url_config.value
-                        if hasattr(base_url_config, 'value')
-                        else str(base_url_config)
-                    )
-                    if not base_url or base_url.strip() == "":
-                        base_url = "https://ai-gateway.apps.cloud.rt.nyu.edu/v1"
+                try:
+                    service = EmbeddingService(request.app.state.config)
+                    user_embedding_function = make_embedding_function(service, user_id=user.id)
                     
-                    # Create embedding function using per-admin model/key
-                    ef = get_ef(
-                        request.app.state.config.RAG_EMBEDDING_ENGINE,
-                        owner_model,  # RBAC: Per-admin model (not global)
-                    )
-                    user_embedding_function = get_embedding_function(
-                        request.app.state.config.RAG_EMBEDDING_ENGINE,
-                        owner_model,  # RBAC: Per-admin model (not global)
-                        ef,
-                        base_url,
-                        owner_key,  # RBAC: Per-admin key (not global)
-                        request.app.state.config.RAG_EMBEDDING_BATCH_SIZE,
-                    )
-                    
-                    # Offload get_sources_from_files to module-level thread pool (more efficient)
+                    # Offload get_sources_from_files to module-level thread pool
                     loop = asyncio.get_running_loop()
                     sources = await loop.run_in_executor(
                         _RAG_EXECUTOR,
@@ -671,9 +637,7 @@ async def chat_completion_files_handler(
                             request=request,
                             files=files,
                             queries=queries,
-                            embedding_function=lambda query: user_embedding_function(
-                                query, user=user
-                            ),
+                            embedding_function=user_embedding_function,
                             k=request.app.state.config.TOP_K.get(user.email),
                             reranking_function=request.app.state.rf,
                             r=request.app.state.config.RELEVANCE_THRESHOLD,
@@ -681,6 +645,9 @@ async def chat_completion_files_handler(
                             full_context=request.app.state.config.RAG_FULL_CONTEXT.get(user.email),
                         ),
                     )
+                except Exception as e:
+                    log.error(f"Embedding service failed for RAG query: {e}")
+                    sources = []
                 # RAG debug: summary of context retrieved (what the model got per file)
                 total_chunks = 0
                 summary_parts = []
