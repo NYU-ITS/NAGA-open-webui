@@ -853,47 +853,12 @@ except Exception as e:
     pass
 
 
-# At startup, use default API key (no user context yet)
-# Per-user API keys are used during actual document processing
-# Portkey is the default and only supported embedding engine
-# Get base URL value - handle PersistentConfig objects properly
-# If value is empty, fall back to Portkey gateway URL (default from config.py)
-base_url_config = app.state.config.RAG_OPENAI_API_BASE_URL
-base_url = (
-    base_url_config.value
-    if hasattr(base_url_config, 'value')
-    else str(base_url_config)
-)
-# Fallback to Portkey gateway URL if empty (default from config.py)
-if not base_url or base_url.strip() == "":
-    base_url = "https://ai-gateway.apps.cloud.rt.nyu.edu/v1"
-    log.warning(f"RAG_OPENAI_API_BASE_URL is empty, using Portkey default gateway: {base_url}")
+# Credential-safe: Do not construct a global embedding function at startup.
+# Embedding service is created per-request with user-specific credentials.
+# app.state.EMBEDDING_FUNCTION is kept as None for backward compatibility.
+app.state.EMBEDDING_FUNCTION = None
 
-# Ensure engine is set to portkey (default and only supported)
-engine_value = (
-    app.state.config.RAG_EMBEDDING_ENGINE.value
-    if hasattr(app.state.config.RAG_EMBEDDING_ENGINE, 'value')
-    else str(app.state.config.RAG_EMBEDDING_ENGINE)
-)
-if engine_value != "portkey":
-    log.warning(f"Embedding engine was '{engine_value}', forcing to 'portkey' (default and only supported)")
-    # Force engine to portkey by updating the config value
-    app.state.config.RAG_EMBEDDING_ENGINE.update("portkey")
-
-app.state.EMBEDDING_FUNCTION = get_embedding_function(
-    app.state.config.RAG_EMBEDDING_ENGINE,
-    app.state.config.RAG_EMBEDDING_MODEL,
-    app.state.ef,
-    base_url,
-    (
-        # UserScopedConfig - use default at startup (empty or env var)
-        app.state.config.RAG_OPENAI_API_KEY.default
-        if app.state.config.RAG_EMBEDDING_ENGINE == "openai"
-        or app.state.config.RAG_EMBEDDING_ENGINE == "portkey"
-        else app.state.config.RAG_OLLAMA_API_KEY
-    ),
-    app.state.config.RAG_EMBEDDING_BATCH_SIZE,
-)
+log.info("Embedding service initialized (credential-safe mode - no global embedding function)")
 
 ########################################
 #
