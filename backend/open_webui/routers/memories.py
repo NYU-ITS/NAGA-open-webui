@@ -4,6 +4,7 @@ import logging
 from typing import Optional
 
 from open_webui.models.memories import Memories, MemoryModel
+from open_webui.retrieval.embedding.compatibility import get_user_embedding_function
 from open_webui.retrieval.vector.connector import VECTOR_DB_CLIENT
 from open_webui.utils.auth import get_verified_user
 from open_webui.env import SRC_LOG_LEVELS
@@ -17,8 +18,8 @@ router = APIRouter()
 
 @router.get("/ef")
 async def get_embeddings(request: Request, user=Depends(get_verified_user)):
-    # Pass user to ensure per-user API key is used for embeddings
-    return {"result": request.app.state.EMBEDDING_FUNCTION("hello world", user=user)}
+    ef = get_user_embedding_function(request.app.state.config, user.id)
+    return {"result": ef("hello world")}
 
 
 ############################
@@ -51,6 +52,7 @@ async def add_memory(
     user=Depends(get_verified_user),
 ):
     memory = Memories.insert_new_memory(user.id, form_data.content)
+    ef = get_user_embedding_function(request.app.state.config, user.id)
 
     VECTOR_DB_CLIENT.upsert(
         collection_name=f"user-memory-{user.id}",
@@ -58,7 +60,7 @@ async def add_memory(
             {
                 "id": memory.id,
                 "text": memory.content,
-                "vector": request.app.state.EMBEDDING_FUNCTION(memory.content, user),
+                "vector": ef(memory.content),
                 "metadata": {"created_at": memory.created_at},
             }
         ],
@@ -81,9 +83,10 @@ class QueryMemoryForm(BaseModel):
 async def query_memory(
     request: Request, form_data: QueryMemoryForm, user=Depends(get_verified_user)
 ):
+    ef = get_user_embedding_function(request.app.state.config, user.id)
     results = VECTOR_DB_CLIENT.search(
         collection_name=f"user-memory-{user.id}",
-        vectors=[request.app.state.EMBEDDING_FUNCTION(form_data.content, user)],
+        vectors=[ef(form_data.content)],
         limit=form_data.k,
     )
 
@@ -100,13 +103,14 @@ async def reset_memory_from_vector_db(
     VECTOR_DB_CLIENT.delete_collection(f"user-memory-{user.id}")
 
     memories = Memories.get_memories_by_user_id(user.id)
+    ef = get_user_embedding_function(request.app.state.config, user.id)
     VECTOR_DB_CLIENT.upsert(
         collection_name=f"user-memory-{user.id}",
         items=[
             {
                 "id": memory.id,
                 "text": memory.content,
-                "vector": request.app.state.EMBEDDING_FUNCTION(memory.content, user),
+                "vector": ef(memory.content),
                 "metadata": {
                     "created_at": memory.created_at,
                     "updated_at": memory.updated_at,
@@ -155,15 +159,14 @@ async def update_memory_by_id(
         raise HTTPException(status_code=404, detail="Memory not found")
 
     if form_data.content is not None:
+        ef = get_user_embedding_function(request.app.state.config, user.id)
         VECTOR_DB_CLIENT.upsert(
             collection_name=f"user-memory-{user.id}",
             items=[
                 {
                     "id": memory.id,
                     "text": memory.content,
-                    "vector": request.app.state.EMBEDDING_FUNCTION(
-                        memory.content, user
-                    ),
+                    "vector": ef(memory.content),
                     "metadata": {
                         "created_at": memory.created_at,
                         "updated_at": memory.updated_at,
