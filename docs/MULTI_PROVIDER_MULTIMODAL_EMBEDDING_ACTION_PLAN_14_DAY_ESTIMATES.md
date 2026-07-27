@@ -119,20 +119,20 @@ An image chunk will store the image reference, MIME type, available metadata, an
 
 ## **4\. Implementation plan**
 
-**Schedule:** Fourteen working days across three weeks, from Tuesday, July 21, 2026 through Friday, August 7, 2026. Weekends are strictly excluded. Week 1 contains Days 1–4, Week 2 contains Days 5–9, and Week 3 contains Days 10–14.
+**Schedule:** Phase 0 was completed before this schedule began. Phase 1 starts on Monday, July 27, 2026, and the final phase is expected to be completed on Friday, August 7, 2026. Work is scheduled only for July 27–31 and August 3–7; weekends are excluded. Multiple phases may be completed on the same date, and phases spanning more than one date are shown with a date range.
 
 ### **Phase 0 \- Confirm scope and inventory current data**
 
 Work:
 
-1. Close the approval items in Section 1\. — **Day 1.**  
-2. List the initial providers, models, modalities, and dimensions. — **Day 1.**  
-3. Inventory admin accounts, their owned user groups, knowledge bases, chat files, and vector counts. — **Day 1.**  
-4. Confirm how the existing RBAC paths resolve the responsible admin for knowledge-base and chat-file operations. — **Day 1.**  
-5. Produce an exception list for content whose responsible admin or existing embedding model cannot be determined confidently. — **Day 1.**  
-6. Confirm the PostgreSQL and pgvector versions in the target environment. — **Day 1.**  
-7. Identify every knowledge-RAG and chat-file call site that generates or searches vectors. — **Day 1.**  
-8. Remove logs exposing an embedding key, preview, suffix, or length. — **Day 1.**
+1. Close the approval items in Section 1\.  
+2. List the initial providers, models, modalities, and dimensions.  
+3. Inventory admin accounts, their owned user groups, knowledge bases, chat files, and vector counts.  
+4. Confirm how the existing RBAC paths resolve the responsible admin for knowledge-base and chat-file operations.  
+5. Produce an exception list for content whose responsible admin or existing embedding model cannot be determined confidently.  
+6. Confirm the PostgreSQL and pgvector versions in the target environment.  
+7. Identify every knowledge-RAG and chat-file call site that generates or searches vectors.  
+8. Remove logs exposing an embedding key, preview, suffix, or length.
 
 Exit criteria:
 
@@ -141,16 +141,18 @@ Exit criteria:
 * The initial model and dimension list is approved.  
 * No embedding credential is exposed in application logs.
 
+**Expected completion:** Completed before July 27, 2026.
+
 ### **Phase 1 \- Add the schema and seed the current model**
 
 Work:
 
-1. Add SQLAlchemy models and an expand-only Alembic migration for the model registry, admin settings, chunks, jobs, and approved dimension tables. — **Day 2.**  
-2. Register the current production text model using its verified dimension. — **Day 2.**  
-3. Create one embedding setting for each existing admin, initially using the current global model. — **Day 2.**  
-4. Backfill admin attribution and model provenance for unambiguous existing knowledge-base and chat-file vectors. — **Day 3.**  
-5. Resolve attribution exceptions without introducing a new knowledge-base-to-group ownership field. — **Day 3.**  
-6. Leave the current `document_chunk` table and read path unchanged. — **Day 3.**
+1. Add SQLAlchemy models and an expand-only Alembic migration for the model registry, admin settings, chunks, jobs, and approved dimension tables.  
+2. Register the current production text model using its verified dimension.  
+3. Create one embedding setting for each existing admin, initially using the current global model.  
+4. Backfill admin attribution and model provenance for unambiguous existing knowledge-base and chat-file vectors.  
+5. Resolve attribution exceptions without introducing a new knowledge-base-to-group ownership field.  
+6. Leave the current `document_chunk` table and read path unchanged.
 
 Exit criteria:
 
@@ -158,16 +160,18 @@ Exit criteria:
 * Admin, user-group, knowledge-base, chat-file, and vector counts reconcile.  
 * Existing RAG behavior is unchanged.
 
+**Expected completion:** July 27, 2026.
+
 ### **Phase 2 \- Introduce provider and embedding services**
 
 Work:
 
-1. Add the provider interface and typed text/image inputs. — **Day 4.**  
-2. Move the current text-embedding call into the first adapter. — **Day 4.**  
-3. Add admin model resolution and user-group inheritance through `EmbeddingService`. — **Day 4.**  
-4. Validate provider output count, vector values, and exact dimension. — **Day 4.**  
-5. Resolve credentials from existing server configuration. — **Day 4.**  
-6. Keep a compatibility wrapper for current ingestion during the transition. — **Day 4.**
+1. Add the provider interface and typed text/image inputs.  
+2. Move the current text-embedding call into the first adapter.  
+3. Add admin model resolution and user-group inheritance through `EmbeddingService`.  
+4. Validate provider output count, vector values, and exact dimension.  
+5. Resolve credentials from existing server configuration.  
+6. Keep a compatibility wrapper for current ingestion during the transition.
 
 Exit criteria:
 
@@ -175,17 +179,19 @@ Exit criteria:
 * Invalid dimensions and unsupported modalities fail before storage.  
 * No new response, log entry, or RQ payload contains an API key.
 
+**Expected completion:** July 29, 2026.
+
 ### **Phase 3 \- Add model-aware vector writes and retrieval**
 
 Work:
 
-1. Persist extracted knowledge-base and chat-file content in `rag_chunks`. — **Day 5.**  
-2. Add the repository that routes dimensions to physical PGVector tables. — **Day 5.**  
-3. Store admin, knowledge or chat-file context, chunk, model, modality, and status with each vector. — **Day 5.**  
-4. Remove zero-padding from the new path. — **Day 6.**  
-5. Generate query embeddings through the same `EmbeddingService`. — **Day 6.**  
-6. Filter searches by admin, model, and RBAC-authorized knowledge-base and file IDs. — **Day 6.**  
-7. Reject retrieval requests that mix effective embedding models. — **Day 6.**
+1. Persist extracted knowledge-base and chat-file content in `rag_chunks`.  
+2. Add the repository that routes dimensions to physical PGVector tables.  
+3. Store admin, knowledge or chat-file context, chunk, model, modality, and status with each vector.  
+4. Remove zero-padding from the new path.  
+5. Generate query embeddings through the same `EmbeddingService`.  
+6. Filter searches by admin, model, and RBAC-authorized knowledge-base and file IDs.  
+7. Reject retrieval requests that mix effective embedding models.
 
 Exit criteria:
 
@@ -193,18 +199,20 @@ Exit criteria:
 * Search cannot return a vector from another admin context or model, and existing RBAC filters remain enforced.  
 * Query and document embeddings report the same model ID.
 
+**Expected completion:** July 31, 2026.
+
 ### **Phase 4 \- Implement reindexing and status**
 
 Work:
 
-1. Add the model-change transaction and duplicate-change guard. — **Day 7.**  
-2. Create and enqueue one `embedding_jobs` row per operation. — **Day 7.**  
-3. Update the RQ worker to resolve the job and model from the database. — **Day 7.**  
-4. Track total, processed, and failed knowledge-base and chat-upload files. — **Day 7.**  
-5. Store failed document IDs and a useful error message. — **Day 8.**  
-6. Make vector writes idempotent. — **Day 8.**  
-7. Disable retrieval until the latest job completes. — **Day 8.**  
-8. Add retry behavior for failed or partially failed jobs. — **Day 8.**
+1. Add the model-change transaction and duplicate-change guard.  
+2. Create and enqueue one `embedding_jobs` row per operation.  
+3. Update the RQ worker to resolve the job and model from the database.  
+4. Track total, processed, and failed knowledge-base and chat-upload files.  
+5. Store failed document IDs and a useful error message.  
+6. Make vector writes idempotent.  
+7. Disable retrieval until the latest job completes.  
+8. Add retry behavior for failed or partially failed jobs.
 
 Exit criteria:
 
@@ -213,17 +221,19 @@ Exit criteria:
 * A completed job restores retrieval.  
 * A failed job remains visible and cannot mix old and new embeddings.
 
+**Expected completion:** August 3, 2026.
+
 ### **Phase 5 \- Add admin settings and status UI**
 
 Work:
 
-1. Add typed frontend clients for the approved model, admin-setting, and job endpoints. — **Day 9.**  
-2. Show the current provider, model, modality, latest status, and last indexed time. — **Day 9.**  
-3. Allow each admin to select an enabled model from Settings. — **Day 9.**  
-4. Show the reindex downtime warning before confirmation. — **Day 10.**  
-5. Disable further changes while a job is queued or processing. — **Day 10.**  
-6. Show failed-document count and retry when allowed. — **Day 10.**  
-7. Handle loading, empty, forbidden, conflict, failed, and partially failed states. — **Day 10.**
+1. Add typed frontend clients for the approved model, admin-setting, and job endpoints.  
+2. Show the current provider, model, modality, latest status, and last indexed time.  
+3. Allow each admin to select an enabled model from Settings.  
+4. Show the reindex downtime warning before confirmation.  
+5. Disable further changes while a job is queued or processing.  
+6. Show failed-document count and retry when allowed.  
+7. Handle loading, empty, forbidden, conflict, failed, and partially failed states.
 
 Exit criteria:
 
@@ -232,17 +242,19 @@ Exit criteria:
 * Regular users cannot view or change an admin's embedding settings.  
 * No credential is displayed or retained in browser state.
 
+**Expected completion:** August 4, 2026.
+
 ### **Phase 6 \- Add basic image support**
 
 Work:
 
-1. Store knowledge-base and chat-upload image files through the existing storage provider. — **Day 11.**  
-2. Create image chunks with admin attribution, storage references, and available metadata. — **Day 11.**  
-3. Validate provider capability for image inputs. — **Day 11.**  
-4. Support direct image embedding for an approved multimodal model. — **Day 12.**  
-5. Support caption/OCR fallback when that text already exists. — **Day 12.**  
-6. Record unsupported images as visible document failures. — **Day 12.**  
-7. Return image metadata with retrieved chunks. — **Day 12.**
+1. Store knowledge-base and chat-upload image files through the existing storage provider.  
+2. Create image chunks with admin attribution, storage references, and available metadata.  
+3. Validate provider capability for image inputs.  
+4. Support direct image embedding for an approved multimodal model.  
+5. Support caption/OCR fallback when that text already exists.  
+6. Record unsupported images as visible document failures.  
+7. Return image metadata with retrieved chunks.
 
 Exit criteria:
 
@@ -250,17 +262,19 @@ Exit criteria:
 * An approved image or text-fallback path can be embedded and retrieved.  
 * Unsupported images fail visibly rather than being silently skipped.
 
+**Expected completion:** August 5–6, 2026.
+
 ### **Phase 7 \- Regenerate, validate, and cut over**
 
 Work:
 
-1. Deploy the schema and services with the existing read path still active. — **Day 13.**  
-2. Regenerate knowledge-base and chat-file embeddings governed by one internal admin. — **Day 13.**  
-3. Compare file and chunk counts, failures, dimensions, latency, and representative RAG results. — **Day 13.**  
-4. Move the validated admin and inherited user-group contexts to the new read path. — **Day 13.**  
-5. Repeat admin by admin. — **Day 14.**  
-6. Stop legacy writes after every admin has migrated. — **Day 14.**  
-7. Remove the fixed-dimension adapter and legacy table in a separate cleanup migration after the observation period. — **Day 14.**
+1. Deploy the schema and services with the existing read path still active.  
+2. Regenerate knowledge-base and chat-file embeddings governed by one internal admin.  
+3. Compare file and chunk counts, failures, dimensions, latency, and representative RAG results.  
+4. Move the validated admin and inherited user-group contexts to the new read path.  
+5. Repeat admin by admin.  
+6. Stop legacy writes after every admin has migrated.  
+7. Remove the fixed-dimension adapter and legacy table in a separate cleanup migration after the observation period.
 
 Exit criteria:
 
@@ -268,6 +282,8 @@ Exit criteria:
 * Existing text knowledge and chat-file RAG checks pass for each migrated admin.  
 * Image storage and the approved embedding path pass for the pilot admin.  
 * No active knowledge-RAG or chat-file path depends on the legacy fixed-dimension table.
+
+**Expected completion:** August 7, 2026.
 
 ## **5\. Validation approach**
 
@@ -335,32 +351,32 @@ During rollout, rollback means returning content governed by an admin to the ret
 
 ## **8\. Supplemental work**
 
-### **Work item 1 \- Credential-log cleanup** — **Day 1, included in Phase 0 task 8.**
+### **Work item 1 \- Credential-log cleanup** — **Completed before July 27, 2026; included in Phase 0 task 8.**
 
 **Start:** Immediately  
 **Dependency:** None
 
 Deliverables:
 
-* Remove full keys, previews, suffixes, and key-length diagnostics from the retrieval router and file worker. — **Day 1, included in Phase 0 task 8.**  
-* Replace those values with admin ID, model ID, job ID, and a `credential_configured` boolean where useful. — **Day 1, included in Phase 0 task 8.**  
-* Keep embedding behavior unchanged. — **Day 1, included in Phase 0 task 8.**
+* Remove full keys, previews, suffixes, and key-length diagnostics from the retrieval router and file worker.  
+* Replace those values with admin ID, model ID, job ID, and a `credential_configured` boolean where useful.  
+* Keep embedding behavior unchanged.
 
 Acceptance:
 
 * Repository search finds no embedding credential or partial representation in application logging.  
 * We confirm that model selection and worker behavior are unchanged.
 
-### **Work item 2 \- Read-only admin embedding panel** — **Days 9–10, included in Phase 5 tasks 1–2 and 7.**
+### **Work item 2 \- Read-only admin embedding panel** — **Expected completion: August 4, 2026; included in Phase 5 tasks 1–2 and 7.**
 
 **Start:** After we merge the model, settings, and status GET contracts  
 **Dependency:** Phase 4 API contract
 
 Deliverables:
 
-* Typed frontend API functions for the current admin's embedding-setting and job endpoints. — **Day 9, included in Phase 5 task 1.**  
-* An admin settings panel showing provider, model, modality, inherited user-group scope, job status, and last indexed time. — **Day 9, included in Phase 5 task 2.**  
-* Loading, empty, forbidden, queued, processing, completed, failed, and partially failed states. — **Day 10, included in Phase 5 task 7.**
+* Typed frontend API functions for the current admin's embedding-setting and job endpoints.  
+* An admin settings panel showing provider, model, modality, inherited user-group scope, job status, and last indexed time.  
+* Loading, empty, forbidden, queued, processing, completed, failed, and partially failed states.
 
 Acceptance:
 
@@ -368,18 +384,18 @@ Acceptance:
 * Regular users do not see the admin embedding settings panel.  
 * No credential value or reference is displayed.
 
-### **Work item 3 \- Model change and retry controls** — **Days 9–10, included in Phase 5 tasks 3–7.**
+### **Work item 3 \- Model change and retry controls** — **Expected completion: August 4, 2026; included in Phase 5 tasks 3–7.**
 
 **Start:** After we merge the model-change and retry contracts  
 **Dependency:** Working reindex workflow
 
 Deliverables:
 
-* Enabled-model selector populated from the backend registry. — **Day 9, included in Phase 5 task 3.**  
-* Confirmation warning explaining retrieval downtime. — **Day 10, included in Phase 5 task 4.**  
-* Disabled controls while indexing is queued or processing. — **Day 10, included in Phase 5 task 5.**  
-* Failed-document count and approved retry action. — **Day 10, included in Phase 5 task 6.**  
-* Clear authorization, conflict, capability, and job-failure messages. — **Day 10, included in Phase 5 task 7.**
+* Enabled-model selector populated from the backend registry.  
+* Confirmation warning explaining retrieval downtime.  
+* Disabled controls while indexing is queued or processing.  
+* Failed-document count and approved retry action.  
+* Clear authorization, conflict, capability, and job-failure messages.
 
 Acceptance:
 
@@ -387,16 +403,16 @@ Acceptance:
 * The UI does not report retrieval as ready before backend status is `completed`.  
 * Only the admin that owns the setting can change the model or retry.
 
-### **Work item 4 \- Image status support** — **Days 9–12, included in Phase 5 tasks 2 and 7 and Phase 6 tasks 6–7.**
+### **Work item 4 \- Image status support** — **Expected completion: August 6, 2026; included in Phase 5 tasks 2 and 7 and Phase 6 tasks 6–7.**
 
 **Start:** After we finalize the image API response  
 **Dependency:** Phase 6 backend contract
 
 Deliverables:
 
-* Display the supported modality for the selected model. — **Day 9, included in Phase 5 task 2.**  
-* Display unsupported-image and failed-image states using existing job UI patterns. — **Days 10 and 12, included in Phase 5 task 7 and Phase 6 task 6.**  
-* Display image metadata only when supplied by the approved backend response. — **Day 12, included in Phase 6 task 7.**
+* Display the supported modality for the selected model.  
+* Display unsupported-image and failed-image states using existing job UI patterns.  
+* Display image metadata only when supplied by the approved backend response.
 
 Acceptance:
 

@@ -61,38 +61,10 @@ class PgvectorClient:
             )
             self.session = scoped_session(SessionLocal)
 
-        try:
-            # Ensure the pgvector extension is available
-            self.session.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
-
-            # Check vector length consistency
-            self.check_vector_length()
-
-            # Create the tables if they do not exist
-            # Base.metadata.create_all requires a bind (engine or connection)
-            # Get the connection from the session
-            connection = self.session.connection()
-            Base.metadata.create_all(bind=connection)
-
-            # Create an index on the vector column if it doesn't exist
-            self.session.execute(
-                text(
-                    "CREATE INDEX IF NOT EXISTS idx_document_chunk_vector "
-                    "ON document_chunk USING ivfflat (vector vector_cosine_ops) WITH (lists = 100);"
-                )
-            )
-            self.session.execute(
-                text(
-                    "CREATE INDEX IF NOT EXISTS idx_document_chunk_collection_name "
-                    "ON document_chunk (collection_name);"
-                )
-            )
-            self.session.commit()
-            log.info("[PGVECTOR] init SUCCESS")
-        except Exception as e:
-            self.session.rollback()
-            log.exception(f"Error during initialization: {e}")
-            raise
+        # Schema ownership belongs to Alembic.  Runtime initialization is deliberately
+        # read-only so a worker cannot create a differently shaped vector table.
+        self.check_vector_length()
+        log.info("[PGVECTOR] init SUCCESS")
 
     def check_vector_length(self) -> None:
         """

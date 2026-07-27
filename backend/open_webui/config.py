@@ -111,7 +111,7 @@ def save_to_db(data):
         caller = " <- ".join(call_stack)
 
         existing_config = db.query(Config).filter(
-            Config.email == GLOBAL_CONFIG_EMAIL
+            Config.email == GLOBAL_CONFIG_EMAIL, Config.version == 0
         ).first()
         if not existing_config:
             # Legacy DB may have global config in a row with NULL email
@@ -216,7 +216,7 @@ def get_config():
     """Load global config for CONFIG_DATA. Prefers the global row (system@default)."""
     with get_db() as db:
         config_entry = db.query(Config).filter(
-            Config.email == GLOBAL_CONFIG_EMAIL
+            Config.email == GLOBAL_CONFIG_EMAIL, Config.version == 0
         ).first()
         if not config_entry:
             config_entry = (
@@ -315,6 +315,14 @@ class PersistentConfig(Generic[T]):
 
     def save(self):
         log.info(f"Saving '{self.env_name}' to the database")
+        if self.config_path == "rag.embedding_model":
+            with get_db() as db:
+                enabled = db.execute(
+                    text("SELECT 1 FROM embedding_models WHERE model_name = :model AND status = 'enabled'"),
+                    {"model": self.value},
+                ).first()
+                if not enabled:
+                    raise ValueError("Embedding model must be an enabled registry model.")
         path_parts = self.config_path.split(".")
         sub_config = CONFIG_DATA
         for key in path_parts[:-1]:
@@ -384,7 +392,7 @@ class UserScopedConfig:
                 group_creator_email = group.created_by
                 if not group_creator_email:
                     continue
-                creator_entry = db.query(Config).filter_by(email=group_creator_email).first()
+                creator_entry = db.query(Config).filter_by(email=group_creator_email, version=0).first()
                 if creator_entry and isinstance(creator_entry.data, dict):
                     data = creator_entry.data
                     final_value = self.default
@@ -434,7 +442,7 @@ class UserScopedConfig:
             return cached_value
 
         with get_db() as db:
-            entry = db.query(Config).filter_by(email=email).first()
+            entry = db.query(Config).filter_by(email=email, version=0).first()
             if entry and isinstance(entry.data, dict):
                 data = entry.data
                 final_value = self.default
@@ -461,7 +469,33 @@ class UserScopedConfig:
         cache.set_user_settings(user.id, self.config_path, self.default)
         return self.default
 
-    def set(self, email: str, value: Any):
+    def _set_in_session(self, db, email: str, value: Any):
+        """Update this setting without committing the caller's transaction."""
+        if self.config_path == "rag.embedding_model_user":
+            enabled = db.execute(
+                text("SELECT 1 FROM embedding_models WHERE model_name = :model AND status = 'enabled'"),
+                {"model": value},
+            ).first()
+            if not enabled:
+                raise ValueError("Embedding model must be an enabled registry model.")
+        entry = db.query(Config).filter_by(email=email, version=0).first()
+        if not entry:
+            entry = Config(email=email, data={}, version=0)
+            db.add(entry)
+
+        data = copy.deepcopy(entry.data) if entry.data else {}
+        current = data
+        parts = self.config_path.split(".")
+        for part in parts[:-1]:
+            if part not in current or not isinstance(current[part], dict):
+                current[part] = {}
+            current = current[part]
+        current[parts[-1]] = value
+        entry.data = data
+        entry.updated_at = datetime.now()
+        flag_modified(entry, "data")
+
+    def set(self, email: str, value: Any, db=None):
         """
         Set a user-scoped configuration value.
         
@@ -502,40 +536,18 @@ class UserScopedConfig:
                 f"config_path={self.config_path}, caller={caller}"
             )
         
-        with get_db() as db:
-            entry = db.query(Config).filter_by(email=email).first()
-            if not entry:
-                entry = Config(email=email, data={})
-                db.add(entry)
+        def persist(session):
+            self._set_in_session(session, email, value)
+            if db is None:
+                session.commit()
 
-            # CRITICAL FIX: Create a deep copy of the data dict to ensure SQLAlchemy
-            # detects the change. In-place modification of JSON columns may not be
-            # tracked properly even with flag_modified in some SQLAlchemy/PostgreSQL cases.
-            old_data = entry.data
-            data = copy.deepcopy(entry.data) if entry.data else {}
-            
-            logging.debug(
-                f"[RBAC_CONFIG_SET] Current DB value for '{email}' before change: {old_data}"
-            )
-            
-            current = data
-            parts = self.config_path.split(".")
-            for part in parts[:-1]:
-                if part not in current or not isinstance(current[part], dict):
-                    current[part] = {}
-                current = current[part]
-            current[parts[-1]] = value
-
-            logging.debug(
-                f"[RBAC_CONFIG_SET] New value being saved for '{email}': "
-                f"config_path={self.config_path}, caller={caller}"
-            )
-
-            # Assign the new dict object (not the same reference)
-            entry.data = data
-            entry.updated_at = datetime.now()
-            flag_modified(entry, "data")
-            db.commit()
+        if db is None:
+            with get_db() as session:
+                persist(session)
+        else:
+            persist(db)
+            # The caller owns commit/rollback and must invalidate caches after commit.
+            return
             
             logging.debug(
                 f"[RBAC_CONFIG_SET] Config saved to DB for '{email}': "
@@ -1953,8 +1965,8 @@ OPENSEARCH_USERNAME = os.environ.get("OPENSEARCH_USERNAME", None)
 OPENSEARCH_PASSWORD = os.environ.get("OPENSEARCH_PASSWORD", None)
 
 # Pgvector
-PGVECTOR_DB_URL = os.environ.get("PGVECTOR_DB_URL", DATABASE_URL)
-if VECTOR_DB == "pgvector" and not PGVECTOR_DB_URL.startswith("postgres"):
+PGVECTOR_DB_URL = os.environ.get("PGVECTOR_DB_URL")
+if VECTOR_DB == "pgvector" and not (PGVECTOR_DB_URL or DATABASE_URL).startswith("postgres"):
     raise ValueError(
         "Pgvector requires setting PGVECTOR_DB_URL or using Postgres with vector extension as the primary database."
     )

@@ -380,3 +380,8 @@ llm_portkey.py
 .env.local-ai-tutor
 QWEN.md
 _check_db.py
+
+
+# Editors
+.zed/
+.vscode/
