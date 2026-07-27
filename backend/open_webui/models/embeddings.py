@@ -18,6 +18,27 @@ class EmbeddingModel(Base):
     created_at = Column(BigInteger, nullable=False)
     updated_at = Column(BigInteger, nullable=False)
 
+    @staticmethod
+    def get_model_by_name(model_name: str):
+        """Get an embedding model by its model_name."""
+        from open_webui.internal.db import get_db
+        with get_db() as db:
+            return db.query(EmbeddingModel).filter(EmbeddingModel.model_name == model_name).first()
+
+    @staticmethod
+    def get_model_by_id(model_id: str):
+        """Get an embedding model by its id."""
+        from open_webui.internal.db import get_db
+        with get_db() as db:
+            return db.query(EmbeddingModel).filter(EmbeddingModel.id == model_id).first()
+
+    @staticmethod
+    def get_enabled_models():
+        """Get all enabled embedding models."""
+        from open_webui.internal.db import get_db
+        with get_db() as db:
+            return db.query(EmbeddingModel).filter(EmbeddingModel.status == "enabled").all()
+
 
 class RagChunk(Base):
     __tablename__ = "rag_chunks"
