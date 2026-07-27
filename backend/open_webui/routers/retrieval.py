@@ -311,47 +311,19 @@ async def get_status(request: Request, user=Depends(get_verified_user)):
 async def get_embedding_config(request: Request, user=Depends(get_verified_user)):
     """
     Get embedding configuration for the requesting user.
-    
-    RBAC: The API key returned is scoped to the requesting user:
-    - If user is an admin: Returns their own configured API key
-    - If user is in a group: Returns the group creator's (admin's) API key
-    - Other admins' API keys are NOT accessible (proper RBAC isolation)
+    Returns model config but never exposes the API key.
     """
-    # CRITICAL RBAC: Log the requesting user's email to ensure proper isolation
     requesting_email = user.email
-    log.info(
-        f"========== LOADING EMBEDDING CONFIG (Documents Page) ========== "
-        f"User '{requesting_email}' (ID: {user.id}) is opening the Documents page."
-    )
-    
-    # Get model and key for THIS specific user
     embedding_model = request.app.state.config.RAG_EMBEDDING_MODEL_USER.get(requesting_email) or ""
-    embedding_api_key = request.app.state.config.RAG_OPENAI_API_KEY.get(requesting_email)
-    
-    log.info(
-        f"[RETURNING TO FRONTEND] For user '{requesting_email}': "
-        f"Model = '{embedding_model}', API Key = '{embedding_api_key}'. "
-        f"This is what the Documents page will display."
-    )
     
     return {
         "status": True,
-        "embedding_engine": request.app.state.config.RAG_EMBEDDING_ENGINE,  # Always "portkey"
-        # RBAC: Per-admin model name - retrieved using requesting user's email
-        # This ensures the model is only accessible to:
-        # 1. The admin who configured it (when they request it)
-        # 2. Users in groups created by that admin (via group inheritance)
-        # 3. NOT accessible to other admins or their groups
+        "embedding_engine": request.app.state.config.RAG_EMBEDDING_ENGINE,
         "embedding_model": embedding_model,
         "embedding_batch_size": request.app.state.config.RAG_EMBEDDING_BATCH_SIZE,
         "openai_config": {
             "url": request.app.state.config.RAG_OPENAI_API_BASE_URL,
-            # RBAC: Per-admin API key - retrieved using requesting user's email
-            # This ensures the key is only accessible to:
-            # 1. The admin who configured it (when they request it)
-            # 2. Users in groups created by that admin (via group inheritance)
-            # 3. NOT accessible to other admins or their groups
-            "key": embedding_api_key,
+            "key": "",  # Never expose credential
         },
     }
 
@@ -387,14 +359,8 @@ async def update_embedding_config(
     request: Request, form_data: EmbeddingModelUpdateForm, user=Depends(get_verified_user)
 ):
     log.info(
-        f"========== EMBEDDING CONFIG UPDATE REQUEST ========== "
-        f"Admin '{user.email}' clicked SAVE on the Documents Embedding page. "
-        f"They want to set: Engine='{form_data.embedding_engine}', Model='{form_data.embedding_model}', "
-        f"BatchSize={form_data.embedding_batch_size}, "
-        f"OpenAI URL='{form_data.openai_config.url if form_data.openai_config else '(none)'}', "
-        f"OpenAI API Key='{form_data.openai_config.key if form_data.openai_config else '(none)'}', "
-        f"Ollama URL='{form_data.ollama_config.url if form_data.ollama_config else '(none)'}', "
-        f"Ollama Key='{form_data.ollama_config.key if form_data.ollama_config else '(none)'}'"
+        f"Embedding config update: admin='{user.email}' engine='{form_data.embedding_engine}' "
+        f"model='{form_data.embedding_model}' batch_size={form_data.embedding_batch_size}"
     )
 
     # Basic validation: model and API key are mandatory for OpenAI/Portkey engines
@@ -410,34 +376,9 @@ async def update_embedding_config(
                 detail="Embedding API key is required for OpenAI/Portkey engines.",
             )
 
-    # CRITICAL RBAC: Log the admin's email to ensure proper isolation
     admin_email = user.email
     try:
-        # Get current model safely inside try block to catch any potential errors
-        current_model = "(empty)"
-        try:
-            current_model = request.app.state.config.RAG_EMBEDDING_MODEL_USER.get(admin_email) or "(empty)"
-        except Exception as e:
-            log.warning(f"Could not get current model for logging: {e}")
-        
-        log.info(
-            f"[RBAC_SET_EMBEDDING] Admin {admin_email} (ID: {user.id}) updating embedding config: "
-            f"{current_model} -> {form_data.embedding_model}, "
-            f"engine={form_data.embedding_engine}"
-        )
-        # Fetch CURRENT model BEFORE update
-        current_engine = getattr(request.app.state.config, 'RAG_EMBEDDING_ENGINE', '(unset)')
-        
-        log.info(
-            f"[ENGINE CHANGE] Admin '{admin_email}' is changing embedding engine from '{current_engine}' to '{form_data.embedding_engine}'"
-        )
         request.app.state.config.RAG_EMBEDDING_ENGINE = form_data.embedding_engine
-        # RBAC: Per-admin model name - stored under admin's email
-        # The model will be accessible to:
-        # 1. The admin themselves
-        # 2. Users in groups created by this admin (via group inheritance)
-        # 3. NOT accessible to other admins or their groups
-        log.info(f"[RBAC_SET_EMBEDDING] Setting model for admin {admin_email}: {form_data.embedding_model}")
         request.app.state.config.RAG_EMBEDDING_MODEL_USER.set(
             admin_email, form_data.embedding_model
         )
@@ -448,38 +389,11 @@ async def update_embedding_config(
             "portkey",
         ]:
             if form_data.openai_config is not None:
-                # Fetch CURRENT value BEFORE update to trace changes
-                current_api_key = request.app.state.config.RAG_OPENAI_API_KEY.get(admin_email) or "(empty)"
-                current_base_url = getattr(request.app.state.config.RAG_OPENAI_API_BASE_URL, 'value', str(request.app.state.config.RAG_OPENAI_API_BASE_URL)) or "(empty)"
-                
-                log.info(
-                    f"***** API KEY COMPARISON ***** "
-                    f"Admin '{admin_email}' is about to change the API key. "
-                    f"CURRENT API Key in system = '{current_api_key}'. "
-                    f"NEW API Key being set = '{form_data.openai_config.key}'. "
-                    f"CURRENT Base URL = '{current_base_url}'. "
-                    f"NEW Base URL = '{form_data.openai_config.url}'."
-                )
-                
                 request.app.state.config.RAG_OPENAI_API_BASE_URL = (
                     form_data.openai_config.url
                 )
-                # Per-admin API key - set for this admin and their group (RBAC-protected)
-                # The key is stored under the admin's email and will be accessible to:
-                # 1. The admin themselves
-                # 2. Users in groups created by this admin
-                # 3. NOT accessible to other admins or their groups
-                log.info(
-                    f"[NOW SAVING API KEY] Calling config.RAG_OPENAI_API_KEY.set() for admin '{admin_email}' with key='{form_data.openai_config.key}'"
-                )
                 request.app.state.config.RAG_OPENAI_API_KEY.set(
                     admin_email, form_data.openai_config.key
-                )
-                log.info(
-                    f"Admin {user.email} configured embedding OpenAI/Portkey API settings: "
-                    f"base_url={form_data.openai_config.url}, "
-                    f"api_key={form_data.openai_config.key} "
-                    f"(RBAC: accessible to admin and their group members only)"
                 )
 
             if form_data.ollama_config is not None:
@@ -499,95 +413,19 @@ async def update_embedding_config(
             request.app.state.config.RAG_EMBEDDING_MODEL,
         )
 
-        # Get user's API key for embedding function
-        user_api_key = request.app.state.config.RAG_OPENAI_API_KEY.get(user.email)
-        
-        # Get base URL value - handle PersistentConfig objects properly
-        if request.app.state.config.RAG_EMBEDDING_ENGINE == "openai" or request.app.state.config.RAG_EMBEDDING_ENGINE == "portkey":
-            base_url_config = request.app.state.config.RAG_OPENAI_API_BASE_URL
-            base_url = (
-                base_url_config.value
-                if hasattr(base_url_config, 'value')
-                else str(base_url_config)
-            )
-            # Fallback to default if empty (from config.py default)
-            if not base_url or base_url.strip() == "":
-                base_url = "https://ai-gateway.apps.cloud.rt.nyu.edu/v1"
-                log.warning(f"RAG_OPENAI_API_BASE_URL is empty, using default: {base_url}")
-        else:
-            base_url_config = request.app.state.config.RAG_OLLAMA_BASE_URL
-            base_url = (
-                base_url_config.value
-                if hasattr(base_url_config, 'value')
-                else str(base_url_config)
-            )
-        
-        request.app.state.EMBEDDING_FUNCTION = get_embedding_function(
-            request.app.state.config.RAG_EMBEDDING_ENGINE,
-            request.app.state.config.RAG_EMBEDDING_MODEL,
-            request.app.state.ef,
-            base_url,
-            (
-                user_api_key
-                if request.app.state.config.RAG_EMBEDDING_ENGINE == "openai"
-                or request.app.state.config.RAG_EMBEDDING_ENGINE == "portkey"
-                else request.app.state.config.RAG_OLLAMA_API_KEY
-            ),
-            request.app.state.config.RAG_EMBEDDING_BATCH_SIZE,
-        )
+        # Credential-safe: Do not rebuild global EMBEDDING_FUNCTION
+        # Embedding service is created per-request with user-specific credentials
 
-        # Fetch the saved values from database to verify the save worked
-        # (cache should be invalidated by set(), so get() will fetch from DB)
         saved_model = request.app.state.config.RAG_EMBEDDING_MODEL_USER.get(user.email) or ""
-        saved_api_key = request.app.state.config.RAG_OPENAI_API_KEY.get(user.email) or ""
-        
-        # Verify the save worked by comparing with what we tried to save
-        log.info(f"[VERIFICATION] Now checking if the save worked by reading back from database...")
-        
-        if saved_model != form_data.embedding_model:
-            log.error(
-                f"!!!!! MODEL SAVE FAILED !!!!! "
-                f"Admin '{admin_email}' tried to save model='{form_data.embedding_model}', "
-                f"but database actually has model='{saved_model}'. Something went wrong!"
-            )
-        else:
-            log.info(
-                f"[MODEL VERIFIED] Model saved correctly for admin '{admin_email}': '{saved_model}'"
-            )
-
-        if form_data.openai_config is not None:
-            if saved_api_key != form_data.openai_config.key:
-                log.error(
-                    f"!!!!! API KEY SAVE FAILED !!!!! "
-                    f"Admin '{admin_email}' tried to save API key='{form_data.openai_config.key}', "
-                    f"but database actually has API key='{saved_api_key}'. "
-                    f"THE KEY WAS OVERWRITTEN OR NOT SAVED CORRECTLY!"
-                )
-            else:
-                log.info(
-                    f"[API KEY VERIFIED] API key saved correctly for admin '{admin_email}': '{saved_api_key}'"
-                )
-        else:
-            log.info(f"[NO API KEY] No OpenAI/Portkey API key was provided (engine='{form_data.embedding_engine}')")
-        
-        # Final summary
-        log.info(
-            f"========== EMBEDDING CONFIG UPDATE COMPLETE ========== "
-            f"Admin: '{admin_email}' | Engine: '{form_data.embedding_engine}' | Model: '{saved_model}' | "
-            f"API Key User Wanted: '{form_data.openai_config.key if form_data.openai_config else '(none)'}' | "
-            f"API Key Actually Saved: '{saved_api_key}'"
-        )
 
         return {
             "status": True,
             "embedding_engine": request.app.state.config.RAG_EMBEDDING_ENGINE,
-            # Return the verified value from database
             "embedding_model": saved_model,
             "embedding_batch_size": request.app.state.config.RAG_EMBEDDING_BATCH_SIZE,
             "openai_config": {
                 "url": request.app.state.config.RAG_OPENAI_API_BASE_URL,
-                # Return the verified API key from database
-                "key": saved_api_key,
+                "key": "",  # Never expose credential
             },
             "ollama_config": {
                 "url": request.app.state.config.RAG_OLLAMA_BASE_URL,
@@ -1094,7 +932,7 @@ def save_docs_to_vector_db(
     split: bool = True,
     add: bool = False,
     user=None,
-    owner_email: Optional[str] = None,
+    embedding_function: Callable = None,
 ) -> bool:
     def _get_docs_info(docs: list[Document]) -> str:
         docs_info = set()
@@ -1260,147 +1098,13 @@ def save_docs_to_vector_db(
 
                 log.info(f"adding to collection {collection_name}")
                 
-                # RBAC: Determine owner_email for per-admin model/key lookup
-                # If owner_email is explicitly provided (from worker/job), use it
-                # Otherwise, fall back to user.email (for direct calls)
-                effective_owner_email = owner_email if owner_email else (user.email if user else None)
-                
-                if not effective_owner_email:
-                    error_msg = (
-                        "No owner_email or user.email available for RBAC model/key lookup. "
-                        "Cannot determine which admin's embedding model to use."
-                    )
-                    log.error(error_msg)
-                    raise ValueError(error_msg)
-                
-                # RBAC: Get per-admin model name and API key for the owner
-                owner_model = request.app.state.config.RAG_EMBEDDING_MODEL_USER.get(effective_owner_email)
-                owner_api_key = request.app.state.config.RAG_OPENAI_API_KEY.get(effective_owner_email)
-                
-                # Validate both model and key are present (no fallback)
-                if not owner_model or not owner_model.strip():
-                    error_msg = (
-                        f"No embedding model configured for owner {effective_owner_email}. "
-                        f"Please ensure the admin configures the embedding model in Settings > Documents."
-                    )
-                    log.error(error_msg)
-                    raise ValueError(error_msg)
-                
-                if not owner_api_key or not owner_api_key.strip():
-                    error_msg = (
-                        f"No embedding API key configured for owner {effective_owner_email}. "
-                        f"Please ensure the admin configures the embedding API key in Settings > Documents."
-                    )
-                    log.error(error_msg)
-                    raise ValueError(error_msg)
-                
-                log.info(
-                    f"RBAC: Using per-admin config for owner={effective_owner_email}: "
-                    f"model={owner_model}, key_length={len(owner_api_key)}"
-                )
-                
-                # Get base URL value - handle PersistentConfig objects properly
-                if request.app.state.config.RAG_EMBEDDING_ENGINE == "openai" or request.app.state.config.RAG_EMBEDDING_ENGINE == "portkey":
-                    base_url_config = request.app.state.config.RAG_OPENAI_API_BASE_URL
-                    base_url = (
-                        base_url_config.value
-                        if hasattr(base_url_config, 'value')
-                        else str(base_url_config)
-                    )
-                    print(f"  [STEP 3.1] Extracted base_url: {base_url}", flush=True)
-                    log.info(f"  [STEP 3.1] Extracted base_url: {base_url}")
-                    
-                    # Fallback to default if empty (from config.py default)
-                    if not base_url or base_url.strip() == "" or base_url == "None":
-                        base_url = "https://ai-gateway.apps.cloud.rt.nyu.edu/v1"
-                        print(f"  [STEP 3.2] ⚠️  Base URL was empty/None, using default: {base_url}", flush=True)
-                        log.warning(f"  [STEP 3.2] Base URL was empty/None, using default: {base_url}")
-                    else:
-                        print(f"  [STEP 3.2] ✅ Using configured base URL: {base_url}", flush=True)
-                        log.info(f"  [STEP 3.2] ✅ Using configured base URL: {base_url}")
-                    
-                    # RBAC: Use owner's API key (per-admin)
-                    api_key_to_use = owner_api_key
-                    print(f"  [STEP 3.3] Using OpenAI/Portkey API key (owner_api_key for {effective_owner_email})", flush=True)
-                    log.info(f"  [STEP 3.3] Using OpenAI/Portkey API key (owner_api_key for {effective_owner_email})")
-                else:
-                    base_url_config = request.app.state.config.RAG_OLLAMA_BASE_URL
-                    base_url = (
-                        base_url_config.value
-                        if hasattr(base_url_config, 'value')
-                        else str(base_url_config)
-                    )
-                    api_key_to_use = request.app.state.config.RAG_OLLAMA_API_KEY
-                    print(f"  [STEP 3.1] Using Ollama config: base_url={base_url}", flush=True)
-                    log.info(f"  [STEP 3.1] Using Ollama config: base_url={base_url}")
-                
-                # CRITICAL BUG FIX: Validate API key before creating embedding function
-                print(f"  [STEP 4] Validating API key before embedding function creation...", flush=True)
-                log.info(f"  [STEP 4] Validating API key before embedding function creation...")
-                print(f"    api_key_to_use is None: {api_key_to_use is None}", flush=True)
-                print(f"    api_key_to_use is empty: {api_key_to_use == '' if api_key_to_use else 'N/A'}", flush=True)
-                print(f"    api_key_to_use length: {len(api_key_to_use) if api_key_to_use else 0}", flush=True)
-                log.info(f"    api_key_to_use is None: {api_key_to_use is None}")
-                log.info(f"    api_key_to_use is empty: {api_key_to_use == '' if api_key_to_use else 'N/A'}")
-                log.info(f"    api_key_to_use length: {len(api_key_to_use) if api_key_to_use else 0}")
-                
-                if not api_key_to_use or not api_key_to_use.strip():
-                    error_msg = (
-                        f"❌ CRITICAL BUG: API key is None or empty before embedding function creation. "
-                        f"Cannot generate embeddings. "
-                        f"user_email={user_email}, engine={request.app.state.config.RAG_EMBEDDING_ENGINE}"
-                    )
-                    print(f"  [STEP 4] ❌ {error_msg}", flush=True)
-                    log.error(f"  [STEP 4] ❌ {error_msg}")
-                    raise ValueError(error_msg)
-                
-                print(f"  [STEP 4] ✅ API key validated", flush=True)
-                log.info(f"  [STEP 4] ✅ API key validated")
-                
-                # Embedding function that sends all texts at once
-                # RBAC: Use per-admin model name (not global)
-                print(f"  [STEP 5] Creating embedding function:", flush=True)
-                print(f"    engine: {request.app.state.config.RAG_EMBEDDING_ENGINE}", flush=True)
-                print(f"    model: {owner_model} (per-admin for {effective_owner_email})", flush=True)
-                print(f"    base_url: {base_url}", flush=True)
-                print(f"    batch_size: {request.app.state.config.RAG_EMBEDDING_BATCH_SIZE}", flush=True)
-                print(f"    api_key provided: {api_key_to_use is not None and len(api_key_to_use) > 0}", flush=True)
-                log.info(f"  [STEP 5] Creating embedding function:")
-                log.info(f"    engine: {request.app.state.config.RAG_EMBEDDING_ENGINE}")
-                log.info(f"    model: {owner_model} (per-admin for {effective_owner_email})")
-                log.info(f"    base_url: {base_url}")
-                log.info(f"    batch_size: {request.app.state.config.RAG_EMBEDDING_BATCH_SIZE}")
-                log.info(f"    api_key provided: {api_key_to_use is not None and len(api_key_to_use) > 0}")
-                
-                embedding_function = get_single_batch_embedding_function(
-                    request.app.state.config.RAG_EMBEDDING_ENGINE,
-                    owner_model,  # RBAC: Use per-admin model (not global)
-                    request.app.state.ef,
-                    base_url,
-                    api_key_to_use,
-                    request.app.state.config.RAG_EMBEDDING_BATCH_SIZE,
-                )
-                
-                print(f"  [STEP 5.1] Embedding function created:", flush=True)
-                print(f"    embedding_function is None: {embedding_function is None}", flush=True)
-                print(f"    embedding_function type: {type(embedding_function)}", flush=True)
-                log.info(f"  [STEP 5.1] Embedding function created:")
-                log.info(f"    embedding_function is None: {embedding_function is None}")
-                log.info(f"    embedding_function type: {type(embedding_function)}")
-                
+                # Credential-safe: Use the provided embedding_function
                 if embedding_function is None:
-                    error_msg = "Failed to create embedding function - get_single_batch_embedding_function returned None"
-                    print(f"  [STEP 5.1] ❌ {error_msg}", flush=True)
-                    log.error(f"  [STEP 5.1] ❌ {error_msg}")
-                    raise ValueError(error_msg)
+                    raise ValueError("No embedding function provided. Cannot generate embeddings.")
                 
-                print(f"  [STEP 5.1] ✅ Embedding function created successfully", flush=True)
-                log.info(f"  [STEP 5.1] ✅ Embedding function created successfully")
-
-                # Process all text chunks in a single API call
+                # Generate embeddings using the provided function
                 embed_api_start = time.time()
-                print(f"  [STEP 6] Generating embeddings for {len(texts)} chunks in a single batch | timestamp={embed_api_start:.3f}", flush=True)
-                log.info(f"  [STEP 6] Generating embeddings for {len(texts)} chunks in a single batch | timestamp={embed_api_start:.3f}")
+                log.info(f"Generating embeddings for {len(texts)} chunks")
                 
                 safe_add_span_event("embedding.generation.started", {"text.count": len(texts)})
                 
@@ -1409,42 +1113,21 @@ def save_docs_to_vector_db(
                         list(map(lambda x: x.replace("\n", " "), texts)), user=user
                     )
                     embed_api_end = time.time()
-                    embed_api_duration = embed_api_end - embed_api_start
-                    log.info(f"[EMBED_API] COMPLETE | chunks={len(texts)} | duration={embed_api_duration:.2f}s | timestamp={embed_api_end:.3f}")
-                
-                    print(f"  [STEP 6.1] Embedding generation result:", flush=True)
-                    print(f"    embeddings is None: {embeddings is None}", flush=True)
-                    print(f"    embeddings type: {type(embeddings)}", flush=True)
-                    print(f"    embeddings length: {len(embeddings) if embeddings else 0}", flush=True)
-                    if embeddings and len(embeddings) > 0:
-                        print(f"    first embedding length: {len(embeddings[0]) if embeddings[0] else 0}", flush=True)
-                    log.info(f"  [STEP 6.1] Embedding generation result:")
-                    log.info(f"    embeddings is None: {embeddings is None}")
-                    log.info(f"    embeddings type: {type(embeddings)}")
-                    log.info(f"    embeddings length: {len(embeddings) if embeddings else 0}")
+                    log.info(f"[EMBED_API] COMPLETE | chunks={len(texts)} | duration={embed_api_end - embed_api_start:.2f}s")
                     
                     if not embeddings or len(embeddings) == 0:
-                        error_msg = "Embedding generation returned empty result"
-                        print(f"  [STEP 6.1] ❌ {error_msg}", flush=True)
-                        log.error(f"  [STEP 6.1] ❌ {error_msg}")
-                        raise ValueError(error_msg)
+                        raise ValueError("Embedding generation returned empty result")
                     
                     if len(embeddings) != len(texts):
-                        error_msg = f"Embedding count mismatch: expected {len(texts)}, got {len(embeddings)}"
-                        print(f"  [STEP 6.1] ❌ {error_msg}", flush=True)
-                        log.error(f"  [STEP 6.1] ❌ {error_msg}")
-                        raise ValueError(error_msg)
+                        raise ValueError(f"Embedding count mismatch: expected {len(texts)}, got {len(embeddings)}")
                     
-                    print(f"  [STEP 6.1] ✅ Embeddings generated successfully", flush=True)
-                    log.info(f"  [STEP 6.1] ✅ Embeddings generated successfully")
-                    safe_add_span_event("embedding.generation.completed", {"embedding.count": len(embeddings) if embeddings else 0})
+                    safe_add_span_event("embedding.generation.completed", {"embedding.count": len(embeddings)})
+                except EmbeddingError as e:
+                    safe_add_span_event("embedding.generation.failed", {"error.code": e.code})
+                    raise
                 except Exception as embed_error:
-                    error_msg = f"Failed to generate embeddings: {embed_error}"
-                    print(f"  [STEP 6] ❌ {error_msg}", flush=True)
-                    log.error(f"  [STEP 6] ❌ {error_msg}", exc_info=True)
                     safe_add_span_event("embedding.generation.failed", {
                         "error.type": type(embed_error).__name__,
-                        "error.message": str(embed_error)[:200],
                     })
                     raise
 
@@ -1611,7 +1294,7 @@ def save_docs_to_multiple_collections(
     overwrite: bool = False,
     split: bool = True,
     user=None,
-    owner_email: Optional[str] = None,
+    embedding_function: Callable = None,
 ) -> bool:
     """
     Save documents to multiple collections using a single embedding operation
@@ -1702,39 +1385,15 @@ def save_docs_to_multiple_collections(
         )
         raise ValueError(ERROR_MESSAGES.EMPTY_CONTENT)
 
-    # RBAC: Determine owner_email for per-admin model lookup
-    effective_owner_email = owner_email if owner_email else (user.email if user else None)
-    
-    # RBAC: Get per-admin model name (no fallback to global)
-    owner_model = None
-    if effective_owner_email:
-        owner_model = request.app.state.config.RAG_EMBEDDING_MODEL_USER.get(effective_owner_email)
-        if not owner_model or not owner_model.strip():
-            error_msg = (
-                f"No embedding model configured for owner {effective_owner_email}. "
-                f"Please ensure the admin configures the embedding model in Settings > Documents."
-            )
-            log.error(error_msg)
-            raise ValueError(error_msg)
-    else:
-        error_msg = (
-            "No owner_email or user.email available for RBAC model lookup. "
-            "Cannot determine which admin's embedding model to use."
-        )
-        log.error(error_msg)
-        raise ValueError(error_msg)
+    # Credential-safe: Validate embedding_function is provided
+    if embedding_function is None:
+        raise ValueError("No embedding function provided. Cannot generate embeddings.")
     
     texts = [doc.page_content for doc in docs]
     metadatas = [
         {
             **doc.metadata,
             **(metadata if metadata else {}),
-            "embedding_config": json.dumps(
-                {
-                    "engine": request.app.state.config.RAG_EMBEDDING_ENGINE,
-                    "model": owner_model,  # RBAC: Per-admin model (not global)
-                }
-            ),
         }
         for doc in docs
     ]
@@ -1761,172 +1420,26 @@ def save_docs_to_multiple_collections(
                     VECTOR_DB_CLIENT.delete_collection(collection_name=collection_name)
                     log.info(f"Deleting existing collection {collection_name}")
 
-        # RBAC: Get per-admin model and API key for the owner
-        print("=" * 80, flush=True)
-        print("[EMBEDDING] Starting embedding generation in save_docs_to_multiple_collections", flush=True)
-        log.info("=" * 80)
-        log.info("[EMBEDDING] Starting embedding generation in save_docs_to_multiple_collections")
-        
-        # RBAC: Use owner_email if provided, otherwise fall back to user.email
-        effective_owner_email_for_key = effective_owner_email  # Already determined above
-        
-        print(f"  [STEP 1] RBAC context:", flush=True)
-        print(f"    owner_email: {effective_owner_email_for_key}", flush=True)
-        print(f"    owner_model: {owner_model}", flush=True)
-        print(f"    collections: {collections}", flush=True)
-        log.info(f"  [STEP 1] RBAC context: owner_email={effective_owner_email_for_key}, owner_model={owner_model}, collections={collections}")
-        
-        print(f"  [STEP 2] Retrieving API key from config for owner {effective_owner_email_for_key}...", flush=True)
-        log.info(f"  [STEP 2] Retrieving API key from config for owner {effective_owner_email_for_key}...")
-        owner_api_key = request.app.state.config.RAG_OPENAI_API_KEY.get(effective_owner_email_for_key)
-        
-        print(f"  [STEP 2.1] API key retrieval result:", flush=True)
-        print(f"    owner_api_key is None: {owner_api_key is None}", flush=True)
-        print(f"    owner_api_key is empty: {owner_api_key == '' if owner_api_key else 'N/A'}", flush=True)
-        print(f"    owner_api_key length: {len(owner_api_key) if owner_api_key else 0}", flush=True)
-        if owner_api_key:
-            api_key_preview = owner_api_key[-4:] if len(owner_api_key) >= 4 else '***'
-            print(f"    owner_api_key ends with: ...{api_key_preview}", flush=True)
-        log.info(f"  [STEP 2.1] API key retrieval result:")
-        log.info(f"    owner_api_key is None: {owner_api_key is None}")
-        log.info(f"    owner_api_key is empty: {owner_api_key == '' if owner_api_key else 'N/A'}")
-        log.info(f"    owner_api_key length: {len(owner_api_key) if owner_api_key else 0}")
-        
-        # RBAC: Validate API key before use (no fallback)
-        if not owner_api_key or not owner_api_key.strip():
-            error_msg = (
-                f"❌ No embedding API key found for owner {effective_owner_email_for_key}. "
-                f"Cannot generate embeddings. "
-                f"Please ensure the admin configures the embedding API key in Settings > Documents."
-            )
-            print(f"  [STEP 2.2] ❌ {error_msg}", flush=True)
-            log.error(f"  [STEP 2.2] ❌ {error_msg}")
-            raise ValueError(error_msg)
-        
-        print(f"  [STEP 2.2] ✅ API key validated", flush=True)
-        log.info(f"  [STEP 2.2] ✅ API key validated")
-        
-        # Get base URL value - handle PersistentConfig objects properly
-        print(f"  [STEP 3] Getting base URL for embedding engine: {request.app.state.config.RAG_EMBEDDING_ENGINE}", flush=True)
-        log.info(f"  [STEP 3] Getting base URL for embedding engine: {request.app.state.config.RAG_EMBEDDING_ENGINE}")
-        
-        if request.app.state.config.RAG_EMBEDDING_ENGINE == "openai" or request.app.state.config.RAG_EMBEDDING_ENGINE == "portkey":
-            base_url_config = request.app.state.config.RAG_OPENAI_API_BASE_URL
-            base_url = (
-                base_url_config.value
-                if hasattr(base_url_config, 'value')
-                else str(base_url_config)
-            )
-            print(f"  [STEP 3.1] Extracted base_url: {base_url}", flush=True)
-            log.info(f"  [STEP 3.1] Extracted base_url: {base_url}")
-            
-            # Fallback to default if empty (from config.py default)
-            if not base_url or base_url.strip() == "" or base_url == "None":
-                base_url = "https://ai-gateway.apps.cloud.rt.nyu.edu/v1"
-                print(f"  [STEP 3.2] ⚠️  Base URL was empty/None, using default: {base_url}", flush=True)
-                log.warning(f"  [STEP 3.2] Base URL was empty/None, using default: {base_url}")
-            else:
-                print(f"  [STEP 3.2] ✅ Using configured base URL: {base_url}", flush=True)
-                log.info(f"  [STEP 3.2] ✅ Using configured base URL: {base_url}")
-            
-            # RBAC: Use owner's API key (per-admin)
-            api_key_to_use = owner_api_key
-            print(f"  [STEP 3.3] Using OpenAI/Portkey API key (owner_api_key for {effective_owner_email_for_key})", flush=True)
-            log.info(f"  [STEP 3.3] Using OpenAI/Portkey API key (owner_api_key for {effective_owner_email_for_key})")
-        else:
-            base_url_config = request.app.state.config.RAG_OLLAMA_BASE_URL
-            base_url = (
-                base_url_config.value
-                if hasattr(base_url_config, 'value')
-                else str(base_url_config)
-            )
-            api_key_to_use = request.app.state.config.RAG_OLLAMA_API_KEY
-            print(f"  [STEP 3.1] Using Ollama config: base_url={base_url}", flush=True)
-            log.info(f"  [STEP 3.1] Using Ollama config: base_url={base_url}")
-        
-        # CRITICAL BUG FIX: Validate API key before calling embedding function
-        print(f"  [STEP 4] Validating API key before embedding generation...", flush=True)
-        log.info(f"  [STEP 4] Validating API key before embedding generation...")
-        print(f"    api_key_to_use is None: {api_key_to_use is None}", flush=True)
-        print(f"    api_key_to_use is empty: {api_key_to_use == '' if api_key_to_use else 'N/A'}", flush=True)
-        print(f"    api_key_to_use length: {len(api_key_to_use) if api_key_to_use else 0}", flush=True)
-        log.info(f"    api_key_to_use is None: {api_key_to_use is None}")
-        log.info(f"    api_key_to_use is empty: {api_key_to_use == '' if api_key_to_use else 'N/A'}")
-        log.info(f"    api_key_to_use length: {len(api_key_to_use) if api_key_to_use else 0}")
-        
-        if not api_key_to_use or not api_key_to_use.strip():
-            error_msg = (
-                f"❌ API key is None or empty before embedding generation. "
-                f"Cannot generate embeddings. "
-                f"owner_email={effective_owner_email_for_key}, engine={request.app.state.config.RAG_EMBEDDING_ENGINE}"
-            )
-            print(f"  [STEP 4] ❌ {error_msg}", flush=True)
-            log.error(f"  [STEP 4] ❌ {error_msg}")
-            raise ValueError(error_msg)
-        
-        print(f"  [STEP 4] ✅ API key validated", flush=True)
-        log.info(f"  [STEP 4] ✅ API key validated")
-        
-        # Usage of get_embeddings_with_fallback
-        # RBAC: Use per-admin model (not global)
-        print(f"  [STEP 5] Calling get_embeddings_with_fallback:", flush=True)
-        print(f"    engine: {request.app.state.config.RAG_EMBEDDING_ENGINE}", flush=True)
-        print(f"    model: {owner_model} (per-admin for {effective_owner_email_for_key})", flush=True)
-        print(f"    base_url: {base_url}", flush=True)
-        print(f"    batch_size: {request.app.state.config.RAG_EMBEDDING_BATCH_SIZE}", flush=True)
-        print(f"    texts count: {len(texts)}", flush=True)
-        print(f"    api_key provided: {api_key_to_use is not None and len(api_key_to_use) > 0}", flush=True)
-        log.info(f"  [STEP 5] Calling get_embeddings_with_fallback:")
-        log.info(f"    engine: {request.app.state.config.RAG_EMBEDDING_ENGINE}")
-        log.info(f"    model: {owner_model} (per-admin for {effective_owner_email_for_key})")
-        log.info(f"    base_url: {base_url}")
-        log.info(f"    batch_size: {request.app.state.config.RAG_EMBEDDING_BATCH_SIZE}")
-        log.info(f"    texts count: {len(texts)}")
-        log.info(f"    api_key provided: {api_key_to_use is not None and len(api_key_to_use) > 0}")
+        # Credential-safe: Use the provided embedding_function
+        log.info(f"Generating embeddings for {len(texts)} chunks")
         
         try:
-            embeddings = get_embeddings_with_fallback(
-                request.app.state.config.RAG_EMBEDDING_ENGINE,
-                owner_model,  # RBAC: Use per-admin model (not global)
-                request.app.state.ef,
-                base_url,
-                api_key_to_use,
-                request.app.state.config.RAG_EMBEDDING_BATCH_SIZE,
-                list(map(lambda x: x.replace("\n", " "), texts)),
-                get_single_batch_embedding_function,  # Pass this function
-                get_embedding_function,  # Pass this function
-                user=user,
+            embeddings = embedding_function(
+                list(map(lambda x: x.replace("\n", " "), texts)), user=user
             )
             
-            print(f"  [STEP 5.1] Embedding generation result:", flush=True)
-            print(f"    embeddings is None: {embeddings is None}", flush=True)
-            print(f"    embeddings type: {type(embeddings)}", flush=True)
-            print(f"    embeddings length: {len(embeddings) if embeddings else 0}", flush=True)
-            if embeddings and len(embeddings) > 0:
-                print(f"    first embedding length: {len(embeddings[0]) if embeddings[0] else 0}", flush=True)
-            log.info(f"  [STEP 5.1] Embedding generation result:")
-            log.info(f"    embeddings is None: {embeddings is None}")
-            log.info(f"    embeddings type: {type(embeddings)}")
-            log.info(f"    embeddings length: {len(embeddings) if embeddings else 0}")
-            
             if not embeddings or len(embeddings) == 0:
-                error_msg = "Embedding generation returned empty result"
-                print(f"  [STEP 5.1] ❌ {error_msg}", flush=True)
-                log.error(f"  [STEP 5.1] ❌ {error_msg}")
-                raise ValueError(error_msg)
+                raise ValueError("Embedding generation returned empty result")
             
             if len(embeddings) != len(texts):
-                error_msg = f"Embedding count mismatch: expected {len(texts)}, got {len(embeddings)}"
-                print(f"  [STEP 5.1] ❌ {error_msg}", flush=True)
-                log.error(f"  [STEP 5.1] ❌ {error_msg}")
-                raise ValueError(error_msg)
+                raise ValueError(f"Embedding count mismatch: expected {len(texts)}, got {len(embeddings)}")
             
-            print(f"  [STEP 5.1] ✅ Embeddings generated successfully", flush=True)
-            log.info(f"  [STEP 5.1] ✅ Embeddings generated successfully")
+            log.info(f"Embeddings generated successfully: {len(embeddings)} vectors")
+        except EmbeddingError as e:
+            log.error(f"Embedding failed: {e.code}")
+            raise
         except Exception as embed_error:
-            error_msg = f"Failed to generate embeddings: {embed_error}"
-            print(f"  [STEP 5] ❌ {error_msg}", flush=True)
-            log.error(f"  [STEP 5] ❌ {error_msg}", exc_info=True)
+            log.error(f"Failed to generate embeddings: {embed_error}")
             raise
 
         # Insert embeddings into all collections
@@ -1988,6 +1501,8 @@ def _process_file_sync(
     collection_name: Optional[str] = None,
     knowledge_id: Optional[str] = None,
     user_id: Optional[str] = None,
+    admin_id: Optional[str] = None,
+    embedding_model_id: Optional[str] = None,
 ) -> None:
     """
     Core file processing logic that runs synchronously.
@@ -2000,17 +1515,10 @@ def _process_file_sync(
         collection_name: Optional collection name
         knowledge_id: Optional knowledge base ID
         user_id: User ID for logging
+        admin_id: Frozen admin user ID for credential-safe resolution
+        embedding_model_id: Frozen embedding model ID for credential-safe resolution
     """
-    print("=" * 80, flush=True)
-    print("[BACKGROUND TASK] Starting _process_file_sync", flush=True)
-    print(f"  file_id: {file_id}", flush=True)
-    print(f"  user_id: {user_id}", flush=True)
-    print(f"  collection_name: {collection_name}", flush=True)
-    print(f"  knowledge_id: {knowledge_id}", flush=True)
-    print(f"  content provided: {'Yes (' + str(len(content)) + ' chars)' if content else 'No'}", flush=True)
-    log.info("=" * 80)
-    log.info("[BACKGROUND TASK] Starting _process_file_sync")
-    log.info(f"  file_id: {file_id}, user_id: {user_id}, collection_name: {collection_name}, knowledge_id: {knowledge_id}")
+    log.info(f"[BACKGROUND TASK] Starting _process_file_sync file_id={file_id} user_id={user_id} admin_id={admin_id}")
     
     try:
         # Get user object if user_id is provided
@@ -2041,25 +1549,16 @@ def _process_file_sync(
             print(f"  [STEP 1] ⚠️  No user_id provided, processing without user context", flush=True)
             log.warning(f"  [STEP 1] No user_id provided, processing without user context")
         
-        # RBAC: Determine owner_email for per-admin model/key lookup
-        # If uploading to a knowledge base, use the knowledge base OWNER's model/key
-        # Otherwise, use the uploader's (user's) model/key
-        owner_email = user.email if user else None
-        if knowledge_id and user:
-            try:
-                knowledge = Knowledges.get_knowledge_by_id(knowledge_id)
-                if knowledge and knowledge.user_id:
-                    owner = Users.get_user_by_id(knowledge.user_id)
-                    if owner and owner.email:
-                        owner_email = owner.email
-                        if owner_email != user.email:
-                            log.info(
-                                f"  [RBAC] Using knowledge base owner's model/key: "
-                                f"owner={owner_email} (not uploader={user.email})"
-                            )
-            except Exception as e:
-                log.warning(f"Failed to retrieve knowledge base owner, using uploader's email: {e}")
-                owner_email = user.email if user else None
+        # Credential-safe: Create embedding function from frozen IDs
+        embedding_function = None
+        if admin_id and embedding_model_id and not request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL:
+            from open_webui.retrieval.embedding.service import EmbeddingService
+            from open_webui.retrieval.embedding.compatibility import make_embedding_function_with_storage_guard
+            
+            service = EmbeddingService(request.app.state.config)
+            embedding_function = make_embedding_function_with_storage_guard(
+                service, admin_id=admin_id, embedding_model_id=embedding_model_id
+            )
         
         # Update status to processing
         print(f"  [STEP 2] Updating file status to 'processing'...", flush=True)
@@ -2281,7 +1780,7 @@ def _process_file_sync(
                         f"user_id={user_id}"
                     )
 
-                    # RBAC: Pass owner_email so save_docs_to_multiple_collections uses per-admin model/key
+                    # Credential-safe: Pass embedding_function
                     result = save_docs_to_multiple_collections(
                         request,
                         docs=docs,
@@ -2291,8 +1790,8 @@ def _process_file_sync(
                             "name": file.filename,
                             "hash": hash,
                         },
-                        owner_email=owner_email,  # RBAC: Per-admin model/key lookup
-                        user=user,  # Use user object if available
+                        embedding_function=embedding_function,
+                        user=user,
                     )
 
                     # Use file collection name for file metadata
@@ -2330,7 +1829,7 @@ def _process_file_sync(
                     print(f"    collection_name: {collection_name}", flush=True)
                     log.info(f"  [STEP 5] No knowledge ID, saving to single collection: {collection_name}")
                     
-                    # RBAC: Pass owner_email so save_docs_to_vector_db uses per-admin model/key
+                    # Credential-safe: Pass embedding_function
                     result = save_docs_to_vector_db(
                         request,
                         docs=docs,
@@ -2341,8 +1840,8 @@ def _process_file_sync(
                             "hash": hash,
                         },
                         add=(True if collection_name else False),
-                        user=user,  # Use user object if available
-                        owner_email=owner_email,  # RBAC: Per-admin model/key lookup
+                        embedding_function=embedding_function,
+                        user=user,
                     )
                     
                     print(f"  [STEP 6] Embedding save result: {result}", flush=True)
@@ -2813,171 +2312,64 @@ def process_file(
     job_enqueued = False
     background_task_added = False
     
-    # Get the user's embedding API key for the worker (per-admin scoped)
-    print("=" * 80, flush=True)
-    print("[PROCESS FILE] Starting file processing request", flush=True)
-    print(f"  file_id: {form_data.file_id}", flush=True)
-    print(f"  user.email: {user.email}", flush=True)
-    print(f"  user.id: {user.id}", flush=True)
-    print(f"  user.role: {user.role}", flush=True)
-    print(f"  knowledge_id: {knowledge_id}", flush=True)
-    log.info("=" * 80)
-    log.info("[PROCESS FILE] Starting file processing request")
-    log.info(f"  file_id: {form_data.file_id}, user.email: {user.email}, user.id: {user.id}, user.role: {user.role}, knowledge_id: {knowledge_id}")
+    # Credential-safe: Resolve frozen IDs (no credentials in payload)
+    from open_webui.retrieval.embedding.resolution import freeze_for_enqueue, freeze_for_knowledge_enqueue
+    from open_webui.retrieval.embedding.errors import EmbeddingError
     
-    # CRITICAL FIX: Determine the correct email to use for API key retrieval
-    # If uploading to a knowledge base, use the knowledge base OWNER's API key
-    # This ensures that when super admin uploads files to admin's knowledge base,
-    # the admin's API key is used (not super admin's)
-    api_key_owner_email = user.email  # Default to requesting user
+    try:
+        admin_id, embedding_model_id = (
+            freeze_for_knowledge_enqueue(knowledge_id, user.id, request.app.state.config)
+            if knowledge_id
+            else freeze_for_enqueue(user.id, request.app.state.config)
+        )
+    except EmbeddingError as e:
+        log.error(f"Embedding resolution failed for file_id={form_data.file_id}: {e.code}")
+        if processing_lock and lock_acquired and not lock_released:
+            try:
+                processing_lock.release_lock()
+                lock_released = True
+            except Exception:
+                pass
+        return {
+            "status": False,
+            "file_id": form_data.file_id,
+            "error": e.code,
+        }
     
-    if knowledge_id:
-        try:
-            knowledge = Knowledges.get_knowledge_by_id(knowledge_id)
-            if knowledge and knowledge.user_id:
-                # Get the knowledge base owner's email
-                owner = Users.get_user_by_id(knowledge.user_id)
-                if owner and owner.email:
-                    api_key_owner_email = owner.email
-                    if api_key_owner_email != user.email:
-                        log.info(
-                            f"  [API KEY RBAC] Using knowledge base owner's API key: "
-                            f"owner={api_key_owner_email} (not uploader={user.email})"
-                        )
-                        print(
-                            f"  [API KEY RBAC] Using knowledge base owner's API key: "
-                            f"owner={api_key_owner_email} (not uploader={user.email})",
-                            flush=True
-                        )
-        except Exception as e:
-            log.warning(f"Failed to retrieve knowledge base owner, using uploader's email: {e}")
-            # Fall back to requesting user's email if anything fails
-            api_key_owner_email = user.email
-    
-    embedding_api_key = None
-    embedding_model = None
-    print(f"  [STEP 1] Checking embedding engine: {request.app.state.config.RAG_EMBEDDING_ENGINE}", flush=True)
-    log.info(f"  [STEP 1] Checking embedding engine: {request.app.state.config.RAG_EMBEDDING_ENGINE}")
-    
-    if request.app.state.config.RAG_EMBEDDING_ENGINE in ["openai", "portkey"]:
-        print(f"  [STEP 1.1] Engine is OpenAI/Portkey, retrieving model and API key for {api_key_owner_email}...", flush=True)
-        log.info(f"  [STEP 1.1] Engine is OpenAI/Portkey, retrieving model and API key for {api_key_owner_email}...")
-        
-        # RBAC: Get per-admin model name and API key for the owner
-        embedding_model = request.app.state.config.RAG_EMBEDDING_MODEL_USER.get(api_key_owner_email)
-        embedding_api_key = request.app.state.config.RAG_OPENAI_API_KEY.get(api_key_owner_email)
-        
-        print(f"  [STEP 1.2] Model and API key retrieval result:", flush=True)
-        print(f"    embedding_model is None: {embedding_model is None}", flush=True)
-        print(f"    embedding_model is empty: {embedding_model == '' if embedding_model else 'N/A'}", flush=True)
-        print(f"    embedding_model value: {embedding_model if embedding_model else '(empty)'}", flush=True)
-        print(f"    embedding_api_key is None: {embedding_api_key is None}", flush=True)
-        print(f"    embedding_api_key is empty: {embedding_api_key == '' if embedding_api_key else 'N/A'}", flush=True)
-        print(f"    embedding_api_key length: {len(embedding_api_key) if embedding_api_key else 0}", flush=True)
-        if embedding_api_key:
-            api_key_preview = embedding_api_key[-4:] if len(embedding_api_key) >= 4 else '***'
-            print(f"    embedding_api_key ends with: ...{api_key_preview}", flush=True)
-        log.info(f"  [STEP 1.2] Model and API key retrieval result:")
-        log.info(f"    embedding_model is None: {embedding_model is None}")
-        log.info(f"    embedding_model is empty: {embedding_model == '' if embedding_model else 'N/A'}")
-        log.info(f"    embedding_model value: {embedding_model if embedding_model else '(empty)'}")
-        log.info(f"    embedding_api_key is None: {embedding_api_key is None}")
-        log.info(f"    embedding_api_key is empty: {embedding_api_key == '' if embedding_api_key else 'N/A'}")
-        log.info(f"    embedding_api_key length: {len(embedding_api_key) if embedding_api_key else 0}")
-        
-        # RBAC: Both model and API key are mandatory - validate both
-        owner_info = f"knowledge base owner {api_key_owner_email}" if knowledge_id and api_key_owner_email != user.email else f"user {api_key_owner_email}"
-        
-        if not embedding_model or not embedding_model.strip():
-            error_msg = (
-                f"❌ No embedding model configured for {owner_info}. "
-                f"File processing will fail without a model. "
-                f"Please ensure the admin ({api_key_owner_email}) configures the embedding model in Settings > Documents. "
-                f"If {api_key_owner_email} is not admin, ensure they are in a group created by an admin who has configured the model."
-            )
-            print(f"  [STEP 1.3] ❌ {error_msg}", flush=True)
-            log.error(f"  [STEP 1.3] ❌ {error_msg}")
-            if processing_lock and lock_acquired and not lock_released:
-                try:
-                    processing_lock.release_lock()
-                    lock_released = True
-                    log.debug(f"Released file processing lock for file_id={form_data.file_id} (model missing)")
-                except Exception as release_error:
-                    log.error(f"Failed to release lock after model check failure: {release_error}")
-            return {
-                "status": False,
-                "file_id": form_data.file_id,
-                "error": "No embedding model configured. Please configure in Settings > Documents.",
-            }
-        
-        if not embedding_api_key or not embedding_api_key.strip():
-            error_msg = (
-                f"❌ No embedding API key configured for {owner_info}. "
-                f"File processing will fail without an API key. "
-                f"Please ensure the admin ({api_key_owner_email}) configures the embedding API key in Settings > Documents. "
-                f"If {api_key_owner_email} is not admin, ensure they are in a group created by an admin who has configured the API key."
-            )
-            print(f"  [STEP 1.3] ❌ {error_msg}", flush=True)
-            log.error(f"  [STEP 1.3] ❌ {error_msg}")
-            if processing_lock and lock_acquired and not lock_released:
-                try:
-                    processing_lock.release_lock()
-                    lock_released = True
-                    log.debug(f"Released file processing lock for file_id={form_data.file_id} (API key missing)")
-                except Exception as release_error:
-                    log.error(f"Failed to release lock after API key check failure: {release_error}")
-            return {
-                "status": False,
-                "file_id": form_data.file_id,
-                "error": "No embedding API key configured. Please configure in Settings > Documents.",
-            }
-        
-        print(f"  [STEP 1.3] ✅ Model and API key retrieved and validated", flush=True)
-        log.info(f"  [STEP 1.3] ✅ Model ({embedding_model}) and API key retrieved and validated for owner {api_key_owner_email}")
-    else:
-        print(f"  [STEP 1.1] Engine is {request.app.state.config.RAG_EMBEDDING_ENGINE}, skipping OpenAI API key check", flush=True)
-        log.info(f"  [STEP 1.1] Engine is {request.app.state.config.RAG_EMBEDDING_ENGINE}, skipping OpenAI API key check")
+    log.info(f"[PROCESS FILE] file_id={form_data.file_id} admin_id={admin_id} embedding_model_id={embedding_model_id}")
     
     try:
         # Try to use job queue first if available
         if is_job_queue_available():
             try:
-                # Enqueue job to distributed job queue
-                # RBAC: Include owner_email and embedding_model in payload for worker
                 job_id = enqueue_file_processing_job(
                     file_id=form_data.file_id,
                     content=form_data.content,
                     collection_name=form_data.collection_name,
                     knowledge_id=knowledge_id,
                     user_id=user.id,
-                    owner_email=api_key_owner_email,  # KB owner or uploader
-                    embedding_model=embedding_model,  # Per-admin model name
-                    embedding_api_key=embedding_api_key,
+                    admin_id=admin_id,
+                    embedding_model_id=embedding_model_id,
                 )
                 
                 if job_id is not None:
-                    # Successfully enqueued job
                     use_job_queue = True
                     job_enqueued = True
                     log.info(f"Successfully enqueued job {job_id} for file_id={form_data.file_id}")
                 else:
-                    # Job queue unavailable, will fall back to BackgroundTasks
                     log.warning(
                         f"Job queue unavailable for file_id={form_data.file_id}, "
                         "falling back to BackgroundTasks"
                     )
             except Exception as job_enqueue_error:
-                # If job enqueue fails, fall back to BackgroundTasks
                 log.warning(
                     f"Failed to enqueue job for file_id={form_data.file_id}: {job_enqueue_error}, "
                     "falling back to BackgroundTasks",
                     exc_info=True
                 )
         
-        # Fall back to BackgroundTasks if job queue wasn't used
         if not job_enqueued:
             try:
-                # Add background task (background_tasks is always provided by FastAPI)
                 background_tasks.add_task(
                     _process_file_sync,
                     request=request,
@@ -2986,16 +2378,17 @@ def process_file(
                     collection_name=form_data.collection_name,
                     knowledge_id=knowledge_id,
                     user_id=user.id,
+                    admin_id=admin_id,
+                    embedding_model_id=embedding_model_id,
                 )
                 background_task_added = True
                 log.debug(f"Added BackgroundTask for file_id={form_data.file_id}")
             except Exception as bg_task_error:
-                # If background task addition fails, log and re-raise
                 log.error(
                     f"Failed to add BackgroundTask for file_id={form_data.file_id}: {bg_task_error}",
                     exc_info=True
                 )
-                raise  # Re-raise the error - this will trigger lock release in finally block
+                raise
         
         # Only mark as successful if we actually enqueued/added a task
         if not (job_enqueued or background_task_added):
@@ -3456,13 +2849,18 @@ def query_doc_handler(
     user=Depends(get_verified_user),
 ):
     try:
+        # Create embedding function using the service
+        from open_webui.retrieval.embedding.service import EmbeddingService
+        from open_webui.retrieval.embedding.compatibility import make_embedding_function
+        
+        service = EmbeddingService(request.app.state.config)
+        embedding_function = make_embedding_function(service, user_id=user.id)
+        
         if request.app.state.config.ENABLE_RAG_HYBRID_SEARCH.get(user.email):
             return query_doc_with_hybrid_search(
                 collection_name=form_data.collection_name,
                 query=form_data.query,
-                embedding_function=lambda query: request.app.state.EMBEDDING_FUNCTION(
-                    query, user=user
-                ),
+                embedding_function=embedding_function,
                 k=form_data.k if form_data.k else request.app.state.config.TOP_K.get(user.email),
                 reranking_function=request.app.state.rf,
                 r=(
@@ -3475,9 +2873,7 @@ def query_doc_handler(
         else:
             return query_doc(
                 collection_name=form_data.collection_name,
-                query_embedding=request.app.state.EMBEDDING_FUNCTION(
-                    form_data.query, user=user
-                ),
+                query_embedding=embedding_function(form_data.query),
                 k=form_data.k if form_data.k else request.app.state.config.TOP_K.get(user.email),
                 user=user,
             )
@@ -3504,13 +2900,18 @@ def query_collection_handler(
     user=Depends(get_verified_user),
 ):
     try:
+        # Create embedding function using the service
+        from open_webui.retrieval.embedding.service import EmbeddingService
+        from open_webui.retrieval.embedding.compatibility import make_embedding_function
+        
+        service = EmbeddingService(request.app.state.config)
+        embedding_function = make_embedding_function(service, user_id=user.id)
+        
         if request.app.state.config.ENABLE_RAG_HYBRID_SEARCH.get(user.email):
             return query_collection_with_hybrid_search(
                 collection_names=form_data.collection_names,
                 queries=[form_data.query],
-                embedding_function=lambda query: request.app.state.EMBEDDING_FUNCTION(
-                    query, user=user
-                ),
+                embedding_function=embedding_function,
                 k=form_data.k if form_data.k else request.app.state.config.TOP_K.get(user.email),
                 reranking_function=request.app.state.rf,
                 r=(
@@ -3523,9 +2924,7 @@ def query_collection_handler(
             return query_collection(
                 collection_names=form_data.collection_names,
                 queries=[form_data.query],
-                embedding_function=lambda query: request.app.state.EMBEDDING_FUNCTION(
-                    query, user=user
-                ),
+                embedding_function=embedding_function,
                 k=form_data.k if form_data.k else request.app.state.config.TOP_K.get(user.email),
             )
 
@@ -3601,8 +3000,9 @@ if ENV == "dev":
 
     @router.get("/ef/{text}")
     async def get_embeddings(request: Request, text: Optional[str] = "Hello World!", user=Depends(get_verified_user)):
-        # Pass user to ensure per-user API key is used for embeddings
-        return {"result": request.app.state.EMBEDDING_FUNCTION(text, user=user)}
+        from open_webui.retrieval.embedding.compatibility import get_user_embedding_function
+        ef = get_user_embedding_function(request.app.state.config, user.id)
+        return {"result": ef(text)}
 
 
 class BatchProcessFilesForm(BaseModel):
