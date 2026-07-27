@@ -406,8 +406,13 @@ def search_knowledge_base(query: str, user_id: str, request: Request, model, k: 
             return []
         
         try:
-            embedding_function = request.app.state.EMBEDDING_FUNCTION
-            query_embedding = embedding_function(query, user_id)
+            # Credential-safe: Create embedding service and callable
+            from open_webui.retrieval.embedding.service import EmbeddingService
+            from open_webui.retrieval.embedding.compatibility import make_embedding_function
+            
+            service = EmbeddingService(request.app.state.config)
+            embedding_function = make_embedding_function(service, user_id=user_id)
+            query_embedding = embedding_function(query)
         except Exception as e:
             logging.error(f"Failed to generate embeddings: {e}")
             return []
