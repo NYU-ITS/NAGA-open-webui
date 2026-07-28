@@ -90,6 +90,7 @@ class PortkeyEmbeddingProvider:
             response = portkey.embeddings.create(
                 model=model.model_name,
                 input=texts,
+                encoding_format="float",
             )
             
             # Extract embeddings from response
@@ -107,12 +108,13 @@ class PortkeyEmbeddingProvider:
         except EmbeddingError:
             # Re-raise our own errors
             raise
-        except Exception:
+        except Exception as e:
             # Sanitize all provider errors to stable code
-            log.error("embedding_provider_failed provider=portkey model_id=%s", model.id)
+            print(f"[EMBEDDING_DEBUG] Portkey error: {type(e).__name__}: {str(e)}", flush=True)
+            log.error("embedding_provider_failed provider=portkey model_id=%s error=%s", model.id, str(e))
             raise EmbeddingError(
                 EMBEDDING_PROVIDER_FAILED,
-                detail="Portkey embedding generation failed.",
+                detail=f"Portkey embedding generation failed: {type(e).__name__}: {str(e)}",
             ) from None
 
 

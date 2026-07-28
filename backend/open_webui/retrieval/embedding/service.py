@@ -36,10 +36,6 @@ from .resolution import (
 
 log = logging.getLogger(__name__)
 
-# Phase 2 storage dimension constant
-CURRENT_DOCUMENT_CHUNK_DIMENSION = 1536
-
-
 class EmbeddingService:
     """
     Embedding service that handles modality gating, provider selection,
@@ -321,20 +317,3 @@ def validate_vectors(
                     EMBEDDING_VECTOR_VALUE_INVALID,
                     detail=f"Vector {i}[{j}] cannot be converted to float.",
                 )
-
-
-def validate_storage_dimension(batch: EmbeddingBatch):
-    """
-    Validate that the batch dimension matches the storage dimension.
-    
-    Args:
-        batch: The embedding batch to validate.
-        
-    Raises:
-        EmbeddingError: If dimension doesn't match storage dimension.
-    """
-    if batch.dimension != CURRENT_DOCUMENT_CHUNK_DIMENSION:
-        raise EmbeddingError(
-            EMBEDDING_DIMENSION_MISMATCH,
-            detail=f"Embedding dimension {batch.dimension} does not match storage dimension {CURRENT_DOCUMENT_CHUNK_DIMENSION}.",
-        )

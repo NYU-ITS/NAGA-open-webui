@@ -42,6 +42,7 @@ from open_webui.socket.utils import RedisLock
 
 
 from open_webui.retrieval.vector.connector import VECTOR_DB_CLIENT
+from open_webui.retrieval.embedding.errors import EmbeddingError
 
 # Document loaders
 from open_webui.retrieval.loaders.main import Loader
