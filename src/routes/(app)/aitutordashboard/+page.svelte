@@ -1498,7 +1498,7 @@ async function runAnalysis() {
 	</div> -->
 
 	<!-- [Standard Section: Charts Summary] -->
-	<div class="space-y-4">
+	<div data-guide="admin-usage" class="space-y-4">
 		<h2 class="text-2xl font-semibold text-gray-800 dark:text-gray-200">Charts Summary</h2>
 
 		<div class="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">

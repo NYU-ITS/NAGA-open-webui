@@ -485,6 +485,7 @@
 <div
 	bind:this={navElement}
 	id="sidebar"
+	data-guide="sidebar"
 	class="h-screen max-h-[100dvh] min-h-screen select-none {$showSidebar
 		? 'md:relative w-[260px] max-w-[260px]'
 		: '-translate-x-[260px] w-[0px]'} {$isApp
@@ -500,10 +501,12 @@
 	>
 		<div class="px-1.5 flex justify-between space-x-1 text-gray-50 dark:text-gray-400">
 			<button
+				data-guide="sidebar-toggle"
 				class=" cursor-pointer p-[7px] flex rounded-xl hover:bg-[#8900E1] dark:hover:bg-gray-700 transition"
 				on:click={() => {
 					showSidebar.set(!$showSidebar);
 				}}
+				aria-label="Toggle Sidebar"
 			>
 				<div class=" m-auto self-center">
 					<svg
@@ -525,6 +528,7 @@
 
 			<a
 				id="sidebar-new-chat-button"
+				data-guide="new-chat"
 				class="flex justify-between items-center flex-1 rounded-lg px-2 py-1 h-full text-right hover:bg-[#8900E1] dark:hover:bg-gray-700 transition no-drag-region"
 				href="/"
 				draggable="false"
@@ -594,6 +598,7 @@
 		<!-- {#if $user?.role === 'admin' || isSuperAdmin} -->
 			<div class="px-1.5 flex justify-center text-gray-50 dark:text-gray-200">
 				<a
+					data-guide="sidebar-workspace"
 					class="grow flex items-center space-x-3 rounded-lg px-2 py-[7px] hover:bg-[#8900E1] dark:hover:bg-gray-700 transition"
 					href="/workspace"
 					on:click={() => {
@@ -633,6 +638,7 @@
 		{#if $user?.role === 'admin' || isSuperAdmin}
 			<div class="px-1.5 flex justify-center text-gray-50 dark:text-gray-200">
 				<a
+					data-guide="sidebar-ai-tutor-dashboard"
 					class="grow flex items-center space-x-3 rounded-lg px-2 py-[7px] hover:bg-[#8900E1] dark:hover:bg-gray-700 transition"
 					href="/aitutordashboard"
 					on:click={() => {
@@ -907,7 +913,7 @@
 					/>
 				{/if}
 
-				<div class=" flex-1 flex flex-col overflow-y-auto scrollbar-hidden">
+				<div class=" flex-1 flex flex-col overflow-y-auto scrollbar-hidden" data-guide="conversation-history">
 					<div class="pt-1.5">
 						{#if $chats}
 							{#each $chats as chat, idx}
@@ -1001,6 +1007,7 @@
 						}}
 					>
 						<button
+							data-guide="user-menu"
 							class=" flex items-center rounded-xl py-2.5 px-2.5 w-full hover:bg-[#8900E1] dark:hover:bg-gray-700 transition"
 							on:click={() => {
 								showDropdown = !showDropdown;

@@ -288,7 +288,7 @@
 		}}
 	/>
 
-	<div class="flex flex-col gap-1 my-1.5">
+	<div data-guide="admin-models-section" class="flex flex-col gap-1 my-1.5">
 		<div class="flex justify-between items-center">
 			<div class="flex items-center md:self-center text-xl font-medium px-0.5">
 				{$i18n.t('Models')}
@@ -313,6 +313,7 @@
 
 			<div>
 				<a
+					data-guide="create-model"
 					class=" px-2 py-2 rounded-xl hover:bg-gray-700/10 dark:hover:bg-gray-100/10 dark:text-gray-300 dark:hover:text-white transition font-medium text-sm flex items-center space-x-1"
 					href="/workspace/models/create"
 				>

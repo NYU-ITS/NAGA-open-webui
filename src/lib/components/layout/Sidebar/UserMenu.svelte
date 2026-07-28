@@ -121,6 +121,7 @@
 				</a>
 
 				<a
+					data-guide="admin-panel-menu-item"
 					class="flex rounded-md py-2 px-3 w-full hover:bg-gray-50 dark:hover:bg-gray-800 transition"
 					href="/admin"
 					on:click={() => {

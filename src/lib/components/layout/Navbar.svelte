@@ -58,6 +58,7 @@
 			>
 				<button
 					id="sidebar-toggle-button"
+					data-guide="sidebar-toggle"
 					class="cursor-pointer px-2 py-2 flex rounded-xl hover:bg-gray-50 dark:hover:bg-gray-850 transition"
 					on:click={() => {
 						showSidebar.set(!$showSidebar);
@@ -118,6 +119,7 @@
 				{:else if $mobile}
 					<Tooltip content={$i18n.t('Controls')}>
 						<button
+							data-guide="chat-controls"
 							class=" flex cursor-pointer px-2 py-2 rounded-xl hover:bg-gray-50 dark:hover:bg-gray-850 transition"
 							on:click={async () => {
 								await showControls.set(!$showControls);
@@ -134,6 +136,7 @@
 				{#if !$mobile}
 					<Tooltip content={$i18n.t('Controls')}>
 						<button
+							data-guide="chat-controls"
 							class=" flex cursor-pointer px-2 py-2 rounded-xl hover:bg-gray-50 dark:hover:bg-gray-850 transition"
 							on:click={async () => {
 								await showControls.set(!$showControls);
@@ -175,6 +178,7 @@
 						}}
 					>
 						<button
+							data-guide="user-menu"
 							class="select-none flex rounded-xl p-1.5 w-full hover:bg-gray-50 dark:hover:bg-gray-850 transition"
 							aria-label="User Menu"
 						>

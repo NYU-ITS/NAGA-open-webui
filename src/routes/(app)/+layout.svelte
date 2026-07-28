@@ -42,6 +42,7 @@
 	import ChangelogModal from '$lib/components/ChangelogModal.svelte';
 	import AccountPending from '$lib/components/layout/Overlay/AccountPending.svelte';
 	import TermsAndConditions from '$lib/components/layout/Overlay/TermsAndConditions.svelte';
+	import GuideHost from '$lib/features/guided-overlay/components/GuideHost.svelte';
 
 	const i18n = getContext('i18n');
 
@@ -345,6 +346,9 @@
 
 			<Sidebar />
 			<slot />
+			{#if ['user', 'admin', 'super_admin'].includes($user.role) && localDBChats.length === 0}
+				<GuideHost />
+			{/if}
 		{/if}
 	</div>
 </div>

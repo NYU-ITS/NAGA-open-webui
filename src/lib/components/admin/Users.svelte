@@ -3,6 +3,7 @@
 	import { toast } from 'svelte-sonner';
 
 	import { goto } from '$app/navigation';
+	import { page } from '$app/stores';
 	import { user } from '$lib/stores';
 
 	import { getUsers } from '$lib/apis/users';
@@ -19,6 +20,13 @@
 
 	$: if (selectedTab) {
 		getUsersHandler();
+	}
+
+	$: {
+		const guidedTab = $page.url.searchParams.get('tab');
+		if (guidedTab === 'overview' || guidedTab === 'groups') {
+			selectedTab = guidedTab;
+		}
 	}
 
 	const getUsersHandler = async () => {
@@ -52,6 +60,7 @@
 		class=" flex flex-row overflow-x-auto gap-2.5 max-w-full lg:gap-1 lg:flex-col lg:flex-none lg:w-40 dark:text-gray-200 text-sm font-medium text-left scrollbar-none"
 	>
 		<button
+			data-guide="admin-panel"
 			class="px-0.5 py-1 min-w-fit rounded-lg lg:flex-none flex text-right transition {selectedTab ===
 			'overview'
 				? 'text-[#57068c] dark:text-white'
@@ -76,6 +85,7 @@
 		</button>
 
 		<button
+			data-guide="group-management-tab"
 			class="px-0.5 py-1 min-w-fit rounded-lg lg:flex-none flex text-right transition {selectedTab ===
 			'groups'
 				? 'text-[#57068c] dark:text-white'
@@ -104,7 +114,9 @@
 		{#if selectedTab === 'overview'}
 			<UserList {users} />
 		{:else if selectedTab === 'groups'}
-			<Groups {users} />
+			<div data-guide="group-management-panel">
+				<Groups {users} />
+			</div>
 		{/if}
 	</div>
 </div>

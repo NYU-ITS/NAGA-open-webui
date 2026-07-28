@@ -196,7 +196,7 @@
 	</title>
 </svelte:head>
 
-<div class="flex flex-col gap-1 mt-1.5 mb-2">
+<div data-guide="admin-functions-section" class="flex flex-col gap-1 mt-1.5 mb-2">
 	<div class="flex justify-between items-center">
 		<div class="flex md:self-center text-xl items-center font-medium px-0.5">
 			{$i18n.t('Functions')}

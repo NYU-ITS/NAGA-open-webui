@@ -670,6 +670,7 @@ import CallModeModal from './MessageInput/CallModeModal.svelte';
 							}}
 						>
 							<div
+								data-guide="workspace-input"
 								class="flex-1 flex flex-col relative w-full rounded-3xl px-1 bg-gray-600/5 dark:bg-gray-400/5 dark:text-gray-100"
 								dir={$settings?.chatDirection ?? 'LTR'}
 							>
@@ -762,7 +763,7 @@ import CallModeModal from './MessageInput/CallModeModal.svelte';
 									</div>
 								{/if}
 
-								<div class="px-2.5">
+								<div class="px-2.5" data-guide="message-input">
 									{#if $settings?.richTextInput ?? true}
 										<div
 											class="scrollbar-hidden text-left bg-transparent dark:text-gray-100 outline-hidden w-full pt-3 px-1 resize-none h-fit max-h-80 overflow-auto"
@@ -1220,6 +1221,7 @@ import CallModeModal from './MessageInput/CallModeModal.svelte';
 											}}
 										>
 											<button
+												data-guide="file-upload"
 												class="bg-transparent hover:bg-gray-100 text-gray-800 dark:text-white dark:hover:bg-gray-800 transition rounded-full p-1.5 outline-hidden focus:outline-hidden"
 												type="button"
 												aria-label="More"
@@ -1243,6 +1245,7 @@ import CallModeModal from './MessageInput/CallModeModal.svelte';
 												<!-- {#if $config?.features?.enable_web_search && ($_user.role === 'admin' || $_user?.permissions?.features?.web_search)} -->
 												<Tooltip content={$i18n.t('Search the internet')} placement="top">
 													<button
+														data-guide="web-search"
 														on:click|preventDefault={() => (webSearchEnabled = !webSearchEnabled)}
 														type="button"
 														class="px-1.5 @sm:px-2.5 py-1.5 flex gap-1.5 items-center text-sm rounded-full font-medium transition-colors duration-300 focus:outline-hidden max-w-full overflow-hidden {webSearchEnabled ||
@@ -1281,6 +1284,7 @@ import CallModeModal from './MessageInput/CallModeModal.svelte';
 												{#if $config?.features?.enable_code_interpreter && ($_user.role === 'admin' || $_user?.permissions?.features?.code_interpreter)}
 													<Tooltip content={$i18n.t('Execute code for analysis')} placement="top">
 														<button
+															data-guide="code-interpreter"
 															on:click|preventDefault={() =>
 																(codeInterpreterEnabled = !codeInterpreterEnabled)}
 															type="button"
@@ -1304,6 +1308,7 @@ import CallModeModal from './MessageInput/CallModeModal.svelte';
 										{#if !history?.currentId || history.messages[history.currentId]?.done == true}
 											<Tooltip content={$i18n.t('Record voice')}>
 												<button
+													data-guide="voice-input"
 													id="voice-input-button"
 													class=" text-gray-600 dark:text-gray-300 hover:text-gray-700 dark:hover:text-gray-200 transition rounded-full p-1.5 mr-0.5 self-center"
 													type="button"
@@ -1355,6 +1360,7 @@ import CallModeModal from './MessageInput/CallModeModal.svelte';
 												<div class=" flex items-center">
 													<Tooltip content={$i18n.t('Call')}>
 														<button
+															data-guide="call-button"
 															class=" {webSearchEnabled ||
 															($settings?.webSearch ?? false) === 'always'
 																? 'bg-blue-500 text-white hover:bg-blue-400 '

@@ -84,7 +84,7 @@
 		}}
 	/>
 
-	<div class="flex flex-col gap-1 my-1.5">
+	<div data-guide="admin-knowledge-section" class="flex flex-col gap-1 my-1.5">
 		<div class="flex justify-between items-center">
 			<div class="flex md:self-center text-xl font-medium px-0.5 items-center">
 				{$i18n.t('Knowledge')}
@@ -109,6 +109,7 @@
 
 			<div>
 				<button
+					data-guide="create-knowledge"
 					class=" px-2 py-2 rounded-xl hover:bg-gray-700/10 dark:hover:bg-gray-100/10 dark:text-gray-300 dark:hover:text-white transition font-medium text-sm flex items-center space-x-1"
 					aria-label={$i18n.t('Create Knowledge')}
 					on:click={() => {

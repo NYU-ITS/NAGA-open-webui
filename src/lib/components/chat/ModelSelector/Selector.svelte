@@ -252,6 +252,7 @@ import { goto } from '$app/navigation';
 	closeFocus={false}
 >
 	<DropdownMenu.Trigger
+		data-guide="model-selector"
 		class="relative w-full font-primary"
 		aria-label={placeholder}
 		id="model-selector-{id}-button"

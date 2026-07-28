@@ -9,12 +9,18 @@
 	import QuestionMarkCircle from '$lib/components/icons/QuestionMarkCircle.svelte';
 	import Lifebuoy from '$lib/components/icons/Lifebuoy.svelte';
 	import Keyboard from '$lib/components/icons/Keyboard.svelte';
+	import { GUIDE_START_EVENT } from '$lib/features/guided-overlay/config/guide.constants';
 	const i18n = getContext('i18n');
 
 	export let showDocsHandler: Function;
 	export let showShortcutsHandler: Function;
 
 	export let onClose: Function = () => {};
+
+	const startGuidedTour = () => {
+		window.dispatchEvent(new CustomEvent(GUIDE_START_EVENT));
+		onClose();
+	};
 </script>
 
 <Dropdown
@@ -34,6 +40,15 @@
 			align="end"
 			transition={flyAndScale}
 		>
+			<DropdownMenu.Item
+				class="flex gap-2 items-center px-3 py-2 text-sm  cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 rounded-md"
+				id="guided-tour-button"
+				on:click={startGuidedTour}
+			>
+				<Lifebuoy className="size-5" />
+				<div class="flex items-center">{$i18n.t('Start Guided Tour')}</div>
+			</DropdownMenu.Item>
+
 			<DropdownMenu.Item
 				class="flex gap-2 items-center px-3 py-2 text-sm  cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 rounded-md"
 				id="chat-share-button"

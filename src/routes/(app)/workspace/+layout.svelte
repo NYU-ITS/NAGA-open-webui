@@ -78,6 +78,7 @@
 					>
 						{#if $user?.role === 'admin' || $user?.permissions?.workspace?.models}
 							<a
+								data-guide="admin-models"
 								class="min-w-fit rounded-full p-1.5 {$page.url.pathname.includes(
 									'/workspace/models'
 								)
@@ -89,6 +90,7 @@
 
 						{#if $user?.role === 'admin' || $user?.permissions?.workspace?.knowledge}
 							<a
+								data-guide="admin-knowledge"
 								class="min-w-fit rounded-full p-1.5 {$page.url.pathname.includes(
 									'/workspace/knowledge'
 								)
@@ -113,6 +115,7 @@
 
 						{#if $user?.role === 'admin' || $user?.permissions?.workspace?.tools}
 							<a
+								data-guide="admin-tools"
 								class="min-w-fit rounded-full p-1.5 {$page.url.pathname.includes('/workspace/tools')
 									? 'text-[#57068c] dark:text-white'
 									: 'text-gray-600 dark:text-gray-600 hover:text-[#57068c] dark:hover:text-white'} transition"
@@ -128,7 +131,11 @@
 			</div>
 		</nav>
 
-		<div class="  pb-1 px-[18px] flex-1 max-h-full overflow-y-auto" id="workspace-container">
+		<div
+			class="  pb-1 px-[18px] flex-1 max-h-full overflow-y-auto"
+			id="workspace-container"
+			data-guide="main-workspace"
+		>
 			<slot />
 		</div>
 	</div>

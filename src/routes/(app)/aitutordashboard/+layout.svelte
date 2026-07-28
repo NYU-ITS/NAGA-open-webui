@@ -230,26 +230,29 @@
 				</div>
 
 				<div class="flex-1">
-					<!-- Course Title with Info Button -->
-					<div class="px-2 py-2 flex items-center justify-between">
-						<!-- [Group Select] Course Title Dropdown -->
-						<div class="relative">
-							<DropdownMenu.Root bind:open={groupDropdownOpen} closeFocus={false}>
-								<DropdownMenu.Trigger
-									class="relative w-full font-primary"
-									aria-label="Select group"
-								>
-									<div
-										class="flex w-full text-left px-0.5 outline-hidden bg-transparent truncate text-lg justify-between font-medium placeholder-gray-400 focus:outline-hidden text-gray-800 dark:text-gray-200 hover:text-gray-600 dark:hover:text-gray-400 transition"
+						<!-- Course Title with Info Button -->
+						<div class="px-2 py-2 flex items-center justify-between">
+							<!-- [Group Select] Course Title Dropdown -->
+							<div class="relative inline-flex max-w-full" data-guide="ai-tutor-group-selector">
+								<DropdownMenu.Root bind:open={groupDropdownOpen} closeFocus={false}>
+									<DropdownMenu.Trigger
+										class="relative inline-flex max-w-full font-primary"
+										aria-label="Select group"
 									>
-										{#if selectedGroup}
-											{selectedGroup.name}
-										{:else if loaded}
-											No Group
-										{:else}
-											Loading...
-										{/if}
-										<ChevronDown className="self-center ml-2 size-3" strokeWidth="2.5" />
+									<div
+										data-guide="ai-tutor-group-selector-trigger"
+										class="inline-flex max-w-full items-center text-left px-0.5 outline-hidden bg-transparent text-lg font-medium placeholder-gray-400 focus:outline-hidden text-gray-800 dark:text-gray-200 hover:text-gray-600 dark:hover:text-gray-400 transition"
+									>
+										<span class="min-w-0 truncate">
+											{#if selectedGroup}
+												{selectedGroup.name}
+											{:else if loaded}
+												No Group
+											{:else}
+												Loading...
+											{/if}
+										</span>
+										<ChevronDown className="self-center ml-2 size-3 shrink-0" strokeWidth="2.5" />
 									</div>
 								</DropdownMenu.Trigger>
 

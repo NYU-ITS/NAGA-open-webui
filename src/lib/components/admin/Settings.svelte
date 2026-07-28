@@ -66,7 +66,7 @@
 	}
 </script>
 
-<div class="flex flex-col lg:flex-row w-full h-full pb-2 lg:space-x-4">
+<div data-guide="admin-modules-section" class="flex flex-col lg:flex-row w-full h-full pb-2 lg:space-x-4">
 	<div
 		id="admin-settings-tabs-container"
 		class="tabs flex flex-row overflow-x-auto gap-2.5 max-w-full lg:gap-1 lg:flex-col lg:flex-none lg:w-40 dark:text-gray-200 text-sm font-medium text-left scrollbar-none"
@@ -169,6 +169,7 @@
 	{/if}
 
 		<button
+			data-guide="admin-documents-tab"
 			class="px-0.5 py-1 min-w-fit rounded-lg flex-1 md:flex-none flex text-right transition {selectedTab ===
 			'documents'
 				? 'text-[#57068c] dark:text-white'
@@ -417,14 +418,16 @@
 		{:else if selectedTab === 'evaluations'}
 			<Evaluations />
 		{:else if selectedTab === 'documents'}
-			<Documents
-				on:save={async () => {
-					toast.success($i18n.t('Settings saved successfully!'));
+			<div data-guide="admin-documents-section">
+				<Documents
+					on:save={async () => {
+						toast.success($i18n.t('Settings saved successfully!'));
 
-					await tick();
-					await config.set(await getBackendConfig());
-				}}
-			/>
+						await tick();
+						await config.set(await getBackendConfig());
+					}}
+				/>
+			</div>
 		{:else if selectedTab === 'web'}
 			<WebSearch
 				saveHandler={async () => {
