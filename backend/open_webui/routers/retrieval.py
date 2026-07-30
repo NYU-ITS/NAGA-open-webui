@@ -2925,6 +2925,22 @@ async def process_web_search(
         )
 
 
+def _resolve_model_aware_query_context(request, user):
+    """Phase 3: best-effort (admin_id, embedding_model_id) for query hardening.
+
+    Returns (None, None) when the user's admin/model space cannot be resolved so
+    callers fall back to the legacy collection-name search.
+    """
+    try:
+        from open_webui.retrieval.embedding.resolution import resolve_for_user
+
+        context = resolve_for_user(user.id, request.app.state.config)
+        return context.admin_id, context.model.id
+    except Exception as e:
+        log.debug(f"model-aware query resolution unavailable: {e}")
+        return None, None
+
+
 class QueryDocForm(BaseModel):
     collection_name: str
     query: str
@@ -2946,7 +2962,8 @@ def query_doc_handler(
         
         service = EmbeddingService(request.app.state.config)
         embedding_function = make_embedding_function(service, user_id=user.id)
-        
+        admin_id, embedding_model_id = _resolve_model_aware_query_context(request, user)
+
         if request.app.state.config.ENABLE_RAG_HYBRID_SEARCH.get(user.email):
             return query_doc_with_hybrid_search(
                 collection_name=form_data.collection_name,
@@ -2967,6 +2984,8 @@ def query_doc_handler(
                 query_embedding=embedding_function(form_data.query),
                 k=form_data.k if form_data.k else request.app.state.config.TOP_K.get(user.email),
                 user=user,
+                admin_id=admin_id,
+                embedding_model_id=embedding_model_id,
             )
     except Exception as e:
         log.exception(e)
@@ -2997,7 +3016,8 @@ def query_collection_handler(
         
         service = EmbeddingService(request.app.state.config)
         embedding_function = make_embedding_function(service, user_id=user.id)
-        
+        admin_id, embedding_model_id = _resolve_model_aware_query_context(request, user)
+
         if request.app.state.config.ENABLE_RAG_HYBRID_SEARCH.get(user.email):
             return query_collection_with_hybrid_search(
                 collection_names=form_data.collection_names,
@@ -3017,6 +3037,8 @@ def query_collection_handler(
                 queries=[form_data.query],
                 embedding_function=embedding_function,
                 k=form_data.k if form_data.k else request.app.state.config.TOP_K.get(user.email),
+                admin_id=admin_id,
+                embedding_model_id=embedding_model_id,
             )
 
     except Exception as e:

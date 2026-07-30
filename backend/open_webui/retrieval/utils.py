@@ -76,15 +76,36 @@ class VectorSearchRetriever(BaseRetriever):
 
 
 def query_doc(
-    collection_name: str, query_embedding: list[float], k: int, user: UserModel = None
+    collection_name: str,
+    query_embedding: list[float],
+    k: int,
+    user: UserModel = None,
+    admin_id: Optional[str] = None,
+    embedding_model_id: Optional[str] = None,
+    knowledge_ids: Optional[list[str]] = None,
+    file_ids: Optional[list[str]] = None,
 ):
-    log.info(f"[VECTOR_SEARCH] query_doc START | collection={collection_name} | k={k} | embedding_len={len(query_embedding) if query_embedding else 0}")
+    log.info(f"[VECTOR_SEARCH] query_doc START | collection={collection_name} | k={k} | admin={admin_id} | model={embedding_model_id} | embedding_len={len(query_embedding) if query_embedding else 0}")
     try:
-        result = VECTOR_DB_CLIENT.search(
-            collection_name=collection_name,
-            vectors=[query_embedding],
-            limit=k,
-        )
+        if admin_id and embedding_model_id and hasattr(
+            VECTOR_DB_CLIENT, "search_model_aware"
+        ):
+            # Phase 3: restrict the result set to one admin/model provenance space.
+            result = VECTOR_DB_CLIENT.search_model_aware(
+                collection_name=collection_name,
+                vectors=[query_embedding],
+                admin_id=admin_id,
+                embedding_model_id=embedding_model_id,
+                limit=k,
+                knowledge_ids=knowledge_ids,
+                file_ids=file_ids,
+            )
+        else:
+            result = VECTOR_DB_CLIENT.search(
+                collection_name=collection_name,
+                vectors=[query_embedding],
+                limit=k,
+            )
 
         if result:
             num_results = len(result.ids[0]) if result.ids and result.ids[0] else 0
@@ -249,6 +270,10 @@ def query_collection(
     queries: list[str],
     embedding_function,
     k: int,
+    admin_id: Optional[str] = None,
+    embedding_model_id: Optional[str] = None,
+    knowledge_ids: Optional[list[str]] = None,
+    file_ids: Optional[list[str]] = None,
 ) -> dict:
     log.info(f"[QUERY_COLLECTION] START | collections={list(collection_names)} | queries_count={len(queries) if queries else 0} | k={k} | queries={queries[:3] if queries else []}{'...' if queries and len(queries) > 3 else ''}")
     results = []
@@ -355,6 +380,10 @@ def query_collection(
                     collection_name=collection_name,
                     k=k,
                     query_embedding=query_embedding,
+                    admin_id=admin_id,
+                    embedding_model_id=embedding_model_id,
+                    knowledge_ids=knowledge_ids,
+                    file_ids=file_ids,
                 )
                 if result is not None:
                     return result.model_dump()
@@ -608,10 +637,49 @@ def get_sources_from_files(
     r,
     hybrid_search,
     full_context=False,
+    user=None,
 ):
     log.debug(
         f"files: {files} {queries} {embedding_function} {reranking_function} {full_context}"
     )
+
+    # Phase 3: resolve the requesting user's admin/model provenance space.
+    # Best-effort: on ambiguity/resolution failure we fall back to the legacy
+    # collection-name search; on a mixed-model request we return no sources
+    # rather than risk comparing query and document vectors from different
+    # models. This guard covers both the hybrid and non-hybrid paths because a
+    # mixed request is rejected before any vector search runs.
+    admin_id = None
+    embedding_model_id = None
+    knowledge_ids_in_scope: list[str] = [
+        f.get("id") for f in files if f.get("type") == "collection" and f.get("id")
+    ]
+    if user is not None:
+        try:
+            from open_webui.retrieval.embedding.resolution import (
+                assert_single_model_space,
+            )
+            from open_webui.retrieval.embedding.errors import (
+                EmbeddingError,
+                EMBEDDING_MODEL_SPACE_MIXED,
+            )
+
+            admin_id, embedding_model_id = assert_single_model_space(
+                user.id, knowledge_ids_in_scope, request.app.state.config
+            )
+        except EmbeddingError as e:
+            if e.code == EMBEDDING_MODEL_SPACE_MIXED:
+                log.warning(
+                    f"[RAG Query] rejected mixed embedding model space: {e.code}"
+                )
+                return []
+            log.debug(
+                f"[RAG Query] model-aware resolution unavailable, using legacy search: {e.code}"
+            )
+        except Exception as e:
+            log.debug(
+                f"[RAG Query] model-aware resolution unavailable, using legacy search: {e}"
+            )
 
     extracted_collections = []
     relevant_contexts = []
@@ -746,6 +814,9 @@ def get_sources_from_files(
                                 queries=queries,
                                 embedding_function=embedding_function,
                                 k=k,
+                                admin_id=admin_id,
+                                embedding_model_id=embedding_model_id,
+                                knowledge_ids=knowledge_ids_in_scope or None,
                             )
                             
                             # Log if no results were found for debugging

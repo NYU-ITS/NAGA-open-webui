@@ -413,6 +413,17 @@ def search_knowledge_base(query: str, user_id: str, request: Request, model, k: 
             service = EmbeddingService(request.app.state.config)
             embedding_function = make_embedding_function(service, user_id=user_id)
             query_embedding = embedding_function(query)
+
+            # Phase 3: resolve the user's admin/model provenance space (best-effort)
+            # so the grant-writing search is restricted to one model space.
+            admin_id, embedding_model_id = None, None
+            try:
+                from open_webui.retrieval.embedding.resolution import resolve_for_user
+
+                ctx = resolve_for_user(user_id, request.app.state.config)
+                admin_id, embedding_model_id = ctx.admin_id, ctx.model.id
+            except Exception as resolve_error:
+                logging.debug(f"model-aware resolution unavailable for facilities: {resolve_error}")
         except Exception as e:
             logging.error(f"Failed to generate embeddings: {e}")
             return []
@@ -422,11 +433,22 @@ def search_knowledge_base(query: str, user_id: str, request: Request, model, k: 
         for collection_name in collection_names:
             try:
                
-                search_results = VECTOR_DB_CLIENT.search(
-                    collection_name=collection_name,
-                    vectors=[query_embedding],
-                    limit=k * 3  
-                )
+                if admin_id and embedding_model_id and hasattr(
+                    VECTOR_DB_CLIENT, "search_model_aware"
+                ):
+                    search_results = VECTOR_DB_CLIENT.search_model_aware(
+                        collection_name=collection_name,
+                        vectors=[query_embedding],
+                        admin_id=admin_id,
+                        embedding_model_id=embedding_model_id,
+                        limit=k * 3,
+                    )
+                else:
+                    search_results = VECTOR_DB_CLIENT.search(
+                        collection_name=collection_name,
+                        vectors=[query_embedding],
+                        limit=k * 3,
+                    )
                 
                 if search_results and hasattr(search_results, 'documents') and search_results.documents:
                     documents = search_results.documents[0]
