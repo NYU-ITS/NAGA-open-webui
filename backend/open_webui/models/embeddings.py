@@ -55,6 +55,87 @@ class RagChunk(Base):
     created_at = Column(BigInteger, nullable=False)
     updated_at = Column(BigInteger, nullable=False)
 
+    @staticmethod
+    def insert_chunks(admin_id: str, file_id: str, chunks: list[dict]) -> list[str]:
+        """Persist extracted content for one admin/file as ordered rag_chunks.
+
+        ``chunks`` is a list of dicts with ``content`` (str), ``content_type``
+        (``"text"``/``"image"``), and optional ``chunk_metadata`` (dict). The
+        list order defines ``chunk_index``. Re-ingesting the same file replaces
+        any prior chunks for that (admin, file) so the operation is idempotent.
+
+        Returns the created rag_chunk_ids in the same order as ``chunks`` so the
+        caller can stamp each generated vector with its rag_chunk_id.
+        """
+        import hashlib
+        import time
+        import uuid
+
+        from open_webui.internal.db import get_db
+
+        now = int(time.time())
+        ids: list[str] = []
+        rows: list[RagChunk] = []
+        for index, chunk in enumerate(chunks):
+            content = chunk.get("content") or ""
+            content_type = chunk.get("content_type") or "text"
+            chunk_metadata = chunk.get("chunk_metadata") or {}
+            digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            chunk_id = str(uuid.uuid4())
+            ids.append(chunk_id)
+            rows.append(
+                RagChunk(
+                    id=chunk_id,
+                    admin_id=admin_id,
+                    file_id=file_id,
+                    chunk_index=index,
+                    content=content,
+                    content_type=content_type,
+                    chunk_metadata=chunk_metadata,
+                    content_sha256=digest,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+
+        with get_db() as db:
+            # Replace any prior chunks for this (admin, file) so re-ingestion is idempotent.
+            db.query(RagChunk).filter(
+                RagChunk.admin_id == admin_id, RagChunk.file_id == file_id
+            ).delete(synchronize_session=False)
+            for row in rows:
+                db.add(row)
+            db.commit()
+        return ids
+
+    @staticmethod
+    def get_ids_by_file(admin_id: str, file_id: str) -> list[str]:
+        """Return rag_chunk_ids for a file in chunk_index order."""
+        from open_webui.internal.db import get_db
+
+        with get_db() as db:
+            rows = (
+                db.query(RagChunk)
+                .filter(RagChunk.admin_id == admin_id, RagChunk.file_id == file_id)
+                .order_by(RagChunk.chunk_index)
+                .all()
+            )
+            return [row.id for row in rows]
+
+    @staticmethod
+    def delete_by_file(admin_id: str, file_id: str) -> int:
+        """Delete all rag_chunks for a file. Returns the number deleted."""
+        from open_webui.internal.db import get_db
+
+        with get_db() as db:
+            deleted = (
+                db.query(RagChunk)
+                .filter(RagChunk.admin_id == admin_id, RagChunk.file_id == file_id)
+                .delete(synchronize_session=False)
+            )
+            db.commit()
+            return deleted
+
 
 class EmbeddingJob(Base):
     __tablename__ = "embedding_jobs"
