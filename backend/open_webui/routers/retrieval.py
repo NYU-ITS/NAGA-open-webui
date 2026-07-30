@@ -312,7 +312,7 @@ async def get_status(request: Request, user=Depends(get_verified_user)):
 async def get_embedding_config(request: Request, user=Depends(get_verified_user)):
     """
     Get embedding configuration for the requesting user.
-    Returns model config but never exposes the API key.
+    Returns embedding configuration, including the stored API key, for the requesting user.
     """
     requesting_email = user.email
     embedding_model = request.app.state.config.RAG_EMBEDDING_MODEL_USER.get(requesting_email) or ""
@@ -324,7 +324,7 @@ async def get_embedding_config(request: Request, user=Depends(get_verified_user)
         "embedding_batch_size": request.app.state.config.RAG_EMBEDDING_BATCH_SIZE,
         "openai_config": {
             "url": request.app.state.config.RAG_OPENAI_API_BASE_URL,
-            "key": "",  # Never expose credential
+            "key": request.app.state.config.RAG_OPENAI_API_KEY.get(requesting_email) or "",
         },
     }
 
@@ -426,7 +426,7 @@ async def update_embedding_config(
             "embedding_batch_size": request.app.state.config.RAG_EMBEDDING_BATCH_SIZE,
             "openai_config": {
                 "url": request.app.state.config.RAG_OPENAI_API_BASE_URL,
-                "key": "",  # Never expose credential
+                "key": request.app.state.config.RAG_OPENAI_API_KEY.get(user.email) or "",
             },
             "ollama_config": {
                 "url": request.app.state.config.RAG_OLLAMA_BASE_URL,
