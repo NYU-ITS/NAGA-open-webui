@@ -1,13 +1,17 @@
 from typing import Optional, List, Dict, Any
 import logging
+import time
 from sqlalchemy import (
+    BigInteger,
     cast,
     column,
     create_engine,
     Column,
     Integer,
     MetaData,
+    or_,
     select,
+    String,
     text,
     Text,
     Table,
@@ -35,13 +39,35 @@ log.setLevel(SRC_LOG_LEVELS["RAG"])
 
 
 class DocumentChunk(Base):
-    __tablename__ = "document_chunk"
+    """ORM view of the embeddings_1536 physical vector table.
+
+    The table was renamed from ``document_chunk`` to ``embeddings_1536`` in the
+    Phase 3 migration. The legacy columns (collection_name, vmetadata, text)
+    remain for the collection-name read path during the transition; the
+    provenance columns (admin_id, embedding_model_id, file_id, knowledge_id,
+    rag_chunk_id, modality, embedding_status, provenance_status) back the
+    model-aware write/read path introduced in Phase 3.
+    """
+
+    __tablename__ = "embeddings_1536"
 
     id = Column(Text, primary_key=True)
     vector = Column(Vector(dim=VECTOR_LENGTH), nullable=True)
     collection_name = Column(Text, nullable=False)
     text = Column(Text, nullable=True)
     vmetadata = Column(MutableDict.as_mutable(JSONB), nullable=True)
+
+    # Phase 1/3 model-aware provenance columns.
+    admin_id = Column(Text, nullable=True)
+    embedding_model_id = Column(Text, nullable=True)
+    file_id = Column(Text, nullable=True)
+    knowledge_id = Column(Text, nullable=True)
+    rag_chunk_id = Column(Text, nullable=True)
+    modality = Column(String(16), nullable=True)
+    embedding_status = Column(String(16), nullable=True)
+    provenance_status = Column(String(20), nullable=False, default="unattributed")
+    created_at = Column(BigInteger, nullable=True)
+    updated_at = Column(BigInteger, nullable=True)
 
 
 class PgvectorClient:
@@ -73,17 +99,17 @@ class PgvectorClient:
         """
         metadata = MetaData()
         try:
-            # Attempt to reflect the 'document_chunk' table
-            document_chunk_table = Table(
-                "document_chunk", metadata, autoload_with=self.session.bind
+            # Reflect the renamed embeddings_1536 table.
+            embeddings_table = Table(
+                "embeddings_1536", metadata, autoload_with=self.session.bind
             )
         except NoSuchTableError:
             # Table does not exist; no action needed
             return
 
         # Proceed to check the vector column
-        if "vector" in document_chunk_table.columns:
-            vector_column = document_chunk_table.columns["vector"]
+        if "vector" in embeddings_table.columns:
+            vector_column = embeddings_table.columns["vector"]
             vector_type = vector_column.type
             if isinstance(vector_type, Vector):
                 db_vector_length = vector_type.dim
@@ -98,7 +124,7 @@ class PgvectorClient:
                 )
         else:
             raise Exception(
-                "The 'vector' column does not exist in the 'document_chunk' table."
+                "The 'vector' column does not exist in the 'embeddings_1536' table."
             )
 
     def adjust_vector_length(self, vector: List[float]) -> List[float]:
@@ -113,20 +139,50 @@ class PgvectorClient:
             )
         return vector
 
+    @staticmethod
+    def _is_model_aware(item: VectorItem) -> bool:
+        """A model-aware write carries registry provenance (embedding_model_id)."""
+        return bool(item.get("embedding_model_id"))
+
+    @staticmethod
+    def _provenance_kwargs(item: VectorItem, now: int) -> dict:
+        """Provenance columns written alongside model-aware vectors."""
+        return {
+            "admin_id": item.get("admin_id"),
+            "embedding_model_id": item.get("embedding_model_id"),
+            "file_id": item.get("file_id"),
+            "knowledge_id": item.get("knowledge_id"),
+            "rag_chunk_id": item.get("rag_chunk_id"),
+            "modality": item.get("modality") or "text",
+            "embedding_status": item.get("embedding_status") or "active",
+            "provenance_status": "attributed",
+            "created_at": now,
+            "updated_at": now,
+        }
+
     def insert(self, collection_name: str, items: List[VectorItem]) -> None:
         log.info("[PGVECTOR] insert START | collection=%s | items_count=%s", collection_name, len(items))
         try:
+            now = int(time.time())
             new_items = []
             for item in items:
-                vector = self.adjust_vector_length(item["vector"])
-                new_chunk = DocumentChunk(
-                    id=item["id"],
-                    vector=vector,
-                    collection_name=collection_name,
-                    text=item["text"],
-                    vmetadata=item["metadata"],
+                # Model-aware writes are validated to the exact table dimension
+                # upstream; never pad or truncate them. Legacy writes pad.
+                vector = (
+                    item["vector"]
+                    if self._is_model_aware(item)
+                    else self.adjust_vector_length(item["vector"])
                 )
-                new_items.append(new_chunk)
+                kwargs = {
+                    "id": item["id"],
+                    "vector": vector,
+                    "collection_name": collection_name,
+                    "text": item["text"],
+                    "vmetadata": item["metadata"],
+                }
+                if self._is_model_aware(item):
+                    kwargs.update(self._provenance_kwargs(item, now))
+                new_items.append(DocumentChunk(**kwargs))
             self.session.bulk_save_objects(new_items)
             self.session.commit()
             log.info("[PGVECTOR] insert SUCCESS | collection=%s | inserted=%s", collection_name, len(new_items))
@@ -138,8 +194,13 @@ class PgvectorClient:
     def upsert(self, collection_name: str, items: List[VectorItem]) -> None:
         log.info("[PGVECTOR] upsert START | collection=%s | items_count=%s", collection_name, len(items))
         try:
+            now = int(time.time())
             for item in items:
-                vector = self.adjust_vector_length(item["vector"])
+                vector = (
+                    item["vector"]
+                    if self._is_model_aware(item)
+                    else self.adjust_vector_length(item["vector"])
+                )
                 existing = (
                     self.session.query(DocumentChunk)
                     .filter(DocumentChunk.id == item["id"])
@@ -152,15 +213,20 @@ class PgvectorClient:
                     existing.collection_name = (
                         collection_name  # Update collection_name if necessary
                     )
+                    if self._is_model_aware(item):
+                        for key, value in self._provenance_kwargs(item, now).items():
+                            setattr(existing, key, value)
                 else:
-                    new_chunk = DocumentChunk(
-                        id=item["id"],
-                        vector=vector,
-                        collection_name=collection_name,
-                        text=item["text"],
-                        vmetadata=item["metadata"],
-                    )
-                    self.session.add(new_chunk)
+                    kwargs = {
+                        "id": item["id"],
+                        "vector": vector,
+                        "collection_name": collection_name,
+                        "text": item["text"],
+                        "vmetadata": item["metadata"],
+                    }
+                    if self._is_model_aware(item):
+                        kwargs.update(self._provenance_kwargs(item, now))
+                    self.session.add(DocumentChunk(**kwargs))
             self.session.commit()
             log.info("[PGVECTOR] upsert SUCCESS | collection=%s | upserted=%s", collection_name, len(items))
         except Exception as e:
@@ -266,6 +332,138 @@ class PgvectorClient:
             except Exception:
                 pass
             log.exception(f"Error during search: {e}")
+            return None
+
+    def search_model_aware(
+        self,
+        collection_name: str,
+        vectors: List[List[float]],
+        admin_id: str,
+        embedding_model_id: str,
+        limit: Optional[int] = None,
+        knowledge_ids: Optional[List[str]] = None,
+        file_ids: Optional[List[str]] = None,
+    ) -> Optional[SearchResult]:
+        """Cosine search restricted to one admin/model provenance space.
+
+        Adds admin_id and embedding_model_id filters on top of the collection
+        name so a query can never match vectors from another admin context or
+        another embedding model. Optional knowledge_ids/file_ids further scope
+        the RBAC-authorized result set (OR semantics). Query vectors are never
+        padded because they are validated to the exact dimension upstream.
+        """
+        log.info(
+            "[PGVECTOR] search_model_aware START | collection=%s | admin=%s | model=%s | vectors=%s | limit=%s",
+            collection_name,
+            admin_id,
+            embedding_model_id,
+            len(vectors) if vectors else 0,
+            limit,
+        )
+        try:
+            if not vectors:
+                log.info(
+                    "[PGVECTOR] search_model_aware EMPTY | collection=%s | reason=no_vectors",
+                    collection_name,
+                )
+                return None
+
+            num_queries = len(vectors)
+
+            def vector_expr(vector):
+                return cast(array(vector), Vector(VECTOR_LENGTH))
+
+            qid_col = column("qid", Integer)
+            q_vector_col = column("q_vector", Vector(VECTOR_LENGTH))
+            query_vectors = (
+                values(qid_col, q_vector_col)
+                .data(
+                    [(idx, vector_expr(vector)) for idx, vector in enumerate(vectors)]
+                )
+                .alias("query_vectors")
+            )
+
+            distance = DocumentChunk.vector.cosine_distance(query_vectors.c.q_vector)
+
+            subq = (
+                select(
+                    DocumentChunk.id,
+                    DocumentChunk.text,
+                    DocumentChunk.vmetadata,
+                    distance.label("distance"),
+                )
+                .where(DocumentChunk.collection_name == collection_name)
+                .where(DocumentChunk.admin_id == admin_id)
+                .where(DocumentChunk.embedding_model_id == embedding_model_id)
+            )
+
+            scope_clauses = []
+            if knowledge_ids:
+                scope_clauses.append(DocumentChunk.knowledge_id.in_(knowledge_ids))
+            if file_ids:
+                scope_clauses.append(DocumentChunk.file_id.in_(file_ids))
+            if scope_clauses:
+                subq = subq.where(or_(*scope_clauses))
+
+            subq = subq.order_by(distance)
+            if limit is not None:
+                subq = subq.limit(limit)
+            subq = subq.lateral("result")
+
+            stmt = (
+                select(
+                    query_vectors.c.qid,
+                    subq.c.id,
+                    subq.c.text,
+                    subq.c.vmetadata,
+                    subq.c.distance,
+                )
+                .select_from(query_vectors)
+                .join(subq, true())
+                .order_by(query_vectors.c.qid, subq.c.distance)
+            )
+
+            results = self.session.execute(stmt).all()
+
+            ids = [[] for _ in range(num_queries)]
+            distances = [[] for _ in range(num_queries)]
+            documents = [[] for _ in range(num_queries)]
+            metadatas = [[] for _ in range(num_queries)]
+
+            if not results:
+                log.info(
+                    "[PGVECTOR] search_model_aware SUCCESS | collection=%s | results_total=0",
+                    collection_name,
+                )
+                return SearchResult(
+                    ids=ids,
+                    distances=distances,
+                    documents=documents,
+                    metadatas=metadatas,
+                )
+
+            for row in results:
+                qid = int(row.qid)
+                ids[qid].append(row.id)
+                distances[qid].append(row.distance)
+                documents[qid].append(row.text)
+                metadatas[qid].append(row.vmetadata)
+
+            total_hits = sum(len(d) for d in documents)
+            log.info(
+                "[PGVECTOR] search_model_aware SUCCESS | collection=%s | results_total=%s",
+                collection_name,
+                total_hits,
+            )
+            return SearchResult(
+                ids=ids, distances=distances, documents=documents, metadatas=metadatas
+            )
+        except Exception as e:
+            try:
+                self.session.rollback()
+            except Exception:
+                pass
+            log.exception(f"Error during model-aware search: {e}")
             return None
 
     def query(
