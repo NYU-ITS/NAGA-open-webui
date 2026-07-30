@@ -1039,6 +1039,9 @@ def process_file_job(
                                     "hash": hash,
                                 },
                                 embedding_function=embedding_function,
+                                admin_id=admin_id,
+                                embedding_model_id=embedding_model_id,
+                                knowledge_id=knowledge_id,
                                 user=user,
                             )
 
@@ -1077,6 +1080,8 @@ def process_file_job(
                                 },
                                 add=(True if collection_name else False),
                                 embedding_function=embedding_function,
+                                admin_id=admin_id,
+                                embedding_model_id=embedding_model_id,
                                 user=user,
                             )
 

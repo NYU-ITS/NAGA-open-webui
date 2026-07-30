@@ -924,6 +924,34 @@ def _get_user_chunk_settings(request: Request, user=None):
     return user_email, chunk_size, chunk_overlap
 
 
+def _resolve_model_aware_ingestion(
+    *,
+    admin_id: Optional[str],
+    embedding_model_id: Optional[str],
+    file_id: Optional[str],
+    texts: list[str],
+    metadatas: list[dict],
+):
+    """Phase 3: persist rag_chunks and resolve the model spec for file ingestion.
+
+    Returns (model_spec, rag_chunk_ids) when the caller resolved a model-aware
+    admin/model context and a file_id is present; otherwise (None, None) so the
+    legacy ingestion path runs unchanged.
+    """
+    if not (admin_id and embedding_model_id and file_id):
+        return None, None
+    from open_webui.retrieval.embedding.registry import get_model_spec_by_id
+    from open_webui.models.embeddings import RagChunk
+
+    model_spec = get_model_spec_by_id(embedding_model_id)
+    chunks = [
+        {"content": text, "content_type": "text", "chunk_metadata": metadatas[idx]}
+        for idx, text in enumerate(texts)
+    ]
+    rag_chunk_ids = RagChunk.insert_chunks(admin_id, file_id, chunks)
+    return model_spec, rag_chunk_ids
+
+
 def save_docs_to_vector_db(
     request: Request,
     docs,
@@ -934,6 +962,9 @@ def save_docs_to_vector_db(
     add: bool = False,
     user=None,
     embedding_function: Callable = None,
+    admin_id: Optional[str] = None,
+    embedding_model_id: Optional[str] = None,
+    knowledge_id: Optional[str] = None,
 ) -> bool:
     def _get_docs_info(docs: list[Document]) -> str:
         docs_info = set()
@@ -1073,6 +1104,15 @@ def save_docs_to_vector_db(
                 for doc in docs
             ]
 
+            file_id = metadata.get("file_id") if isinstance(metadata, dict) else None
+            model_spec, rag_chunk_ids = _resolve_model_aware_ingestion(
+                admin_id=admin_id,
+                embedding_model_id=embedding_model_id,
+                file_id=file_id,
+                texts=texts,
+                metadatas=metadatas,
+            )
+
             # ChromaDB does not like datetime formats
             # for meta-data so convert them to string.
             for metadata in metadatas:
@@ -1138,15 +1178,31 @@ def save_docs_to_vector_db(
                 log.info(f"  [STEP 7] Preparing items for vector DB insertion:")
                 log.info(f"    collection_name: {collection_name}, items count: {len(texts)}")
                 
-                items = [
-                    {
-                        "id": str(uuid.uuid4()),
-                        "text": text,
-                        "vector": embeddings[idx],
-                        "metadata": metadatas[idx],
-                    }
-                    for idx, text in enumerate(texts)
-                ]
+                if rag_chunk_ids is not None:
+                    from open_webui.retrieval.vector.model_aware import (
+                        ModelAwareVectorRepository,
+                    )
+
+                    items = ModelAwareVectorRepository().make_items(
+                        texts=texts,
+                        vectors=embeddings,
+                        metadata=metadatas,
+                        rag_chunk_ids=rag_chunk_ids,
+                        admin_id=admin_id,
+                        model=model_spec,
+                        file_id=file_id,
+                        knowledge_id=knowledge_id,
+                    )
+                else:
+                    items = [
+                        {
+                            "id": str(uuid.uuid4()),
+                            "text": text,
+                            "vector": embeddings[idx],
+                            "metadata": metadatas[idx],
+                        }
+                        for idx, text in enumerate(texts)
+                    ]
                 
                 print(f"  [STEP 7.1] Items prepared, inserting into vector DB...", flush=True)
                 log.info(f"  [STEP 7.1] Items prepared, inserting into vector DB...")
@@ -1296,6 +1352,9 @@ def save_docs_to_multiple_collections(
     split: bool = True,
     user=None,
     embedding_function: Callable = None,
+    admin_id: Optional[str] = None,
+    embedding_model_id: Optional[str] = None,
+    knowledge_id: Optional[str] = None,
 ) -> bool:
     """
     Save documents to multiple collections using a single embedding operation
@@ -1399,6 +1458,15 @@ def save_docs_to_multiple_collections(
         for doc in docs
     ]
 
+    file_id = metadata.get("file_id") if isinstance(metadata, dict) else None
+    model_spec, rag_chunk_ids = _resolve_model_aware_ingestion(
+        admin_id=admin_id,
+        embedding_model_id=embedding_model_id,
+        file_id=file_id,
+        texts=texts,
+        metadatas=metadatas,
+    )
+
     # ChromaDB does not like datetime formats
     # for meta-data so convert them to string.
     for metadata in metadatas:
@@ -1451,15 +1519,31 @@ def save_docs_to_multiple_collections(
             print(f"  [STEP 7.{col_idx+1}] Processing collection: {collection_name}", flush=True)
             log.info(f"  [STEP 7.{col_idx+1}] Processing collection: {collection_name}")
             
-            items = [
-                {
-                    "id": str(uuid.uuid4()),
-                    "text": text,
-                    "vector": embeddings[text_idx],
-                    "metadata": metadatas[text_idx],
-                }
-                for text_idx, text in enumerate(texts)
-            ]
+            if rag_chunk_ids is not None:
+                from open_webui.retrieval.vector.model_aware import (
+                    ModelAwareVectorRepository,
+                )
+
+                items = ModelAwareVectorRepository().make_items(
+                    texts=texts,
+                    vectors=embeddings,
+                    metadata=metadatas,
+                    rag_chunk_ids=rag_chunk_ids,
+                    admin_id=admin_id,
+                    model=model_spec,
+                    file_id=file_id,
+                    knowledge_id=knowledge_id,
+                )
+            else:
+                items = [
+                    {
+                        "id": str(uuid.uuid4()),
+                        "text": text,
+                        "vector": embeddings[text_idx],
+                        "metadata": metadatas[text_idx],
+                    }
+                    for text_idx, text in enumerate(texts)
+                ]
             
             print(f"    Preparing {len(items)} items for insertion", flush=True)
             log.info(f"    Preparing {len(items)} items for insertion")
@@ -1792,6 +1876,9 @@ def _process_file_sync(
                             "hash": hash,
                         },
                         embedding_function=embedding_function,
+                        admin_id=admin_id,
+                        embedding_model_id=embedding_model_id,
+                        knowledge_id=knowledge_id,
                         user=user,
                     )
 
@@ -1842,6 +1929,9 @@ def _process_file_sync(
                         },
                         add=(True if collection_name else False),
                         embedding_function=embedding_function,
+                        admin_id=admin_id,
+                        embedding_model_id=embedding_model_id,
+                        knowledge_id=knowledge_id,
                         user=user,
                     )
                     
