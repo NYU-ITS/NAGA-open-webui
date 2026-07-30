@@ -22,6 +22,7 @@ from .errors import (
     EMBEDDING_VECTOR_NON_FINITE,
     EMBEDDING_DIMENSION_MISMATCH,
     EMBEDDING_PROVIDER_FAILED,
+    EMBEDDING_MODEL_SPACE_MIXED,
 )
 from .provider import EmbeddingProvider, EmbeddingProviderFactory
 
@@ -47,6 +48,7 @@ __all__ = [
     "EMBEDDING_VECTOR_NON_FINITE",
     "EMBEDDING_DIMENSION_MISMATCH",
     "EMBEDDING_PROVIDER_FAILED",
+    "EMBEDDING_MODEL_SPACE_MIXED",
     # Protocols
     "EmbeddingProvider",
     "EmbeddingProviderFactory",

@@ -15,6 +15,7 @@ from .errors import (
     EMBEDDING_ADMIN_UNRESOLVED,
     EMBEDDING_ADMIN_AMBIGUOUS,
     EMBEDDING_CREDENTIALS_MISSING,
+    EMBEDDING_MODEL_SPACE_MIXED,
 )
 from .registry import get_model_spec_by_name, get_model_spec_by_id
 
@@ -336,3 +337,68 @@ def freeze_for_knowledge_enqueue(knowledge_id: str, requesting_user_id: str, con
     admin = resolve_admin_for_knowledge(knowledge_id, requesting_user_id)
     model = resolve_model_for_admin(admin.email, config)
     return (admin.id, model.id)
+
+
+def resolve_model_space_for_knowledge(knowledge_id: str, config) -> tuple[str, str]:
+    """
+    Resolve the (admin_id, embedding_model_id) provenance space a knowledge base
+    belongs to.
+
+    A knowledge base resolves to its owning admin (RBAC group owner), and the
+    model is that admin's currently selected registry model.
+
+    Args:
+        knowledge_id: The knowledge base ID.
+        config: The app config.
+
+    Returns:
+        Tuple of (admin_id, embedding_model_id).
+
+    Raises:
+        EmbeddingError: If resolution fails.
+    """
+    admin = resolve_admin_for_knowledge(knowledge_id, requesting_user_id=None)
+    model = resolve_model_for_admin(admin.email, config)
+    return (admin.id, model.id)
+
+
+def assert_single_model_space(
+    requesting_user_id: str,
+    knowledge_ids,
+    config,
+) -> tuple[str, str]:
+    """
+    Resolve the requesting user's effective (admin_id, embedding_model_id) space
+    and assert every supplied knowledge base resolves to the same space.
+
+    A retrieval request that mixes embedding model spaces is rejected so a query
+    vector is never compared with document vectors from another model.
+
+    Args:
+        requesting_user_id: The user issuing the retrieval request.
+        knowledge_ids: Iterable of knowledge base IDs in the request.
+        config: The app config.
+
+    Returns:
+        The single effective (admin_id, embedding_model_id) for the request.
+
+    Raises:
+        EmbeddingError: EMBEDDING_MODEL_SPACE_MIXED if any knowledge base
+            resolves to a different space than the requesting user.
+    """
+    admin = resolve_admin_for_user(requesting_user_id)
+    model = resolve_model_for_admin(admin.email, config)
+    effective = (admin.id, model.id)
+
+    for knowledge_id in knowledge_ids or []:
+        space = resolve_model_space_for_knowledge(knowledge_id, config)
+        if space != effective:
+            raise EmbeddingError(
+                EMBEDDING_MODEL_SPACE_MIXED,
+                detail=(
+                    f"Knowledge base {knowledge_id} resolves to model space {space}, "
+                    f"expected {effective}."
+                ),
+            )
+
+    return effective
