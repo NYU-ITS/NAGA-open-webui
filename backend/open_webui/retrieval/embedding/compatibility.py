@@ -41,16 +41,25 @@ def _legacy_vectors(query: Union[str, list[str]], batch: EmbeddingBatch):
     return [list(vector) for vector in batch.vectors]
 
 
-def validate_storage_dimension(batch: EmbeddingBatch) -> None:
-    """Reject vectors that cannot fit the current document-chunk storage."""
-    if batch.dimension != CURRENT_DOCUMENT_CHUNK_DIMENSION:
+def assert_dimension_supported(dimension: int) -> None:
+    """Reject a registry model dimension the storage layer cannot persist.
+
+    Centralizes the supported-dimension check so state management and other
+    consumers reference routing policy rather than a hardcoded constant.
+    """
+    if dimension != CURRENT_DOCUMENT_CHUNK_DIMENSION:
         raise EmbeddingError(
             EMBEDDING_STORAGE_DIMENSION_UNSUPPORTED,
             detail=(
-                f"Embedding dimension {batch.dimension} does not match document storage "
-                f"dimension {CURRENT_DOCUMENT_CHUNK_DIMENSION}."
+                f"Embedding dimension {dimension} is not supported by the current "
+                f"document storage dimension {CURRENT_DOCUMENT_CHUNK_DIMENSION}."
             ),
         )
+
+
+def validate_storage_dimension(batch: EmbeddingBatch) -> None:
+    """Reject vectors that cannot fit the current document-chunk storage."""
+    assert_dimension_supported(batch.dimension)
 
 
 def make_embedding_function(

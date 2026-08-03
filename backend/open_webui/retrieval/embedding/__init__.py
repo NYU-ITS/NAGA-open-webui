@@ -23,8 +23,13 @@ from .errors import (
     EMBEDDING_DIMENSION_MISMATCH,
     EMBEDDING_PROVIDER_FAILED,
     EMBEDDING_MODEL_SPACE_MIXED,
+    EMBEDDING_MODEL_STATE_CONFLICT,
 )
 from .provider import EmbeddingProvider, EmbeddingProviderFactory
+from .state import (
+    AdminEmbeddingModelStateView,
+    AdminEmbeddingModelStateRepository,
+)
 
 __all__ = [
     # Inputs
@@ -49,6 +54,10 @@ __all__ = [
     "EMBEDDING_DIMENSION_MISMATCH",
     "EMBEDDING_PROVIDER_FAILED",
     "EMBEDDING_MODEL_SPACE_MIXED",
+    "EMBEDDING_MODEL_STATE_CONFLICT",
+    # State
+    "AdminEmbeddingModelStateView",
+    "AdminEmbeddingModelStateRepository",
     # Protocols
     "EmbeddingProvider",
     "EmbeddingProviderFactory",

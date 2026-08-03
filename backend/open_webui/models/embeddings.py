@@ -171,3 +171,41 @@ class EmbeddingJobFile(Base):
     updated_at = Column(BigInteger, nullable=False)
     started_at = Column(BigInteger)
     completed_at = Column(BigInteger)
+
+
+class AdminEmbeddingModelState(Base):
+    """Durable, admin-scoped authority over embedding model spaces.
+
+    One row per admin. ``active_embedding_model_id`` is the only model whose
+    completed vectors may be retrieved. ``target_embedding_model_id`` is the
+    model currently being built by a reindex operation (nullable). Stored IDs
+    reference ``embedding_models`` registry rows; model names remain
+    presentation/config compatibility data only.
+    """
+
+    __tablename__ = "admin_embedding_model_state"
+
+    admin_id = Column(String, ForeignKey("user.id", ondelete="CASCADE"), primary_key=True)
+    active_embedding_model_id = Column(
+        String, ForeignKey("embedding_models.id", ondelete="RESTRICT"), nullable=False
+    )
+    target_embedding_model_id = Column(
+        String, ForeignKey("embedding_models.id", ondelete="RESTRICT")
+    )
+    latest_embedding_job_id = Column(
+        String, ForeignKey("embedding_jobs.id", ondelete="SET NULL")
+    )
+    created_at = Column(BigInteger, nullable=False)
+    updated_at = Column(BigInteger, nullable=False)
+
+    @staticmethod
+    def get_by_admin(admin_id: str):
+        """Return the state row for an admin, or None if absent."""
+        from open_webui.internal.db import get_db
+
+        with get_db() as db:
+            return (
+                db.query(AdminEmbeddingModelState)
+                .filter(AdminEmbeddingModelState.admin_id == admin_id)
+                .first()
+            )
