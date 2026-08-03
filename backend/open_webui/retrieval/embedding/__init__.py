@@ -62,6 +62,11 @@ from .jobs import (
     FILE_STATUS_COMPLETED,
     FILE_STATUS_FAILED,
 )
+from .model_change import (
+    ModelChangeResult,
+    ModelChangeNoOp,
+    request_model_change,
+)
 
 __all__ = [
     # Inputs
@@ -123,4 +128,8 @@ __all__ = [
     "FILE_STATUS_PROCESSING",
     "FILE_STATUS_COMPLETED",
     "FILE_STATUS_FAILED",
+    # Model Change
+    "ModelChangeResult",
+    "ModelChangeNoOp",
+    "request_model_change",
 ]
