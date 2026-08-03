@@ -167,6 +167,7 @@ class EmbeddingJobFile(Base):
     attempt_count = Column(Integer, nullable=False, default=0)
     error_code = Column(String(64))
     error_message = Column(Text)
+    file_snapshot = Column(JSONField, nullable=False)
     created_at = Column(BigInteger, nullable=False)
     updated_at = Column(BigInteger, nullable=False)
     started_at = Column(BigInteger)

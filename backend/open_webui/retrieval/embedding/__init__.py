@@ -29,6 +29,12 @@ from .errors import (
     EMBEDDING_INVENTORY_AMBIGUOUS_ADMIN,
     EMBEDDING_INVENTORY_MISSING_FILE,
     EMBEDDING_INVENTORY_MALFORMED_REFERENCE,
+    EMBEDDING_JOB_ACTIVE_EXISTS,
+    EMBEDDING_JOB_NOT_FOUND,
+    EMBEDDING_JOB_TERMINAL,
+    EMBEDDING_JOB_WRONG_STATUS,
+    EMBEDDING_FILE_NOT_FOUND,
+    EMBEDDING_FILE_WRONG_STATUS,
 )
 from .provider import EmbeddingProvider, EmbeddingProviderFactory
 from .state import (
@@ -40,6 +46,21 @@ from .inventory import (
     build_reindex_inventory,
     SOURCE_KNOWLEDGE,
     SOURCE_CHAT_UPLOAD,
+)
+from .jobs import (
+    EmbeddingJobView,
+    EmbeddingJobFileView,
+    CreateJobResult,
+    EmbeddingJobRepository,
+    JOB_STATUS_QUEUED,
+    JOB_STATUS_PROCESSING,
+    JOB_STATUS_COMPLETED,
+    JOB_STATUS_FAILED,
+    JOB_STATUS_PARTIALLY_FAILED,
+    FILE_STATUS_PENDING,
+    FILE_STATUS_PROCESSING,
+    FILE_STATUS_COMPLETED,
+    FILE_STATUS_FAILED,
 )
 
 __all__ = [
@@ -71,6 +92,12 @@ __all__ = [
     "EMBEDDING_INVENTORY_AMBIGUOUS_ADMIN",
     "EMBEDDING_INVENTORY_MISSING_FILE",
     "EMBEDDING_INVENTORY_MALFORMED_REFERENCE",
+    "EMBEDDING_JOB_ACTIVE_EXISTS",
+    "EMBEDDING_JOB_NOT_FOUND",
+    "EMBEDDING_JOB_TERMINAL",
+    "EMBEDDING_JOB_WRONG_STATUS",
+    "EMBEDDING_FILE_NOT_FOUND",
+    "EMBEDDING_FILE_WRONG_STATUS",
     # State
     "AdminEmbeddingModelStateView",
     "AdminEmbeddingModelStateRepository",
@@ -82,4 +109,18 @@ __all__ = [
     # Protocols
     "EmbeddingProvider",
     "EmbeddingProviderFactory",
+    # Jobs
+    "EmbeddingJobView",
+    "EmbeddingJobFileView",
+    "CreateJobResult",
+    "EmbeddingJobRepository",
+    "JOB_STATUS_QUEUED",
+    "JOB_STATUS_PROCESSING",
+    "JOB_STATUS_COMPLETED",
+    "JOB_STATUS_FAILED",
+    "JOB_STATUS_PARTIALLY_FAILED",
+    "FILE_STATUS_PENDING",
+    "FILE_STATUS_PROCESSING",
+    "FILE_STATUS_COMPLETED",
+    "FILE_STATUS_FAILED",
 ]
