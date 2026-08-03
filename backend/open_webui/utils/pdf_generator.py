@@ -4,6 +4,7 @@ from typing import Dict, Any, List
 from html import escape
 import re
 import os
+import queue as queue_lib
 import time
 import multiprocessing as mp
 import base64
@@ -15,8 +16,80 @@ from open_webui.env import STATIC_DIR
 from open_webui.models.chats import ChatTitleMessagesForm
 from .katex_compiler import KaTeXCompiler
 
-PDF_DEBUG = True
-LATEX_DEBUG = True
+PDF_DEBUG = os.environ.get("PDF_DEBUG", "False").lower() == "true"
+LATEX_DEBUG = os.environ.get("LATEX_DEBUG", "False").lower() == "true"
+
+# Minimum and maximum wall clock budget for the WeasyPrint render, and the
+# per-message allowance used to interpolate between them.
+RENDER_TIMEOUT_MIN_SEC = 60.0
+RENDER_TIMEOUT_MAX_SEC = 600.0
+RENDER_TIMEOUT_PER_MESSAGE_SEC = 2.0
+
+# Placeholder that stands in for a rendered LaTeX fragment while the message
+# body goes through list normalization, escaping and markdown. Letters and
+# digits only so that no markdown or regex pass can rewrite it.
+LATEX_PLACEHOLDER = "xkatexph{index}endx"
+LATEX_PLACEHOLDER_RE = re.compile(r"xkatexph(\d+)endx")
+
+
+# Character class the frontend tokenizer requires on both sides of a math span:
+# whitespace or punctuation. A delimiter glued to a letter or a digit (a price
+# such as "$20", a variable named x$) is not math.
+LATEX_BOUNDARY = r"\s?。，!-/:-@\[-`{-~"
+_LEAD = f"(?<![^{LATEX_BOUNDARY}])"
+_TRAIL = f"(?=[{LATEX_BOUNDARY}]|$)"
+# Same body pattern as the frontend: any run of characters, treating a
+# backslash and the character after it as one unit so escaped delimiters
+# do not terminate the span.
+_BODY = r"((?:\\[\s\S]|[^\\])+?)"
+# Inline math never contains a bare dollar sign; a literal one is written \$.
+# Refusing to span one stops a stray delimiter, a price for instance, from
+# pairing with the opening delimiter of the next real expression and
+# swallowing the prose in between.
+_BODY_NO_DOLLAR = r"((?:\\[\s\S]|[^\\$])+?)"
+_BRACED = r"([^{}]*(?:\{[^{}]*\}[^{}]*)*)"
+
+PARAGRAPH_BREAK_RE = re.compile(r"\n[ \t]*\n")
+
+# (compiled pattern, delimiter name, display mode). Display delimiters are
+# matched first so that the inline scan cannot claim part of a block span.
+LATEX_PATTERNS = [
+    (re.compile(rf"{_LEAD}\$\${_BODY}\$\${_TRAIL}"), "$$", True),
+    (re.compile(rf"{_LEAD}\\\[{_BODY}\\\]{_TRAIL}"), "\\[\\]", True),
+    (re.compile(rf"{_LEAD}\\begin\{{equation\}}([\s\S]*?)\\end\{{equation\}}{_TRAIL}"),
+     "\\begin{equation}\\end{equation}", True),
+    (re.compile(rf"{_LEAD}(?<!\$)\${_BODY_NO_DOLLAR}\$(?!\$){_TRAIL}"), "$", False),
+    (re.compile(rf"{_LEAD}\\\({_BODY}\\\){_TRAIL}"), "\\(\\)", False),
+    (re.compile(rf"{_LEAD}\\ce\{{{_BRACED}\}}{_TRAIL}"), "\\ce{}", False),
+    (re.compile(rf"{_LEAD}\\pu\{{{_BRACED}\}}{_TRAIL}"), "\\pu{}", False),
+    (re.compile(rf"{_LEAD}\\boxed\{{{_BRACED}\}}{_TRAIL}"), "\\boxed{}", False),
+]
+
+# Arguments of these commands are typeset in text mode, where the soft break
+# macro is not defined. Anything inside their braces is left untouched.
+TEXT_MODE_COMMANDS = ("\\text", "\\textbf", "\\textit", "\\textrm", "\\textsf",
+                      "\\texttt", "\\textnormal", "\\mbox", "\\operatorname")
+
+# Breaking inside a matrix or a case distinction only adds gaps between the
+# entries; these environments lay themselves out.
+RIGID_ENVIRONMENTS = ("pmatrix", "bmatrix", "Bmatrix", "vmatrix", "Vmatrix",
+                      "matrix", "smallmatrix", "array", "cases")
+RIGID_ENVIRONMENT_RE = re.compile(
+    r"\\begin\{(" + "|".join(RIGID_ENVIRONMENTS) + r")\}[\s\S]*?\\end\{\1\}"
+)
+
+# Short expressions fit on one line, so the soft breaks would only show up as
+# extra spacing around operators.
+SOFT_BREAK_MIN_LENGTH = 60
+
+
+def _weasyprint_worker(result_queue, doc_html: str, base_url: str | None) -> None:
+    """Render HTML to PDF bytes in a child process and hand the result back."""
+    try:
+        document = HTML(string=doc_html, base_url=base_url) if base_url else HTML(string=doc_html)
+        result_queue.put((True, document.write_pdf()))
+    except Exception as ex:
+        result_queue.put((False, f"{type(ex).__name__}: {ex}"))
 
 class PDFGenerator:
     """
@@ -112,49 +185,44 @@ class PDFGenerator:
         """
         Detect LaTeX code in a chat message content.
         Returns a list of dictionaries containing LaTeX expressions found.
-        Based on the frontend katex-extension.ts implementation.
+        Mirrors the frontend tokenizer in src/lib/utils/marked/katex-extension.ts so
+        that the PDF renders the same expressions the user saw in the chat.
         Excludes LaTeX expressions that are inside code blocks.
         """
         # First, detect all code block regions
         code_regions = self._detect_code_blocks(content)
-        
+
         found_latex = []
-        # LaTeX delimiter patterns: (regex, delimiter_name, is_display_mode)
-        # Display mode expressions are centered and on their own line
-        patterns = [
-            (r'\$\$(.+?)\$\$', "$$", True),  # Block math: $$...$$
-            (r'(?<!\$)\$(.+?)\$(?!\$)', "$", False),  # Inline math: $...$ (not part of $$)
-            (r'\\ce\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}', "\\ce{}", False),  # Chemical formulas
-            (r'\\pu\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}', "\\pu{}", False),  # Physical units
-            (r'\\boxed\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}', "\\boxed{}", False),  # Boxed expressions
-            (r'\\\((.*?)\\\)', "\\(\\)", False),  # Inline math: \(...\)
-            (r'\\\[(.*?)\\\]', "\\[\\]", True),  # Block math: \[...\]
-            (r'\\begin\{equation\}([\s\S]*?)\\end\{equation\}', "\\begin{equation}\\end{equation}", True)  # Equation environment
-        ]
-        
         # Track used positions to avoid duplicate matches (e.g., $ inside $$)
         used_positions = set()
-        
-        for pattern, delimiter, display in patterns:
-            for match in re.finditer(pattern, content, re.MULTILINE | re.DOTALL):
+
+        for pattern, delimiter, display in LATEX_PATTERNS:
+            for match in pattern.finditer(content):
                 start, end = match.start(), match.end()
-                
+
                 # Skip if this LaTeX expression is inside a code block
                 if self._is_in_code_block(start, code_regions) or self._is_in_code_block(end - 1, code_regions):
                     if self.debug_pdf:
                         print("*"*20, f"\nPDF: Skipping LaTeX in code block at position {start}-{end}, delimiter={delimiter}\n", "*"*20)
                     continue
-                
+
                 # Skip pathological matches (likely unmatched delimiters)
                 if end - start > 10000:
                     if self.debug_pdf:
                         print("*"*20, f"\nPDF: Skipping pathological LaTeX span length={end-start} delimiter={delimiter}\n", "*"*20)
                     continue
-                
+
                 # Skip if this position range overlaps with a previously matched expression
                 if any(start < used_end and end > used_start for used_start, used_end in used_positions):
                     continue
-                
+
+                # A blank line ends a paragraph, so it also ends a math span. Without
+                # this a stray delimiter swallows unrelated prose further down.
+                if PARAGRAPH_BREAK_RE.search(match.group(1)):
+                    if self.debug_pdf:
+                        print("*"*20, f"\nPDF: Skipping LaTeX span crossing a blank line, delimiter={delimiter}\n", "*"*20)
+                    continue
+
                 latex_expr = match.group(1).strip()
                 # Only add if we have meaningful content (not just whitespace)
                 if latex_expr and len(latex_expr) > 0 and not latex_expr.isspace():
@@ -167,7 +235,9 @@ class PDFGenerator:
                         "end": end
                     })
                     used_positions.add((start, end))
-        
+
+        found_latex.sort(key=lambda item: item["start"])
+
         if self.debug_pdf:
             print("*"*20, f"\nPDF: detect_latex_in_message count={len(found_latex)} content_len={len(content)}\n", "*"*20)
         return found_latex
@@ -220,16 +290,6 @@ class PDFGenerator:
         # Also clean up KaTeX temp images
         if hasattr(self, 'katex_compiler'):
             self.katex_compiler.cleanup_temp_images()
-        
-        # Clean up any remaining files in the project temp directory
-        project_temp_dir = Path(__file__).parent.parent.parent.parent / "temp"
-        if project_temp_dir.exists():
-            try:
-                for temp_file in project_temp_dir.glob("*"):
-                    if temp_file.is_file():
-                        temp_file.unlink()
-            except Exception as e:
-                print(f"Error cleaning up project temp directory: {e}")
 
 
     def print_latex_detected(self, message: Dict[str, Any]) -> None:
@@ -252,35 +312,35 @@ class PDFGenerator:
                 print(f"  Full match: {latex['full_match']}")
                 print()
 
-    def _build_html_message(self, message: Dict[str, Any]) -> tuple[str, List[Dict[str, Any]]]:
-        """Build HTML for a single message and return LaTeX image data."""
+    def _build_html_message(
+        self, message: Dict[str, Any], body: str, fragments: List[str]
+    ) -> str:
+        """
+        Build HTML for a single message from its placeholder body and the KaTeX
+        fragments already rendered for it.
+        """
         role = escape(message.get("role", "user"))
-        content = message.get("content", "")
         timestamp = message.get("timestamp")
 
-        model = escape(message.get("model") if role == "assistant" else "")
+        model = escape(message.get("model") or "" if role == "assistant" else "")
 
         date_str = escape(self.format_timestamp(timestamp) if timestamp else "")
 
-        # Check for LaTeX code in the message and print to terminal
-        if self.debug_latex:
-            self.print_latex_detected(message)
-
-        # First process LaTeX expressions (convert LaTeX to HTML)
-        html_content = self._process_latex_to_html(content)
-        
         # Minimal preprocessing: only fix items that are clearly on the same line
         # when they should be separate (e.g., "text - (a) text - (b)" -> separate lines)
-        # This is minimal and doesn't touch well-formed markdown
-        html_content = self._fix_broken_list_items(html_content)
-        
+        # This is minimal and doesn't touch well-formed markdown. It runs on the
+        # placeholder body so it can never rewrite generated KaTeX markup.
+        html_content = self._fix_broken_list_items(body)
+
         # Convert markdown to HTML with extensions that preserve formatting
         # Use markdown extensions for better formatting support
         html_content = markdown.markdown(
-            html_content, 
+            html_content,
             extensions=['fenced_code', 'tables', 'toc']
         )
-        
+
+        html_content = self._apply_latex_fragments(html_content, fragments)
+
         # Wrap in markdown-section div for proper CSS styling
         html_message = f"""
             <div>
@@ -300,7 +360,7 @@ class PDFGenerator:
             </div>
             <br/>
           """
-        return html_message, []
+        return html_message
 
     def _fix_broken_list_items(self, content: str) -> str:
         """
@@ -370,100 +430,185 @@ class PDFGenerator:
         </html>
         """
 
-    def _process_latex_to_html(self, content: str) -> str:
+    def _extract_latex(self, content: str) -> tuple[str, List[tuple[str, bool]]]:
         """
-        Convert LaTeX in content to KaTeX-rendered HTML fragments.
-        
-        This function:
-        1. Detects all LaTeX expressions in the content
-        2. Renders them with KaTeX to HTML (which may include SVG elements)
-        3. Converts SVG elements to base64-encoded images for PDF compatibility
-        4. Replaces the original LaTeX expressions with the rendered HTML
+        Replace every LaTeX span in a message with a neutral placeholder.
+
+        Returns the placeholder body, which is safe to run through list
+        normalization, escaping and markdown, plus the list of
+        (expression, display) pairs to render, in placeholder order.
         """
         latex_expressions = self.detect_latex_in_message(content)
-        if not latex_expressions:
-            return escape(content)
 
-        # Sort by start position in reverse order so we can replace from end to start
-        # This preserves indices when doing string replacements
-        latex_expressions.sort(key=lambda x: x['start'], reverse=True)
-        html_content = content
-        
-        # Prepare expressions for KaTeX rendering
-        to_render: list[tuple[str, bool]] = []
-        
-        for latex in latex_expressions:
+        to_render: List[tuple[str, bool]] = []
+        parts: List[str] = []
+        cursor = 0
+
+        for index, latex in enumerate(latex_expressions):
             expr = latex['expression']
-            
+
             # Rebuild expression for special delimiters (boxed, ce, pu)
             # These need to be wrapped in their command syntax
             if latex['delimiter'] in ['\\boxed{}', '\\ce{}', '\\pu{}']:
                 expr = latex['delimiter'].replace('{}', '{' + expr + '}')
-            elif latex['delimiter'] == '\\[\\boxed{}\\]]':
-                expr = '\\boxed{' + expr + '}'
-            
+
             # Insert soft breaks to allow long expressions to wrap in PDF
-            expr = self._insert_soft_breaks(expr)
+            if len(expr) >= SOFT_BREAK_MIN_LENGTH:
+                expr = self._insert_soft_breaks(expr)
+
+            parts.append(escape(content[cursor:latex['start']], quote=False))
+            parts.append(LATEX_PLACEHOLDER.format(index=index))
+            cursor = latex['end']
             to_render.append((expr, latex['display']))
 
-        try:
-            rendered = self.katex_compiler.render_many_to_html(to_render) if to_render else []
-        except Exception:
-            rendered = [escape(e) for e, _ in to_render]
+        parts.append(escape(content[cursor:], quote=False))
+        return "".join(parts), to_render
 
-        # Fix SVG sizing issues while keeping SVG tags embedded directly in HTML
-        # This preserves em context which would be lost with base64 image conversion
-        final_fragments: list[str] = []
-        for fragment in rendered:
+    def _apply_latex_fragments(self, html_content: str, fragments: List[str]) -> str:
+        """Swap the placeholders in rendered markdown for their KaTeX fragments."""
+        if not fragments:
+            return html_content
+
+        def _replace(match: re.Match) -> str:
+            index = int(match.group(1))
+            if index >= len(fragments):
+                return ""
+            fragment = fragments[index]
             if '<svg' in fragment:
                 try:
-                    fixed = self._fix_svg_sizing(fragment)
-                    final_fragments.append(fixed)
+                    return self._fix_svg_sizing(fragment)
                 except Exception:
-                    # Fallback: keep original fragment
-                    final_fragments.append(fragment)
-            else:
-                final_fragments.append(fragment)
+                    return fragment
+            return fragment
 
-        for latex, fragment in zip(latex_expressions, final_fragments):
-            html_content = html_content[:latex['start']] + fragment + html_content[latex['end']:]
+        return LATEX_PLACEHOLDER_RE.sub(_replace, html_content)
 
-        html_content = html_content.replace('\\[', '').replace('\\]', '')
+    def _render_timeout(self) -> float:
+        """Scale the render budget with the size of the conversation."""
+        per_message = RENDER_TIMEOUT_PER_MESSAGE_SEC * len(self.form_data.messages)
+        return min(max(RENDER_TIMEOUT_MIN_SEC, per_message), RENDER_TIMEOUT_MAX_SEC)
 
-        return html_content
+    def _render_with_timeout(self, html_full: str, timeout_sec: float | None = None, use_base_url: bool = True) -> bytes:
+        """
+        Render PDF in a separate process with a timeout. Returns bytes or raises TimeoutError.
 
-    def _render_with_timeout(self, html_full: str, timeout_sec: float = 15.0, use_base_url: bool = True) -> bytes:
-        """Render PDF in a separate process with a timeout. Returns bytes or raises TimeoutError."""
-        q: mp.Queue = mp.Queue(maxsize=1)
-
-        def _worker(doc_html: str, base_url: str | None):
-            try:
-                if base_url:
-                    data = HTML(string=doc_html, base_url=base_url).write_pdf()
-                else:
-                    data = HTML(string=doc_html).write_pdf()
-                q.put((True, data))
-            except Exception as ex:
-                q.put((False, str(ex)))
+        The result is read off the queue before the process is joined. A
+        multiprocessing queue writes through a pipe with a 64 KiB kernel buffer,
+        so a child holding a larger payload cannot exit until a reader drains it.
+        Joining first deadlocks on every PDF above that size no matter how
+        generous the timeout is.
+        """
+        if timeout_sec is None:
+            timeout_sec = self._render_timeout()
 
         base_url_val = str(STATIC_DIR) if use_base_url else None
-        p = mp.Process(target=_worker, args=(html_full, base_url_val))
+        q: mp.Queue = mp.Queue()
+        p = mp.Process(target=_weasyprint_worker, args=(q, html_full, base_url_val))
         p.daemon = True
         p.start()
-        p.join(timeout_sec)
+
+        deadline = time.monotonic() + timeout_sec
+        result = None
+        while result is None:
+            try:
+                result = q.get(timeout=min(1.0, max(0.0, deadline - time.monotonic())))
+            except queue_lib.Empty:
+                if not p.is_alive():
+                    # The renderer died without producing anything, for example
+                    # killed by the container memory limit. Give the queue a
+                    # moment in case the payload is still in flight.
+                    try:
+                        result = q.get(timeout=5)
+                    except queue_lib.Empty:
+                        raise RuntimeError(
+                            f"PDF renderer exited unexpectedly (exit code {p.exitcode})"
+                        )
+                    break
+                if time.monotonic() >= deadline:
+                    if self.debug_pdf:
+                        print("*"*20, "\nPDF: write_pdf timed out; terminating renderer process\n", "*"*20)
+                    p.terminate()
+                    p.join(5)
+                    raise TimeoutError("WeasyPrint write_pdf timeout")
+
+        ok, payload = result
+        p.join(10)
         if p.is_alive():
-            if self.debug_pdf:
-                print("*"*20, "\nPDF: write_pdf timed out; terminating renderer process\n", "*"*20)
             p.terminate()
-            p.join(2)
-            raise TimeoutError("WeasyPrint write_pdf timeout")
-        ok, payload = q.get() if not q.empty() else (False, 'no result')
+            p.join(5)
+
         if not ok:
             raise RuntimeError(payload)
         return payload
 
+    def _protected_spans(self, expr: str) -> List[tuple[int, int]]:
+        """
+        Return (start, end) ranges that soft break insertion must not touch:
+        text mode arguments and self laying out environments.
+        """
+        spans: List[tuple[int, int]] = [
+            (match.start(), match.end()) for match in RIGID_ENVIRONMENT_RE.finditer(expr)
+        ]
+        for command in TEXT_MODE_COMMANDS:
+            search_from = 0
+            while True:
+                idx = expr.find(command, search_from)
+                if idx == -1:
+                    break
+                search_from = idx + len(command)
+                # Reject a longer command that merely starts with this one
+                # (\textbf found while scanning for \text).
+                if search_from < len(expr) and expr[search_from].isalpha():
+                    continue
+                brace = expr.find("{", search_from)
+                if brace == -1 or expr[search_from:brace].strip():
+                    continue
+                depth = 0
+                for pos in range(brace, len(expr)):
+                    if expr[pos] == "{":
+                        depth += 1
+                    elif expr[pos] == "}":
+                        depth -= 1
+                        if depth == 0:
+                            spans.append((idx, pos + 1))
+                            search_from = pos + 1
+                            break
+                else:
+                    spans.append((idx, len(expr)))
+                    search_from = len(expr)
+
+        spans.sort()
+        # Drop ranges already contained in an earlier one, for example \text{}
+        # inside a matrix cell, so the merge below stays linear.
+        merged: List[tuple[int, int]] = []
+        for start, end in spans:
+            if merged and start < merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        return merged
+
     def _insert_soft_breaks(self, expr: str) -> str:
-        """Insert KaTeX-friendly soft breakpoints into long LaTeX expressions."""
+        """
+        Insert KaTeX-friendly soft breakpoints into long LaTeX expressions.
+        Text mode arguments are skipped: \\allowbreak is undefined there and
+        makes KaTeX render the whole expression as an error.
+        """
+        spans = self._protected_spans(expr)
+        if spans:
+            out = []
+            cursor = 0
+            for start, end in spans:
+                if start > cursor:
+                    out.append(self._insert_soft_breaks_math(expr[cursor:start]))
+                out.append(expr[start:end])
+                cursor = end
+            out.append(self._insert_soft_breaks_math(expr[cursor:]))
+            return "".join(out)
+        return self._insert_soft_breaks_math(expr)
+
+    def _insert_soft_breaks_math(self, expr: str) -> str:
+        """Soft breakpoint insertion for a run of pure math mode LaTeX."""
         multi_token_replacements = {
             r"\\cdot": r"\\allowbreak{}\\cdot\\allowbreak{}",
             r"\\times": r"\\allowbreak{}\\times\\allowbreak{}",
@@ -478,14 +623,18 @@ class PDFGenerator:
         for k, v in multi_token_replacements.items():
             expr = re.sub(k, v, expr)
 
-        expr = re.sub(r"(?<![\\\\a-zA-Z0-9])\+", r"\\allowbreak{}+\\allowbreak{}", expr)
-        expr = re.sub(r"(?<![\\\\a-zA-Z0-9])-", r"\\allowbreak{}-\\allowbreak{}", expr)
-        expr = re.sub(r"(?<![\\\\a-zA-Z0-9])=", r"\\allowbreak{}=\\allowbreak{}", expr)
-        expr = expr.replace(",", ",\\allowbreak{}")
-        expr = expr.replace(";", ";\\allowbreak{}")
-        expr = expr.replace(":", ":\\allowbreak{}")
-        expr = expr.replace(")", ")\\allowbreak{}")
-        expr = expr.replace("]", "]\\allowbreak{}")
+        # A break directly after ^ or _ would become the scripted token itself,
+        # so those positions are excluded as well.
+        expr = re.sub(r"(?<![\\\\a-zA-Z0-9^_])\+", r"\\allowbreak{}+\\allowbreak{}", expr)
+        expr = re.sub(r"(?<![\\\\a-zA-Z0-9^_])-", r"\\allowbreak{}-\\allowbreak{}", expr)
+        expr = re.sub(r"(?<![\\\\a-zA-Z0-9^_])=", r"\\allowbreak{}=\\allowbreak{}", expr)
+        expr = re.sub(r"(?<![\\\\^_]),", r",\\allowbreak{}", expr)
+        expr = re.sub(r"(?<![\\\\^_]);", r";\\allowbreak{}", expr)
+        expr = re.sub(r"(?<![\\\\^_]):", r":\\allowbreak{}", expr)
+        # Not before an opening brace: \sqrt[3]{27} and friends would lose their
+        # mandatory argument to the break macro.
+        expr = re.sub(r"\)(?!\s*\{)", r")\\allowbreak{}", expr)
+        expr = re.sub(r"\](?!\s*\{)", r"]\\allowbreak{}", expr)
 
         return expr
 
@@ -495,16 +644,35 @@ class PDFGenerator:
         """
         try:
             gen_start = time.perf_counter()
-            messages_html_parts = []
-            all_latex_images = []
             if self.debug_pdf:
                 print("*"*20, f"\nPDF: starting build for {len(self.form_data.messages)} messages\n", "*"*20)
+
+            # Pass one: detect LaTeX in every message and collect the whole
+            # conversation into a single render batch. Rendering per message
+            # spawns one Node process per message.
+            bodies: List[str] = []
+            batch: List[tuple[str, bool]] = []
+            spans: List[tuple[int, int]] = []
             for message in self.form_data.messages:
                 if self.debug_latex:
                     self.print_latex_detected(message)
-                html_message, latex_images = self._build_html_message(message)
-                messages_html_parts.append(html_message)
-                all_latex_images.extend(latex_images)
+                body, to_render = self._extract_latex(message.get("content", ""))
+                bodies.append(body)
+                spans.append((len(batch), len(batch) + len(to_render)))
+                batch.extend(to_render)
+
+            t_katex0 = time.perf_counter()
+            rendered = self.katex_compiler.render_many_to_html(batch) if batch else []
+            t_katex1 = time.perf_counter()
+            if self.debug_pdf:
+                print("*"*20, f"\nPDF: rendered {len(batch)} LaTeX expressions in {t_katex1 - t_katex0:.3f}s\n", "*"*20)
+
+            # Pass two: markdown and assembly, with the fragments spliced back in.
+            messages_html_parts = []
+            for message, body, (start, end) in zip(self.form_data.messages, bodies, spans):
+                messages_html_parts.append(
+                    self._build_html_message(message, body, rendered[start:end])
+                )
 
             self.messages_html = "\n".join(messages_html_parts)
             html_body = self._generate_html_body()
@@ -585,7 +753,7 @@ class PDFGenerator:
                 print("*"*20)
             t_wp0 = time.perf_counter()
             try:
-                pdf_bytes = self._render_with_timeout(html_full, timeout_sec=60.0)
+                pdf_bytes = self._render_with_timeout(html_full)
             except TimeoutError:
                 if self.debug_pdf:
                     print("*"*20, "\nPDF: render timed out; returning error without retry\n", "*"*20)

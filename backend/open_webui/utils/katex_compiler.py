@@ -1,6 +1,10 @@
+import atexit
 import subprocess
 import os
 import json
+import tempfile
+import threading
+from collections import OrderedDict
 from typing import List
 from pathlib import Path
 import re
@@ -12,6 +16,59 @@ import logging
 This code requires Pango system dependency to run
 """
 
+# Rendered fragments are shared by every request in this process. A new
+# KaTeXCompiler is built per export, so an instance level cache is discarded
+# before it can ever be reused.
+_RENDER_CACHE: "OrderedDict[tuple[str, bool], str]" = OrderedDict()
+_RENDER_CACHE_MAX = 4096
+_RENDER_CACHE_LOCK = threading.Lock()
+
+# The batch script is identical on every call, so it is written once per
+# process to a private path. A shared path lets concurrent exports delete
+# each other's script mid-run.
+_SCRIPT_LOCK = threading.Lock()
+_SCRIPT_DIR: Path | None = None
+
+
+def _cache_get(key: "tuple[str, bool]") -> str | None:
+    with _RENDER_CACHE_LOCK:
+        value = _RENDER_CACHE.get(key)
+        if value is not None:
+            _RENDER_CACHE.move_to_end(key)
+        return value
+
+
+def _cache_set(key: "tuple[str, bool]", value: str) -> None:
+    with _RENDER_CACHE_LOCK:
+        _RENDER_CACHE[key] = value
+        _RENDER_CACHE.move_to_end(key)
+        while len(_RENDER_CACHE) > _RENDER_CACHE_MAX:
+            _RENDER_CACHE.popitem(last=False)
+
+
+def _script_dir() -> Path:
+    """Private temp directory for this process, created on first use."""
+    global _SCRIPT_DIR
+    with _SCRIPT_LOCK:
+        if _SCRIPT_DIR is None or not _SCRIPT_DIR.exists():
+            _SCRIPT_DIR = Path(tempfile.mkdtemp(prefix="katex-"))
+            atexit.register(_cleanup_script_dir)
+        return _SCRIPT_DIR
+
+
+def _cleanup_script_dir() -> None:
+    global _SCRIPT_DIR
+    if _SCRIPT_DIR is None:
+        return
+    try:
+        for path in _SCRIPT_DIR.glob("*"):
+            path.unlink(missing_ok=True)
+        _SCRIPT_DIR.rmdir()
+    except Exception:
+        pass
+    _SCRIPT_DIR = None
+
+
 class KaTeXCompiler:
     """
     Compile LaTeX expressions using KaTeX for better matrix and complex expression support.
@@ -21,7 +78,6 @@ class KaTeXCompiler:
     def __init__(self, debug: bool = False):
         self.temp_images = []
         self.node_modules_path = self._find_node_modules()
-        self._cache = {}
         self._logger = logging.getLogger(__name__)
         self._debug = debug
 
@@ -361,8 +417,9 @@ class KaTeXCompiler:
         try:
             # Cache check
             cache_key = (latex_expr, bool(display))
-            if cache_key in self._cache:
-                return self._cache[cache_key]
+            cached = _cache_get(cache_key)
+            if cached is not None:
+                return cached
             # Ensure Node.js is available
             result = subprocess.run(['node', '--version'], capture_output=True, text=True, timeout=5)
             if result.returncode != 0:
@@ -393,10 +450,7 @@ class KaTeXCompiler:
 
             script_content = "\n".join(script_lines)
 
-            # Use /tmp directory (works in OpenShift)
-            project_temp_dir = Path('/tmp')
-            
-            script_path = project_temp_dir / 'katex_render_fragment.cjs'
+            script_path = _script_dir() / 'katex_render_fragment.cjs'
             with open(script_path, 'w') as f:
                 f.write(script_content)
 
@@ -423,7 +477,7 @@ class KaTeXCompiler:
                 raise RuntimeError(data.get('error', 'KaTeX render failed'))
 
             html = data['html']
-            self._cache[cache_key] = html
+            _cache_set(cache_key, html)
             if self._debug:
                 self._logger.info(
                     f"KaTeX: single render display={display} len={len(latex_expr)} took {t1 - t0:.3f}s"
@@ -433,31 +487,39 @@ class KaTeXCompiler:
             raise e
 
     def render_many_to_html(self, items: list[tuple[str, bool]]) -> list[str]:
-        """Batch render multiple LaTeX expressions to KaTeX HTML in a single Node process."""
+        """
+        Batch render multiple LaTeX expressions to KaTeX HTML in a single Node process.
+
+        Always returns one fragment per input. An expression KaTeX cannot render
+        degrades to its own escaped source, so a single bad expression never
+        discards the mathematics around it.
+        """
         # Prepare results with cache hits filled
         results: list[str | None] = []
         to_render = []
         index_map = []
         for idx, (expr, display) in enumerate(items):
             key = (expr, bool(display))
-            if key in self._cache:
-                results.append(self._cache[key])
+            cached = _cache_get(key)
+            if cached is not None:
+                results.append(cached)
             else:
                 results.append(None)
                 index_map.append(idx)
                 to_render.append({"latex": expr, "display": bool(display)})
 
         if not to_render:
-            # All cached
-            return [r for r in results if r is not None]
+            return [r if r is not None else '' for r in results]
 
         # Ensure Node.js is available
         chk = subprocess.run(['node', '--version'], capture_output=True, text=True, timeout=5)
         if chk.returncode != 0:
             # Fallback: render individually
             for j, item in zip(index_map, to_render):
-                html = self.render_to_html(item["latex"], item["display"])
-                self._cache[(item["latex"], item["display"])] = html
+                try:
+                    html = self.render_to_html(item["latex"], item["display"])
+                except Exception:
+                    html = self._error_fragment(item["latex"])
                 results[j] = html
             return [r if r is not None else '' for r in results]
 
@@ -488,27 +550,30 @@ class KaTeXCompiler:
             "});",
         ]
         script_content = "\n".join(script_lines)
+        script_path = self._batch_script_path(script_content)
 
-        tmp_dir = Path('/tmp')
-        script_path = tmp_dir / 'katex_render_many.cjs'
-        with open(script_path, 'w') as f:
-            f.write(script_content)
+        # Node startup dominates for small batches; the render itself is linear
+        # in the number of expressions.
+        timeout = min(30 + 0.1 * len(to_render), 300)
 
         t0 = time.perf_counter()
-        proc = subprocess.run(
-            ['node', str(script_path)],
-            input=payload,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            cwd=str(self.node_modules_path.parent)
-        )
-        t1 = time.perf_counter()
-
         try:
-            os.unlink(script_path)
-        except Exception:
-            pass
+            proc = subprocess.run(
+                ['node', str(script_path)],
+                input=payload,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=str(self.node_modules_path.parent)
+            )
+        except subprocess.TimeoutExpired:
+            self._logger.warning(
+                f"KaTeX: batch render of {len(to_render)} expressions timed out after {timeout:.0f}s"
+            )
+            for idx, item in zip(index_map, to_render):
+                results[idx] = self._error_fragment(item["latex"])
+            return [r if r is not None else '' for r in results]
+        t1 = time.perf_counter()
 
         if proc.returncode != 0:
             raise RuntimeError(proc.stderr or 'KaTeX batch render failed')
@@ -519,42 +584,55 @@ class KaTeXCompiler:
         if not isinstance(data, list) or len(data) != len(to_render):
             raise RuntimeError('KaTeX batch returned unexpected result')
 
+        failures = 0
         for idx, item, res in zip(index_map, to_render, data):
             if not res.get('success'):
-                raise RuntimeError(res.get('error', 'KaTeX render failed'))
+                failures += 1
+                self._logger.warning(
+                    f"KaTeX: expression failed to render: {res.get('error', 'unknown error')}"
+                )
+                results[idx] = self._error_fragment(item["latex"])
+                continue
             html = res['html']
-            self._cache[(item["latex"], item["display"])] = html
+            _cache_set((item["latex"], item["display"]), html)
             results[idx] = html
 
         if self._debug:
             self._logger.info(
-                f"KaTeX: batch render count={len(to_render)} cached={len(items)-len(to_render)} took {t1 - t0:.3f}s payload_len={len(payload)}"
+                f"KaTeX: batch render count={len(to_render)} cached={len(items)-len(to_render)} "
+                f"failed={failures} took {t1 - t0:.3f}s payload_len={len(payload)}"
             )
 
         return [r if r is not None else '' for r in results]
 
+    def _batch_script_path(self, script_content: str) -> Path:
+        """Write the batch render script once per process and reuse it."""
+        script_path = _script_dir() / 'katex_render_many.cjs'
+        with _SCRIPT_LOCK:
+            if not script_path.exists() or script_path.read_text() != script_content:
+                script_path.write_text(script_content)
+        return script_path
+
+    def _error_fragment(self, latex_expr: str) -> str:
+        """Fallback markup for an expression KaTeX could not render."""
+        return f'<code class="latex-error">{escape(latex_expr)}</code>'
+
     def cleanup_temp_images(self):
-        """Clean up temporary image files."""
+        """
+        Clean up the temporary files this instance created.
+
+        Scoped deliberately: a glob over the shared temp directory would delete
+        the in-flight files of every other export running in this container.
+        """
         for temp_path in self.temp_images:
             try:
                 if os.path.exists(temp_path):
                     os.unlink(temp_path)
             except Exception as e:
-                print(f"Error cleaning up temp file {temp_path}: {e}")
+                self._logger.warning(f"Error cleaning up temp file {temp_path}: {e}")
         self.temp_images.clear()
-        
-        # Clean up any remaining KaTeX files in /tmp
-        temp_dir = Path('/tmp')
-        if temp_dir.exists():
-            try:
-                for pattern in ("katex_*", "weasyprint-*"):
-                    for temp_file in temp_dir.glob(pattern):
-                        if temp_file.is_file():
-                            temp_file.unlink()
-            except Exception as e:
-                print(f"Error cleaning up temp directory {temp_dir}: {e}")
 
-    
+
     def is_available(self) -> bool:
         """Check if KaTeX compilation is available."""
         try:

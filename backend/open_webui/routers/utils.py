@@ -7,10 +7,12 @@ from open_webui.config import DATA_DIR, ENABLE_ADMIN_EXPORT
 from open_webui.constants import ERROR_MESSAGES
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 from starlette.responses import FileResponse
 
 
 from open_webui.utils.misc import get_gravatar_url
+from open_webui.utils import pdf_jobs
 from open_webui.utils.pdf_generator import PDFGenerator
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.code_interpreter import execute_code_jupyter
@@ -93,7 +95,10 @@ async def download_chat_as_pdf(
     form_data: ChatTitleMessagesForm, user=Depends(get_verified_user)
 ):
     try:
-        pdf_bytes = PDFGenerator(form_data).generate_chat_pdf()
+        # PDF generation is synchronous and CPU bound. Running it inline would
+        # hold the event loop, and with it every other request this worker is
+        # serving, for the whole export.
+        pdf_bytes = await run_in_threadpool(PDFGenerator(form_data).generate_chat_pdf)
 
         return Response(
             content=pdf_bytes,
@@ -103,6 +108,59 @@ async def download_chat_as_pdf(
     except Exception as e:
         log.exception(f"Error generating PDF: {e}")
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/pdf/jobs")
+async def create_chat_pdf_job(
+    form_data: ChatTitleMessagesForm, user=Depends(get_verified_user)
+):
+    """Queue a PDF export and return a job id to poll."""
+    try:
+        job_id = pdf_jobs.submit(form_data, user.id)
+        return {"id": job_id, "status": pdf_jobs.STATUS_PENDING}
+    except Exception as e:
+        log.exception(f"Error queueing PDF export: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+def _get_owned_job(job_id: str, user):
+    job = pdf_jobs.status(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="PDF export job not found")
+    if job.get("user_id") and job["user_id"] != user.id:
+        raise HTTPException(status_code=403, detail=ERROR_MESSAGES.ACCESS_PROHIBITED)
+    return job
+
+
+@router.get("/pdf/jobs/{job_id}")
+async def get_chat_pdf_job(job_id: str, user=Depends(get_verified_user)):
+    job = _get_owned_job(job_id, user)
+    return {
+        "id": job["id"],
+        "status": job["status"],
+        "size": job["size"],
+        "error": job["error"],
+    }
+
+
+@router.get("/pdf/jobs/{job_id}/download")
+async def download_chat_pdf_job(job_id: str, user=Depends(get_verified_user)):
+    job = _get_owned_job(job_id, user)
+
+    if job["status"] == pdf_jobs.STATUS_ERROR:
+        raise HTTPException(status_code=400, detail=job.get("error") or "PDF export failed")
+    if job["status"] != pdf_jobs.STATUS_COMPLETED:
+        raise HTTPException(status_code=409, detail="PDF export is not finished yet")
+
+    pdf_bytes = pdf_jobs.result(job_id)
+    if pdf_bytes is None:
+        raise HTTPException(status_code=404, detail="PDF export result expired")
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": "attachment;filename=chat.pdf"},
+    )
 
 
 @router.get("/db/download")

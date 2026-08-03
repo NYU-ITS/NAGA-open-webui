@@ -29,6 +29,7 @@ from open_webui.env import SRC_LOG_LEVELS
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import Response
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 
 from open_webui.utils.auth import get_admin_user, get_verified_user
@@ -983,7 +984,9 @@ async def export_chats_as_zip(
                 )
                 
                 pdf_generator = PDFGenerator(pdf_form)
-                pdf_bytes = pdf_generator.generate_chat_pdf()
+                # Off the event loop: this export builds one PDF per student and
+                # would otherwise hold the worker for the whole batch.
+                pdf_bytes = await run_in_threadpool(pdf_generator.generate_chat_pdf)
                 
                 # Create filename for the PDF
                 filename = f"{user_name}_{model_name}.pdf"
