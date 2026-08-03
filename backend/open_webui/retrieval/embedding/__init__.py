@@ -24,11 +24,22 @@ from .errors import (
     EMBEDDING_PROVIDER_FAILED,
     EMBEDDING_MODEL_SPACE_MIXED,
     EMBEDDING_MODEL_STATE_CONFLICT,
+    EMBEDDING_INVENTORY_UNRESOLVED_SOURCE,
+    EMBEDDING_INVENTORY_AMBIGUOUS_SOURCE,
+    EMBEDDING_INVENTORY_AMBIGUOUS_ADMIN,
+    EMBEDDING_INVENTORY_MISSING_FILE,
+    EMBEDDING_INVENTORY_MALFORMED_REFERENCE,
 )
 from .provider import EmbeddingProvider, EmbeddingProviderFactory
 from .state import (
     AdminEmbeddingModelStateView,
     AdminEmbeddingModelStateRepository,
+)
+from .inventory import (
+    ReindexFile,
+    build_reindex_inventory,
+    SOURCE_KNOWLEDGE,
+    SOURCE_CHAT_UPLOAD,
 )
 
 __all__ = [
@@ -55,9 +66,19 @@ __all__ = [
     "EMBEDDING_PROVIDER_FAILED",
     "EMBEDDING_MODEL_SPACE_MIXED",
     "EMBEDDING_MODEL_STATE_CONFLICT",
+    "EMBEDDING_INVENTORY_UNRESOLVED_SOURCE",
+    "EMBEDDING_INVENTORY_AMBIGUOUS_SOURCE",
+    "EMBEDDING_INVENTORY_AMBIGUOUS_ADMIN",
+    "EMBEDDING_INVENTORY_MISSING_FILE",
+    "EMBEDDING_INVENTORY_MALFORMED_REFERENCE",
     # State
     "AdminEmbeddingModelStateView",
     "AdminEmbeddingModelStateRepository",
+    # Inventory
+    "ReindexFile",
+    "build_reindex_inventory",
+    "SOURCE_KNOWLEDGE",
+    "SOURCE_CHAT_UPLOAD",
     # Protocols
     "EmbeddingProvider",
     "EmbeddingProviderFactory",
