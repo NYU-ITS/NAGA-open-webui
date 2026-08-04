@@ -67,6 +67,10 @@ from .model_change import (
     ModelChangeNoOp,
     request_model_change,
 )
+from .enqueue import (
+    enqueue_embedding_job,
+    EMBEDDING_REINDEX_QUEUE_NAME,
+)
 
 __all__ = [
     # Inputs
@@ -132,4 +136,7 @@ __all__ = [
     "ModelChangeResult",
     "ModelChangeNoOp",
     "request_model_change",
+    # Enqueue
+    "enqueue_embedding_job",
+    "EMBEDDING_REINDEX_QUEUE_NAME",
 ]

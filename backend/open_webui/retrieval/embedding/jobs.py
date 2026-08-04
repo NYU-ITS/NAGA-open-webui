@@ -102,6 +102,7 @@ class EmbeddingJobView:
     failed_files: int
     rq_job_id: Optional[str]
     created_by_user_id: Optional[str]
+    error_code: Optional[str]
     error_message: Optional[str]
     created_at: int
     updated_at: int
@@ -134,6 +135,7 @@ def _job_to_view(row: EmbeddingJob) -> EmbeddingJobView:
         failed_files=row.failed_files,
         rq_job_id=row.rq_job_id,
         created_by_user_id=row.created_by_user_id,
+        error_code=row.error_code,
         error_message=row.error_message,
         created_at=row.created_at,
         updated_at=row.updated_at,
@@ -610,6 +612,49 @@ def _list_failed_files(db, job_id: str) -> list[EmbeddingJobFileView]:
     return [_file_to_view(row) for row in rows]
 
 
+def _mark_job_failed(
+    db, job_id: str, error_code: str, error_message: str
+) -> Optional[EmbeddingJobView]:
+    """Internal: mark job as failed with error details (flush only).
+
+    Used for operation-level failures (e.g., enqueue failures) that prevent
+    the job from proceeding. Sets terminal status to 'failed' and records
+    the error code and message.
+
+    Returns None if job not found. No-op if already terminal.
+    """
+    now = _now()
+    job_row = (
+        db.query(EmbeddingJob)
+        .filter(EmbeddingJob.id == job_id)
+        .with_for_update()
+        .first()
+    )
+    if job_row is None:
+        return None
+
+    # Already terminal: no-op
+    if job_row.status in _TERMINAL_JOB_STATUSES:
+        return _job_to_view(job_row)
+
+    # Set failed status with error details
+    job_row.status = JOB_STATUS_FAILED
+    job_row.error_code = error_code
+    job_row.error_message = error_message
+    if job_row.completed_at is None:
+        job_row.completed_at = now
+    job_row.updated_at = now
+
+    db.flush()
+    log.info(
+        "[JOB] marked job %s as failed: error_code=%s, message=%s",
+        job_id,
+        error_code,
+        error_message,
+    )
+    return _job_to_view(job_row)
+
+
 class EmbeddingJobRepository:
     """Transactional API for durable embedding-job and per-file lifecycle state."""
 
@@ -863,3 +908,28 @@ class EmbeddingJobRepository:
             with get_db() as session:
                 return _list_failed_files(session, job_id)
         return _list_failed_files(db, job_id)
+
+    @staticmethod
+    def mark_job_failed(
+        job_id: str,
+        error_code: str,
+        error_message: str,
+        db=None,
+    ) -> Optional[EmbeddingJobView]:
+        """Mark job as failed with error details.
+
+        Used for operation-level failures (e.g., enqueue failures) that prevent
+        the job from proceeding. Sets terminal status to 'failed' and records
+        the error code and message.
+
+        Returns None if job not found. No-op if already terminal.
+
+        When ``db`` is provided the caller owns the transaction (only flush);
+        otherwise a session is opened and committed here.
+        """
+        if db is None:
+            with get_db() as session:
+                view = _mark_job_failed(session, job_id, error_code, error_message)
+                session.commit()
+                return view
+        return _mark_job_failed(db, job_id, error_code, error_message)
