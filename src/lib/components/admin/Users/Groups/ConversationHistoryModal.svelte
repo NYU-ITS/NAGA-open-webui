@@ -512,7 +512,14 @@
 			document.body.removeChild(link);
 			URL.revokeObjectURL(url);
 
-			toast.success(`Successfully exported ${selectedMembers.size} conversations`);
+			const failedCount = Number(response.headers.get('X-Export-Failed-Count') ?? 0);
+			if (failedCount > 0) {
+				toast.warning(
+					`Exported ${selectedMembers.size} conversations, but ${failedCount} PDF${failedCount === 1 ? '' : 's'} failed to generate. See EXPORT_ERRORS.txt in the ZIP.`
+				);
+			} else {
+				toast.success(`Successfully exported ${selectedMembers.size} conversations`);
+			}
 		} catch (error) {
 			toast.error(`Failed to export PDF: ${error.message}`);
 		}

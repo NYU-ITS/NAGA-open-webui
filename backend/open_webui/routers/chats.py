@@ -873,6 +873,55 @@ async def delete_all_tags_by_id(id: str, user=Depends(get_verified_user)):
 ############################
 
 
+def _export_timestamp(message: dict) -> float:
+    """
+    Timestamp usable as a sort key. Missing or malformed values sort first
+    instead of raising: comparing a None against an int aborts the merge, and
+    the caller turns that into a whole student silently dropped from the ZIP.
+    """
+    ts = message.get("timestamp")
+    if isinstance(ts, bool):
+        return 0.0
+    try:
+        return float(ts)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _linear_messages(chat) -> list:
+    """
+    The conversation branch the user actually sees, newest turns included.
+
+    `chat["messages"]` is only rewritten when the browser saves the chat, so a
+    session that ended without one (tab closed mid-answer, stream finished after
+    navigation) keeps a stale or empty list there while the backend has already
+    written the turns to `history.messages`. Walking the history the way the
+    frontend does is what keeps those chats from disappearing out of the export.
+    """
+    history = chat.chat.get("history") or {}
+    messages = history.get("messages") or {}
+
+    if messages:
+        branch = []
+        seen = set()
+        message_id = history.get("currentId")
+        while message_id and message_id in messages and message_id not in seen:
+            seen.add(message_id)
+            message = messages[message_id]
+            branch.append(message)
+            message_id = message.get("parentId") or message.get("parent_id")
+        branch.reverse()
+
+        if branch:
+            return branch
+
+        # No usable currentId: fall back to every message the history holds
+        # rather than reporting the chat as empty.
+        return sorted(messages.values(), key=_export_timestamp)
+
+    return chat.chat.get("messages") or []
+
+
 @router.post("/export/zip")
 async def export_chats_as_zip(
     form_data: ChatExportZipForm, user=Depends(get_verified_user)
@@ -933,6 +982,7 @@ async def export_chats_as_zip(
 
         # Generate PDFs for each group
         pdf_files = {}
+        failures = []
         for group_key, group_data in grouped_chats.items():
             try:
                 # Get user information
@@ -949,27 +999,42 @@ async def export_chats_as_zip(
                 model_name = model_name.replace(' ', '_')
 
                 # Collect and merge all messages from all chats for this user-model combination
+                sessions = []
+                for chat in group_data['chats']:
+                    messages = sorted(_linear_messages(chat), key=_export_timestamp)
+                    started_at = (
+                        _export_timestamp(messages[0]) if messages else float(chat.created_at or 0)
+                    )
+                    sessions.append((started_at, chat, messages))
+
+                # Order the sessions themselves, then keep each one contiguous. A
+                # single sort across the merged list interleaves sessions that
+                # overlap in time, which buries the later turns of one chat under
+                # the header of another and reads as a missing conversation.
+                sessions.sort(key=lambda session: (session[0], session[1].created_at or 0))
+
                 all_messages = []
                 chat_titles = []
-                
-                for chat in group_data['chats']:
+                for started_at, chat, messages in sessions:
                     chat_titles.append(chat.title)
-                    messages = chat.chat.get('messages', [])
-                    
+
                     # Add chat context to messages if multiple chats
-                    if len(group_data['chats']) > 1:
+                    if len(sessions) > 1:
                         # Add a separator message to distinguish between different chat sessions
-                        separator_message = {
+                        all_messages.append({
                             "role": "system",
                             "content": f"--- Chat Session: {chat.title} ---",
-                            "timestamp": messages[0].get('timestamp', 0) if messages else 0
-                        }
-                        all_messages.append(separator_message)
-                    
-                    all_messages.extend(messages)
+                            "timestamp": started_at,
+                        })
 
-                # Sort all messages by timestamp to maintain chronological order
-                all_messages.sort(key=lambda x: x.get('timestamp', 0))
+                    if not messages:
+                        all_messages.append({
+                            "role": "system",
+                            "content": f"_(No messages stored for chat session: {chat.title})_",
+                            "timestamp": started_at,
+                        })
+
+                    all_messages.extend(messages)
 
                 # Create title for the merged PDF
                 if len(chat_titles) == 1:
@@ -1002,8 +1067,16 @@ async def export_chats_as_zip(
                 pdf_files[filename] = pdf_bytes
 
             except Exception as e:
-                log.error(f"Error generating PDF for group {group_key}: {e}")
-                # Continue with other PDFs even if one fails
+                log.exception(f"Error generating PDF for group {group_key}: {e}")
+                # Continue with other PDFs even if one fails, but record the
+                # failure: dropping a student silently is indistinguishable from
+                # a successful export to whoever downloads the ZIP.
+                failures.append({
+                    'user_id': group_data['user_id'],
+                    'model_name': group_data['model_name'],
+                    'chat_ids': [c.id for c in group_data['chats']],
+                    'error': f"{type(e).__name__}: {e}",
+                })
                 continue
 
         if not pdf_files:
@@ -1018,6 +1091,17 @@ async def export_chats_as_zip(
             for filename, pdf_bytes in pdf_files.items():
                 zip_file.writestr(filename, pdf_bytes)
 
+            if failures:
+                report = ["The following conversations could not be exported as PDF:", ""]
+                for failure in failures:
+                    user_info = Users.get_user_by_id(failure['user_id'])
+                    report.append(
+                        f"- {user_info.name if user_info else failure['user_id']}"
+                        f" / {failure['model_name']}: {failure['error']}"
+                    )
+                    report.append(f"  chat ids: {', '.join(failure['chat_ids'])}")
+                zip_file.writestr("EXPORT_ERRORS.txt", "\n".join(report) + "\n")
+
         zip_buffer.seek(0)
         zip_content = zip_buffer.getvalue()
 
@@ -1026,12 +1110,19 @@ async def export_chats_as_zip(
         timestamp = datetime.now().strftime("%Y-%m-%d")
         zip_filename = f"group-{form_data.group_id}-conversations-{timestamp}.zip"
 
-        log.info(f"Successfully created ZIP export: {zip_filename} with {len(pdf_files)} PDFs")
+        log.info(
+            f"Successfully created ZIP export: {zip_filename} with {len(pdf_files)} PDFs"
+            f" ({len(failures)} failed)"
+        )
 
         return Response(
             content=zip_content,
             media_type="application/zip",
-            headers={"Content-Disposition": f"attachment; filename={zip_filename}"}
+            headers={
+                "Content-Disposition": f"attachment; filename={zip_filename}",
+                "X-Export-Failed-Count": str(len(failures)),
+                "Access-Control-Expose-Headers": "X-Export-Failed-Count",
+            }
         )
 
     except HTTPException:
