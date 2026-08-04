@@ -1,6 +1,7 @@
 from typing import Optional, List, Dict, Any
 import logging
 import time
+import uuid
 from sqlalchemy import (
     BigInteger,
     cast,
@@ -66,6 +67,9 @@ class DocumentChunk(Base):
     modality = Column(String(16), nullable=True)
     embedding_status = Column(String(16), nullable=True)
     provenance_status = Column(String(20), nullable=False, default="unattributed")
+    # Spec 07: the durable embedding job that built this row, when it was built
+    # by a reindex operation. NULL for ordinary ingestion and legacy rows.
+    embedding_job_id = Column(Text, nullable=True)
     created_at = Column(BigInteger, nullable=True)
     updated_at = Column(BigInteger, nullable=True)
 
@@ -155,6 +159,7 @@ class PgvectorClient:
             "rag_chunk_id": item.get("rag_chunk_id"),
             "modality": item.get("modality") or "text",
             "embedding_status": item.get("embedding_status") or "active",
+            "embedding_job_id": item.get("embedding_job_id"),
             "provenance_status": "attributed",
             "created_at": now,
             "updated_at": now,
@@ -232,6 +237,145 @@ class PgvectorClient:
         except Exception as e:
             self.session.rollback()
             log.exception(f"Error during upsert: {e}")
+            raise
+
+    def reconcile_model_aware(
+        self, collection_name: str, items: List[VectorItem]
+    ) -> None:
+        """Atomically upsert current target rows and delete stale target rows.
+
+        This is the Spec 07 write path for one target file/collection
+        projection. The projection is identified by ``(admin_id,
+        embedding_model_id, file_id, collection_name)``.
+
+        In a single database transaction:
+
+        1. Current rows are upserted by the provenance conflict key
+           ``(admin_id, embedding_model_id, rag_chunk_id, collection_name)``
+           (the partial unique index ``ux_embeddings_1536_model_chunk_collection``).
+           On conflict the existing row is updated in place and its generated id
+           is preserved; duplicate delivery, retries, and concurrent workers
+           converge on one row per logical chunk instead of appending.
+        2. Stale rows in the same projection whose ``rag_chunk_id`` is not
+           among the current ids are deleted.
+
+        The stale deletion is deliberately scoped to this projection only:
+        rows for other models, other files, and other collections are never
+        touched, and the shared ``rag_chunks`` rows themselves are never
+        deleted here (so old active-model vectors cannot be cascade-removed
+        while a target build is in progress). Legacy rows without a
+        ``rag_chunk_id`` are excluded and left for later maintenance.
+
+        Every item must be model-aware and carry a ``rag_chunk_id``; otherwise a
+        ``ValueError`` is raised before any write.
+        """
+        log.info(
+            "[PGVECTOR] reconcile_model_aware START | collection=%s | items_count=%s",
+            collection_name,
+            len(items),
+        )
+        if not items:
+            log.info(
+                "[PGVECTOR] reconcile_model_aware EMPTY | collection=%s",
+                collection_name,
+            )
+            return
+
+        try:
+            from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+            now = int(time.time())
+            current_ids: set[str] = set()
+            rows = []
+            for item in items:
+                if not self._is_model_aware(item) or not item.get("rag_chunk_id"):
+                    raise ValueError(
+                        "reconcile_model_aware requires provenance "
+                        "(admin_id, embedding_model_id, rag_chunk_id)"
+                    )
+                current_ids.add(item["rag_chunk_id"])
+                rows.append(
+                    {
+                        "id": str(uuid.uuid4()),
+                        "vector": item["vector"],
+                        "collection_name": collection_name,
+                        "text": item["text"],
+                        "vmetadata": item["metadata"],
+                        "admin_id": item["admin_id"],
+                        "embedding_model_id": item["embedding_model_id"],
+                        "file_id": item.get("file_id"),
+                        "knowledge_id": item.get("knowledge_id"),
+                        "rag_chunk_id": item["rag_chunk_id"],
+                        "modality": item.get("modality") or "text",
+                        "embedding_status": item.get("embedding_status") or "active",
+                        "embedding_job_id": item.get("embedding_job_id"),
+                        "provenance_status": "attributed",
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+                )
+
+            stmt = pg_insert(DocumentChunk).values(rows)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=[
+                    DocumentChunk.admin_id,
+                    DocumentChunk.embedding_model_id,
+                    DocumentChunk.rag_chunk_id,
+                    DocumentChunk.collection_name,
+                ],
+                index_where=DocumentChunk.rag_chunk_id.isnot(None),
+                set_={
+                    "vector": stmt.excluded.vector,
+                    "text": stmt.excluded.text,
+                    "vmetadata": stmt.excluded.vmetadata,
+                    "collection_name": stmt.excluded.collection_name,
+                    "file_id": stmt.excluded.file_id,
+                    "knowledge_id": stmt.excluded.knowledge_id,
+                    "modality": stmt.excluded.modality,
+                    "embedding_status": stmt.excluded.embedding_status,
+                    "embedding_job_id": stmt.excluded.embedding_job_id,
+                    "provenance_status": stmt.excluded.provenance_status,
+                    "updated_at": stmt.excluded.updated_at,
+                },
+            )
+            self.session.execute(stmt)
+
+            # 2. Delete stale target rows scoped to this projection only:
+            #    same (admin_id, embedding_model_id, file_id, collection_name),
+            #    model-aware rows whose rag_chunk_id is no longer current. Rows
+            #    for other models/files/collections and shared rag_chunks rows
+            #    are never touched.
+            first = items[0]
+            stale_query = (
+                self.session.query(DocumentChunk)
+                .filter(DocumentChunk.collection_name == collection_name)
+                .filter(DocumentChunk.admin_id == first["admin_id"])
+                .filter(DocumentChunk.embedding_model_id == first["embedding_model_id"])
+            )
+            if first.get("file_id"):
+                stale_query = stale_query.filter(
+                    DocumentChunk.file_id == first["file_id"]
+                )
+            stale_query = stale_query.filter(DocumentChunk.rag_chunk_id.isnot(None))
+            stale_query = stale_query.filter(
+                DocumentChunk.rag_chunk_id.notin_(list(current_ids))
+            )
+            stale_deleted = stale_query.delete(synchronize_session=False)
+
+            self.session.commit()
+            log.info(
+                "[PGVECTOR] reconcile_model_aware SUCCESS | collection=%s | "
+                "upserted=%s | stale_deleted=%s",
+                collection_name,
+                len(items),
+                stale_deleted,
+            )
+        except Exception as e:
+            try:
+                self.session.rollback()
+            except Exception:
+                pass
+            log.exception(f"Error during model-aware reconcile: {e}")
             raise
 
     def search(
@@ -395,6 +539,10 @@ class PgvectorClient:
                 .where(DocumentChunk.collection_name == collection_name)
                 .where(DocumentChunk.admin_id == admin_id)
                 .where(DocumentChunk.embedding_model_id == embedding_model_id)
+                # Spec 07: only active rows are retrievable. Rows stamped with a
+                # non-retrievable build status (e.g. "building") are excluded so
+                # a partially built target space can never become searchable.
+                .where(DocumentChunk.embedding_status == "active")
             )
 
             scope_clauses = []

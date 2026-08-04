@@ -4,7 +4,12 @@ Implements the full worker orchestration with all 17 critical fixes:
 1. Use embed_for_frozen_context() with job's target model
 2. Check RQ job status to prevent duplicate delivery corruption
 3. Use reclaim_file() for processing rows with stale threshold
-4. Use ModelAwareVectorRepository.make_items() + client.upsert()
+4. Use ModelAwareVectorRepository.make_items() + reconcile_model_aware()
+   - Build items with full provenance and a non-retrievable "building" status
+   - Idempotent upsert keyed by (admin, model, rag_chunk_id, collection)
+   - Transactional per-projection reconcile: stale target rows for the same
+     (admin, model, file, collection) are deleted in the same transaction;
+     other models/files/collections and shared rag_chunks are never touched
 5. Build items with full provenance (rag_chunk_id, model, admin, file, knowledge)
 6. Use get_worker_config() for proper config initialization
 7. Mark job failed before re-raising EmbeddingError
@@ -54,7 +59,10 @@ from open_webui.retrieval.embedding.jobs import (
 )
 from open_webui.retrieval.embedding.registry import get_model_spec_by_id
 from open_webui.retrieval.embedding.service import EmbeddingService
-from open_webui.retrieval.vector.model_aware import ModelAwareVectorRepository
+from open_webui.retrieval.vector.model_aware import (
+    ModelAwareVectorRepository,
+    VECTOR_STATUS_BUILDING,
+)
 from open_webui.retrieval.vector.main import VectorItem
 from open_webui.storage.provider import Storage
 from open_webui.retrieval.loaders.main import Loader
@@ -446,7 +454,7 @@ def _process_file(
         embedding_service=embedding_service,
     )
     
-    # Step 13: Idempotently write vector projections (Fix #4, #5: use ModelAwareVectorRepository)
+    # Step 13: Reconcile vector projections (Fix #4, #5, Spec 07)
     _write_vectors(
         vector_repo=vector_repo,
         admin_id=admin.id,
@@ -456,8 +464,9 @@ def _process_file(
         rag_chunk_ids=rag_chunk_ids,
         file_snapshot=file_snapshot,
         target_model=target_model,
+        job_id=job_id,
     )
-    
+
     # Step 14: Mark file completed
     _mark_file_completed_safe(job_id, file_id)
     
@@ -652,8 +661,20 @@ def _write_vectors(
     rag_chunk_ids: list[str],
     file_snapshot: dict,
     target_model,
+    job_id: str,
 ):
-    """Write vectors with full provenance (Fix #4, #5: use ModelAwareVectorRepository)."""
+    """Reconcile every required vector projection (Fix #4, #5, Spec 07).
+
+    Vectors are stamped with the non-retrievable ``building`` status and the
+    durable ``embedding_job_id`` so a partially built target space is never
+    searchable (Spec 07 Build Visibility). Each file/knowledge collection
+    projection is reconciled transactionally: current target rows are upserted
+    by ``(admin_id, embedding_model_id, rag_chunk_id, collection_name)`` and
+    stale target rows for the same projection are deleted in the same
+    transaction. Rows for other models, files, and collections — including old
+    active-model vectors — are never touched, and shared ``rag_chunks`` rows
+    are never deleted.
+    """
     if not chunks or not embeddings:
         return
     
@@ -685,11 +706,16 @@ def _write_vectors(
             file_id=file_id,
             knowledge_id=None,
             modality="text",
+            embedding_status=VECTOR_STATUS_BUILDING,
+            embedding_job_id=job_id,
         )
         
-        # Write to file collection using client.upsert() (Fix #4)
-        client = vector_repo._client_for(target_model.dimension)
-        client.upsert(collection_name=file_collection_name, items=file_items)
+        # Write to file collection (Spec 07: transactional per-projection reconcile)
+        vector_repo.reconcile_model_aware(
+            collection_name=file_collection_name,
+            items=file_items,
+            model=target_model,
+        )
         
         # Write to knowledge collections
         for knowledge_id in knowledge_collection_ids:
@@ -704,11 +730,17 @@ def _write_vectors(
                 file_id=file_id,
                 knowledge_id=knowledge_id,
                 modality="text",
+                embedding_status=VECTOR_STATUS_BUILDING,
+                embedding_job_id=job_id,
             )
-            client.upsert(collection_name=knowledge_collection_name, items=knowledge_items)
+            vector_repo.reconcile_model_aware(
+                collection_name=knowledge_collection_name,
+                items=knowledge_items,
+                model=target_model,
+            )
         
         log.debug(
-            f"[EMBEDDING_WORKER] Wrote {len(file_items)} vectors to {1 + len(knowledge_collection_ids)} collections"
+            f"[EMBEDDING_WORKER] Reconcile wrote {len(file_items)} vectors to {1 + len(knowledge_collection_ids)} collections"
         )
     except Exception as e:
         raise EmbeddingError(

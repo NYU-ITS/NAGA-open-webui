@@ -39,6 +39,14 @@ DIMENSION_TABLE = {
     1536: "embeddings_1536",
 }
 
+# Non-retrievable vs retrievable build status carried on every model-aware row.
+# Ordinary ingestion writes ``active`` immediately. Reindex target builds write
+# ``building`` and only become ``active`` when Spec 09 promotes the job; search
+# filters to ``active`` only, so a partially built target space is never
+# retrievable.
+VECTOR_STATUS_ACTIVE = "active"
+VECTOR_STATUS_BUILDING = "building"
+
 
 def supported_dimensions() -> list[int]:
     """Return the list of approved vector dimensions."""
@@ -99,12 +107,19 @@ class ModelAwareVectorRepository:
         file_id: Optional[str],
         knowledge_id: Optional[str],
         modality: str = "text",
+        embedding_status: str = VECTOR_STATUS_ACTIVE,
+        embedding_job_id: Optional[str] = None,
     ) -> list[VectorItem]:
         """Build provenance-bearing vector items aligned by index.
 
         The returned items keep the legacy ``metadata`` (vmetadata) contract and
         add the model-aware provenance keys read by the enriched pgvector
         insert. Fresh ids are assigned per item.
+
+        ``embedding_status`` defaults to :data:`VECTOR_STATUS_ACTIVE` (ordinary
+        ingestion). A reindex worker passes :data:`VECTOR_STATUS_BUILDING` plus
+        its durable ``embedding_job_id`` so the partially built target space is
+        non-retrievable (Spec 07 Build Visibility).
 
         Raises:
             EmbeddingError: if the model dimension is unsupported or the inputs
@@ -134,10 +149,42 @@ class ModelAwareVectorRepository:
                     "knowledge_id": knowledge_id,
                     "rag_chunk_id": rag_chunk_id,
                     "modality": modality,
-                    "embedding_status": "active",
+                    "embedding_status": embedding_status,
+                    "embedding_job_id": embedding_job_id,
                 }
             )
         return items
+
+    def reconcile_model_aware(
+        self,
+        *,
+        collection_name: str,
+        items: Sequence[VectorItem],
+        model: EmbeddingModelSpec,
+    ) -> None:
+        """Atomically reconcile one target file/collection projection.
+
+        Delegates to the dimension's vector client, which in a single
+        transaction upserts the current provenance-bearing rows keyed by
+        ``(admin_id, embedding_model_id, rag_chunk_id, collection_name)`` and
+        deletes stale rows for the same ``(admin_id, embedding_model_id,
+        file_id, collection_name)`` projection whose ``rag_chunk_id`` is no
+        longer current (Spec 07 Vector Identity). Rows for other models, files,
+        and collections — including old active-model vectors — are never
+        touched, and shared ``rag_chunks`` rows are never deleted here.
+        """
+        client = self._client_for(model.dimension)
+        if not hasattr(client, "reconcile_model_aware"):
+            raise EmbeddingError(
+                EMBEDDING_STORAGE_DIMENSION_UNSUPPORTED,
+                detail=(
+                    f"Vector client {type(client).__name__} does not support "
+                    "model-aware reconcile."
+                ),
+            )
+        client.reconcile_model_aware(
+            collection_name=collection_name, items=list(items)
+        )
 
     def search(
         self,

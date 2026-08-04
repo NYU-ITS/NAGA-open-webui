@@ -61,11 +61,29 @@ class RagChunk(Base):
 
         ``chunks`` is a list of dicts with ``content`` (str), ``content_type``
         (``"text"``/``"image"``), and optional ``chunk_metadata`` (dict). The
-        list order defines ``chunk_index``. Re-ingesting the same file replaces
-        any prior chunks for that (admin, file) so the operation is idempotent.
+        list order defines ``chunk_index``.
 
-        Returns the created rag_chunk_ids in the same order as ``chunks`` so the
-        caller can stamp each generated vector with its rag_chunk_id.
+        Logical chunk identity is ``(admin_id, file_id, chunk_index)``. This is
+        an upsert by that identity (Spec 07):
+
+        1. Existing chunks for ``(admin_id, file_id)`` are loaded by index.
+        2. Each incoming index updates the existing row in place, preserving its
+           id (and original ``created_at``).
+        3. A new row is inserted only for an index that does not yet exist.
+        4. No rows are deleted here. Chunk rows are shared across collection
+           memberships and vector models (``rag_chunk_id`` is ``ON DELETE
+           CASCADE``), so deleting them during a target build would cascade
+           away other collections' and the old active model's vectors. Stale
+           target vectors are instead removed per projection by the vector
+           repository reconcile, and chunk-row cleanup is deferred until no
+           active or building vectors reference them (promotion/retirement).
+
+        The content hash detects changed content; it is not treated as the sole
+        identity because repeated text may occur at multiple positions.
+
+        Returns the rag_chunk_ids for ``chunks`` in the same order so the caller
+        can stamp each generated vector with its rag_chunk_id. Re-processing the
+        same file yields the same ids for chunk positions that persist.
         """
         import hashlib
         import time
@@ -74,37 +92,51 @@ class RagChunk(Base):
         from open_webui.internal.db import get_db
 
         now = int(time.time())
-        ids: list[str] = []
-        rows: list[RagChunk] = []
-        for index, chunk in enumerate(chunks):
-            content = chunk.get("content") or ""
-            content_type = chunk.get("content_type") or "text"
-            chunk_metadata = chunk.get("chunk_metadata") or {}
-            digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-            chunk_id = str(uuid.uuid4())
-            ids.append(chunk_id)
-            rows.append(
-                RagChunk(
-                    id=chunk_id,
-                    admin_id=admin_id,
-                    file_id=file_id,
-                    chunk_index=index,
-                    content=content,
-                    content_type=content_type,
-                    chunk_metadata=chunk_metadata,
-                    content_sha256=digest,
-                    created_at=now,
-                    updated_at=now,
-                )
-            )
 
         with get_db() as db:
-            # Replace any prior chunks for this (admin, file) so re-ingestion is idempotent.
-            db.query(RagChunk).filter(
-                RagChunk.admin_id == admin_id, RagChunk.file_id == file_id
-            ).delete(synchronize_session=False)
-            for row in rows:
-                db.add(row)
+            existing = {
+                row.chunk_index: row
+                for row in (
+                    db.query(RagChunk)
+                    .filter(RagChunk.admin_id == admin_id, RagChunk.file_id == file_id)
+                    .all()
+                )
+            }
+
+            ids: list[str] = []
+            for index, chunk in enumerate(chunks):
+                content = chunk.get("content") or ""
+                content_type = chunk.get("content_type") or "text"
+                chunk_metadata = chunk.get("chunk_metadata") or {}
+                digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+                row = existing.get(index)
+                if row is None:
+                    # New index: insert a fresh row.
+                    chunk_id = str(uuid.uuid4())
+                    ids.append(chunk_id)
+                    db.add(
+                        RagChunk(
+                            id=chunk_id,
+                            admin_id=admin_id,
+                            file_id=file_id,
+                            chunk_index=index,
+                            content=content,
+                            content_type=content_type,
+                            chunk_metadata=chunk_metadata,
+                            content_sha256=digest,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+                else:
+                    # Existing index: update in place, preserving the id.
+                    row.content = content
+                    row.content_type = content_type
+                    row.chunk_metadata = chunk_metadata
+                    row.content_sha256 = digest
+                    row.updated_at = now
+                    ids.append(row.id)
             db.commit()
         return ids
 

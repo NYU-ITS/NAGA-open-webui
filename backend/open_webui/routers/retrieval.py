@@ -1183,7 +1183,8 @@ def save_docs_to_vector_db(
                         ModelAwareVectorRepository,
                     )
 
-                    items = ModelAwareVectorRepository().make_items(
+                    vector_repo = ModelAwareVectorRepository()
+                    items = vector_repo.make_items(
                         texts=texts,
                         vectors=embeddings,
                         metadata=metadatas,
@@ -1210,10 +1211,21 @@ def save_docs_to_vector_db(
                 safe_add_span_event("vector_db.insert.started", {"item.count": len(items)})
 
                 try:
-                    VECTOR_DB_CLIENT.insert(
-                        collection_name=collection_name,
-                        items=items,
-                    )
+                    if rag_chunk_ids is not None:
+                        # Spec 07: transactional per-projection reconcile keyed by
+                        # (admin_id, embedding_model_id, rag_chunk_id, collection_name).
+                        # Current rows are upserted and stale rows for this
+                        # projection only are deleted in the same transaction.
+                        vector_repo.reconcile_model_aware(
+                            collection_name=collection_name,
+                            items=items,
+                            model=model_spec,
+                        )
+                    else:
+                        VECTOR_DB_CLIENT.insert(
+                            collection_name=collection_name,
+                            items=items,
+                        )
                     print(f"  [STEP 7.1] ✅ Successfully inserted {len(items)} items into collection: {collection_name}", flush=True)
                     log.info(f"  [STEP 7.1] ✅ Successfully inserted {len(items)} items into collection: {collection_name}")
                     safe_add_span_event("vector_db.insert.completed", {"item.count": len(items)})
@@ -1524,7 +1536,8 @@ def save_docs_to_multiple_collections(
                     ModelAwareVectorRepository,
                 )
 
-                items = ModelAwareVectorRepository().make_items(
+                vector_repo = ModelAwareVectorRepository()
+                items = vector_repo.make_items(
                     texts=texts,
                     vectors=embeddings,
                     metadata=metadatas,
@@ -1549,10 +1562,23 @@ def save_docs_to_multiple_collections(
             log.info(f"    Preparing {len(items)} items for insertion")
 
             try:
-                VECTOR_DB_CLIENT.insert(
-                    collection_name=collection_name,
-                    items=items,
-                )
+                if rag_chunk_ids is not None:
+                    # Spec 07: transactional per-projection reconcile keyed by
+                    # (admin_id, embedding_model_id, rag_chunk_id, collection_name).
+                    # Current rows are upserted and stale rows for this
+                    # projection only are deleted in the same transaction, so
+                    # one collection's re-ingestion never touches another
+                    # membership's rows.
+                    vector_repo.reconcile_model_aware(
+                        collection_name=collection_name,
+                        items=items,
+                        model=model_spec,
+                    )
+                else:
+                    VECTOR_DB_CLIENT.insert(
+                        collection_name=collection_name,
+                        items=items,
+                    )
                 print(f"  [STEP 7.{col_idx+1}] ✅ Successfully inserted into collection: {collection_name}", flush=True)
                 log.info(f"  [STEP 7.{col_idx+1}] ✅ Successfully inserted into collection: {collection_name}")
             except Exception as insert_error:
