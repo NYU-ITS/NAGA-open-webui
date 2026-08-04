@@ -42,7 +42,10 @@ from open_webui.socket.utils import RedisLock
 
 
 from open_webui.retrieval.vector.connector import VECTOR_DB_CLIENT
-from open_webui.retrieval.embedding.errors import EmbeddingError
+from open_webui.retrieval.embedding.errors import (
+    EmbeddingError,
+    EMBEDDING_REINDEX_NOT_READY,
+)
 
 # Document loaders
 from open_webui.retrieval.loaders.main import Loader
@@ -2952,18 +2955,36 @@ async def process_web_search(
 
 
 def _resolve_model_aware_query_context(request, user):
-    """Phase 3: best-effort (admin_id, embedding_model_id) for query hardening.
+    """Spec 10: resolve (admin_id, embedding_model_id) via readiness gate.
 
-    Returns (None, None) when the user's admin/model space cannot be resolved so
-    callers fall back to the legacy collection-name search.
+    Returns (None, None) when the user's admin/model space cannot be resolved
+    and no durable state exists (legacy fallback).  Raises EmbeddingError for
+    mixed-model spaces and blocked retrieval (EMBEDDING_REINDEX_NOT_READY) so
+    callers return 409 Conflict.  All durable-state resolution errors fail
+    closed — never legacy-fallback.
     """
     try:
         from open_webui.retrieval.embedding.resolution import resolve_for_user
+        from open_webui.retrieval.embedding.gate import (
+            assert_embedding_retrieval_ready,
+            RetrievalModelSpace,
+            RetrievalReadyNoState,
+        )
 
-        context = resolve_for_user(user.id, request.app.state.config)
-        return context.admin_id, context.model.id
+        result = assert_embedding_retrieval_ready(
+            requesting_user_id=user.id,
+        )
+        if isinstance(result, RetrievalModelSpace):
+            return result.admin_id, result.active_model_id
+        # RetrievalReadyNoState: legacy admin, use config-resolved model.
+        ctx = resolve_for_user(user.id, request.app.state.config)
+        return ctx.admin_id, ctx.model.id
+    except EmbeddingError:
+        # All embedding errors (MIXED, NOT_READY, resolution failures) propagate.
+        raise
     except Exception as e:
-        log.debug(f"model-aware query resolution unavailable: {e}")
+        # Non-embedding resolution failure: fail closed.
+        log.warning(f"model-aware query resolution failed: {e}")
         return None, None
 
 
@@ -3002,7 +3023,8 @@ def query_doc_handler(
                     if form_data.r
                     else request.app.state.config.RELEVANCE_THRESHOLD
                 ),
-                user=user,
+                admin_id=admin_id,
+                embedding_model_id=embedding_model_id,
             )
         else:
             return query_doc(
@@ -3013,6 +3035,19 @@ def query_doc_handler(
                 admin_id=admin_id,
                 embedding_model_id=embedding_model_id,
             )
+    except EmbeddingError as e:
+        if e.code == EMBEDDING_REINDEX_NOT_READY:
+            detail = e.detail if isinstance(e.detail, dict) else {"message": str(e.detail)}
+            detail["error_code"] = e.code
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=detail,
+            )
+        log.exception(e)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.DEFAULT(e),
+        )
     except Exception as e:
         log.exception(e)
         raise HTTPException(
@@ -3056,6 +3091,8 @@ def query_collection_handler(
                     if form_data.r
                     else request.app.state.config.RELEVANCE_THRESHOLD
                 ),
+                admin_id=admin_id,
+                embedding_model_id=embedding_model_id,
             )
         else:
             return query_collection(
@@ -3067,6 +3104,19 @@ def query_collection_handler(
                 embedding_model_id=embedding_model_id,
             )
 
+    except EmbeddingError as e:
+        if e.code == EMBEDDING_REINDEX_NOT_READY:
+            detail = e.detail if isinstance(e.detail, dict) else {"message": str(e.detail)}
+            detail["error_code"] = e.code
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=detail,
+            )
+        log.exception(e)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.DEFAULT(e),
+        )
     except Exception as e:
         log.exception(e)
         raise HTTPException(

@@ -684,6 +684,58 @@ class PgvectorClient:
             log.exception(f"Error during get: {e}")
             return None
 
+    def get_model_aware(
+        self,
+        collection_name: str,
+        admin_id: str,
+        embedding_model_id: str,
+        limit: Optional[int] = None,
+    ) -> Optional[GetResult]:
+        """Model-aware variant of ``get``: returns only active rows for one
+        admin/model provenance space.  Used by hybrid search to ensure BM25
+        retrievers never see building, inactive, or cross-admin rows."""
+        log.info(
+            "[PGVECTOR] get_model_aware START | collection=%s | admin=%s | model=%s",
+            collection_name,
+            admin_id,
+            embedding_model_id,
+        )
+        try:
+            query = self.session.query(DocumentChunk).filter(
+                DocumentChunk.collection_name == collection_name,
+                DocumentChunk.admin_id == admin_id,
+                DocumentChunk.embedding_model_id == embedding_model_id,
+                DocumentChunk.embedding_status == "active",
+            )
+            if limit is not None:
+                query = query.limit(limit)
+
+            results = query.all()
+
+            if not results:
+                log.info(
+                    "[PGVECTOR] get_model_aware EMPTY | collection=%s", collection_name
+                )
+                return None
+
+            ids = [[result.id for result in results]]
+            documents = [[result.text for result in results]]
+            metadatas = [[result.vmetadata for result in results]]
+
+            log.info(
+                "[PGVECTOR] get_model_aware SUCCESS | collection=%s | results_count=%s",
+                collection_name,
+                len(results),
+            )
+            return GetResult(ids=ids, documents=documents, metadatas=metadatas)
+        except Exception as e:
+            try:
+                self.session.rollback()
+            except Exception:
+                pass
+            log.exception(f"Error during get_model_aware: {e}")
+            return None
+
     def delete(
         self,
         collection_name: str,

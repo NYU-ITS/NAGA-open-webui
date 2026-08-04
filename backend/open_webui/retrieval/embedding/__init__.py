@@ -36,11 +36,17 @@ from .errors import (
     EMBEDDING_JOB_WRONG_STATUS,
     EMBEDDING_FILE_NOT_FOUND,
     EMBEDDING_FILE_WRONG_STATUS,
+    EMBEDDING_REINDEX_NOT_READY,
 )
 from .provider import EmbeddingProvider, EmbeddingProviderFactory
 from .state import (
     AdminEmbeddingModelStateView,
     AdminEmbeddingModelStateRepository,
+)
+from .gate import (
+    RetrievalModelSpace,
+    RetrievalReadyNoState,
+    assert_embedding_retrieval_ready,
 )
 from .inventory import (
     ReindexFile,
@@ -115,6 +121,11 @@ __all__ = [
     "EMBEDDING_JOB_WRONG_STATUS",
     "EMBEDDING_FILE_NOT_FOUND",
     "EMBEDDING_FILE_WRONG_STATUS",
+    "EMBEDDING_REINDEX_NOT_READY",
+    # Gate
+    "RetrievalModelSpace",
+    "RetrievalReadyNoState",
+    "assert_embedding_retrieval_ready",
     # State
     "AdminEmbeddingModelStateView",
     "AdminEmbeddingModelStateRepository",

@@ -47,6 +47,8 @@ class VectorSearchRetriever(BaseRetriever):
     collection_name: Any
     embedding_function: Any
     top_k: int
+    admin_id: Any = None
+    embedding_model_id: Any = None
 
     def _get_relevant_documents(
         self,
@@ -54,11 +56,22 @@ class VectorSearchRetriever(BaseRetriever):
         *,
         run_manager: CallbackManagerForRetrieverRun,
     ) -> list[Document]:
-        result = VECTOR_DB_CLIENT.search(
-            collection_name=self.collection_name,
-            vectors=[self.embedding_function(query)],
-            limit=self.top_k,
-        )
+        if self.admin_id and self.embedding_model_id and hasattr(
+            VECTOR_DB_CLIENT, "search_model_aware"
+        ):
+            result = VECTOR_DB_CLIENT.search_model_aware(
+                collection_name=self.collection_name,
+                vectors=[self.embedding_function(query)],
+                admin_id=self.admin_id,
+                embedding_model_id=self.embedding_model_id,
+                limit=self.top_k,
+            )
+        else:
+            result = VECTOR_DB_CLIENT.search(
+                collection_name=self.collection_name,
+                vectors=[self.embedding_function(query)],
+                limit=self.top_k,
+            )
 
         ids = result.ids[0]
         metadatas = result.metadatas[0]
@@ -143,9 +156,28 @@ def query_doc_with_hybrid_search(
     k: int,
     reranking_function,
     r: float,
+    admin_id: Optional[str] = None,
+    embedding_model_id: Optional[str] = None,
 ) -> dict:
     try:
-        result = VECTOR_DB_CLIENT.get(collection_name=collection_name)
+        # Model-aware get: only active rows for the resolved admin/model space.
+        if admin_id and embedding_model_id and hasattr(
+            VECTOR_DB_CLIENT, "get_model_aware"
+        ):
+            result = VECTOR_DB_CLIENT.get_model_aware(
+                collection_name=collection_name,
+                admin_id=admin_id,
+                embedding_model_id=embedding_model_id,
+            )
+        else:
+            result = VECTOR_DB_CLIENT.get(collection_name=collection_name)
+
+        if result is None or not result.documents or not result.documents[0]:
+            return {
+                "distances": [[]],
+                "documents": [[]],
+                "metadatas": [[]],
+            }
 
         bm25_retriever = BM25Retriever.from_texts(
             texts=result.documents[0],
@@ -157,6 +189,8 @@ def query_doc_with_hybrid_search(
             collection_name=collection_name,
             embedding_function=embedding_function,
             top_k=k,
+            admin_id=admin_id,
+            embedding_model_id=embedding_model_id,
         )
 
         ensemble_retriever = EnsembleRetriever(
@@ -457,6 +491,8 @@ def query_collection_with_hybrid_search(
     k: int,
     reranking_function,
     r: float,
+    admin_id: Optional[str] = None,
+    embedding_model_id: Optional[str] = None,
 ) -> dict:
     log.info(f"[HYBRID_SEARCH] START | collections={list(collection_names)} | queries_count={len(queries) if queries else 0} | k={k} | r={r}")
     results = []
@@ -489,6 +525,8 @@ def query_collection_with_hybrid_search(
                 k=k,
                 reranking_function=reranking_function,
                 r=r,
+                admin_id=admin_id,
+                embedding_model_id=embedding_model_id,
             )
             return {"result": result, "error": None, "collection": collection_name}
         except Exception as e:
@@ -654,24 +692,38 @@ def get_sources_from_files(
     knowledge_ids_in_scope: list[str] = [
         f.get("id") for f in files if f.get("type") == "collection" and f.get("id")
     ]
+    file_ids_in_scope: list[str] = [
+        f.get("id") for f in files if f.get("type") != "collection" and f.get("id")
+    ]
     if user is not None:
         try:
-            from open_webui.retrieval.embedding.resolution import (
-                assert_single_model_space,
-            )
             from open_webui.retrieval.embedding.errors import (
                 EmbeddingError,
                 EMBEDDING_MODEL_SPACE_MIXED,
+                EMBEDDING_REINDEX_NOT_READY,
+            )
+            from open_webui.retrieval.embedding.gate import (
+                assert_embedding_retrieval_ready,
+                RetrievalModelSpace,
             )
 
-            admin_id, embedding_model_id = assert_single_model_space(
-                user.id, knowledge_ids_in_scope, request.app.state.config
+            # Spec 10: single gate call — resolves admin/model space, validates
+            # knowledge/file ownership, and checks readiness.
+            result = assert_embedding_retrieval_ready(
+                requesting_user_id=user.id,
+                knowledge_ids=knowledge_ids_in_scope or None,
+                file_ids=file_ids_in_scope or None,
             )
+            if isinstance(result, RetrievalModelSpace):
+                admin_id = result.admin_id
+                embedding_model_id = result.active_model_id
+            else:
+                # RetrievalReadyNoState: legacy admin, no model-aware search.
+                admin_id = None
+                embedding_model_id = None
         except EmbeddingError as e:
-            if e.code == EMBEDDING_MODEL_SPACE_MIXED:
-                log.warning(
-                    f"[RAG Query] rejected mixed embedding model space: {e.code}"
-                )
+            if e.code in (EMBEDDING_MODEL_SPACE_MIXED, EMBEDDING_REINDEX_NOT_READY):
+                log.warning(f"[RAG Query] retrieval rejected: {e.code} — {e.detail}")
                 return []
             log.debug(
                 f"[RAG Query] model-aware resolution unavailable, using legacy search: {e.code}"
@@ -801,6 +853,8 @@ def get_sources_from_files(
                                     k=k,
                                     reranking_function=reranking_function,
                                     r=r,
+                                    admin_id=admin_id,
+                                    embedding_model_id=embedding_model_id,
                                 )
                             except Exception as e:
                                 log.debug(

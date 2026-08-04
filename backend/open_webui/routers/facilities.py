@@ -15,6 +15,11 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
 from open_webui.models.knowledge import Knowledges
 from open_webui.retrieval.vector.connector import VECTOR_DB_CLIENT
+from open_webui.retrieval.embedding.errors import (
+    EmbeddingError,
+    EMBEDDING_REINDEX_NOT_READY,
+    EMBEDDING_MODEL_SPACE_MIXED,
+)
 from open_webui.utils.auth import get_verified_user
 from open_webui.retrieval.web.tavily import search_tavily
 from open_webui.retrieval.web.main import SearchResult
@@ -414,16 +419,37 @@ def search_knowledge_base(query: str, user_id: str, request: Request, model, k: 
             embedding_function = make_embedding_function(service, user_id=user_id)
             query_embedding = embedding_function(query)
 
-            # Phase 3: resolve the user's admin/model provenance space (best-effort)
-            # so the grant-writing search is restricted to one model space.
+            # Spec 10: gate readiness BEFORE embedding generation.
+            from open_webui.retrieval.embedding.gate import (
+                assert_embedding_retrieval_ready,
+                RetrievalModelSpace,
+                RetrievalReadyNoState,
+            )
+
             admin_id, embedding_model_id = None, None
             try:
-                from open_webui.retrieval.embedding.resolution import resolve_for_user
+                result = assert_embedding_retrieval_ready(
+                    requesting_user_id=user_id,
+                    knowledge_ids=[cid for cid in collection_names] or None,
+                )
+                if isinstance(result, RetrievalModelSpace):
+                    admin_id, embedding_model_id = result.admin_id, result.active_model_id
+                else:
+                    # RetrievalReadyNoState: legacy admin.
+                    from open_webui.retrieval.embedding.resolution import resolve_for_user
+                    ctx = resolve_for_user(user_id, request.app.state.config)
+                    admin_id, embedding_model_id = ctx.admin_id, ctx.model.id
+            except EmbeddingError as gate_error:
+                if gate_error.code in (EMBEDDING_REINDEX_NOT_READY, EMBEDDING_MODEL_SPACE_MIXED):
+                    logging.warning(f"facilities retrieval blocked: {gate_error.detail}")
+                    return []
+                logging.debug(f"model-aware resolution unavailable for facilities: {gate_error}")
+            except Exception as gate_error:
+                logging.debug(f"model-aware resolution unavailable for facilities: {gate_error}")
 
-                ctx = resolve_for_user(user_id, request.app.state.config)
-                admin_id, embedding_model_id = ctx.admin_id, ctx.model.id
-            except Exception as resolve_error:
-                logging.debug(f"model-aware resolution unavailable for facilities: {resolve_error}")
+            # Generate embeddings only after gate passes.
+            embedding_function = make_embedding_function(service, user_id=user_id)
+            query_embedding = embedding_function(query)
         except Exception as e:
             logging.error(f"Failed to generate embeddings: {e}")
             return []
