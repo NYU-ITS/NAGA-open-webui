@@ -67,6 +67,7 @@ from .model_change import (
     ModelChangeNoOp,
     request_model_change,
 )
+from .worker import process_embedding_job
 from .enqueue import (
     enqueue_embedding_job,
     EMBEDDING_REINDEX_QUEUE_NAME,
@@ -139,4 +140,6 @@ __all__ = [
     # Enqueue
     "enqueue_embedding_job",
     "EMBEDDING_REINDEX_QUEUE_NAME",
+    # Worker
+    "process_embedding_job",
 ]
