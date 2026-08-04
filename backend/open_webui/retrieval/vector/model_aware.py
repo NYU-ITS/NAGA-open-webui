@@ -186,6 +186,70 @@ class ModelAwareVectorRepository:
             collection_name=collection_name, items=list(items)
         )
 
+    def activate_target_vectors(
+        self,
+        admin_id: str,
+        model: EmbeddingModelSpec,
+        session=None,
+        job_id: str | None = None,
+    ) -> int:
+        """Promote target vectors from building to active (Spec 09).
+
+        Returns the number of vectors promoted. Only vectors previously written
+        with ``embedding_status="building"`` for this admin/model are affected.
+        When ``job_id`` is provided, activation is scoped to vectors written by
+        that specific job so stale vectors from failed/retried attempts are
+        never promoted. ``session`` is forwarded to the vector client for
+        cross-table atomicity.
+        """
+        client = self._client_for(model.dimension)
+        if not hasattr(client, "bulk_update_embedding_status"):
+            raise EmbeddingError(
+                EMBEDDING_STORAGE_DIMENSION_UNSUPPORTED,
+                detail=(
+                    f"Vector client {type(client).__name__} does not support "
+                    "bulk status update."
+                ),
+            )
+        return client.bulk_update_embedding_status(
+            admin_id=admin_id,
+            embedding_model_id=model.id,
+            from_status=VECTOR_STATUS_BUILDING,
+            to_status=VECTOR_STATUS_ACTIVE,
+            session=session,
+            job_id=job_id,
+        )
+
+    def deactivate_previous_model_vectors(
+        self,
+        admin_id: str,
+        model: EmbeddingModelSpec,
+        session=None,
+    ) -> int:
+        """Mark previous-model vectors inactive so they are excluded from search (Spec 09).
+
+        Returns the number of vectors deactivated. Only vectors with
+        ``embedding_status="active"`` for this admin/model are affected; vectors
+        already building or inactive are untouched. ``session`` is forwarded to
+        the vector client for cross-table atomicity.
+        """
+        client = self._client_for(model.dimension)
+        if not hasattr(client, "bulk_update_embedding_status"):
+            raise EmbeddingError(
+                EMBEDDING_STORAGE_DIMENSION_UNSUPPORTED,
+                detail=(
+                    f"Vector client {type(client).__name__} does not support "
+                    "bulk status update."
+                ),
+            )
+        return client.bulk_update_embedding_status(
+            admin_id=admin_id,
+            embedding_model_id=model.id,
+            from_status=VECTOR_STATUS_ACTIVE,
+            to_status="inactive",
+            session=session,
+        )
+
     def search(
         self,
         *,

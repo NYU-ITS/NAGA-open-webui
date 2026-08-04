@@ -38,11 +38,13 @@ from open_webui.models.users import User
 from open_webui.retrieval.embedding.errors import (
     EmbeddingError,
     EMBEDDING_JOB_NOT_FOUND,
+    EMBEDDING_JOB_STALE_OPERATION,
     EMBEDDING_JOB_TERMINAL,
     EMBEDDING_ADMIN_UNRESOLVED,
     EMBEDDING_ADMIN_AMBIGUOUS,
     EMBEDDING_MODEL_NOT_CONFIGURED,
     EMBEDDING_MODEL_DISABLED,
+    EMBEDDING_MODEL_STATE_CONFLICT,
     EMBEDDING_FILE_NOT_FOUND,
     EMBEDDING_FILE_WRONG_STATUS,
     EMBEDDING_CREDENTIALS_MISSING,
@@ -125,6 +127,8 @@ _EMBEDDING_CODE_MAP = {
     EMBEDDING_INVENTORY_UNRESOLVED_SOURCE: FILE_ERROR_OWNERSHIP_AMBIGUOUS,
     EMBEDDING_INVENTORY_MALFORMED_REFERENCE: FILE_ERROR_OWNERSHIP_AMBIGUOUS,
     EMBEDDING_FILE_WRONG_STATUS: FILE_ERROR_STALE_CLAIM,
+    EMBEDDING_JOB_STALE_OPERATION: FILE_ERROR_STALE_CLAIM,
+    EMBEDDING_MODEL_STATE_CONFLICT: FILE_ERROR_ADMIN_MODEL_RESOLUTION,
 }
 
 # Allowlisted human-readable operation labels per file error code. Unrecognized
@@ -959,13 +963,101 @@ def _mark_job_failed_safe(job_id: str, error_code: str, error_message: str):
 
 
 def _finalize_job_safe(job_id: str):
-    """Finalize job with safe boundary (Fix #17: defer to Spec 09).
-    
-    For now, just recompute counters without changing status.
-    Spec 09 will implement the full finalization with model promotion.
+    """Finalize job with full Spec 09 finalization (vector activation + model promotion).
+
+    On success (all files completed): atomically activates target vectors,
+    deactivates previous-model vectors, promotes the target model, and marks
+    the job completed — all in one transaction.
+
+    On partial/failure: delegates to the standard _finalize_job path which
+    sets terminal status without promoting any model.
+
+    Stale-operation errors (job no longer latest) are caught and recorded as
+    a job failure so the worker can still return a result. Unexpected errors
+    during finalization are logged but do not crash the worker.
     """
+    # Load job to determine admin context and finalization path
     with get_db() as db:
-        # Recompute counters but don't finalize status yet
-        EmbeddingJobRepository.recompute_counters(job_id=job_id, db=db)
-        db.commit()
-    log.info(f"[EMBEDDING_WORKER] Recomputed counters for job {job_id} (finalization deferred to Spec 09)")
+        job_view = EmbeddingJobRepository.get_job(job_id, db=db)
+
+    if job_view is None:
+        log.warning(f"[EMBEDDING_WORKER] Cannot finalize job {job_id}: not found")
+        return
+
+    admin_id = job_view.admin_id
+    target_model_id = job_view.embedding_model_id
+    previous_model_id = job_view.previous_embedding_model_id
+
+    vector_repo = ModelAwareVectorRepository()
+
+    try:
+        with get_db() as db:
+            # First, recompute counters
+            EmbeddingJobRepository.recompute_counters(job_id=job_id, db=db)
+
+            # Determine if this is an all-success finalization
+            refreshed = EmbeddingJobRepository.get_job(job_id, db=db)
+            if refreshed is None:
+                db.commit()
+                return
+
+            all_success = (
+                refreshed.total_files == refreshed.processed_files
+                and refreshed.total_files >= 0
+                and refreshed.failed_files == 0
+            )
+
+            if all_success:
+                # Full finalization: activate vectors + promote model + complete
+                # Load target model spec within the session
+                target_model_spec = get_model_spec_by_id(target_model_id)
+
+                EmbeddingJobRepository.finalize_job_success(
+                    job_id=job_id,
+                    admin_id=admin_id,
+                    target_model_id=target_model_id,
+                    previous_model_id=previous_model_id,
+                    vector_repo=vector_repo,
+                    target_model_spec=target_model_spec,
+                    db=db,
+                )
+            else:
+                # Partial/failure finalization: set terminal status, no promotion
+                EmbeddingJobRepository.finalize_job(job_id=job_id, db=db)
+
+            db.commit()
+
+        log.info(f"[EMBEDDING_WORKER] Finalized job {job_id}")
+
+    except EmbeddingError as e:
+        if e.code == EMBEDDING_JOB_STALE_OPERATION:
+            # Stale job: mark as failed with stale-operation error
+            log.warning(
+                f"[EMBEDDING_WORKER] Job {job_id} is stale (no longer latest); marking failed"
+            )
+            _mark_job_failed_safe(
+                job_id, EMBEDDING_JOB_STALE_OPERATION, str(e.detail or "Stale operation")
+            )
+        elif e.code == EMBEDDING_MODEL_STATE_CONFLICT:
+            log.warning(
+                f"[EMBEDDING_WORKER] Model state conflict during finalization of job {job_id}: {e.detail}"
+            )
+            _mark_job_failed_safe(
+                job_id, EMBEDDING_MODEL_STATE_CONFLICT, str(e.detail or "Model state conflict")
+            )
+        else:
+            log.error(
+                f"[EMBEDDING_WORKER] EmbeddingError during finalization of job {job_id}: {e}",
+                exc_info=True,
+            )
+            _mark_job_failed_safe(job_id, e.code, _sanitize_error_message("unexpected", e))
+    except Exception as e:
+        log.error(
+            f"[EMBEDDING_WORKER] Unexpected error during finalization of job {job_id}: {e}",
+            exc_info=True,
+        )
+        _mark_job_failed_safe(
+            job_id,
+            _get_stable_error_code(e),
+            _sanitize_error_message("unexpected", e),
+        )

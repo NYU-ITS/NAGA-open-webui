@@ -721,6 +721,45 @@ class PgvectorClient:
             log.exception(f"Error during reset: {e}")
             raise
 
+    def bulk_update_embedding_status(
+        self,
+        admin_id: str,
+        embedding_model_id: str,
+        from_status: str,
+        to_status: str,
+        session=None,
+        job_id: str | None = None,
+    ) -> int:
+        """Bulk-update embedding_status for all matching provenance rows.
+
+        Returns the number of rows updated. Used by Spec 09 finalization to
+        activate target vectors (building→active) or deactivate previous-model
+        vectors (active→inactive).
+
+        When ``session`` is provided the caller owns the transaction (only
+        flush); otherwise the client's own session is used. ``job_id`` narrows
+        the update to vectors written by a specific embedding job so stale
+        vectors from failed/retried jobs are never promoted.
+        """
+        db = session if session is not None else self.session
+        now = int(time.time())
+        q = db.query(DocumentChunk).filter(
+            DocumentChunk.admin_id == admin_id,
+            DocumentChunk.embedding_model_id == embedding_model_id,
+            DocumentChunk.embedding_status == from_status,
+        )
+        if job_id is not None:
+            q = q.filter(DocumentChunk.embedding_job_id == job_id)
+        updated = q.update(
+            {
+                DocumentChunk.embedding_status: to_status,
+                DocumentChunk.updated_at: now,
+            },
+            synchronize_session=False,
+        )
+        db.flush()
+        return updated
+
     def close(self) -> None:
         pass
 

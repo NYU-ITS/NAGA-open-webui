@@ -37,10 +37,12 @@ from open_webui.retrieval.embedding.errors import (
     EmbeddingError,
     EMBEDDING_JOB_ACTIVE_EXISTS,
     EMBEDDING_JOB_NOT_FOUND,
+    EMBEDDING_JOB_STALE_OPERATION,
     EMBEDDING_JOB_TERMINAL,
     EMBEDDING_JOB_WRONG_STATUS,
     EMBEDDING_FILE_NOT_FOUND,
     EMBEDDING_FILE_WRONG_STATUS,
+    EMBEDDING_MODEL_STATE_CONFLICT,
 )
 from open_webui.retrieval.embedding.inventory import (
     ReindexFile,
@@ -711,6 +713,194 @@ def _finalize_job(db, job_id: str) -> Optional[EmbeddingJobView]:
     return _job_to_view(job_row)
 
 
+def _finalize_job_success(
+    db,
+    job_id: str,
+    admin_id: str,
+    target_model_id: str,
+    previous_model_id: Optional[str],
+    vector_repo,
+    target_model_spec,
+) -> Optional[EmbeddingJobView]:
+    """Atomically finalize a successful job: activate vectors, promote model, complete job (Spec 09).
+
+    Steps (all within the caller-owned ``db`` session):
+    1. Lock the job row (``SELECT … FOR UPDATE``).
+    2. Reject if any file is still unfinished (pending/processing).
+    3. If already terminal, return current view (idempotent no-op).
+    4. Lock admin model state and validate target consistency.
+    5. Activate target job vectors (building → active).
+    6. Deactivate previous-model vectors (active → inactive).
+    7. Promote target model to active and clear target.
+    8. Mark job completed and set completion timestamp.
+    9. Flush (caller commits atomically).
+
+    A zero-file job may complete and promote because no governed vectors
+    can be mixed.
+
+    Raises:
+        EmbeddingError (EMBEDDING_JOB_STALE_OPERATION): if the job is no
+            longer the latest for this admin and cannot promote a model.
+        EmbeddingError (EMBEDDING_MODEL_STATE_CONFLICT): if admin state
+            has no target, target mismatches job, or latest-job mismatch.
+    """
+    from open_webui.models.embeddings import AdminEmbeddingModelState
+
+    now = _now()
+
+    # 1. Lock job
+    job_row = (
+        db.query(EmbeddingJob)
+        .filter(EmbeddingJob.id == job_id)
+        .with_for_update()
+        .first()
+    )
+    if job_row is None:
+        return None
+
+    # 3. Already terminal: idempotent no-op
+    if job_row.status in _TERMINAL_JOB_STATUSES:
+        return _job_to_view(job_row)
+
+    # 2. Recompute and verify no files are unfinished
+    total = db.query(EmbeddingJobFile).filter(EmbeddingJobFile.job_id == job_id).count()
+    processed = (
+        db.query(EmbeddingJobFile)
+        .filter(EmbeddingJobFile.job_id == job_id, EmbeddingJobFile.status == FILE_STATUS_COMPLETED)
+        .count()
+    )
+    failed = (
+        db.query(EmbeddingJobFile)
+        .filter(EmbeddingJobFile.job_id == job_id, EmbeddingJobFile.status == FILE_STATUS_FAILED)
+        .count()
+    )
+    unfinished = total - processed - failed
+    if unfinished > 0:
+        log.warning(
+            "[JOB] finalize_job_success rejected for job %s: %d files still unfinished",
+            job_id,
+            unfinished,
+        )
+        job_row.total_files = total
+        job_row.processed_files = processed
+        job_row.failed_files = failed
+        job_row.updated_at = now
+        db.flush()
+        return _job_to_view(job_row)
+
+    # Update counters
+    job_row.total_files = total
+    job_row.processed_files = processed
+    job_row.failed_files = failed
+
+    # All files must be completed for a successful finalization
+    if total != processed:
+        log.warning(
+            "[JOB] finalize_job_success called on job %s with %d/%d completed; "
+            "caller should use _finalize_job for partial/failure outcomes",
+            job_id,
+            processed,
+            total,
+        )
+        # Fall through to _finalize_job behavior for non-all-success cases
+        job_row.status = JOB_STATUS_PARTIALLY_FAILED if processed > 0 and failed > 0 else JOB_STATUS_FAILED
+        if job_row.completed_at is None:
+            job_row.completed_at = now
+        job_row.updated_at = now
+        db.flush()
+        return _job_to_view(job_row)
+
+    # 4. Lock admin model state and validate target consistency
+    state_row = (
+        db.query(AdminEmbeddingModelState)
+        .filter_by(admin_id=admin_id)
+        .with_for_update()
+        .first()
+    )
+    if state_row is None:
+        raise EmbeddingError(
+            EMBEDDING_MODEL_STATE_CONFLICT,
+            detail=f"No embedding model state for admin {admin_id}.",
+        )
+    if state_row.latest_embedding_job_id != job_id:
+        raise EmbeddingError(
+            EMBEDDING_JOB_STALE_OPERATION,
+            detail=(
+                f"Job {job_id} is no longer the latest for admin {admin_id} "
+                f"(latest is {state_row.latest_embedding_job_id}); "
+                f"refusing promotion."
+            ),
+        )
+    if state_row.target_embedding_model_id is None:
+        raise EmbeddingError(
+            EMBEDDING_MODEL_STATE_CONFLICT,
+            detail=f"Admin {admin_id} has no target model to promote.",
+        )
+    if state_row.target_embedding_model_id != target_model_id:
+        raise EmbeddingError(
+            EMBEDDING_MODEL_STATE_CONFLICT,
+            detail=(
+                f"Admin target model '{state_row.target_embedding_model_id}' does not "
+                f"match job target '{target_model_id}'; refusing promotion."
+            ),
+        )
+
+    # 5. Activate target job vectors (building → active).
+    #    Scoped to this specific job_id so stale vectors from failed/retried
+    #    attempts are never promoted. Uses caller's db session for atomicity.
+    activated = vector_repo.activate_target_vectors(
+        admin_id=admin_id,
+        model=target_model_spec,
+        session=db,
+        job_id=job_id,
+    )
+    log.info(
+        "[JOB] activated %d target vectors for admin %s model %s job %s",
+        activated,
+        admin_id,
+        target_model_id,
+        job_id,
+    )
+
+    # 6. Deactivate previous-model vectors (active → inactive).
+    #    Uses caller's db session; failure aborts finalization.
+    if previous_model_id:
+        from open_webui.retrieval.embedding.registry import get_model_spec_by_id
+
+        prev_spec = get_model_spec_by_id(previous_model_id)
+        deactivated = vector_repo.deactivate_previous_model_vectors(
+            admin_id=admin_id,
+            model=prev_spec,
+            session=db,
+        )
+        log.info(
+            "[JOB] deactivated %d previous-model vectors for admin %s model %s",
+            deactivated,
+            admin_id,
+            previous_model_id,
+        )
+
+    # 7. Promote target model → active, clear target
+    state_row.active_embedding_model_id = state_row.target_embedding_model_id
+    state_row.target_embedding_model_id = None
+    state_row.updated_at = now
+
+    # 8. Mark job completed
+    job_row.status = JOB_STATUS_COMPLETED
+    if job_row.completed_at is None:
+        job_row.completed_at = now
+    job_row.updated_at = now
+    db.flush()
+
+    log.info(
+        "[JOB] finalized successful job %s: completed, target model %s promoted for admin %s",
+        job_id,
+        target_model_id,
+        admin_id,
+    )
+    return _job_to_view(job_row)
+
+
 def _list_failed_files(db, job_id: str) -> list[EmbeddingJobFileView]:
     """Internal: list all failed file rows for a job."""
     rows = (
@@ -1088,6 +1278,51 @@ class EmbeddingJobRepository:
                 session.commit()
                 return view
         return _finalize_job(db, job_id)
+
+    @staticmethod
+    def finalize_job_success(
+        job_id: str,
+        admin_id: str,
+        target_model_id: str,
+        previous_model_id: Optional[str],
+        vector_repo,
+        target_model_spec,
+        db=None,
+    ) -> Optional[EmbeddingJobView]:
+        """Atomically finalize a successful job: activate vectors, promote model, complete job.
+
+        All steps (vector activation, model promotion, job completion) execute
+        within a single transaction for atomicity. Idempotent: returns current
+        view if already terminal.
+
+        Raises:
+            EmbeddingError (EMBEDDING_JOB_STALE_OPERATION): if the job is no
+                longer the latest for this admin.
+            EmbeddingError (EMBEDDING_MODEL_STATE_CONFLICT): if admin state
+                is missing or inconsistent.
+        """
+        if db is None:
+            with get_db() as session:
+                view = _finalize_job_success(
+                    session,
+                    job_id,
+                    admin_id,
+                    target_model_id,
+                    previous_model_id,
+                    vector_repo,
+                    target_model_spec,
+                )
+                session.commit()
+                return view
+        return _finalize_job_success(
+            db,
+            job_id,
+            admin_id,
+            target_model_id,
+            previous_model_id,
+            vector_repo,
+            target_model_spec,
+        )
 
     @staticmethod
     def list_failed_files(job_id: str, db=None) -> list[EmbeddingJobFileView]:
