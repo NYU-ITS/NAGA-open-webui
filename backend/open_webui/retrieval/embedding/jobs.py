@@ -27,7 +27,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import Mapping, Optional, Sequence
 
 from sqlalchemy.exc import IntegrityError
 
@@ -42,7 +42,11 @@ from open_webui.retrieval.embedding.errors import (
     EMBEDDING_FILE_NOT_FOUND,
     EMBEDDING_FILE_WRONG_STATUS,
 )
-from open_webui.retrieval.embedding.inventory import ReindexFile
+from open_webui.retrieval.embedding.inventory import (
+    ReindexFile,
+    SOURCE_KNOWLEDGE,
+    SOURCE_CHAT_UPLOAD,
+)
 
 log = logging.getLogger(__name__)
 
@@ -116,6 +120,69 @@ class CreateJobResult:
 
     job: EmbeddingJobView
     files: tuple[EmbeddingJobFileView, ...]
+
+
+# Source-context buckets for status data (Spec 08). A physical file is classified
+# from its persisted snapshot's ``source_contexts`` into exactly one mutually
+# exclusive bucket so aggregate counts never double-count a file referenced by
+# both a knowledge base and a chat upload.
+SOURCE_CONTEXT_KNOWLEDGE = SOURCE_KNOWLEDGE
+SOURCE_CONTEXT_CHAT_UPLOAD = SOURCE_CHAT_UPLOAD
+SOURCE_CONTEXT_BOTH = "both"
+
+
+@dataclass(frozen=True)
+class SourceContextCounts:
+    """Ledger-derived counts for one source-context bucket.
+
+    ``total`` counts every file row in the bucket; ``processed`` counts
+    completed rows; ``failed`` counts failed rows. A processing or pending row
+    is in neither terminal count, so ``pending_or_processing`` is derived.
+    """
+
+    total: int = 0
+    processed: int = 0
+    failed: int = 0
+
+    @property
+    def pending_or_processing(self) -> int:
+        return self.total - self.processed - self.failed
+
+
+@dataclass(frozen=True)
+class EmbeddingJobStatusView:
+    """Read-only status for one embedding job (Spec 08).
+
+    ``job`` carries the stored aggregate counters (recomputed from the file
+    ledger after every terminal transition and at finalization).
+    ``pending_or_processing`` and ``source_contexts`` are derived: the three
+    buckets (``knowledge``, ``chat_upload``, ``both``) are mutually exclusive
+    and their totals sum to the aggregate file count without double-counting a
+    file referenced by both knowledge and chat.
+    """
+
+    job: EmbeddingJobView
+    pending_or_processing: int
+    source_contexts: dict[str, SourceContextCounts]
+
+
+def _source_bucket(source_contexts) -> Optional[str]:
+    """Classify a file snapshot's ``source_contexts`` into one status bucket.
+
+    Returns one of :data:`SOURCE_CONTEXT_KNOWLEDGE`,
+    :data:`SOURCE_CONTEXT_CHAT_UPLOAD`, :data:`SOURCE_CONTEXT_BOTH`, or ``None``
+    when no recognized source context is present.
+    """
+    contexts = set(source_contexts or [])
+    has_knowledge = SOURCE_KNOWLEDGE in contexts
+    has_chat_upload = SOURCE_CHAT_UPLOAD in contexts
+    if has_knowledge and has_chat_upload:
+        return SOURCE_CONTEXT_BOTH
+    if has_knowledge:
+        return SOURCE_CONTEXT_KNOWLEDGE
+    if has_chat_upload:
+        return SOURCE_CONTEXT_CHAT_UPLOAD
+    return None
 
 
 def _now() -> int:
@@ -412,6 +479,49 @@ def _mark_file_failed(
     return _file_to_view(row)
 
 
+def _fail_nonterminal_files(
+    db,
+    job_id: str,
+    error_code: str,
+    error_messages: Mapping[str, str],
+) -> list[EmbeddingJobFileView]:
+    """Atomically fail every pending or processing file in a job.
+
+    Pending rows first enter processing and increment ``attempt_count`` so the
+    persisted lifecycle remains ``pending -> processing -> failed``. Existing
+    processing rows retain their current attempt. Completed and already-failed
+    rows remain unchanged. Counters are recomputed once after all transitions.
+    """
+    now = _now()
+    rows = (
+        db.query(EmbeddingJobFile)
+        .filter(EmbeddingJobFile.job_id == job_id)
+        .with_for_update()
+        .all()
+    )
+
+    failed_rows: list[EmbeddingJobFileView] = []
+    for row in rows:
+        if row.status not in (FILE_STATUS_PENDING, FILE_STATUS_PROCESSING):
+            continue
+        if row.status == FILE_STATUS_PENDING:
+            row.status = FILE_STATUS_PROCESSING
+            row.attempt_count += 1
+            if row.started_at is None:
+                row.started_at = now
+
+        row.status = FILE_STATUS_FAILED
+        row.error_code = error_code
+        row.error_message = error_messages.get(row.file_id)
+        row.completed_at = now
+        row.updated_at = now
+        failed_rows.append(_file_to_view(row))
+
+    _recompute_counters(db, job_id)
+    db.flush()
+    return failed_rows
+
+
 def _reclaim_file(
     db, job_id: str, file_id: str, stale_threshold_seconds: int = 300
 ) -> Optional[EmbeddingJobFileView]:
@@ -610,6 +720,67 @@ def _list_failed_files(db, job_id: str) -> list[EmbeddingJobFileView]:
         .all()
     )
     return [_file_to_view(row) for row in rows]
+
+
+def _get_job_status(db, job_id: str) -> Optional[EmbeddingJobStatusView]:
+    """Internal: build a read-only status view for a job (no mutation).
+
+    Aggregate counters come from the job row (maintained to match the ledger);
+    ``pending_or_processing`` and the source-context breakdown are derived from
+    the persisted file rows and their inventory snapshots (Spec 08). A physical
+    file belongs to exactly one bucket (knowledge / chat_upload / both) so the
+    bucket totals never double-count a multi-context file.
+    """
+    job_row = _get_job_row(db, job_id)
+    if job_row is None:
+        return None
+    job_view = _job_to_view(job_row)
+
+    file_rows = (
+        db.query(EmbeddingJobFile)
+        .filter(EmbeddingJobFile.job_id == job_id)
+        .all()
+    )
+
+    bucket_totals = {
+        SOURCE_CONTEXT_KNOWLEDGE: 0,
+        SOURCE_CONTEXT_CHAT_UPLOAD: 0,
+        SOURCE_CONTEXT_BOTH: 0,
+    }
+    bucket_processed = dict(bucket_totals)
+    bucket_failed = dict(bucket_totals)
+    for row in file_rows:
+        snapshot = row.file_snapshot if isinstance(row.file_snapshot, dict) else {}
+        bucket = _source_bucket(snapshot.get("source_contexts"))
+        if bucket is None:
+            continue
+        bucket_totals[bucket] += 1
+        if row.status == FILE_STATUS_COMPLETED:
+            bucket_processed[bucket] += 1
+        elif row.status == FILE_STATUS_FAILED:
+            bucket_failed[bucket] += 1
+
+    source_contexts = {
+        bucket: SourceContextCounts(
+            total=bucket_totals[bucket],
+            processed=bucket_processed[bucket],
+            failed=bucket_failed[bucket],
+        )
+        for bucket in (
+            SOURCE_CONTEXT_KNOWLEDGE,
+            SOURCE_CONTEXT_CHAT_UPLOAD,
+            SOURCE_CONTEXT_BOTH,
+        )
+    }
+
+    pending_or_processing = (
+        job_view.total_files - job_view.processed_files - job_view.failed_files
+    )
+    return EmbeddingJobStatusView(
+        job=job_view,
+        pending_or_processing=pending_or_processing,
+        source_contexts=source_contexts,
+    )
 
 
 def _mark_job_failed(
@@ -875,6 +1046,23 @@ class EmbeddingJobRepository:
         return _mark_file_failed(db, job_id, file_id, error_code, error_message)
 
     @staticmethod
+    def fail_nonterminal_files(
+        job_id: str,
+        error_code: str,
+        error_messages: Mapping[str, str],
+        db=None,
+    ) -> list[EmbeddingJobFileView]:
+        """Fail all pending or processing files and recompute counters atomically."""
+        if db is None:
+            with get_db() as session:
+                views = _fail_nonterminal_files(
+                    session, job_id, error_code, error_messages
+                )
+                session.commit()
+                return views
+        return _fail_nonterminal_files(db, job_id, error_code, error_messages)
+
+    @staticmethod
     def recompute_counters(job_id: str, db=None) -> Optional[EmbeddingJobView]:
         """Recompute job counters from file rows.
 
@@ -908,6 +1096,22 @@ class EmbeddingJobRepository:
             with get_db() as session:
                 return _list_failed_files(session, job_id)
         return _list_failed_files(db, job_id)
+
+    @staticmethod
+    def get_job_status(job_id: str, db=None) -> Optional[EmbeddingJobStatusView]:
+        """Return a read-only status view for a job (Spec 08).
+
+        Includes the job row, ``pending_or_processing``, and derived counts by
+        source context (``knowledge`` / ``chat_upload`` / ``both``). The bucket
+        totals are mutually exclusive and never double-count a physical file
+        referenced by both knowledge and chat.
+
+        Returns None if the job is not found.
+        """
+        if db is None:
+            with get_db() as session:
+                return _get_job_status(session, job_id)
+        return _get_job_status(db, job_id)
 
     @staticmethod
     def mark_job_failed(

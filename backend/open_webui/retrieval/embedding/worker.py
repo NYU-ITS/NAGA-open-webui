@@ -40,9 +40,20 @@ from open_webui.retrieval.embedding.errors import (
     EMBEDDING_JOB_NOT_FOUND,
     EMBEDDING_JOB_TERMINAL,
     EMBEDDING_ADMIN_UNRESOLVED,
+    EMBEDDING_ADMIN_AMBIGUOUS,
     EMBEDDING_MODEL_NOT_CONFIGURED,
     EMBEDDING_MODEL_DISABLED,
     EMBEDDING_FILE_NOT_FOUND,
+    EMBEDDING_FILE_WRONG_STATUS,
+    EMBEDDING_CREDENTIALS_MISSING,
+    EMBEDDING_PROVIDER_FAILED,
+    EMBEDDING_PROVIDER_UNSUPPORTED,
+    EMBEDDING_MODALITY_UNSUPPORTED,
+    EMBEDDING_INVENTORY_AMBIGUOUS_SOURCE,
+    EMBEDDING_INVENTORY_AMBIGUOUS_ADMIN,
+    EMBEDDING_INVENTORY_UNRESOLVED_SOURCE,
+    EMBEDDING_INVENTORY_MALFORMED_REFERENCE,
+    EMBEDDING_INVENTORY_MISSING_FILE,
 )
 from open_webui.retrieval.embedding.inputs import TextEmbeddingInput
 from open_webui.retrieval.embedding.jobs import (
@@ -77,31 +88,127 @@ MAX_ERROR_LENGTH = 500
 # Stale threshold for reclaiming processing files (5 minutes)
 FILE_STALE_THRESHOLD_SECONDS = 300
 
-# Stable error codes for file processing stages
+# Stable error codes for file processing stages (Spec 08 taxonomy).
+# These are the only codes recorded on failed file rows; they distinguish the
+# failing stage without exposing provider or credential details.
+FILE_ERROR_FILE_MISSING = "file_missing"
+FILE_ERROR_STORAGE_READ_FAILED = "storage_read_failed"
 FILE_ERROR_EXTRACTION_FAILED = "extraction_failed"
 FILE_ERROR_EMPTY_CONTENT = "empty_content"
+FILE_ERROR_ADMIN_MODEL_RESOLUTION = "admin_model_resolution_failed"
+FILE_ERROR_CREDENTIALS_MISSING = "credentials_missing"
+FILE_ERROR_PROVIDER_EMBEDDING_FAILED = "provider_embedding_failed"
 FILE_ERROR_EMBEDDING_FAILED = "embedding_failed"
 FILE_ERROR_VECTOR_WRITE_FAILED = "vector_write_failed"
+FILE_ERROR_OWNERSHIP_AMBIGUOUS = "ownership_ambiguity"
+FILE_ERROR_STALE_CLAIM = "worker_interrupted"
 FILE_ERROR_CHUNK_REUSE_INVALID = "chunk_reuse_invalid"
+FILE_ERROR_PROCESSING_FAILED = "processing_failed"
+
+# Maps stable EmbeddingError codes onto the file-level failure taxonomy so a
+# failed file row records one of the Spec 08 categories. Codes not listed here
+# (e.g. embedding_dimension_mismatch) are already stable and sanitized and pass
+# through unchanged.
+_EMBEDDING_CODE_MAP = {
+    EMBEDDING_FILE_NOT_FOUND: FILE_ERROR_FILE_MISSING,
+    EMBEDDING_INVENTORY_MISSING_FILE: FILE_ERROR_FILE_MISSING,
+    EMBEDDING_ADMIN_UNRESOLVED: FILE_ERROR_ADMIN_MODEL_RESOLUTION,
+    EMBEDDING_ADMIN_AMBIGUOUS: FILE_ERROR_ADMIN_MODEL_RESOLUTION,
+    EMBEDDING_MODEL_NOT_CONFIGURED: FILE_ERROR_ADMIN_MODEL_RESOLUTION,
+    EMBEDDING_MODEL_DISABLED: FILE_ERROR_ADMIN_MODEL_RESOLUTION,
+    EMBEDDING_CREDENTIALS_MISSING: FILE_ERROR_CREDENTIALS_MISSING,
+    EMBEDDING_PROVIDER_FAILED: FILE_ERROR_PROVIDER_EMBEDDING_FAILED,
+    EMBEDDING_PROVIDER_UNSUPPORTED: FILE_ERROR_PROVIDER_EMBEDDING_FAILED,
+    EMBEDDING_MODALITY_UNSUPPORTED: FILE_ERROR_EMBEDDING_FAILED,
+    EMBEDDING_INVENTORY_AMBIGUOUS_SOURCE: FILE_ERROR_OWNERSHIP_AMBIGUOUS,
+    EMBEDDING_INVENTORY_AMBIGUOUS_ADMIN: FILE_ERROR_OWNERSHIP_AMBIGUOUS,
+    EMBEDDING_INVENTORY_UNRESOLVED_SOURCE: FILE_ERROR_OWNERSHIP_AMBIGUOUS,
+    EMBEDDING_INVENTORY_MALFORMED_REFERENCE: FILE_ERROR_OWNERSHIP_AMBIGUOUS,
+    EMBEDDING_FILE_WRONG_STATUS: FILE_ERROR_STALE_CLAIM,
+}
+
+# Allowlisted human-readable operation labels per file error code. Unrecognized
+# stable codes that start with "embedding_" are treated as an embedding request.
+_FILE_OPERATION_LABELS = {
+    FILE_ERROR_FILE_MISSING: "Embedding request failed",
+    FILE_ERROR_STORAGE_READ_FAILED: "File storage read failed",
+    FILE_ERROR_EXTRACTION_FAILED: "File content extraction failed",
+    FILE_ERROR_EMPTY_CONTENT: "File content extraction failed",
+    FILE_ERROR_ADMIN_MODEL_RESOLUTION: "Embedding request failed",
+    FILE_ERROR_CREDENTIALS_MISSING: "Embedding request failed",
+    FILE_ERROR_PROVIDER_EMBEDDING_FAILED: "Embedding request failed",
+    FILE_ERROR_EMBEDDING_FAILED: "Embedding generation failed",
+    FILE_ERROR_VECTOR_WRITE_FAILED: "Vector write failed",
+    FILE_ERROR_OWNERSHIP_AMBIGUOUS: "Embedding request failed",
+    FILE_ERROR_STALE_CLAIM: "Embedding request failed",
+    FILE_ERROR_CHUNK_REUSE_INVALID: "Embedding request failed",
+    FILE_ERROR_PROCESSING_FAILED: "Processing failed",
+}
+
+# Allowlisted, user-safe cause phrases per file error code. These never contain
+# provider payloads, credentials, or stack traces.
+_FILE_SAFE_CAUSES = {
+    FILE_ERROR_FILE_MISSING: "the source file was not found",
+    FILE_ERROR_STORAGE_READ_FAILED: "the source file could not be read from storage",
+    FILE_ERROR_EXTRACTION_FAILED: "content extraction failed for the file format",
+    FILE_ERROR_EMPTY_CONTENT: "the file contains no extractable content",
+    FILE_ERROR_ADMIN_MODEL_RESOLUTION: "the embedding model or admin could not be resolved",
+    FILE_ERROR_CREDENTIALS_MISSING: "embedding credentials are missing",
+    FILE_ERROR_PROVIDER_EMBEDDING_FAILED: "the embedding provider request failed",
+    FILE_ERROR_EMBEDDING_FAILED: "embedding generation failed",
+    FILE_ERROR_VECTOR_WRITE_FAILED: "writing vectors to the vector database failed",
+    FILE_ERROR_OWNERSHIP_AMBIGUOUS: "file ownership or collection membership is ambiguous",
+    FILE_ERROR_STALE_CLAIM: "the worker was interrupted or the claim became stale",
+    FILE_ERROR_CHUNK_REUSE_INVALID: "persisted chunks could not be reused because the source content changed",
+    FILE_ERROR_PROCESSING_FAILED: "processing failed",
+}
+
+# Safe, bounded job-level messages (no exception text is persisted).
+_JOB_ERROR_MESSAGES = {
+    "job_validation": "Embedding reindex job validation failed. Check admin and embedding model configuration.",
+    "unexpected": "Embedding reindex job failed with an unexpected error.",
+    "enqueue_failed": "Embedding reindex job could not be enqueued.",
+}
+
+
+def _build_file_error_message(code: str, display_name: str, error: Exception) -> str:
+    """Build a concise, user-safe error message that includes operation and cause.
+
+    Format: ``"<operation> for <filename>: <cause>."``
+
+    Only allowlisted operation/cause phrases are used; provider payloads,
+    credentials, and stack traces never reach the durable record. Unknown
+    stable codes degrade to the code's words (e.g. ``embedding_vector_non_finite``
+    -> ``embedding vector non finite``), which is still safe.
+    """
+    operation = _FILE_OPERATION_LABELS.get(code)
+    if operation is None:
+        operation = (
+            "Embedding request failed"
+            if code.startswith("embedding_")
+            else "Processing failed"
+        )
+    cause = _FILE_SAFE_CAUSES.get(code)
+    if cause is None:
+        cause = code.replace("_", " ")
+
+    prefix = f"{operation} for "
+    suffix = f": {cause}."
+    name_budget = max(1, MAX_ERROR_LENGTH - len(prefix) - len(suffix))
+    safe_display_name = str(display_name).replace("\r", " ").replace("\n", " ")
+    if len(safe_display_name) > name_budget:
+        if name_budget > 1:
+            safe_display_name = safe_display_name[: name_budget - 1] + "…"
+        else:
+            safe_display_name = safe_display_name[:name_budget]
+    return f"{prefix}{safe_display_name}{suffix}"
 
 
 def _sanitize_error_message(stage: str, error: Exception) -> str:
-    """Create allowlisted error message for specific stage.
-    
-    Never includes raw exception text, only stage-specific safe messages.
-    """
-    if stage == FILE_ERROR_EXTRACTION_FAILED:
-        return "File content extraction failed. Check file format and storage."
-    elif stage == FILE_ERROR_EMPTY_CONTENT:
-        return "File contains no extractable content."
-    elif stage == FILE_ERROR_EMBEDDING_FAILED:
-        return "Embedding generation failed. Check model configuration."
-    elif stage == FILE_ERROR_VECTOR_WRITE_FAILED:
-        return "Vector database write failed. Check storage connectivity."
-    elif stage == FILE_ERROR_CHUNK_REUSE_INVALID:
-        return "Persisted chunks invalid for reuse. Source content changed."
-    else:
-        return f"Processing failed at stage: {stage}"
+    """Return a safe, bounded job-level error message (never exception text)."""
+    return _JOB_ERROR_MESSAGES.get(
+        stage, "Embedding reindex job failed."
+    )[:MAX_ERROR_LENGTH]
 
 
 def _is_terminal_status(status: str) -> bool:
@@ -159,7 +266,10 @@ def process_embedding_job(embedding_job_id: str) -> dict:
             admin = _load_and_verify_admin(admin_id)
             target_model = _load_target_model(target_model_id)
         except EmbeddingError as e:
-            # Fix #7: Persist job-level domain errors
+            # Spec 08: a pre-file admin/model failure is terminal for every
+            # nonterminal inventory row. Persist each file failure first so job
+            # counters and durable document errors match the ledger.
+            _fail_job_files_safe(embedding_job_id, e)
             error_msg = _sanitize_error_message("job_validation", e)
             _mark_job_failed_safe(embedding_job_id, e.code, error_msg)
             raise
@@ -210,7 +320,7 @@ def process_embedding_job(embedding_job_id: str) -> dict:
                     continue
             
             try:
-                _process_file(
+                completed = _process_file(
                     job_view=job_view,
                     file_view=file_view,
                     admin=admin,
@@ -218,11 +328,15 @@ def process_embedding_job(embedding_job_id: str) -> dict:
                     embedding_service=embedding_service,
                     vector_repo=vector_repo,
                 )
-                processed_count += 1
+                if completed:
+                    processed_count += 1
             except Exception as file_error:
-                # File-local error: mark file failed and continue
+                # File-local error: mark file failed and continue (Spec 08).
+                # Record a stable stage code and a safe operation+cause message
+                # that identifies the file without exposing credentials.
                 error_code = _get_stable_error_code(file_error)
-                error_msg = _sanitize_error_message(error_code, file_error)
+                display_name = _get_file_display_name(file_view.file_id)
+                error_msg = _build_file_error_message(error_code, display_name, file_error)
                 log.error(
                     f"[EMBEDDING_WORKER] File {file_view.file_id} failed: {error_code} - {error_msg}",
                     exc_info=True,
@@ -255,7 +369,7 @@ def process_embedding_job(embedding_job_id: str) -> dict:
         raise
     except Exception as unexpected_error:
         # Unexpected error: mark job failed
-        error_code = type(unexpected_error).__name__
+        error_code = _get_stable_error_code(unexpected_error)
         error_msg = _sanitize_error_message("unexpected", unexpected_error)
         log.error(
             f"[EMBEDDING_WORKER] Job {embedding_job_id} failed with unexpected error: {error_code} - {error_msg}",
@@ -270,22 +384,27 @@ def process_embedding_job(embedding_job_id: str) -> dict:
 
 def _get_stable_error_code(error: Exception) -> str:
     """Extract stable error code from exception.
-    
-    For EmbeddingError, use .code. For others, map to stable codes.
+
+    For EmbeddingError, map the code onto the Spec 08 file-level failure
+    taxonomy; unmapped EmbeddingError codes pass through unchanged because they
+    are already stable and sanitized. Other exceptions are mapped by class name
+    to a stable stage code.
     """
     if isinstance(error, EmbeddingError):
-        return error.code
-    
+        return _EMBEDDING_CODE_MAP.get(error.code, error.code)
+
     # Map common exceptions to stable codes
     error_name = type(error).__name__.lower()
     if "extraction" in error_name or "loader" in error_name:
         return FILE_ERROR_EXTRACTION_FAILED
+    elif "storage" in error_name or "filenotfound" in error_name:
+        return FILE_ERROR_STORAGE_READ_FAILED
     elif "embedding" in error_name:
         return FILE_ERROR_EMBEDDING_FAILED
     elif "vector" in error_name or "upsert" in error_name:
         return FILE_ERROR_VECTOR_WRITE_FAILED
     else:
-        return "processing_failed"
+        return FILE_ERROR_PROCESSING_FAILED
 
 
 def _claim_job_safe(job_view: EmbeddingJobView) -> Optional[EmbeddingJobView]:
@@ -423,9 +542,9 @@ def _process_file(
     claim_result = _claim_file_safe(job_id, file_view)
     
     # Fix #12: Treat failed claim as skip, not failure
-    if claim_result is None:
+    if claim_result is not True:
         log.debug(f"[EMBEDDING_WORKER] File {file_id} claim failed/skipped")
-        return
+        return False
     
     # Step 10: Load source file and inventory membership
     source_file = _load_source_file(file_id)
@@ -471,6 +590,7 @@ def _process_file(
     _mark_file_completed_safe(job_id, file_id)
     
     log.debug(f"[EMBEDDING_WORKER] Completed file {file_id}")
+    return True
 
 
 def _claim_file_safe(job_id: str, file_view) -> Optional[bool]:
@@ -521,6 +641,22 @@ def _load_source_file(file_id: str) -> File:
     return source_file
 
 
+def _get_file_display_name(file_id: str) -> str:
+    """Return a safe display name for error records (filename when available).
+
+    Falls back to the stable file id so every failure record still identifies
+    the file even when the source row is missing or unreadable.
+    """
+    try:
+        with get_db() as db:
+            source_file = db.query(File).filter(File.id == file_id).first()
+        if source_file is not None and source_file.filename:
+            return source_file.filename
+    except Exception:
+        pass
+    return file_id
+
+
 def _load_or_parse_chunks(
     admin_id: str, file_id: str, source_file: File, content_hash: Optional[str]
 ) -> tuple[list, list[str]]:
@@ -563,11 +699,30 @@ def _parse_file_content(source_file: File, admin_id: str, file_id: str) -> tuple
     if source_file.data and isinstance(source_file.data, dict):
         file_content = source_file.data.get("content", "")
     
-    # If no content in data, try to extract from storage (Fix #10)
+    # If no content in data, try to read from storage (Fix #10, Spec 08)
     if not file_content and source_file.path:
+        # Storage read stage: distinguish an unreadable/missing blob (Spec 08
+        # storage_read_failed) from a loader/extraction failure below.
         try:
             file_path = Storage.get_file(source_file.path)
-            if file_path and Storage.file_exists(file_path):
+            storage_readable = bool(file_path and Storage.file_exists(file_path))
+            if not storage_readable:
+                raise EmbeddingError(
+                    FILE_ERROR_STORAGE_READ_FAILED,
+                    detail="The source file is unavailable in storage",
+                )
+        except EmbeddingError:
+            raise
+        except Exception as e:
+            log.error(f"[EMBEDDING_WORKER] Failed to read file {file_id} from storage: {e}")
+            raise EmbeddingError(
+                FILE_ERROR_STORAGE_READ_FAILED,
+                detail=f"Storage read failed: {type(e).__name__}",
+            )
+        
+        if storage_readable:
+            # Extraction stage: loader failures are extraction_failed.
+            try:
                 loader = Loader()
                 docs = loader.load(
                     filename=source_file.filename,
@@ -576,12 +731,12 @@ def _parse_file_content(source_file: File, admin_id: str, file_id: str) -> tuple
                 )
                 if docs:
                     file_content = " ".join([doc.page_content for doc in docs])
-        except Exception as e:
-            log.error(f"[EMBEDDING_WORKER] Failed to extract file {file_id}: {e}")
-            raise EmbeddingError(
-                FILE_ERROR_EXTRACTION_FAILED,
-                detail=f"File extraction failed: {type(e).__name__}",
-            )
+            except Exception as e:
+                log.error(f"[EMBEDDING_WORKER] Failed to extract file {file_id}: {e}")
+                raise EmbeddingError(
+                    FILE_ERROR_EXTRACTION_FAILED,
+                    detail=f"File extraction failed: {type(e).__name__}",
+                )
     
     # Fix #11: Raise error for empty content
     if not file_content or not file_content.strip():
@@ -630,7 +785,7 @@ def _generate_embeddings(
         else:
             # Fix #11: Raise error for unsupported modalities
             raise EmbeddingError(
-                "EMBEDDING_MODALITY_UNSUPPORTED",
+                EMBEDDING_MODALITY_UNSUPPORTED,
                 detail=f"Unsupported chunk modality: {chunk['content_type']}",
             )
     
@@ -638,18 +793,15 @@ def _generate_embeddings(
         return []
     
     # Fix #1: Use embed_for_frozen_context with target model ID
-    try:
-        batch = embedding_service.embed_for_frozen_context(
-            inputs=inputs,
-            admin_id=admin_id,
-            embedding_model_id=target_model_id,
-        )
-        return batch.vectors
-    except EmbeddingError as e:
-        raise EmbeddingError(
-            FILE_ERROR_EMBEDDING_FAILED,
-            detail=f"Embedding generation failed: {e.code}",
-        ) from e
+    # Spec 08: preserve the original stable EmbeddingError code so the caller's
+    # error mapping can record a distinct stage (credentials_missing,
+    # provider_embedding_failed, ...) instead of collapsing every failure.
+    batch = embedding_service.embed_for_frozen_context(
+        inputs=inputs,
+        admin_id=admin_id,
+        embedding_model_id=target_model_id,
+    )
+    return batch.vectors
 
 
 def _write_vectors(
@@ -766,6 +918,29 @@ def _mark_file_failed_safe(job_id: str, file_id: str, error_code: str, error_mes
             file_id=file_id,
             error_code=error_code,
             error_message=error_message,
+            db=db,
+        )
+        db.commit()
+
+
+def _fail_job_files_safe(job_id: str, error: EmbeddingError) -> None:
+    """Persist a safe failure for every nonterminal file after job validation fails."""
+    error_code = _get_stable_error_code(error)
+    file_views = _load_job_files(job_id)
+    error_messages = {
+        file_view.file_id: _build_file_error_message(
+            error_code,
+            _get_file_display_name(file_view.file_id),
+            error,
+        )
+        for file_view in file_views
+        if file_view.status in (FILE_STATUS_PENDING, FILE_STATUS_PROCESSING)
+    }
+    with get_db() as db:
+        EmbeddingJobRepository.fail_nonterminal_files(
+            job_id=job_id,
+            error_code=error_code,
+            error_messages=error_messages,
             db=db,
         )
         db.commit()
