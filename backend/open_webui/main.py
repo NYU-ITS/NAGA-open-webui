@@ -82,6 +82,7 @@ from open_webui.routers import (
     users,
     utils,
     facilities,
+    embedding_jobs,
 )
 
 from open_webui.routers.retrieval import (
@@ -1115,6 +1116,7 @@ app.include_router(
 )
 app.include_router(utils.router, prefix="/api/v1/utils", tags=["utils"])
 app.include_router(facilities.router, prefix="/api/v1/facilities", tags=["facilities"])
+app.include_router(embedding_jobs.router, prefix="/api/v1", tags=["embedding_jobs"])
 
 
 try:

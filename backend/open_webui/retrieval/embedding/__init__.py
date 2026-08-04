@@ -37,6 +37,8 @@ from .errors import (
     EMBEDDING_FILE_NOT_FOUND,
     EMBEDDING_FILE_WRONG_STATUS,
     EMBEDDING_REINDEX_NOT_READY,
+    EMBEDDING_REINDEX_SOURCE_CHANGED,
+    EMBEDDING_RETRY_ACTIVE_EXISTS,
 )
 from .provider import EmbeddingProvider, EmbeddingProviderFactory
 from .state import (
@@ -122,6 +124,8 @@ __all__ = [
     "EMBEDDING_FILE_NOT_FOUND",
     "EMBEDDING_FILE_WRONG_STATUS",
     "EMBEDDING_REINDEX_NOT_READY",
+    "EMBEDDING_REINDEX_SOURCE_CHANGED",
+    "EMBEDDING_RETRY_ACTIVE_EXISTS",
     # Gate
     "RetrievalModelSpace",
     "RetrievalReadyNoState",

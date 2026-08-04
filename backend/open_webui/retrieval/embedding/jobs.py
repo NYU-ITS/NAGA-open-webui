@@ -108,6 +108,7 @@ class EmbeddingJobView:
     failed_files: int
     rq_job_id: Optional[str]
     created_by_user_id: Optional[str]
+    source_job_id: Optional[str]
     error_code: Optional[str]
     error_message: Optional[str]
     created_at: int
@@ -204,6 +205,7 @@ def _job_to_view(row: EmbeddingJob) -> EmbeddingJobView:
         failed_files=row.failed_files,
         rq_job_id=row.rq_job_id,
         created_by_user_id=row.created_by_user_id,
+        source_job_id=getattr(row, "source_job_id", None),
         error_code=row.error_code,
         error_message=row.error_message,
         created_at=row.created_at,
@@ -341,6 +343,308 @@ def _create_job(
     return CreateJobResult(
         job=_job_to_view(job_row),
         files=tuple(_file_to_view(fr) for fr in file_rows),
+    )
+
+
+def _create_retry_job(
+    db,
+    source_job_id: str,
+    admin_id: str,
+) -> CreateJobResult:
+    """Create a retry_failed job from a source job's failed files (Spec 11).
+
+    Validates (in lock order):
+    1. Source job exists, belongs to admin, and is failed/partially_failed.
+    2. Lock admin state row first (serialises concurrent retries per admin).
+    3. No active (queued/processing) job exists (rechecked after state lock).
+    4. Source job's target matches admin's current target; missing state or
+       cleared target fails closed.
+    5. ALL source job files (not just failed) have unchanged content hashes.
+    6. At least one failed file exists, or all files are pending (enqueue-only
+       failure re-enqueue path).
+
+    For enqueue-only failures (queued source job with no processing/completed
+    files), the source job itself is re-enqueued rather than creating a new
+    retry job — the source job and its latest-job pointer are already correct.
+
+    Creates a new ``retry_failed`` job with fresh pending file rows for each
+    failed file.  The source job is never modified.  The admin's
+    ``latest_embedding_job_id`` is updated atomically.
+
+    Raises:
+        EmbeddingError (EMBEDDING_JOB_NOT_FOUND): source job missing.
+        EmbeddingError (EMBEDDING_JOB_WRONG_STATUS): source job not failed
+            and not an enqueue-only failure.
+        EmbeddingError (EMBEDDING_JOB_ACTIVE_EXISTS): active job already exists.
+        EmbeddingError (EMBEDDING_MODEL_STATE_CONFLICT): target mismatch or
+            missing state.
+        EmbeddingError (EMBEDDING_REINDEX_SOURCE_CHANGED): file content changed.
+    """
+    from open_webui.models.embeddings import AdminEmbeddingModelState
+    from open_webui.models.files import File
+
+    now = _now()
+
+    # 1. Lock and validate source job.
+    source_row = (
+        db.query(EmbeddingJob)
+        .filter(EmbeddingJob.id == source_job_id)
+        .with_for_update()
+        .first()
+    )
+    if source_row is None:
+        raise EmbeddingError(
+            EMBEDDING_JOB_NOT_FOUND,
+            detail=f"Source job {source_job_id} not found.",
+        )
+    if source_row.admin_id != admin_id:
+        raise EmbeddingError(
+            EMBEDDING_JOB_NOT_FOUND,
+            detail=f"Source job {source_job_id} not found.",
+        )
+
+    # Explicitly validate source terminal status (Finding 3).
+    # Active jobs are blocked by the active-job check below, but completed
+    # jobs with failed rows must also be rejected — only failed/partially_failed
+    # are valid retry sources.  Queued jobs with no started files are the
+    # enqueue-only failure path (handled below).
+    if source_row.status not in (
+        JOB_STATUS_FAILED,
+        JOB_STATUS_PARTIALLY_FAILED,
+        JOB_STATUS_QUEUED,
+    ):
+        raise EmbeddingError(
+            EMBEDDING_JOB_WRONG_STATUS,
+            detail=(
+                f"Source job {source_job_id} is {source_row.status}; "
+                f"expected failed, partially_failed, or queued (enqueue-only)."
+            ),
+        )
+
+    # 2. Lock admin state row FIRST to serialise concurrent retries.
+    state_row = (
+        db.query(AdminEmbeddingModelState)
+        .filter_by(admin_id=admin_id)
+        .with_for_update()
+        .first()
+    )
+
+    # 3. Recheck active job AFTER acquiring state lock.
+    active = (
+        db.query(EmbeddingJob)
+        .filter(
+            EmbeddingJob.admin_id == admin_id,
+            EmbeddingJob.status.in_(_ACTIVE_JOB_STATUSES),
+        )
+        .first()
+    )
+    if active is not None:
+        raise EmbeddingError(
+            EMBEDDING_RETRY_ACTIVE_EXISTS,
+            detail={
+                "message": f"Admin {admin_id} already has an active job {active.id}.",
+                "active_job_id": active.id,
+                "active_job_status": active.status,
+            },
+        )
+
+    # 4. Target consistency: state must exist and target must match source.
+    if state_row is None:
+        raise EmbeddingError(
+            EMBEDDING_MODEL_STATE_CONFLICT,
+            detail=f"No embedding model state for admin {admin_id}.",
+        )
+    if state_row.target_embedding_model_id is None:
+        raise EmbeddingError(
+            EMBEDDING_MODEL_STATE_CONFLICT,
+            detail=f"Admin {admin_id} has no target model; retry requires a pending target.",
+        )
+    if state_row.target_embedding_model_id != source_row.embedding_model_id:
+        raise EmbeddingError(
+            EMBEDDING_MODEL_STATE_CONFLICT,
+            detail=(
+                f"Source job target '{source_row.embedding_model_id}' does not "
+                f"match current admin target '{state_row.target_embedding_model_id}'."
+            ),
+        )
+
+    # 5. Walk the full retry lineage chain to collect ALL files that will
+    #    contribute vectors to the final promoted model space.  A retry
+    #    activates ALL building vectors (source + retry), so every file in
+    #    the chain must be content-checked.
+    lineage_job_ids: list[str] = []
+    cursor_id: str | None = source_job_id
+    while cursor_id is not None:
+        if cursor_id in lineage_job_ids:
+            break  # cycle guard
+        lineage_job_ids.append(cursor_id)
+        cursor_row = (
+            db.query(EmbeddingJob.source_job_id)
+            .filter(EmbeddingJob.id == cursor_id)
+            .first()
+        )
+        cursor_id = cursor_row[0] if cursor_row else None
+
+    all_lineage_rows = (
+        db.query(EmbeddingJobFile)
+        .filter(EmbeddingJobFile.job_id.in_(lineage_job_ids))
+        .order_by(EmbeddingJobFile.job_id, EmbeddingJobFile.file_id)
+        .all()
+    )
+
+    # Deduplicate by file_id, keeping the most recent snapshot (last in chain).
+    seen_files: dict[str, object] = {}
+    for frow in all_lineage_rows:
+        seen_files[frow.file_id] = frow
+
+    all_source_rows = list(seen_files.values())
+
+    failed_rows = []
+    has_processing_or_completed = False
+    for frow in all_source_rows:
+        if frow.status == FILE_STATUS_FAILED:
+            failed_rows.append(frow)
+        elif frow.status in (FILE_STATUS_PROCESSING, FILE_STATUS_COMPLETED):
+            has_processing_or_completed = True
+
+    # Content staleness: check ALL files in the lineage chain so stale
+    # vectors from previously successful files are never silently promoted.
+    for frow in all_source_rows:
+        snapshot = frow.file_snapshot if isinstance(frow.file_snapshot, dict) else {}
+        original_hash = snapshot.get("content_hash")
+        if not original_hash:
+            # Missing hash: cannot verify — fail closed.
+            raise EmbeddingError(
+                EMBEDDING_REINDEX_SOURCE_CHANGED,
+                detail=(
+                    f"File {frow.file_id} has no content hash in snapshot; "
+                    f"cannot verify staleness. A fresh model-change is required."
+                ),
+            )
+        current_file = db.query(File).filter(File.id == frow.file_id).first()
+        if current_file is None:
+            raise EmbeddingError(
+                EMBEDDING_REINDEX_SOURCE_CHANGED,
+                detail=(
+                    f"File {frow.file_id} no longer exists. "
+                    f"A fresh model-change is required."
+                ),
+            )
+        if not current_file.hash:
+            raise EmbeddingError(
+                EMBEDDING_REINDEX_SOURCE_CHANGED,
+                detail=(
+                    f"File {frow.file_id} has no current content hash; "
+                    f"cannot verify staleness. A fresh model-change is required."
+                ),
+            )
+        if current_file.hash != original_hash:
+            raise EmbeddingError(
+                EMBEDDING_REINDEX_SOURCE_CHANGED,
+                detail=(
+                    f"File {frow.file_id} content has changed since the original job "
+                    f"(original={original_hash}, current={current_file.hash}). "
+                    f"A fresh model-change operation is required."
+                ),
+            )
+
+    # 6. Enqueue-only failure path: source job is queued, no files were ever
+    #    started, and all files are still pending.  Re-enqueue the source job
+    #    rather than creating a duplicate retry job.
+    if (
+        source_row.status in (JOB_STATUS_FAILED, JOB_STATUS_QUEUED)
+        and not has_processing_or_completed
+        and not failed_rows
+    ):
+        # All files are pending — this is an enqueue-only failure.
+        # Mark source job as queued (reset if it was failed) and return it
+        # for re-enqueue.  Clear completed_at so finalization timestamps
+        # reflect the actual completion, not the original enqueue failure.
+        if source_row.status in (JOB_STATUS_FAILED, JOB_STATUS_QUEUED):
+            source_row.status = JOB_STATUS_QUEUED
+            source_row.error_code = None
+            source_row.error_message = None
+            source_row.completed_at = None
+            source_row.updated_at = now
+        db.flush()
+        log.info(
+            "[JOB] re-enqueue path for source job %s (enqueue-only failure)",
+            source_job_id,
+        )
+        return CreateJobResult(
+            job=_job_to_view(source_row),
+            files=tuple(_file_to_view(fr) for fr in all_source_rows),
+        )
+
+    if not failed_rows:
+        raise EmbeddingError(
+            EMBEDDING_JOB_WRONG_STATUS,
+            detail=f"Source job {source_job_id} has no failed files to retry.",
+        )
+
+    # 7. Create new retry_failed job with fresh pending file rows.
+    retry_files = [ReindexFile.from_dict(fr.file_snapshot) for fr in failed_rows]
+
+    new_job_id = str(uuid.uuid4())
+    job_row = EmbeddingJob(
+        id=new_job_id,
+        admin_id=admin_id,
+        embedding_model_id=source_row.embedding_model_id,
+        previous_embedding_model_id=source_row.previous_embedding_model_id,
+        job_type="retry_failed",
+        status=JOB_STATUS_QUEUED,
+        total_files=len(retry_files),
+        processed_files=0,
+        failed_files=0,
+        source_job_id=source_job_id,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(job_row)
+
+    for reindex_file in retry_files:
+        file_row = EmbeddingJobFile(
+            job_id=new_job_id,
+            file_id=reindex_file.file_id,
+            status=FILE_STATUS_PENDING,
+            attempt_count=0,
+            file_snapshot=reindex_file.to_dict(),
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(file_row)
+
+    # 8. Update latest job pointer atomically.
+    state_row.latest_embedding_job_id = new_job_id
+    state_row.updated_at = now
+
+    db.flush()
+
+    log.info(
+        "[JOB] created retry job %s from source %s for admin %s: %d failed files",
+        new_job_id,
+        source_job_id,
+        admin_id,
+        len(retry_files),
+    )
+    return CreateJobResult(
+        job=_job_to_view(job_row),
+        files=tuple(
+            EmbeddingJobFileView(
+                job_id=new_job_id,
+                file_id=rf.file_id,
+                status=FILE_STATUS_PENDING,
+                attempt_count=0,
+                error_code=None,
+                error_message=None,
+                file_snapshot=rf.to_dict(),
+                created_at=now,
+                updated_at=now,
+                started_at=None,
+                completed_at=None,
+            )
+            for rf in retry_files
+        ),
     )
 
 
@@ -845,21 +1149,22 @@ def _finalize_job_success(
             ),
         )
 
-    # 5. Activate target job vectors (building → active).
-    #    Scoped to this specific job_id so stale vectors from failed/retried
-    #    attempts are never promoted. Uses caller's db session for atomicity.
+    # 5. Activate ALL target vectors (building → active) for this admin/model.
+    #    NOT scoped to job_id: a retry must publish both the repaired rows
+    #    (from the retry job) AND the prior successful rows (from the source
+    #    job).  Stale vectors from genuinely abandoned attempts are safe because
+    #    _create_retry_job validates content hashes for ALL source files before
+    #    allowing the retry to proceed.
     activated = vector_repo.activate_target_vectors(
         admin_id=admin_id,
         model=target_model_spec,
         session=db,
-        job_id=job_id,
     )
     log.info(
-        "[JOB] activated %d target vectors for admin %s model %s job %s",
+        "[JOB] activated %d target vectors for admin %s model %s",
         activated,
         admin_id,
         target_model_id,
-        job_id,
     )
 
     # 6. Deactivate previous-model vectors (active → inactive).
@@ -1323,6 +1628,29 @@ class EmbeddingJobRepository:
             vector_repo,
             target_model_spec,
         )
+
+    @staticmethod
+    def create_retry_job(
+        source_job_id: str,
+        admin_id: str,
+        db=None,
+    ) -> CreateJobResult:
+        """Create a retry_failed job from a source job's failed files.
+
+        Validates source job status, no active jobs, target consistency, and
+        content staleness.  Creates a new ``retry_failed`` job with fresh
+        pending file rows.  The source job is never modified.
+
+        Raises:
+            EmbeddingError: on validation failure (wrong status, active job,
+                target mismatch, source content changed).
+        """
+        if db is None:
+            with get_db() as session:
+                result = _create_retry_job(session, source_job_id, admin_id)
+                session.commit()
+                return result
+        return _create_retry_job(db, source_job_id, admin_id)
 
     @staticmethod
     def list_failed_files(job_id: str, db=None) -> list[EmbeddingJobFileView]:

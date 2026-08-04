@@ -183,6 +183,7 @@ class EmbeddingJob(Base):
     failed_files = Column(Integer, nullable=False, default=0)
     rq_job_id = Column(String, unique=True)
     created_by_user_id = Column(String, ForeignKey("user.id", ondelete="SET NULL"))
+    source_job_id = Column(String, ForeignKey("embedding_jobs.id", ondelete="SET NULL"))
     error_code = Column(String(64))
     error_message = Column(Text)
     created_at = Column(BigInteger, nullable=False)
