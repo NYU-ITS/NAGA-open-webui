@@ -397,9 +397,9 @@ async def update_embedding_config(
     admin_email = user.email
     try:
         request.app.state.config.RAG_EMBEDDING_ENGINE = form_data.embedding_engine
-        request.app.state.config.RAG_EMBEDDING_MODEL_USER.set(
-            admin_email, form_data.embedding_model
-        )
+        # NOTE: RAG_EMBEDDING_MODEL_USER is NOT written here.  It is persisted
+        # atomically inside request_model_change() so a validation or inventory
+        # failure rolls config back together with durable state.
 
         if request.app.state.config.RAG_EMBEDDING_ENGINE in [
             "ollama",
@@ -434,20 +434,25 @@ async def update_embedding_config(
         # Credential-safe: Do not rebuild global EMBEDDING_FUNCTION
         # Embedding service is created per-request with user-specific credentials
 
-        saved_model = request.app.state.config.RAG_EMBEDDING_MODEL_USER.get(user.email) or ""
-
         # Phase 4: Create durable reindex job via model-change transaction.
-        # Config is already saved above; this creates a reindex job if the
-        # model actually changed.  Errors here do NOT roll back the config
-        # save — they are surfaced to the caller so the admin can act.
+        # RAG_EMBEDDING_MODEL_USER is written atomically inside the transaction
+        # so a validation or inventory failure rolls config back together with
+        # durable state.
         reindex_job = None
+        change_result = None
         if form_data.embedding_model and form_data.embedding_model.strip():
             try:
-                change_result = request_model_change(
+                change_result, _admin_email = request_model_change(
                     admin_id=user.id,
                     target_model_id=form_data.embedding_model,
                     authenticated_user_id=user.id,
                     config=request.app.state.config,
+                )
+                # Config was written atomically inside the transaction.
+                # Invalidate caches now that the transaction has committed.
+                from open_webui.config import invalidate_user_scoped_config_cache
+                invalidate_user_scoped_config_cache(
+                    admin_email, "rag.embedding_model_user"
                 )
                 if isinstance(change_result, ModelChangeResult):
                     try:
@@ -510,6 +515,13 @@ async def update_embedding_config(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail=ERROR_MESSAGES.DEFAULT(e),
                 )
+
+        # Derive the authoritative model name from the transaction result
+        # (falls back to the form value when no model change was attempted).
+        if change_result is not None:
+            saved_model = change_result.target_model_id
+        else:
+            saved_model = form_data.embedding_model or ""
 
         return {
             "status": True,

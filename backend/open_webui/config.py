@@ -592,8 +592,42 @@ class UserScopedConfig:
 
 
 
+def invalidate_user_scoped_config_cache(email: str, config_path: str) -> None:
+    """Invalidate caches for a ``UserScopedConfig`` value after a transactional write.
+
+    Call this after the owning database transaction has committed.  Mirrors the
+    cache-update logic at the tail of ``UserScopedConfig.set()`` but is safe to
+    call from any post-commit path (e.g. ``request_model_change``).
+    """
+    from open_webui.utils.cache import get_cache_manager
+    from open_webui.models.users import Users
+    from open_webui.models.groups import Groups
+
+    cache = get_cache_manager()
+    user = Users.get_user_by_email(email)
+    if user is None:
+        return
+
+    is_api_key = "api_key" in config_path or "openai_api_key" in config_path
+
+    cache.invalidate_user_settings(user.id, config_path)
+    cache.set_user_settings(user.id, config_path, None)  # force reload on next read
+    logging.debug(
+        f"[CACHE_INVALIDATE] invalidated {config_path} for admin {email} (ID: {user.id})"
+    )
+
+    groups = Groups.get_groups(email)
+    for group in groups:
+        cache.invalidate_group_admin_config(group.id, config_path)
+        member_count = cache.invalidate_group_member_users(group.id)
+        logging.debug(
+            f"[CACHE_INVALIDATE] invalidated {config_path} for {member_count} member(s) "
+            f"of group {group.id} (admin {email})"
+        )
+
+
 class AppConfig:
-    _state: dict[str, PersistentConfig | UserScopedConfig ]
+    _state: dict[str, PersistentConfig | UserScopedConfig]
 
     def __init__(self):
         super().__setattr__("_state", {})

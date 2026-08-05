@@ -11,18 +11,22 @@ but does not perform HTTP authentication.
 
 Transaction flow:
 1.  Verify requester == admin_id
-2.  Lock admin embedding-state row
+2.  Lock admin embedding-state row; resolve admin email
 3.  Resolve target model by ID or name (within transaction)
 4.  Validate enabled status and dimension support
 5.  Pending-target guard: reject active jobs, require retry for same failed
     target, allow atomic replacement for a different failed target
 6.  Reject if active job exists (when no pending target)
-7.  Reject if target equals active model (unless retry needed)
+7.  Reject if target equals active model (unless retry needed); repair stale
+    compatibility config on no-op
 8.  Build deterministic inventory before mutation
 9.  Create job + file rows atomically
 10. Set target model and latest job ID (replace_existing if replacing)
-11. Commit once
-12. Enqueue job (caller responsible via Spec 05)
+11. Write RAG_EMBEDDING_MODEL_USER inside the transaction
+12. Commit once
+13. Reload job from DB
+14. Return (result, admin_email); caller invalidates caches after commit
+    Enqueue job (caller responsible via Spec 05)
 
 Non-goals:
 - Executing reindex work (Spec 05/06)
@@ -35,6 +39,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from open_webui.internal.db import get_db
+from open_webui.models.users import Users
 from open_webui.retrieval.embedding.errors import (
     EmbeddingError,
     EMBEDDING_JOB_ACTIVE_EXISTS,
@@ -97,11 +102,17 @@ def request_model_change(
     target_model_id: str,
     authenticated_user_id: str,
     config=None,
-) -> ModelChangeResult | ModelChangeNoOp:
+) -> tuple[ModelChangeResult | ModelChangeNoOp, str]:
     """Execute the model-change transaction atomically.
 
     Authorization precondition: authenticated_user_id must equal admin_id.
     Caller must perform HTTP authentication before invoking this function.
+
+    The admin's ``RAG_EMBEDDING_MODEL_USER`` compatibility config is written
+    inside the same transaction so a validation or inventory failure rolls
+    config back together with durable state.  The second element of the
+    returned tuple is the admin's email, which the caller uses to invalidate
+    caches *after* commit.
 
     Args:
         admin_id: Stable user ID of the admin whose model to change.
@@ -110,7 +121,8 @@ def request_model_change(
         config: Optional config for resolving admin/model if not in DB yet.
 
     Returns:
-        ModelChangeResult on success, or ModelChangeNoOp if no change needed.
+        ``(ModelChangeResult, admin_email)`` on success, or
+        ``(ModelChangeNoOp, admin_email)`` if no change needed.
 
     Raises:
         EmbeddingError: On authorization failure, validation error, duplicate guard,
@@ -123,12 +135,21 @@ def request_model_change(
             detail=f"Requester {authenticated_user_id} is not authorized to change admin {admin_id}.",
         )
 
-    # Step 2-13: Atomic transaction
+    # Step 2-14: Atomic transaction
     with get_db() as db:
         # Step 2: Ensure admin state exists and lock (creates if missing)
         state_view = AdminEmbeddingModelStateRepository.ensure_state(
             admin_id, config, db=db
         )
+
+        # Resolve admin email once for config writes and return value.
+        admin_user = Users.get_user_by_id(admin_id)
+        if admin_user is None:
+            raise EmbeddingError(
+                EMBEDDING_ADMIN_UNRESOLVED,
+                detail=f"Admin {admin_id} not found.",
+            )
+        admin_email = admin_user.email
 
         # Step 3-4: Resolve and validate target model (within transaction)
         target_spec = _resolve_target_model(target_model_id)
@@ -209,12 +230,19 @@ def request_model_change(
                                     f"latest job {latest_job.id} failed. Use retry endpoint instead."
                                 ),
                             )
-            # No failed job to same target, return no-op
+            # No failed job to same target.  Repair stale compatibility
+            # config if it doesn't match the active model, then return no-op.
+            if config is not None:
+                current_cfg = config.RAG_EMBEDDING_MODEL_USER.get(admin_email) or ""
+                if current_cfg != target_spec.name:
+                    config.RAG_EMBEDDING_MODEL_USER.set(
+                        admin_email, target_spec.name, db=db
+                    )
             return ModelChangeNoOp(
                 active_model_id=state_view.active_embedding_model_id,
                 target_model_id=target_spec.id,
                 reason="Target equals active model; no reindex needed.",
-            )
+            ), admin_email
 
         # Step 8: Build inventory before mutation (failures abort transaction)
         inventory = build_reindex_inventory(admin_id, db=db)
@@ -240,7 +268,14 @@ def request_model_change(
             replace_existing=replace_existing,
         )
 
-        # Step 11: Commit (happens automatically when exiting with block)
+        # Step 11: Write compatibility config inside the transaction so a
+        # failure rolls config back together with durable state.
+        if config is not None:
+            config.RAG_EMBEDDING_MODEL_USER.set(
+                admin_email, target_spec.name, db=db
+            )
+
+        # Step 12: Commit (happens automatically when exiting with block)
         db.commit()
 
         log.info(
@@ -251,7 +286,7 @@ def request_model_change(
             len(inventory),
         )
 
-        # Step 12: Reload job from DB to get authoritative state after commit
+        # Step 13: Reload job from DB to get authoritative state after commit
         committed_job = EmbeddingJobRepository.get_job(job_result.job.id, db=db)
         if committed_job is None:
             # Should not happen, but defensive
@@ -260,14 +295,14 @@ def request_model_change(
                 detail=f"Job {job_result.job.id} not found after commit.",
             )
 
-        # Step 13: Return response contract from committed state
+        # Step 14: Return response contract from committed state
         return ModelChangeResult(
             job_id=committed_job.id,
             status=committed_job.status,
             active_model_id=state_view.active_embedding_model_id,
             target_model_id=target_spec.id,
             total_files=committed_job.total_files,
-        )
+        ), admin_email
 
 
 def _resolve_target_model(target_model_id: str) -> EmbeddingModelSpec:
