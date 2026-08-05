@@ -24,6 +24,9 @@ from dataclasses import dataclass, asdict
 
 from open_webui.retrieval.embedding.errors import (
     EmbeddingError,
+    EMBEDDING_FILE_NOT_FOUND,
+    EMBEDDING_INVENTORY_UNRESOLVED_SOURCE,
+    EMBEDDING_MODEL_SPACE_MIXED,
     EMBEDDING_REINDEX_NOT_READY,
 )
 from open_webui.retrieval.embedding.jobs import (
@@ -127,10 +130,12 @@ def assert_embedding_retrieval_ready(
     )
 
     # 2. Validate file ownership: every file must belong to the resolved admin.
+    #    Resolution errors (missing file, unresolved owner, ambiguous admin)
+    #    propagate as EmbeddingError — never treated as permission success.
     if file_ids:
         for fid in file_ids:
             owner_id = _resolve_file_owner(fid)
-            if owner_id is not None and owner_id != admin_id:
+            if owner_id != admin_id:
                 raise EmbeddingError(
                     EMBEDDING_MODEL_SPACE_MIXED,
                     detail=(
@@ -232,19 +237,46 @@ def _raise_blocked(
     raise EmbeddingError(EMBEDDING_REINDEX_NOT_READY, detail=detail)
 
 
-def _resolve_file_owner(file_id: str) -> str | None:
-    """Resolve the admin owner of a file, or None if unresolvable."""
-    try:
-        from open_webui.models.files import Files
-        from open_webui.retrieval.embedding.resolution import resolve_admin_for_user
+def _resolve_file_owner(file_id: str) -> str:
+    """Resolve the admin owner of a file.
 
+    Returns the admin user ID on success.
+
+    Raises:
+        EmbeddingError (EMBEDDING_FILE_NOT_FOUND): file does not exist or
+            DB lookup failed.
+        EmbeddingError (EMBEDDING_INVENTORY_UNRESOLVED_SOURCE): file exists
+            but has no recorded owner (user_id is NULL).
+        EmbeddingError (EMBEDDING_ADMIN_UNRESOLVED / EMBEDDING_ADMIN_AMBIGUOUS):
+            owner user exists but admin resolution failed.  Propagated from
+            ``resolve_admin_for_user``.
+    """
+    from open_webui.models.files import Files
+    from open_webui.retrieval.embedding.resolution import resolve_admin_for_user
+
+    try:
         file_obj = Files.get_file_by_id(file_id)
-        if file_obj is None or file_obj.user_id is None:
-            return None
-        admin = resolve_admin_for_user(file_obj.user_id)
-        return admin.id
-    except Exception:
-        return None
+    except Exception as e:
+        raise EmbeddingError(
+            EMBEDDING_FILE_NOT_FOUND,
+            detail=f"Failed to look up file {file_id}: {type(e).__name__}",
+        ) from e
+
+    if file_obj is None:
+        raise EmbeddingError(
+            EMBEDDING_FILE_NOT_FOUND,
+            detail=f"File {file_id} not found.",
+        )
+
+    if file_obj.user_id is None:
+        raise EmbeddingError(
+            EMBEDDING_INVENTORY_UNRESOLVED_SOURCE,
+            detail=f"File {file_id} has no recorded owner.",
+        )
+
+    # Propagates EMBEDDING_ADMIN_UNRESOLVED / EMBEDDING_ADMIN_AMBIGUOUS
+    admin = resolve_admin_for_user(file_obj.user_id)
+    return admin.id
 
 
 def _get_app_config():
