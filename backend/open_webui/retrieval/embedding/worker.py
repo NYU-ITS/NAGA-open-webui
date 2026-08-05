@@ -413,48 +413,50 @@ def _get_stable_error_code(error: Exception) -> str:
 
 def _claim_job_safe(job_view: EmbeddingJobView) -> Optional[EmbeddingJobView]:
     """Atomically claim job as processing with duplicate delivery detection.
-    
+
     Returns None if duplicate delivery with live owner detected.
     """
+    from open_webui.retrieval.embedding.jobs import _transition_to_processing
+
     with get_db() as db:
-        # Try to transition from queued to processing
-        claimed = EmbeddingJobRepository.transition_to_processing(
-            job_id=job_view.id, db=db
-        )
-        
-        if claimed is not None:
+        # Try to transition from queued to processing.
+        # Use the internal function directly so we can distinguish a fresh
+        # claim (queued → processing) from an already-processing no-op.
+        claimed, changed = _transition_to_processing(db, job_view.id)
+
+        if claimed is None:
+            # Job not found — treat as terminal.
+            raise EmbeddingError(
+                EMBEDDING_JOB_TERMINAL,
+                detail=f"Job {job_view.id} not found during claim",
+            )
+
+        if changed:
+            # Fresh claim: queued → processing.  Commit immediately.
             db.commit()
             log.info(f"[EMBEDDING_WORKER] Claimed job {job_view.id} as processing")
             return claimed
-        
-        # Job already processing - check for duplicate delivery (Fix #2)
-        if job_view.status == JOB_STATUS_PROCESSING:
-            # Check if RQ job is still active
-            rq_job_id = job_view.rq_job_id
-            if rq_job_id:
-                from open_webui.utils.job_queue import get_job_status
-                rq_status = get_job_status(rq_job_id)
-                
-                # If RQ job is queued or started, another worker owns it
-                if rq_status and rq_status.get("status") in ["pending", "processing"]:
-                    log.warning(
-                        f"[EMBEDDING_WORKER] Duplicate delivery detected for job {job_view.id}. "
-                        f"RQ job {rq_job_id} is {rq_status.get('status')}. No-op."
-                    )
-                    return None
-            
-            # RQ job not active or not found - safe to continue
-            log.info(
-                f"[EMBEDDING_WORKER] Job {job_view.id} already processing, "
-                f"continuing with restart/reclaim"
+
+    # Job was already processing — no DB transaction to commit.
+    # Check whether a live RQ worker still owns it before reclaiming.
+    rq_job_id = claimed.rq_job_id
+    if rq_job_id:
+        from open_webui.utils.job_queue import get_job_status
+
+        rq_status = get_job_status(rq_job_id)
+        if rq_status and rq_status.get("status") in ("pending", "processing"):
+            log.warning(
+                f"[EMBEDDING_WORKER] Duplicate delivery detected for job {job_view.id}. "
+                f"RQ job {rq_job_id} is {rq_status.get('status')}. No-op."
             )
-            return job_view
-        
-        # Job in unexpected state
-        raise EmbeddingError(
-            EMBEDDING_JOB_TERMINAL,
-            detail=f"Job {job_view.id} in state {job_view.status}, cannot claim",
-        )
+            return None
+
+    # RQ job not active or not found — safe to reclaim.
+    log.info(
+        f"[EMBEDDING_WORKER] Job {job_view.id} already processing, "
+        f"continuing with restart/reclaim"
+    )
+    return claimed
 
 
 def _load_and_verify_admin(admin_id: str) -> User:

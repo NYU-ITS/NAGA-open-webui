@@ -659,10 +659,16 @@ def _create_retry_job(
     )
 
 
-def _transition_to_processing(db, job_id: str) -> Optional[EmbeddingJobView]:
+def _transition_to_processing(
+    db, job_id: str
+) -> tuple[Optional[EmbeddingJobView], bool]:
     """Internal: atomically transition queued -> processing (flush only).
 
-    Returns None if job not found. Returns current view if already processing (no-op).
+    Returns ``(view, changed)`` where *changed* is True when the job was
+    actually transitioned (queued → processing) and False when the job was
+    already processing (no-op).
+
+    Returns ``(None, False)`` if job not found.
     Raises EMBEDDING_JOB_TERMINAL if job is in a terminal state.
     """
     now = _now()
@@ -673,9 +679,9 @@ def _transition_to_processing(db, job_id: str) -> Optional[EmbeddingJobView]:
         .first()
     )
     if row is None:
-        return None
+        return None, False
     if row.status == JOB_STATUS_PROCESSING:
-        return _job_to_view(row)  # no-op: already processing
+        return _job_to_view(row), False  # no-op: already processing
     if row.status in _TERMINAL_JOB_STATUSES:
         raise EmbeddingError(
             EMBEDDING_JOB_TERMINAL,
@@ -693,7 +699,7 @@ def _transition_to_processing(db, job_id: str) -> Optional[EmbeddingJobView]:
         row.started_at = now
     row.updated_at = now
     db.flush()
-    return _job_to_view(row)
+    return _job_to_view(row), True
 
 
 def _claim_file(db, job_id: str, file_id: str) -> Optional[EmbeddingJobFileView]:
@@ -1469,13 +1475,19 @@ class EmbeddingJobRepository:
 
         Returns None if job not found. Returns current view if already processing (no-op).
         Raises EMBEDDING_JOB_TERMINAL if job is in a terminal state.
+
+        Note: the internal ``_transition_to_processing`` returns ``(view, changed)``;
+        this public wrapper discards the flag for backward compatibility.  Use the
+        internal function directly when you need to distinguish a fresh claim from an
+        already-processing no-op.
         """
         if db is None:
             with get_db() as session:
-                view = _transition_to_processing(session, job_id)
+                view, _changed = _transition_to_processing(session, job_id)
                 session.commit()
                 return view
-        return _transition_to_processing(db, job_id)
+        view, _changed = _transition_to_processing(db, job_id)
+        return view
 
     @staticmethod
     def claim_file(job_id: str, file_id: str, db=None) -> Optional[EmbeddingJobFileView]:
