@@ -722,9 +722,15 @@ def get_sources_from_files(
                 admin_id = None
                 embedding_model_id = None
         except EmbeddingError as e:
-            if e.code in (EMBEDDING_MODEL_SPACE_MIXED, EMBEDDING_REINDEX_NOT_READY):
+            if e.code == EMBEDDING_MODEL_SPACE_MIXED:
+                # Mixed-model request: no valid cross-model results exist.
                 log.warning(f"[RAG Query] retrieval rejected: {e.code} — {e.detail}")
                 return []
+            if e.code == EMBEDDING_REINDEX_NOT_READY:
+                # Blocked state: propagate so callers can distinguish
+                # "no matches" from "reindex in progress / failed."
+                log.warning(f"[RAG Query] retrieval blocked: {e.code} — {e.detail}")
+                raise
             log.debug(
                 f"[RAG Query] model-aware resolution unavailable, using legacy search: {e.code}"
             )

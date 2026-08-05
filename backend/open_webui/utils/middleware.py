@@ -66,6 +66,7 @@ from open_webui.models.users import UserModel
 from open_webui.models.functions import Functions
 from open_webui.models.models import Models
 
+from open_webui.retrieval.embedding.errors import EmbeddingError
 from open_webui.retrieval.utils import (
     get_sources_from_files,
     get_embedding_function,
@@ -663,8 +664,16 @@ async def chat_completion_files_handler(
                 log.info(
                     f"[RAG Context Summary] total_chunks={total_chunks} | sources_count={len(sources)} | per_source: {' | '.join(summary_parts)}"
                 )
+        except EmbeddingError as e:
+            # Propagated blocked state (e.g. EMBEDDING_REINDEX_NOT_READY):
+            # log with structured code and degrade to no-RAG gracefully.
+            log.warning(
+                f"[RAG Chat] retrieval blocked: {e.code} — {e.detail}"
+            )
+            sources = []
         except Exception as e:
             log.exception(e)
+            sources = []
 
         log.debug(f"rag_contexts:sources: {sources}")
 
