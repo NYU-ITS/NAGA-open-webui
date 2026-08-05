@@ -44,8 +44,22 @@ from open_webui.socket.utils import RedisLock
 from open_webui.retrieval.vector.connector import VECTOR_DB_CLIENT
 from open_webui.retrieval.embedding.errors import (
     EmbeddingError,
+    EMBEDDING_ADMIN_UNRESOLVED,
+    EMBEDDING_CREDENTIALS_MISSING,
+    EMBEDDING_JOB_ACTIVE_EXISTS,
+    EMBEDDING_MODEL_DISABLED,
+    EMBEDDING_MODEL_NOT_CONFIGURED,
+    EMBEDDING_MODEL_STATE_CONFLICT,
+    EMBEDDING_PROVIDER_UNSUPPORTED,
     EMBEDDING_REINDEX_NOT_READY,
+    EMBEDDING_STORAGE_DIMENSION_UNSUPPORTED,
 )
+from open_webui.retrieval.embedding.model_change import (
+    ModelChangeResult,
+    ModelChangeNoOp,
+    request_model_change,
+)
+from open_webui.retrieval.embedding.enqueue import enqueue_embedding_job
 
 # Document loaders
 from open_webui.retrieval.loaders.main import Loader
@@ -422,6 +436,81 @@ async def update_embedding_config(
 
         saved_model = request.app.state.config.RAG_EMBEDDING_MODEL_USER.get(user.email) or ""
 
+        # Phase 4: Create durable reindex job via model-change transaction.
+        # Config is already saved above; this creates a reindex job if the
+        # model actually changed.  Errors here do NOT roll back the config
+        # save — they are surfaced to the caller so the admin can act.
+        reindex_job = None
+        if form_data.embedding_model and form_data.embedding_model.strip():
+            try:
+                change_result = request_model_change(
+                    admin_id=user.id,
+                    target_model_id=form_data.embedding_model,
+                    authenticated_user_id=user.id,
+                    config=request.app.state.config,
+                )
+                if isinstance(change_result, ModelChangeResult):
+                    try:
+                        enqueue_embedding_job(change_result.job_id)
+                    except Exception as enqueue_err:
+                        log.error(
+                            "[EMBEDDING_UPDATE] Failed to enqueue job %s: %s",
+                            change_result.job_id,
+                            enqueue_err,
+                            exc_info=True,
+                        )
+                        try:
+                            from open_webui.retrieval.embedding.jobs import EmbeddingJobRepository
+                            EmbeddingJobRepository.mark_job_failed(
+                                job_id=change_result.job_id,
+                                error_code="enqueue_failed",
+                                error_message=f"Failed to enqueue job: {type(enqueue_err).__name__}",
+                            )
+                        except Exception as mark_err:
+                            log.error(
+                                "[EMBEDDING_UPDATE] Failed to mark job %s as failed: %s",
+                                change_result.job_id,
+                                mark_err,
+                                exc_info=True,
+                            )
+                        raise HTTPException(
+                            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="Model config saved, but reindex job enqueue failed. Retry from embedding jobs page.",
+                        )
+                    reindex_job = {
+                        "job_id": change_result.job_id,
+                        "status": change_result.status,
+                        "target_model_id": change_result.target_model_id,
+                        "total_files": change_result.total_files,
+                    }
+            except HTTPException:
+                raise
+            except EmbeddingError as e:
+                if e.code in (EMBEDDING_JOB_ACTIVE_EXISTS, EMBEDDING_MODEL_STATE_CONFLICT):
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail={"error_code": e.code, "message": str(e.detail)},
+                    )
+                if e.code in (EMBEDDING_MODEL_NOT_CONFIGURED, EMBEDDING_MODEL_DISABLED):
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail={"error_code": e.code, "message": str(e.detail)},
+                    )
+                if e.code in (
+                    EMBEDDING_ADMIN_UNRESOLVED,
+                    EMBEDDING_CREDENTIALS_MISSING,
+                    EMBEDDING_PROVIDER_UNSUPPORTED,
+                    EMBEDDING_STORAGE_DIMENSION_UNSUPPORTED,
+                ):
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail={"error_code": e.code, "message": str(e.detail)},
+                    )
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=ERROR_MESSAGES.DEFAULT(e),
+                )
+
         return {
             "status": True,
             "embedding_engine": request.app.state.config.RAG_EMBEDDING_ENGINE,
@@ -435,7 +524,10 @@ async def update_embedding_config(
                 "url": request.app.state.config.RAG_OLLAMA_BASE_URL,
                 "key": request.app.state.config.RAG_OLLAMA_API_KEY,
             },
+            **({"reindex_job": reindex_job} if reindex_job else {}),
         }
+    except HTTPException:
+        raise
     except Exception as e:
         log.exception(f"Problem updating embedding model: {e}")
         raise HTTPException(
