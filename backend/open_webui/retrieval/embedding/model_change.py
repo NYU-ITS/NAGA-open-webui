@@ -10,16 +10,17 @@ authenticated_user_id matching admin_id. This function enforces the precondition
 but does not perform HTTP authentication.
 
 Transaction flow:
-1. Verify requester == admin_id
-2. Lock admin embedding-state row
-3. Resolve target model by ID or name (within transaction)
-4. Validate enabled status and dimension support
-5. Check pending target guard (before inventory)
-6. Reject if active job exists
-7. Reject if target equals active model (unless retry needed)
-8. Build deterministic inventory before mutation
-9. Create job + file rows atomically
-10. Set target model and latest job ID
+1.  Verify requester == admin_id
+2.  Lock admin embedding-state row
+3.  Resolve target model by ID or name (within transaction)
+4.  Validate enabled status and dimension support
+5.  Pending-target guard: reject active jobs, require retry for same failed
+    target, allow atomic replacement for a different failed target
+6.  Reject if active job exists (when no pending target)
+7.  Reject if target equals active model (unless retry needed)
+8.  Build deterministic inventory before mutation
+9.  Create job + file rows atomically
+10. Set target model and latest job ID (replace_existing if replacing)
 11. Commit once
 12. Enqueue job (caller responsible via Spec 05)
 
@@ -48,6 +49,8 @@ from open_webui.retrieval.embedding.state import (
 )
 from open_webui.retrieval.embedding.jobs import (
     EmbeddingJobRepository,
+    JOB_STATUS_QUEUED,
+    JOB_STATUS_PROCESSING,
 )
 from open_webui.retrieval.embedding.inventory import (
     build_reindex_inventory,
@@ -120,7 +123,7 @@ def request_model_change(
             detail=f"Requester {authenticated_user_id} is not authorized to change admin {admin_id}.",
         )
 
-    # Step 2-11: Atomic transaction
+    # Step 2-13: Atomic transaction
     with get_db() as db:
         # Step 2: Ensure admin state exists and lock (creates if missing)
         state_view = AdminEmbeddingModelStateRepository.ensure_state(
@@ -130,22 +133,66 @@ def request_model_change(
         # Step 3-4: Resolve and validate target model (within transaction)
         target_spec = _resolve_target_model(target_model_id)
 
-        # Step 5: Check pending target guard (before inventory)
+        # Step 5: Pending-target guard with failed-target replacement.
+        replace_existing = False
         if state_view.target_embedding_model_id is not None:
-            raise EmbeddingError(
-                EMBEDDING_MODEL_STATE_CONFLICT,
-                detail=f"Admin {admin_id} already has pending target {state_view.target_embedding_model_id}.",
-            )
+            # An active (queued/processing) job always blocks — no replacement.
+            active_job = EmbeddingJobRepository.get_active_job(admin_id, db=db)
+            if active_job is not None:
+                raise EmbeddingError(
+                    EMBEDDING_JOB_ACTIVE_EXISTS,
+                    detail=f"Admin {admin_id} has active job {active_job.id} in status {active_job.status}.",
+                )
 
-        # Step 6: Check for active job
-        active_job = EmbeddingJobRepository.get_active_job(admin_id, db=db)
-        if active_job is not None:
-            raise EmbeddingError(
-                EMBEDDING_JOB_ACTIVE_EXISTS,
-                detail=f"Admin {admin_id} has active job {active_job.id} in status {active_job.status}.",
+            # No active job — the latest job must be terminal.
+            latest_job_id = state_view.latest_embedding_job_id
+            latest_job = (
+                EmbeddingJobRepository.get_job(latest_job_id, db=db)
+                if latest_job_id
+                else None
             )
+            if latest_job is None or latest_job.status not in (
+                "failed",
+                "partially_failed",
+            ):
+                # Target is set but job is not terminal-failed (e.g. completed
+                # but promotion hasn't run, or status is unknown).  Reject to
+                # avoid silently overwriting an in-flight operation.
+                raise EmbeddingError(
+                    EMBEDDING_MODEL_STATE_CONFLICT,
+                    detail=(
+                        f"Admin {admin_id} has pending target "
+                        f"{state_view.target_embedding_model_id} with job "
+                        f"{latest_job_id} in status "
+                        f"{latest_job.status if latest_job else 'missing'}; "
+                        f"cannot replace."
+                    ),
+                )
 
-        # Step 6: Check if target equals active (no-change case)
+            # Latest job is terminal-failed.
+            if target_spec.id == state_view.target_embedding_model_id:
+                # Same failed target — retry only, no new job.
+                raise EmbeddingError(
+                    EMBEDDING_MODEL_STATE_CONFLICT,
+                    detail=(
+                        f"Target model {target_spec.id} matches pending failed "
+                        f"target. Use retry endpoint instead."
+                    ),
+                )
+
+            # Different target — allow atomic replacement.
+            replace_existing = True
+
+        # Step 6: Check for active job (only when no pending target)
+        if not replace_existing:
+            active_job = EmbeddingJobRepository.get_active_job(admin_id, db=db)
+            if active_job is not None:
+                raise EmbeddingError(
+                    EMBEDDING_JOB_ACTIVE_EXISTS,
+                    detail=f"Admin {admin_id} has active job {active_job.id} in status {active_job.status}.",
+                )
+
+        # Step 7: Check if target equals active (no-change case)
         if target_spec.id == state_view.active_embedding_model_id:
             # Check if latest job failed and needs retry
             latest_job_id = state_view.latest_embedding_job_id
@@ -169,10 +216,10 @@ def request_model_change(
                 reason="Target equals active model; no reindex needed.",
             )
 
-        # Step 7: Build inventory before mutation (failures abort transaction)
+        # Step 8: Build inventory before mutation (failures abort transaction)
         inventory = build_reindex_inventory(admin_id, db=db)
 
-        # Step 8: Create job atomically
+        # Step 9: Create job atomically
         job_result = EmbeddingJobRepository.create_job(
             admin_id=admin_id,
             embedding_model_id=target_spec.id,
@@ -183,16 +230,17 @@ def request_model_change(
             db=db,
         )
 
-        # Step 9: Set target model and latest job ID
+        # Step 10: Set target model and latest job ID
         state_view = AdminEmbeddingModelStateRepository.request_target(
             admin_id=admin_id,
             target_model_id=target_spec.id,
             job_id=job_result.job.id,
             config=config,
             db=db,
+            replace_existing=replace_existing,
         )
 
-        # Step 10: Commit (happens automatically when exiting with block)
+        # Step 11: Commit (happens automatically when exiting with block)
         db.commit()
 
         log.info(
@@ -203,7 +251,7 @@ def request_model_change(
             len(inventory),
         )
 
-        # Step 11: Reload job from DB to get authoritative state after commit
+        # Step 12: Reload job from DB to get authoritative state after commit
         committed_job = EmbeddingJobRepository.get_job(job_result.job.id, db=db)
         if committed_job is None:
             # Should not happen, but defensive
@@ -212,7 +260,7 @@ def request_model_change(
                 detail=f"Job {job_result.job.id} not found after commit.",
             )
 
-        # Step 12: Return response contract from committed state
+        # Step 13: Return response contract from committed state
         return ModelChangeResult(
             job_id=committed_job.id,
             status=committed_job.status,

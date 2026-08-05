@@ -127,7 +127,8 @@ def _ensure_state(db, admin_id: str, config) -> AdminEmbeddingModelStateView:
 
 
 def _request_target(
-    db, admin_id: str, target_model_id: str, job_id: str, config
+    db, admin_id: str, target_model_id: str, job_id: str, config, *,
+    replace_existing: bool = False,
 ) -> AdminEmbeddingModelStateView:
     """Set a target model for an in-flight reindex (flush only; caller commits).
 
@@ -135,6 +136,10 @@ def _request_target(
     state from config if missing, and enforces the invariant that an admin cannot
     hold a pending target while another operation is requested. The active model
     is left unchanged.
+
+    When *replace_existing* is True the caller has already validated that the
+    existing target's job is terminal-failed and a different target is being
+    requested, so the pending target may be overwritten.
     """
     admin = resolve_admin_for_admin_id(admin_id)
     target = get_model_spec_by_id(target_model_id)  # NOT_CONFIGURED / DISABLED
@@ -162,9 +167,9 @@ def _request_target(
             if row is None:
                 raise
 
-    # Invariant 5 + replay protection: no pending target may be overwritten.
-    # A new model change requires finalizing/retrying the current target first.
-    if row.target_embedding_model_id is not None:
+    # Replay protection: no pending target may be silently overwritten
+    # unless the caller explicitly opted in (replace_existing=True).
+    if row.target_embedding_model_id is not None and not replace_existing:
         raise EmbeddingError(
             EMBEDDING_MODEL_STATE_CONFLICT,
             detail=(
@@ -282,6 +287,8 @@ class AdminEmbeddingModelStateRepository:
         job_id: str,
         config,
         db=None,
+        *,
+        replace_existing: bool = False,
     ) -> AdminEmbeddingModelStateView:
         """Set a target model for an in-flight reindex without altering active.
 
@@ -289,13 +296,23 @@ class AdminEmbeddingModelStateRepository:
         otherwise a session is opened and committed here. Validates the target,
         seeds state if missing, and rejects a pending target so an in-flight or
         replayed operation cannot be silently overwritten.
+
+        When *replace_existing* is True the caller has already validated that
+        the existing target's job is terminal-failed and a different target is
+        being requested, so the pending target may be overwritten.
         """
         if db is None:
             with get_db() as session:
-                view = _request_target(session, admin_id, target_model_id, job_id, config)
+                view = _request_target(
+                    session, admin_id, target_model_id, job_id, config,
+                    replace_existing=replace_existing,
+                )
                 session.commit()
                 return view
-        return _request_target(db, admin_id, target_model_id, job_id, config)
+        return _request_target(
+            db, admin_id, target_model_id, job_id, config,
+            replace_existing=replace_existing,
+        )
 
     @staticmethod
     def promote_target(
