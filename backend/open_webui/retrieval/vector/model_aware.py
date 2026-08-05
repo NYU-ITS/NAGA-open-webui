@@ -191,16 +191,16 @@ class ModelAwareVectorRepository:
         admin_id: str,
         model: EmbeddingModelSpec,
         session=None,
-        job_id: str | None = None,
+        job_ids: list[str] | None = None,
     ) -> int:
         """Promote target vectors from building to active (Spec 09).
 
         Returns the number of vectors promoted. Only vectors previously written
         with ``embedding_status="building"`` for this admin/model are affected.
-        When ``job_id`` is provided, activation is scoped to vectors written by
-        that specific job so stale vectors from failed/retried attempts are
-        never promoted. ``session`` is forwarded to the vector client for
-        cross-table atomicity.
+        When *job_ids* is provided, activation is scoped to vectors written by
+        those specific jobs (the job lineage) so stale vectors from unrelated
+        abandoned operations are never promoted. ``session`` is forwarded to
+        the vector client for cross-table atomicity.
         """
         client = self._client_for(model.dimension)
         if not hasattr(client, "bulk_update_embedding_status"):
@@ -217,7 +217,7 @@ class ModelAwareVectorRepository:
             from_status=VECTOR_STATUS_BUILDING,
             to_status=VECTOR_STATUS_ACTIVE,
             session=session,
-            job_id=job_id,
+            job_ids=job_ids,
         )
 
     def deactivate_previous_model_vectors(

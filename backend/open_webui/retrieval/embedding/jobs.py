@@ -934,6 +934,27 @@ def _recompute_counters(db, job_id: str) -> Optional[EmbeddingJobView]:
     return _job_to_view(job_row)
 
 
+def _collect_job_lineage(db, job_id: str) -> list[str]:
+    """Walk the source_job_id chain and return all IDs in the lineage.
+
+    The returned list always contains *job_id* itself plus every ancestor
+    reachable via ``source_job_id``.  The walk is bounded by the depth of
+    the retry chain (typically 1–2 hops).
+    """
+    lineage: list[str] = []
+    current: str | None = job_id
+    while current is not None:
+        if current in lineage:
+            break  # defensive: cycle guard
+        lineage.append(current)
+        current = (
+            db.query(EmbeddingJob.source_job_id)
+            .filter(EmbeddingJob.id == current)
+            .scalar()
+        )
+    return lineage
+
+
 def _finalize_job(db, job_id: str) -> Optional[EmbeddingJobView]:
     """Internal: recompute counters and set terminal status (flush only).
 
@@ -1166,16 +1187,17 @@ def _finalize_job_success(
             ),
         )
 
-    # 5. Activate ALL target vectors (building → active) for this admin/model.
-    #    NOT scoped to job_id: a retry must publish both the repaired rows
-    #    (from the retry job) AND the prior successful rows (from the source
-    #    job).  Stale vectors from genuinely abandoned attempts are safe because
-    #    _create_retry_job validates content hashes for ALL source files before
-    #    allowing the retry to proceed.
+    # 5. Activate target vectors (building → active) for this admin/model,
+    #    scoped to the job lineage (current job + source chain).  This ensures
+    #    a retry publishes both its own repaired rows and the prior successful
+    #    rows from the source job, while leaving vectors from unrelated
+    #    abandoned operations in building status.
+    lineage = _collect_job_lineage(db, job_id)
     activated = vector_repo.activate_target_vectors(
         admin_id=admin_id,
         model=target_model_spec,
         session=db,
+        job_ids=lineage,
     )
     log.info(
         "[JOB] activated %d target vectors for admin %s model %s",
