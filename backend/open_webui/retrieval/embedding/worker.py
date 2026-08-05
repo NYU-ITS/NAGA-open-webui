@@ -29,6 +29,7 @@ import logging
 import time
 from typing import Optional
 
+from langchain.text_splitter import RecursiveCharacterTextSplitter, TokenTextSplitter
 from langchain_core.documents import Document
 
 from open_webui.internal.db import get_db
@@ -331,6 +332,7 @@ def process_embedding_job(embedding_job_id: str) -> dict:
                     target_model=target_model,
                     embedding_service=embedding_service,
                     vector_repo=vector_repo,
+                    config=config,
                 )
                 if completed:
                     processed_count += 1
@@ -537,6 +539,7 @@ def _process_file(
     target_model,
     embedding_service: EmbeddingService,
     vector_repo: ModelAwareVectorRepository,
+    config,
 ):
     """Process a single file with all critical fixes."""
     job_id = job_view.id
@@ -562,6 +565,7 @@ def _process_file(
         file_id=file_id,
         source_file=source_file,
         content_hash=file_snapshot.get("content_hash"),
+        config=config,
     )
     
     # Fix #11: Raise error for empty content
@@ -664,7 +668,8 @@ def _get_file_display_name(file_id: str) -> str:
 
 
 def _load_or_parse_chunks(
-    admin_id: str, file_id: str, source_file: File, content_hash: Optional[str]
+    admin_id: str, file_id: str, source_file: File, content_hash: Optional[str],
+    config,
 ) -> tuple[list, list[str]]:
     """Load persisted rag_chunks or parse file content.
     
@@ -691,20 +696,70 @@ def _load_or_parse_chunks(
     
     # Parse file content (Fix #10: use proper parsing pipeline)
     log.debug(f"[EMBEDDING_WORKER] Parsing file {file_id} content")
-    return _parse_file_content(source_file, admin_id, file_id)
+    return _parse_file_content(source_file, admin_id, file_id, config)
 
 
-def _parse_file_content(source_file: File, admin_id: str, file_id: str) -> tuple[list, list[str]]:
-    """Parse file content into chunks using proper pipeline.
-    
+def _get_chunk_settings(config, admin_id: str) -> tuple[int, int]:
+    """Return (chunk_size, chunk_overlap) for the given admin.
+
+    Mirrors ``_get_user_chunk_settings`` from the canonical ingestion pipeline
+    but operates on the worker config (no FastAPI request object).
+    """
+    try:
+        chunk_size = config.CHUNK_SIZE.get(admin_id)
+        chunk_overlap = config.CHUNK_OVERLAP.get(admin_id)
+    except Exception:
+        chunk_size, chunk_overlap = None, None
+
+    if not chunk_size or chunk_size <= 0:
+        chunk_size = 1000
+    if chunk_overlap is None or chunk_overlap < 0:
+        chunk_overlap = 200
+    return chunk_size, chunk_overlap
+
+
+def _make_text_splitter(config, chunk_size: int, chunk_overlap: int):
+    """Build the configured text splitter (mirrors canonical pipeline)."""
+    splitter_name = getattr(config, "TEXT_SPLITTER", "") or ""
+    if splitter_name in ("", "character"):
+        return RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            add_start_index=True,
+        )
+    elif splitter_name == "token":
+        encoding_name = getattr(config, "TIKTOKEN_ENCODING_NAME", "cl100k_base")
+        import tiktoken
+        tiktoken.get_encoding(str(encoding_name))
+        return TokenTextSplitter(
+            encoding_name=str(encoding_name),
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            add_start_index=True,
+        )
+    # Fallback: character splitter (same as canonical pipeline default)
+    return RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        add_start_index=True,
+    )
+
+
+def _parse_file_content(
+    source_file: File, admin_id: str, file_id: str, config
+) -> tuple[list, list[str]]:
+    """Parse file content into chunks using the canonical splitter pipeline.
+
     Returns tuple of (chunks, rag_chunk_ids).
-    Fix #10: Use existing file storage and Loader/chunker pipeline.
+    Uses the same Loader + text splitter pipeline as normal file ingestion
+    so reindexed vectors match the granularity and metadata of original vectors.
     """
     # Load file content from storage
+    docs = None
     file_content = None
     if source_file.data and isinstance(source_file.data, dict):
         file_content = source_file.data.get("content", "")
-    
+
     # If no content in data, try to read from storage (Fix #10, Spec 08)
     if not file_content and source_file.path:
         # Storage read stage: distinguish an unreadable/missing blob (Spec 08
@@ -725,7 +780,7 @@ def _parse_file_content(source_file: File, admin_id: str, file_id: str) -> tuple
                 FILE_ERROR_STORAGE_READ_FAILED,
                 detail=f"Storage read failed: {type(e).__name__}",
             )
-        
+
         if storage_readable:
             # Extraction stage: loader failures are extraction_failed.
             try:
@@ -735,37 +790,62 @@ def _parse_file_content(source_file: File, admin_id: str, file_id: str) -> tuple
                     content_type=source_file.content_type,
                     file_path=file_path,
                 )
-                if docs:
-                    file_content = " ".join([doc.page_content for doc in docs])
             except Exception as e:
                 log.error(f"[EMBEDDING_WORKER] Failed to extract file {file_id}: {e}")
                 raise EmbeddingError(
                     FILE_ERROR_EXTRACTION_FAILED,
                     detail=f"File extraction failed: {type(e).__name__}",
                 )
-    
-    # Fix #11: Raise error for empty content
+
+    # Build Document objects with full metadata (matches canonical pipeline)
+    if docs:
+        file_content = " ".join(doc.page_content for doc in docs)
     if not file_content or not file_content.strip():
         raise EmbeddingError(
             FILE_ERROR_EMPTY_CONTENT,
             detail=f"File {file_id} contains no extractable content",
         )
-    
-    # Simple chunking: treat entire file as one chunk
-    # TODO: Implement proper text splitting using existing utilities
-    chunk = {
-        "content": file_content,
-        "content_type": "text",
-        "metadata": {
-            "file_id": source_file.id,
-            "filename": source_file.filename,
-        },
+
+    base_metadata = {
+        "name": source_file.filename,
+        "created_by": source_file.user_id,
+        "file_id": source_file.id,
+        "source": source_file.filename,
     }
-    
+    if docs:
+        for doc in docs:
+            doc.metadata.update(base_metadata)
+    else:
+        docs = [Document(page_content=file_content, metadata=dict(base_metadata))]
+
+    # Apply the canonical text splitter so chunk granularity matches normal
+    # ingestion.  Chunk settings come from the worker config (same source as
+    # the web UI).
+    chunk_size, chunk_overlap = _get_chunk_settings(config, admin_id)
+    if chunk_size <= 0:
+        chunk_size = 1000
+    if chunk_overlap < 0:
+        chunk_overlap = 0
+    if chunk_overlap >= chunk_size:
+        chunk_overlap = chunk_size // 4
+
+    text_splitter = _make_text_splitter(config, chunk_size, chunk_overlap)
+    docs = text_splitter.split_documents(docs)
+
+    # Convert split Documents to the chunk dict format expected downstream
+    chunks = [
+        {
+            "content": doc.page_content,
+            "content_type": "text",
+            "metadata": dict(doc.metadata),
+        }
+        for doc in docs
+    ]
+
     # Persist chunks as rag_chunks
-    rag_chunk_ids = _persist_chunks(admin_id, file_id, [chunk])
-    
-    return [chunk], rag_chunk_ids
+    rag_chunk_ids = _persist_chunks(admin_id, file_id, chunks)
+
+    return chunks, rag_chunk_ids
 
 
 def _persist_chunks(admin_id: str, file_id: str, chunks: list) -> list[str]:
