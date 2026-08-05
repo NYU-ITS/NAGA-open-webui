@@ -472,9 +472,13 @@ def _create_retry_job(
     #    contribute vectors to the final promoted model space.  A retry
     #    activates ALL building vectors (source + retry), so every file in
     #    the chain must be content-checked.
+    #
+    #    Depth is capped at 16 to prevent runaway walks from corrupted or
+    #    circular lineage data.  Practical retry chains are ≤3 deep.
+    _MAX_LINEAGE_DEPTH = 16
     lineage_job_ids: list[str] = []
     cursor_id: str | None = source_job_id
-    while cursor_id is not None:
+    while cursor_id is not None and len(lineage_job_ids) < _MAX_LINEAGE_DEPTH:
         if cursor_id in lineage_job_ids:
             break  # cycle guard
         lineage_job_ids.append(cursor_id)
@@ -484,6 +488,13 @@ def _create_retry_job(
             .first()
         )
         cursor_id = cursor_row[0] if cursor_row else None
+    if len(lineage_job_ids) >= _MAX_LINEAGE_DEPTH:
+        log.warning(
+            "[JOB] lineage depth cap (%d) reached for source job %s; "
+            "some ancestor files may not be checked",
+            _MAX_LINEAGE_DEPTH,
+            source_job_id,
+        )
 
     all_lineage_rows = (
         db.query(EmbeddingJobFile)
