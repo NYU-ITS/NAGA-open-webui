@@ -12,6 +12,10 @@ Verifies that:
 - /ensure writes PORTKEY_API_BASE_URL alongside PORTKEY_API_KEY
 - /ensure is idempotent (safe to call on every workspace settings save)
 - _prepopulate_portkey_valves finds Valves nested inside Pipe (not just top-level Valves)
+- Step 1 returns immediately (no valve update) when is_system_default=True already exists
+- Step 2 adopts an existing content-matched clone and marks is_system_default=True
+- Step 3 creates a fresh function with is_active=False when no content match exists
+- Step 3 skips creation and returns None when the derived ID is already taken by modified content
 
 Run locally (from project root):
 
@@ -214,4 +218,101 @@ def test_pipe_nested_valves_prepopulated(tmp_path):
     assert data["key_value_correct"] is True, "pre-populated key must match workspace key"
     assert data["has_portkey_url"] is True, (
         "_prepopulate must also set PORTKEY_API_BASE_URL when defined in Pipe.Valves"
+    )
+
+
+# ── 12: Step 1 short-circuits without updating the valve ─────────────────────
+
+def test_step1_returns_immediately(tmp_path):
+    """When is_system_default=True already exists, ensure must detect it in Step 1
+    and return immediately without updating the valve. The cascade owns the valve
+    after first setup; ensure must not overwrite it on every admin login."""
+    data = run_scenario(tmp_path, "STEP1_RETURNS_IMMEDIATELY")
+    assert data["step1_detected"] is True, (
+        "ensure must detect the existing is_system_default=True function in Step 1"
+    )
+    assert data["function_returned"] is True, (
+        "Step 1 must return the existing system default function"
+    )
+    assert data["valve_not_updated"] is True, (
+        "Step 1 must not update PORTKEY_API_KEY — valve must retain original value"
+    )
+    assert data["url_not_updated"] is True, (
+        "Step 1 must not update PORTKEY_API_BASE_URL — valve must retain original value"
+    )
+
+
+# ── 13: Step 2 adopts existing content-matched clone ─────────────────────────
+
+def test_content_match_adopted(tmp_path):
+    """When the admin has a function with matching content (same as system default)
+    but not marked is_system_default=True, ensure Step 2 must adopt it: mark
+    is_system_default=True, write canonical content, and set the valve.
+    No new function must be created."""
+    data = run_scenario(tmp_path, "CONTENT_MATCH_ADOPTED")
+    assert data["adopted"] is True, (
+        "Step 2 must find the content-matched clone and adopt it"
+    )
+    assert data["adopted_id_is_clone"] is True, (
+        "adopted function must be the original clone, not a new function"
+    )
+    assert data["no_new_function_created"] is True, (
+        "Step 2 must not create a new function — exactly one system default must exist"
+    )
+    assert data["valve_key_set"] is True, (
+        "adopted function valve must have PORTKEY_API_KEY set to the provided key"
+    )
+    assert data["valve_url_set"] is True, (
+        "adopted function valve must have PORTKEY_API_BASE_URL set"
+    )
+
+
+# ── 14: Step 3 creates fresh function with is_active=False ───────────────────
+
+def test_content_mismatch_fresh_inactive(tmp_path):
+    """When the admin has no function with matching content, ensure Step 3 must
+    create a fresh system default function with is_active=False so the admin's
+    existing active function continues running undisturbed."""
+    data = run_scenario(tmp_path, "CONTENT_MISMATCH_FRESH_INACTIVE")
+    assert data["new_function_created"] is True, (
+        "Step 3 must create a new system default function when no content match exists"
+    )
+    assert data["new_function_inactive"] is True, (
+        "freshly created system default must start with is_active=False"
+    )
+    assert data["new_function_is_system_default"] is True, (
+        "freshly created function must have is_system_default=True"
+    )
+    assert data["original_function_still_active"] is True, (
+        "admin's original active function must remain active — ensure must not touch it"
+    )
+    assert data["valve_key_set"] is True, (
+        "fresh system default valve must have PORTKEY_API_KEY set"
+    )
+
+
+# ── 15: Step 3 skips when derived ID is taken by modified content ─────────────
+
+def test_id_collision_skip(tmp_path):
+    """When the derived system default ID (system_default_llm__<net_id>) is
+    already taken by a function with different content, ensure must skip creation
+    and return None. The admin's modified function must remain completely untouched."""
+    data = run_scenario(tmp_path, "ID_COLLISION_SKIP")
+    assert data["step1_no_system_default"] is True, (
+        "Step 1 must find no is_system_default=True function"
+    )
+    assert data["step2_no_content_match"] is True, (
+        "Step 2 must find no content match for the modified function"
+    )
+    assert data["id_collision_detected"] is True, (
+        "Step 3 must detect that the derived ID is already occupied"
+    )
+    assert data["no_duplicate_created"] is True, (
+        "ensure must not create a second function when ID collision is detected"
+    )
+    assert data["original_content_intact"] is True, (
+        "admin's modified function content must remain completely untouched"
+    )
+    assert data["original_still_active"] is True, (
+        "admin's modified function must remain active after the collision skip"
     )

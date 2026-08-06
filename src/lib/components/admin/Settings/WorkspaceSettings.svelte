@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { toast } from 'svelte-sonner';
 	import { onMount, getContext } from 'svelte';
+	import { beforeNavigate } from '$app/navigation';
 
 	import { user } from '$lib/stores';
 	import { getEmbeddingConfig, updateEmbeddingConfig, updateRAGConfig } from '$lib/apis/retrieval';
@@ -50,6 +51,10 @@
 	let originalApiKey = '';
 
 	let isSaving = false;
+
+	beforeNavigate(({ cancel }) => {
+		if (isSaving) cancel();
+	});
 
 	// ── Test connection ───────────────────────────────────────────────────────
 	let testingConnection = false;
@@ -151,24 +156,25 @@
 				}
 			});
 
-			const cascadedFunctionIds: string[] = [];
-			const failedFunctionNames: string[] = [];
-
-			// Always ensure system default exists (idempotent — creates if missing for an
-			// old admin account, updates key if it already exists). Badge only when key changed.
-			if (apiKey) {
-				try {
-					const ensuredFn = await ensureAdminSystemDefault(localStorage.token, apiKey);
-					if (ensuredFn?.id && keyChanged) {
-						cascadedFunctionIds.push(ensuredFn.id);
-					}
-				} catch (e) {
-					console.error('Failed to ensure admin system default function:', e);
-				}
-			}
-
-			// Gate cascade on key change only to avoid spurious badges on every save.
+			// Gate ensure + cascade on key change only. Provisioning for old admin accounts
+			// that never had a system default now happens at login (layout.svelte onMount),
+			// not on every save — avoids duplicate function creation.
 			if (keyChanged) {
+				const cascadedFunctionIds: string[] = [];
+				const failedFunctionNames: string[] = [];
+
+				// Ensure system default valve is updated with the new key.
+				if (apiKey) {
+					try {
+						const ensuredFn = await ensureAdminSystemDefault(localStorage.token, apiKey);
+						if (ensuredFn?.id) {
+							cascadedFunctionIds.push(ensuredFn.id);
+						}
+					} catch (e) {
+						console.error('Failed to ensure admin system default function:', e);
+					}
+				}
+
 				// Cascade key + URL to functions whose PORTKEY_API_KEY valve was tracking
 				// the previous workspace key (old key -> new key match), was never set
 				// (empty string), or is null (workspace-resolved at runtime). Functions
@@ -206,9 +212,9 @@
 						})
 					);
 				}
-			}
 
-			localStorage.setItem(WORKSPACE_CASCADED_FUNCTIONS_KEY, JSON.stringify(cascadedFunctionIds));
+				localStorage.setItem(WORKSPACE_CASCADED_FUNCTIONS_KEY, JSON.stringify(cascadedFunctionIds));
+			}
 
 			toast.success($i18n.t('Workspace settings saved successfully!'));
 		} catch (e) {
@@ -257,9 +263,10 @@
 			console.error('Failed to load audio config:', e);
 		}
 
-		// Snapshot the resolved API key so saveHandler can detect which functions
-		// were tracking the workspace key prior to this edit.
-		originalApiKey = apiKey;
+		// Snapshot the admin's OWN embedding key — not the audio fallback — so
+		// saveHandler correctly detects a key change even when the audio config
+		// pre-fills the display with a globally-stored key from another admin.
+		originalApiKey = fullEmbeddingConfig?.openai_config?.key || '';
 	});
 </script>
 

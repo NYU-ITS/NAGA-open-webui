@@ -12,7 +12,8 @@
 	import { page } from '$app/stores';
 
 	import { getKnowledgeBases } from '$lib/apis/knowledge';
-	import { getFunctions } from '$lib/apis/functions';
+	import { getFunctions, ensureAdminSystemDefault } from '$lib/apis/functions';
+	import { getEmbeddingConfig } from '$lib/apis/retrieval';
 	import { getModels } from '$lib/apis';
 	import { getAllTags } from '$lib/apis/chats';
 	import { getPrompts } from '$lib/apis/prompts';
@@ -244,6 +245,24 @@
 
 			if ($user.role === 'admin' && ($settings?.showChangelog ?? true)) {
 				showChangelog.set($settings?.version !== $config.version);
+			}
+
+			// Non-blocking: provision system default function for admins at login.
+			// Fire-and-forget IIFE — must never throw into the outer onMount flow.
+			// Mirrors how the API key auto-populates: seamless, no manual Save needed.
+			if ($user.role === 'admin') {
+				(async () => {
+					try {
+						const embeddingConfig = await getEmbeddingConfig(localStorage.token, $user.email);
+						const apiKey = embeddingConfig?.openai_config?.key ?? '';
+						if (apiKey) {
+							await ensureAdminSystemDefault(localStorage.token, apiKey);
+						}
+					} catch (e) {
+						// Best-effort — never block or disrupt login
+						console.error('[SystemDefault] Provision check failed:', e);
+					}
+				})();
 			}
 
 			if ($page.url.searchParams.get('temporary-chat') === 'true') {

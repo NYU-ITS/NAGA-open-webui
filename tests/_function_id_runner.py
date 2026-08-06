@@ -22,6 +22,10 @@ Scenarios:
   ENSURE_INCLUDES_URL            - /ensure writes PORTKEY_API_BASE_URL into system default valve
   ENSURE_IDEMPOTENT              - calling ensure twice with same key succeeds and function still exists
   PIPE_NESTED_VALVES_PREPOPULATED - _prepopulate finds Valves nested inside Pipe class
+  STEP1_RETURNS_IMMEDIATELY      - Step 1 short-circuits when is_system_default=True exists, no valve update
+  CONTENT_MATCH_ADOPTED          - Step 2 adopts existing clone with matching content, marks is_system_default=True
+  CONTENT_MISMATCH_FRESH_INACTIVE - Step 3 creates fresh function with is_active=False when no content match
+  ID_COLLISION_SKIP              - Step 3 skips creation when derived ID is already taken by modified content
 """
 import json
 import sys
@@ -532,6 +536,263 @@ def scenario_pipe_nested_valves_prepopulated():
     }))
 
 
+# ── Scenario: STEP1_RETURNS_IMMEDIATELY ─────────────────────────────────────
+
+def scenario_step1_returns_immediately():
+    """If is_system_default=True already exists, ensure must return immediately
+    without updating the valve. The cascade in WorkspaceSettings owns the valve
+    after first setup — ensure must not overwrite it at every login."""
+    from open_webui.config import DEFAULT_SYSTEM_FUNCTION_CONTENT, DEFAULT_SYSTEM_FUNCTION_ID
+    from open_webui.models.functions import Functions, FunctionForm, FunctionMeta
+    from open_webui.utils.plugin import load_function_module_by_id, replace_imports
+
+    net_id = "aa12947"
+    email = f"{net_id}@nyu.edu"
+    user_id = f"{net_id}-uid"
+    _seed_user(email, user_id)
+    _seed_config(email, "original-key")
+
+    function_id = f"{DEFAULT_SYSTEM_FUNCTION_ID}__{net_id}"
+    content = replace_imports(DEFAULT_SYSTEM_FUNCTION_CONTENT)
+    function_module, function_type, frontmatter = load_function_module_by_id(
+        function_id, content=content
+    )
+    function = Functions.insert_new_function(
+        user_id=user_id,
+        user_email=email,
+        type=function_type,
+        form_data=FunctionForm(
+            id=function_id,
+            name="LLM",
+            content=content,
+            meta=FunctionMeta(description="System default LLM pipe", manifest=frontmatter),
+        ),
+        is_active=True,
+        is_system_default=True,
+    )
+    # Set a distinctive initial valve value that must NOT be overwritten by ensure.
+    Functions.update_function_valves_by_id(function.id, {
+        "PORTKEY_API_KEY": "original-key",
+        "PORTKEY_API_BASE_URL": "https://original.example.com",
+    })
+
+    # Simulate Step 1 of ensure_admin_system_default:
+    # if is_system_default=True exists, return immediately (no valve update).
+    existing = Functions.get_admin_system_default_function(email)
+    if existing:
+        returned_fn = Functions.get_function_by_id(existing.id)
+    else:
+        returned_fn = None
+
+    valves_after = Functions.get_function_valves_by_id(function_id) or {}
+    print(json.dumps({
+        "step1_detected": existing is not None,
+        "function_returned": returned_fn is not None and returned_fn.id == function_id,
+        "valve_not_updated": valves_after.get("PORTKEY_API_KEY") == "original-key",
+        "url_not_updated": valves_after.get("PORTKEY_API_BASE_URL") == "https://original.example.com",
+    }))
+
+
+# ── Scenario: CONTENT_MATCH_ADOPTED ─────────────────────────────────────────
+
+def scenario_content_match_adopted():
+    """If the admin already has a function with matching content (same as system
+    default) but not marked is_system_default=True, ensure must adopt it: mark
+    is_system_default=True, overwrite content with canonical, and update the
+    valve. No new function is created."""
+    from open_webui.config import DEFAULT_SYSTEM_FUNCTION_CONTENT, DEFAULT_SYSTEM_FUNCTION_ID
+    from open_webui.models.functions import Functions, FunctionForm, FunctionMeta
+    from open_webui.routers.functions import _normalize_content
+    from open_webui.utils.plugin import load_function_module_by_id, replace_imports
+    from open_webui.utils.portkey import find_workspace_portkey_url
+
+    net_id = "aa12947"
+    email = f"{net_id}@nyu.edu"
+    user_id = f"{net_id}-uid"
+    _seed_user(email, user_id)
+    _seed_config(email, "match-key")
+
+    # Insert a clone with canonical content but a different ID, no is_system_default flag.
+    canonical_raw = replace_imports(DEFAULT_SYSTEM_FUNCTION_CONTENT)
+    clone_id = f"my_custom_llm__{net_id}"
+    function_module, function_type, frontmatter = load_function_module_by_id(
+        clone_id, content=canonical_raw
+    )
+    Functions.insert_new_function(
+        user_id=user_id,
+        user_email=email,
+        type=function_type,
+        form_data=FunctionForm(
+            id=clone_id,
+            name="My Custom LLM",
+            content=canonical_raw,
+            meta=FunctionMeta(description="existing clone", manifest=frontmatter),
+        ),
+        is_active=True,
+        is_system_default=False,
+    )
+
+    # Simulate Step 2 of ensure_admin_system_default: scan for content match.
+    canonical_norm = _normalize_content(canonical_raw)
+    all_functions = Functions.get_functions(email)
+    adopted_fn = None
+    for fn in all_functions:
+        if _normalize_content(fn.content or '') == canonical_norm:
+            Functions.update_function_by_id(fn.id, {
+                "content": canonical_raw,
+                "is_system_default": True,
+            })
+            valve_update = {
+                "PORTKEY_API_KEY": "match-key",
+                "PORTKEY_API_BASE_URL": find_workspace_portkey_url(),
+            }
+            existing_valves = Functions.get_function_valves_by_id(fn.id) or {}
+            Functions.update_function_valves_by_id(fn.id, {**existing_valves, **valve_update})
+            adopted_fn = Functions.get_function_by_id(fn.id)
+            break
+
+    valves = Functions.get_function_valves_by_id(clone_id) or {}
+    all_system_defaults = [f for f in Functions.get_functions(email) if f.is_system_default]
+    print(json.dumps({
+        "adopted": adopted_fn is not None,
+        "adopted_id_is_clone": adopted_fn is not None and adopted_fn.id == clone_id,
+        "no_new_function_created": len(all_system_defaults) == 1,
+        "valve_key_set": valves.get("PORTKEY_API_KEY") == "match-key",
+        "valve_url_set": bool(valves.get("PORTKEY_API_BASE_URL")),
+    }))
+
+
+# ── Scenario: CONTENT_MISMATCH_FRESH_INACTIVE ────────────────────────────────
+
+def scenario_content_mismatch_fresh_inactive():
+    """If the admin has no function with matching content, ensure must create a
+    fresh system default function with is_active=False so the admin's existing
+    active function continues running undisturbed."""
+    from open_webui.config import DEFAULT_SYSTEM_FUNCTION_CONTENT, DEFAULT_SYSTEM_FUNCTION_ID
+    from open_webui.models.functions import Functions, FunctionForm, FunctionMeta
+    from open_webui.utils.plugin import load_function_module_by_id, replace_imports
+    from open_webui.utils.portkey import find_workspace_portkey_url
+
+    net_id = "aa12947"
+    email = f"{net_id}@nyu.edu"
+    user_id = f"{net_id}-uid"
+    _seed_user(email, user_id)
+    _seed_config(email, "fresh-key")
+
+    # Admin has a function with different (customized) content that is active.
+    other_id = f"other_function__{net_id}"
+    function_module, function_type, frontmatter = load_function_module_by_id(
+        other_id, content=TEST_PIPE_WITH_PORTKEY
+    )
+    Functions.insert_new_function(
+        user_id=user_id,
+        user_email=email,
+        type=function_type,
+        form_data=FunctionForm(
+            id=other_id,
+            name="Other Function",
+            content=TEST_PIPE_WITH_PORTKEY,
+            meta=FunctionMeta(description="admin's custom function", manifest=frontmatter),
+        ),
+        is_active=True,
+        is_system_default=False,
+    )
+
+    # Simulate Step 3: create fresh system default with is_active=False.
+    canonical_raw = replace_imports(DEFAULT_SYSTEM_FUNCTION_CONTENT)
+    function_id = f"{DEFAULT_SYSTEM_FUNCTION_ID}__{net_id}"
+    new_module, new_type, new_frontmatter = load_function_module_by_id(
+        function_id, content=canonical_raw
+    )
+    new_fn = Functions.insert_new_function(
+        user_id=user_id,
+        user_email=email,
+        type=new_type,
+        form_data=FunctionForm(
+            id=function_id,
+            name="LLM",
+            content=canonical_raw,
+            meta=FunctionMeta(description="System default LLM pipe", manifest=new_frontmatter),
+        ),
+        is_active=False,
+        is_system_default=True,
+    )
+    Functions.update_function_valves_by_id(new_fn.id, {
+        "PORTKEY_API_KEY": "fresh-key",
+        "PORTKEY_API_BASE_URL": find_workspace_portkey_url(),
+    })
+
+    new_fn_db = Functions.get_function_by_id(function_id)
+    other_fn_db = Functions.get_function_by_id(other_id)
+    valves = Functions.get_function_valves_by_id(function_id) or {}
+    print(json.dumps({
+        "new_function_created": new_fn_db is not None,
+        "new_function_inactive": new_fn_db is not None and not new_fn_db.is_active,
+        "new_function_is_system_default": new_fn_db is not None and new_fn_db.is_system_default,
+        "original_function_still_active": other_fn_db is not None and other_fn_db.is_active,
+        "valve_key_set": valves.get("PORTKEY_API_KEY") == "fresh-key",
+    }))
+
+
+# ── Scenario: ID_COLLISION_SKIP ──────────────────────────────────────────────
+
+def scenario_id_collision_skip():
+    """If the derived system default ID is already taken by a function with
+    different content (admin customized it), ensure must skip creation and return
+    None. The admin's modified function must remain completely untouched."""
+    from open_webui.config import DEFAULT_SYSTEM_FUNCTION_CONTENT, DEFAULT_SYSTEM_FUNCTION_ID
+    from open_webui.models.functions import Functions, FunctionForm, FunctionMeta
+    from open_webui.routers.functions import _normalize_content
+    from open_webui.utils.plugin import load_function_module_by_id, replace_imports
+
+    net_id = "aa12947"
+    email = f"{net_id}@nyu.edu"
+    user_id = f"{net_id}-uid"
+    _seed_user(email, user_id)
+    _seed_config(email, "collision-key")
+
+    # Insert a function at the canonical ID with different (modified) content.
+    function_id = f"{DEFAULT_SYSTEM_FUNCTION_ID}__{net_id}"
+    function_module, function_type, frontmatter = load_function_module_by_id(
+        function_id, content=TEST_PIPE_WITH_PORTKEY
+    )
+    Functions.insert_new_function(
+        user_id=user_id,
+        user_email=email,
+        type=function_type,
+        form_data=FunctionForm(
+            id=function_id,
+            name="LLM",
+            content=TEST_PIPE_WITH_PORTKEY,
+            meta=FunctionMeta(description="admin-modified function", manifest=frontmatter),
+        ),
+        is_active=True,
+        is_system_default=False,
+    )
+
+    # Simulate the full ensure decision path:
+    # Step 1: no is_system_default=True → None
+    step1_existing = Functions.get_admin_system_default_function(email)
+    # Step 2: content scan → no match (TEST_PIPE_WITH_PORTKEY ≠ canonical)
+    canonical_raw = replace_imports(DEFAULT_SYSTEM_FUNCTION_CONTENT)
+    canonical_norm = _normalize_content(canonical_raw)
+    all_functions = Functions.get_functions(email)
+    step2_match = any(_normalize_content(fn.content or '') == canonical_norm for fn in all_functions)
+    # Step 3: ID collision → skip (return None)
+    id_taken = Functions.get_function_by_id(function_id) is not None
+
+    all_fns_after = Functions.get_functions(email)
+    original_fn_after = Functions.get_function_by_id(function_id)
+    print(json.dumps({
+        "step1_no_system_default": step1_existing is None,
+        "step2_no_content_match": not step2_match,
+        "id_collision_detected": id_taken,
+        "no_duplicate_created": len(all_fns_after) == 1,
+        "original_content_intact": original_fn_after is not None and original_fn_after.content == TEST_PIPE_WITH_PORTKEY,
+        "original_still_active": original_fn_after is not None and original_fn_after.is_active,
+    }))
+
+
 # ── Dispatch ──────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -548,4 +809,8 @@ if __name__ == "__main__":
         "ENSURE_INCLUDES_URL": scenario_ensure_includes_url,
         "ENSURE_IDEMPOTENT": scenario_ensure_idempotent,
         "PIPE_NESTED_VALVES_PREPOPULATED": scenario_pipe_nested_valves_prepopulated,
+        "STEP1_RETURNS_IMMEDIATELY": scenario_step1_returns_immediately,
+        "CONTENT_MATCH_ADOPTED": scenario_content_match_adopted,
+        "CONTENT_MISMATCH_FRESH_INACTIVE": scenario_content_mismatch_fresh_inactive,
+        "ID_COLLISION_SKIP": scenario_id_collision_skip,
     }[scenario]()

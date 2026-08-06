@@ -116,9 +116,7 @@
 		{$i18n.t('No LLM configured.')}
 		<a href={WORKSPACE_SETTINGS_PATH} class="underline">{$i18n.t('Set up your API key')}</a>
 	</div>
-{/if}
-
-{#if showSetDefault}
+{:else if showSetDefault}
 	<div
 		class=" absolute text-left mt-[1px] ml-1 text-[0.7rem] text-gray-600 dark:text-gray-500 font-primary"
 	>

@@ -79,6 +79,21 @@ def _prepopulate_portkey_valves(
         log.exception("Failed to pre-populate Portkey valves for function %s", id)
 
 
+def _normalize_content(content: str) -> str:
+    """Normalize function source for content-match comparison.
+
+    Strips trailing whitespace from each line, drops leading/trailing blank
+    lines, and normalises CRLF → LF. Used by ensure_admin_system_default to
+    detect existing clones that differ from the canonical only in whitespace."""
+    lines = content.replace('\r\n', '\n').split('\n')
+    stripped = [line.rstrip() for line in lines]
+    while stripped and not stripped[0]:
+        stripped.pop(0)
+    while stripped and not stripped[-1]:
+        stripped.pop()
+    return '\n'.join(stripped)
+
+
 class EnsureSystemDefaultForm(BaseModel):
     api_key: str
 
@@ -94,9 +109,26 @@ async def ensure_admin_system_default(
     form_data: EnsureSystemDefaultForm,
     user=Depends(get_admin_user),
 ):
-    """Create or update this admin's personal system-default function copy,
-    setting PORTKEY_API_KEY in its valve. Called when admin saves Workspace Settings.
-    Each admin has exactly one is_system_default=True function owned by their email."""
+    """Idempotent provisioning of this admin's system-default function.
+
+    Called at login (non-blocking fire-and-forget) and on Workspace Settings
+    save when the key changes. Three-step logic:
+
+    Step 1 — already provisioned (is_system_default=True exists):
+        Return immediately. No valve update — the cascade owns the valve after
+        first setup, consistent with how the API key behaves on page load.
+
+    Step 2 — content match found (existing clone with same source):
+        Adopt the clone: overwrite its content with the canonical version
+        (cleaning any whitespace drift), set is_system_default=True, write valve.
+        The function's is_active state is left unchanged — admin keeps their
+        existing toggle state.
+
+    Step 3 — no match, try create fresh:
+        Create a new function with is_active=False so the admin's current active
+        function keeps running. If the derived ID is already taken by a function
+        with different content, log a warning and skip — renaming that function
+        would require chasing all references in models/groups/user-settings."""
     from open_webui.config import (
         DEFAULT_SYSTEM_FUNCTION_CONTENT,
         DEFAULT_SYSTEM_FUNCTION_ID,
@@ -104,46 +136,75 @@ async def ensure_admin_system_default(
 
     if not form_data.api_key:
         log.warning(
-            "Admin %s called ensure with empty key — skipping",
-            user.email,
+            "Admin %s called ensure with empty key — skipping", user.email
         )
         return None
 
+    # ── Step 1: already provisioned ──────────────────────────────────────────
     existing = Functions.get_admin_system_default_function(user.email)
-
-    # Build the valve payload: key from the request + URL from workspace config.
-    # Always write both so the URL stays in sync when the admin saves settings.
-    workspace_url = find_workspace_portkey_url()
-    valve_update = {
-        "PORTKEY_API_KEY": form_data.api_key,
-        "PORTKEY_API_BASE_URL": workspace_url,
-    }
-
     if existing:
-        # Merge with whatever other fields may already be stored (full-overwrite
-        # model layer means we must fetch first to avoid wiping unrelated valves).
-        existing_valves = Functions.get_function_valves_by_id(existing.id) or {}
-        Functions.update_function_valves_by_id(
-            existing.id, {**existing_valves, **valve_update}
-        )
-        log.info(
-            "Updated system default valves for admin %s function %s (key len=%d)",
-            user.email,
-            existing.id,
-            len(form_data.api_key),
+        log.debug(
+            "System default already exists for admin %s (id=%s) — no action needed",
+            user.email, existing.id,
         )
         return Functions.get_function_by_id(existing.id)
 
-    # No existing function — create a new per-admin copy using net_id (not UUID)
-    # so the ID is human-readable and stable across email changes.
+    # ── Step 2: scan all admin functions for content match ────────────────────
+    canonical_raw = replace_imports(DEFAULT_SYSTEM_FUNCTION_CONTENT)
+    canonical_norm = _normalize_content(canonical_raw)
+
+    all_functions = Functions.get_functions(user.email, user=user)
+    log.debug(
+        "Scanning %d functions for content match for admin %s",
+        len(all_functions), user.email,
+    )
+
+    for fn in all_functions:
+        if _normalize_content(fn.content or '') == canonical_norm:
+            log.info(
+                "Content match found for admin %s — adopting function %s (id=%s) as system default",
+                user.email, fn.name, fn.id,
+            )
+            # Overwrite content with canonical (removes whitespace artifacts) and flag it.
+            Functions.update_function_by_id(fn.id, {
+                "content": canonical_raw,
+                "is_system_default": True,
+            })
+            valve_update = {
+                "PORTKEY_API_KEY": form_data.api_key,
+                "PORTKEY_API_BASE_URL": find_workspace_portkey_url(),
+            }
+            existing_valves = Functions.get_function_valves_by_id(fn.id) or {}
+            Functions.update_function_valves_by_id(fn.id, {**existing_valves, **valve_update})
+            log.info(
+                "Adopted function %s as system default for admin %s (key len=%d)",
+                fn.id, user.email, len(form_data.api_key),
+            )
+            return Functions.get_function_by_id(fn.id)
+
+    log.debug(
+        "No content match found for admin %s — proceeding to create fresh", user.email
+    )
+
+    # ── Step 3: create fresh ──────────────────────────────────────────────────
     net_id = user.email.split('@')[0]
     function_id = f"{DEFAULT_SYSTEM_FUNCTION_ID}__{net_id}"
-    try:
-        content = replace_imports(DEFAULT_SYSTEM_FUNCTION_CONTENT)
-        function_module, function_type, frontmatter = load_function_module_by_id(
-            function_id, content=content
-        )
 
+    if Functions.get_function_by_id(function_id) is not None:
+        # ID is taken by a function whose content differs — that admin deliberately
+        # customised it. Renaming it would require chasing all references in models,
+        # groups, and user settings; too risky for this edge case.
+        log.warning(
+            "ID collision: function %s exists with non-matching content for admin %s "
+            "— skipping system default creation to avoid overwrite",
+            function_id, user.email,
+        )
+        return None
+
+    try:
+        function_module, function_type, frontmatter = load_function_module_by_id(
+            function_id, content=canonical_raw
+        )
         function = Functions.insert_new_function(
             user_id=user.id,
             user_email=user.email,
@@ -151,25 +212,25 @@ async def ensure_admin_system_default(
             form_data=FunctionForm(
                 id=function_id,
                 name="LLM",
-                content=content,
+                content=canonical_raw,
                 meta=FunctionMeta(
                     description="System default LLM pipe",
                     manifest=frontmatter,
                 ),
             ),
-            is_active=True,
+            is_active=False,        # OFF — admin's existing active function keeps running
             is_system_default=True,
         )
 
         if function is None:
             log.error("insert_new_function returned None for admin %s", user.email)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to create system default function",
-            )
+            return None
 
         # New row always has valves=NULL — no need to fetch existing.
-        Functions.update_function_valves_by_id(function.id, valve_update)
+        Functions.update_function_valves_by_id(function.id, {
+            "PORTKEY_API_KEY": form_data.api_key,
+            "PORTKEY_API_BASE_URL": find_workspace_portkey_url(),
+        })
 
         function_cache_dir = Path(CACHE_DIR) / "functions" / function_id
         function_cache_dir.mkdir(parents=True, exist_ok=True)
@@ -177,23 +238,16 @@ async def ensure_admin_system_default(
         invalidate_models_cache(request)
 
         log.info(
-            "Created system default function %s for admin %s (key len=%d)",
-            function_id,
-            user.email,
-            len(form_data.api_key),
+            "Created system default function %s (is_active=False) for admin %s (key len=%d)",
+            function_id, user.email, len(form_data.api_key),
         )
         return Functions.get_function_by_id(function.id)
 
-    except HTTPException:
-        raise
     except Exception:
         log.exception(
             "Failed to create system default function for admin %s", user.email
         )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to create system default function",
-        )
+        return None     # best-effort — must never block or crash login
 
 
 ############################
