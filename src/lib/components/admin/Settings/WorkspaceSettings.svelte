@@ -313,10 +313,10 @@
 
 <!-- Main form -->
 <form class="flex flex-col space-y-3 text-sm" on:submit|preventDefault={saveHandler}>
-	<div class="space-y-4 pr-1.5">
+	<main class="space-y-4 pr-1.5">
 
 		<div class="mb-1">
-			<div class="text-xl font-semibold dark:text-white">{$i18n.t('Workspace settings')}</div>
+			<h1 class="text-xl font-semibold dark:text-white">{$i18n.t('Workspace settings')}</h1>
 		</div>
 
 		<hr class="border-gray-100 dark:border-gray-850" />
@@ -327,6 +327,7 @@
 			<div class="flex items-center gap-2">
 				<input
 					class="flex-1 rounded-lg py-1.5 px-3 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+					aria-label={$i18n.t('Portkey URL')}
 					value={modelEngineUrl}
 					readonly
 				/>
@@ -449,7 +450,7 @@
 			{/if}
 		</div>
 
-	</div>
+	</main>
 
 	<!-- Save button -->
 	<div class="pt-3">
