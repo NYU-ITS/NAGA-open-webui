@@ -1,5 +1,127 @@
 import { WEBUI_API_BASE_URL } from '$lib/constants';
 
+export type KnowledgeIndexingDisplayState =
+	| 'ready'
+	| 'queued'
+	| 'indexing'
+	| 'partial'
+	| 'failed'
+	| 'unavailable';
+
+export type KnowledgeIndexingJobStatus =
+	| 'queued'
+	| 'processing'
+	| 'completed'
+	| 'failed'
+	| 'partially_failed';
+
+export type KnowledgeIndexingProgress = {
+	total: number;
+	processed: number;
+	failed: number;
+	pending_or_processing: number;
+};
+
+export type EmbeddingModelSummary = {
+	id: string;
+	provider: string;
+	display_name: string;
+	modalities: string[];
+	status: string;
+};
+
+export type KnowledgeIndexingFailure = {
+	file_id: string;
+	error_code: string | null;
+	error_message: string | null;
+	attempt_count: number;
+	created_at: number | null;
+	updated_at: number | null;
+	started_at: number | null;
+	completed_at: number | null;
+};
+
+export type KnowledgeIndexingStatus = {
+	knowledge_id: string;
+	display_state: KnowledgeIndexingDisplayState;
+	job_status: KnowledgeIndexingJobStatus | null;
+	retrieval_available: boolean;
+	job_id: string | null;
+	job_type: string | null;
+	active_model: EmbeddingModelSummary | null;
+	target_model: EmbeddingModelSummary | null;
+	collection_progress: KnowledgeIndexingProgress;
+	job_progress: KnowledgeIndexingProgress;
+	failed_document_count: number;
+	job_failed_document_count: number;
+	error_code: string | null;
+	error_message: string | null;
+	retry_eligible: boolean;
+	can_retry: boolean;
+	created_at: number | null;
+	updated_at: number | null;
+	started_at: number | null;
+	completed_at: number | null;
+	last_successful_indexed_at: number | null;
+	failed_documents?: KnowledgeIndexingFailure[];
+};
+
+export class KnowledgeIndexingApiError extends Error {
+	status: number;
+	detail: unknown;
+	errorCode: string | null;
+
+	constructor(status: number, payload: any) {
+		const detail = payload?.detail ?? payload;
+		const message =
+			typeof detail === 'string'
+				? detail
+				: typeof detail?.message === 'string'
+					? detail.message
+					: `Knowledge indexing request failed (${status}).`;
+		super(message);
+		this.name = 'KnowledgeIndexingApiError';
+		this.status = status;
+		this.detail = detail;
+		this.errorCode =
+			typeof detail === 'object' && typeof detail?.error_code === 'string'
+				? detail.error_code
+				: null;
+	}
+}
+
+const getKnowledgeIndexingResponse = async <T>(url: string, token: string): Promise<T> => {
+	const response = await fetch(url, {
+		method: 'GET',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		}
+	});
+
+	if (!response.ok) {
+		const payload = await response.json().catch(() => null);
+		throw new KnowledgeIndexingApiError(response.status, payload);
+	}
+
+	return response.json();
+};
+
+export const getKnowledgeIndexingStatuses = async (
+	token: string
+): Promise<KnowledgeIndexingStatus[]> =>
+	getKnowledgeIndexingResponse(`${WEBUI_API_BASE_URL}/knowledge/indexing/status`, token);
+
+export const getKnowledgeIndexingStatus = async (
+	token: string,
+	id: string
+): Promise<KnowledgeIndexingStatus> =>
+	getKnowledgeIndexingResponse(
+		`${WEBUI_API_BASE_URL}/knowledge/${encodeURIComponent(id)}/indexing/status`,
+		token
+	);
+
 export const createNewKnowledge = async (
 	token: string,
 	name: string,

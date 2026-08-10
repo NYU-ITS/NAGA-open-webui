@@ -49,6 +49,7 @@
 	import VideoLight from '$lib/components/icons/VideoLight.svelte';
 	import FolderOpen from '$lib/components/icons/FolderOpen.svelte';
 	import AccessControlModal from '../common/AccessControlModal.svelte';
+	import IndexingStatus from './KnowledgeBase/IndexingStatus.svelte';
 
 	let largeScreen = true;
 
@@ -1099,6 +1100,8 @@
 				</div>
 			</div>
 		</div>
+
+		<IndexingStatus knowledgeId={id} />
 
 		<div class="flex flex-row flex-1 h-full max-h-full pb-2.5 gap-3">
 			{#if largeScreen}

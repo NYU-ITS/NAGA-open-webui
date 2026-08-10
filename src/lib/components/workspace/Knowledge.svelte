@@ -6,14 +6,16 @@
 	dayjs.extend(relativeTime);
 
 	import { toast } from 'svelte-sonner';
-	import { onMount, getContext } from 'svelte';
+	import { onMount, onDestroy, getContext } from 'svelte';
 	const i18n = getContext('i18n');
 
 	import { WEBUI_NAME, knowledge } from '$lib/stores';
 	import {
 		getKnowledgeBases,
 		deleteKnowledgeById,
-		getKnowledgeBaseList
+		getKnowledgeBaseList,
+		getKnowledgeIndexingStatuses,
+		type KnowledgeIndexingStatus
 	} from '$lib/apis/knowledge';
 
 	import { goto } from '$app/navigation';
@@ -26,6 +28,7 @@
 	import Spinner from '../common/Spinner.svelte';
 	import { capitalizeFirstLetter } from '$lib/utils';
 	import Tooltip from '../common/Tooltip.svelte';
+	import IndexingStatusBadge from './Knowledge/IndexingStatusBadge.svelte';
 
 	let loaded = false;
 
@@ -37,6 +40,70 @@
 
 	let knowledgeBases = [];
 	let filteredItems = [];
+	let indexingStatuses: Record<string, KnowledgeIndexingStatus> = {};
+	let indexingPollTimer: ReturnType<typeof setTimeout> | null = null;
+	let indexingStatusRequestInFlight = false;
+	let indexingStatusLoadFailed = false;
+	let destroyed = false;
+
+	const getHttpStatus = (error: unknown) => {
+		if (typeof error !== 'object' || error === null || !('status' in error)) return null;
+		return Number((error as { status?: number }).status) || null;
+	};
+
+	const hasActiveIndexingJob = () =>
+		Object.values(indexingStatuses).some(
+			(status) => status.job_status === 'queued' || status.job_status === 'processing'
+		);
+
+	const stopIndexingPolling = () => {
+		if (indexingPollTimer) {
+			clearTimeout(indexingPollTimer);
+			indexingPollTimer = null;
+		}
+	};
+
+	const scheduleIndexingPolling = () => {
+		stopIndexingPolling();
+		if (
+			destroyed ||
+			document.visibilityState === 'hidden' ||
+			(!hasActiveIndexingJob() && !indexingStatusLoadFailed)
+		) {
+			return;
+		}
+		indexingPollTimer = setTimeout(() => {
+			refreshIndexingStatuses();
+		}, 5000);
+	};
+
+	const refreshIndexingStatuses = async () => {
+		if (indexingStatusRequestInFlight || destroyed) return;
+		indexingStatusRequestInFlight = true;
+		try {
+			const statuses = await getKnowledgeIndexingStatuses(localStorage.token);
+			if (!destroyed) {
+				indexingStatuses = Object.fromEntries(
+					statuses.map((status) => [status.knowledge_id, status])
+				);
+				indexingStatusLoadFailed = false;
+			}
+		} catch (error) {
+			// Keep the last durable status on transient request failures.
+			if (!destroyed) indexingStatusLoadFailed = getHttpStatus(error) !== 403;
+		} finally {
+			indexingStatusRequestInFlight = false;
+			if (!destroyed) scheduleIndexingPolling();
+		}
+	};
+
+	const handleVisibilityChange = () => {
+		if (document.visibilityState === 'hidden') {
+			stopIndexingPolling();
+		} else {
+			refreshIndexingStatuses();
+		}
+	};
 
 	$: if (knowledgeBases) {
 		fuse = new Fuse(knowledgeBases, {
@@ -60,13 +127,43 @@
 		if (res) {
 			knowledgeBases = await getKnowledgeBaseList(localStorage.token);
 			knowledge.set(await getKnowledgeBases(localStorage.token));
+			await refreshIndexingStatuses();
 			toast.success($i18n.t('Knowledge deleted successfully.'));
 		}
 	};
 
-	onMount(async () => {
-		knowledgeBases = await getKnowledgeBaseList(localStorage.token);
-		loaded = true;
+	onMount(() => {
+		document.addEventListener('visibilitychange', handleVisibilityChange);
+		void (async () => {
+			let statusLoadFailed = false;
+			const [bases, statuses] = await Promise.all([
+				getKnowledgeBaseList(localStorage.token).catch((error) => {
+					toast.error(`${error}`);
+					return [];
+				}),
+				getKnowledgeIndexingStatuses(localStorage.token).catch((error) => {
+					statusLoadFailed = getHttpStatus(error) !== 403;
+					return null;
+				})
+			]);
+			if (destroyed) return;
+
+			knowledgeBases = bases;
+			if (statuses) {
+				indexingStatuses = Object.fromEntries(
+					statuses.map((status) => [status.knowledge_id, status])
+				);
+			}
+			indexingStatusLoadFailed = statusLoadFailed;
+			loaded = true;
+			scheduleIndexingPolling();
+		})();
+	});
+
+	onDestroy(() => {
+		destroyed = true;
+		stopIndexingPolling();
+		document.removeEventListener('visibilitychange', handleVisibilityChange);
 	});
 </script>
 
@@ -139,11 +236,18 @@
 			>
 				<div class=" w-full">
 					<div class="flex items-center justify-between -mt-1">
-						{#if item?.meta?.document}
-							<Badge type="muted" content={$i18n.t('Document')} />
-						{:else}
-							<Badge type="success" content={$i18n.t('Collection')} />
-						{/if}
+						<div class="flex items-center gap-1">
+							{#if item?.meta?.document}
+								<Badge type="muted" content={$i18n.t('Document')} />
+							{:else}
+								<Badge type="success" content={$i18n.t('Collection')} />
+								{#if indexingStatuses[item.id]}
+									<IndexingStatusBadge state={indexingStatuses[item.id].display_state} />
+								{:else if indexingStatusLoadFailed}
+									<Badge type="muted" content={$i18n.t('Status unavailable')} />
+								{/if}
+							{/if}
+						</div>
 
 						<div class=" flex self-center -mr-1 translate-y-1">
 							<ItemMenu
