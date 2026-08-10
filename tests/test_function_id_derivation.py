@@ -13,8 +13,10 @@ Verifies that:
 - /ensure is idempotent (safe to call on every workspace settings save)
 - _prepopulate_portkey_valves finds Valves nested inside Pipe (not just top-level Valves)
 - Step 1 returns immediately (no valve update) when is_system_default=True already exists
-- Step 2 adopts an existing content-matched clone and marks is_system_default=True
-- Step 3 creates a fresh function with is_active=False when no content match exists
+- Step 2 adopts an existing content-matched clone, marks is_system_default=True, and sets is_active=True
+- Step 3 creates with is_active=False when an active pipe already exists (content mismatch)
+- Step 3 creates with is_active=True when no functions exist (new admin)
+- Step 3 creates with is_active=True when only a non-pipe (filter/action) is active
 - Step 3 skips creation and returns None when the derived ID is already taken by modified content
 
 Run locally (from project root):
@@ -262,17 +264,20 @@ def test_content_match_adopted(tmp_path):
     assert data["valve_key_set"] is True, (
         "adopted function valve must have PORTKEY_API_KEY set to the provided key"
     )
+    assert data["is_active_on"] is True, (
+        "adopted function must be set to is_active=True — it is now the system default"
+    )
     assert data["valve_url_set"] is True, (
         "adopted function valve must have PORTKEY_API_BASE_URL set"
     )
 
 
-# ── 14: Step 3 creates fresh function with is_active=False ───────────────────
+# ── 14: Step 3 creates fresh function with is_active=False when active pipe exists
 
 def test_content_mismatch_fresh_inactive(tmp_path):
-    """When the admin has no function with matching content, ensure Step 3 must
-    create a fresh system default function with is_active=False so the admin's
-    existing active function continues running undisturbed."""
+    """When the admin has no function with matching content but has an existing
+    active pipe, ensure Step 3 must create a fresh system default with
+    is_active=False so the existing active pipe continues running undisturbed."""
     data = run_scenario(tmp_path, "CONTENT_MISMATCH_FRESH_INACTIVE")
     assert data["new_function_created"] is True, (
         "Step 3 must create a new system default function when no content match exists"
@@ -315,4 +320,65 @@ def test_id_collision_skip(tmp_path):
     )
     assert data["original_still_active"] is True, (
         "admin's modified function must remain active after the collision skip"
+    )
+
+
+# ── 16: Step 3 creates active function when admin has no existing functions ───
+
+def test_step3_no_existing_functions_creates_active(tmp_path):
+    """New admin with no prior functions: Step 3 must create the system default
+    with is_active=True so chat works immediately without manual intervention."""
+    data = run_scenario(tmp_path, "STEP3_NO_EXISTING_FUNCTIONS")
+    assert data["new_function_created"] is True, (
+        "Step 3 must create a new system default function"
+    )
+    assert data["new_function_active"] is True, (
+        "system default must be active when no other pipe exists — chat must work immediately"
+    )
+    assert data["new_function_is_system_default"] is True, (
+        "freshly created function must have is_system_default=True"
+    )
+
+
+# ── 17: Step 3 creates active function when only a non-pipe is active ─────────
+
+def test_step3_non_pipe_active_creates_active(tmp_path):
+    """When the admin only has an active filter (not a pipe), Step 3 must create
+    the system default with is_active=True — filters don't provide LLM models
+    so there is no conflict."""
+    data = run_scenario(tmp_path, "STEP3_NON_PIPE_ACTIVE")
+    assert data["new_function_created"] is True, (
+        "Step 3 must create a new system default function"
+    )
+    assert data["new_function_active"] is True, (
+        "system default must be active — an active filter does not conflict with a new pipe"
+    )
+    assert data["new_function_is_system_default"] is True, (
+        "freshly created function must have is_system_default=True"
+    )
+    assert data["filter_still_active"] is True, (
+        "existing active filter must remain active — ensure must not touch it"
+    )
+    assert data["filter_type_confirmed"] is True, (
+        "the non-conflicting function must be of type 'filter'"
+    )
+
+
+# ── 18: Step 3 creates active function when existing pipe is toggled OFF ───────
+
+def test_step3_inactive_pipe_creates_active(tmp_path):
+    """When the admin's only pipe is toggled OFF, Step 3 must create the system
+    default with is_active=True — nothing is running so the new default starts ON."""
+    data = run_scenario(tmp_path, "STEP3_INACTIVE_PIPE_ACTIVE")
+    assert data["new_function_created"] is True, (
+        "Step 3 must create a new system default function"
+    )
+    assert data["new_function_active"] is True, (
+        "system default must be active when existing pipe is OFF — nothing else is running"
+    )
+    assert data["new_function_is_system_default"] is True, (
+        "freshly created function must have is_system_default=True"
+    )
+    assert data["inactive_pipe_still_inactive"] is True, (
+        "the existing inactive pipe must remain inactive — ensure must not touch it"
     )

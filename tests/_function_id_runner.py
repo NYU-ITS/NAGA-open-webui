@@ -24,8 +24,11 @@ Scenarios:
   PIPE_NESTED_VALVES_PREPOPULATED - _prepopulate finds Valves nested inside Pipe class
   STEP1_RETURNS_IMMEDIATELY      - Step 1 short-circuits when is_system_default=True exists, no valve update
   CONTENT_MATCH_ADOPTED          - Step 2 adopts existing clone with matching content, marks is_system_default=True
-  CONTENT_MISMATCH_FRESH_INACTIVE - Step 3 creates fresh function with is_active=False when no content match
+  CONTENT_MISMATCH_FRESH_INACTIVE - Step 3 creates fresh function with is_active=False when active pipe exists
   ID_COLLISION_SKIP              - Step 3 skips creation when derived ID is already taken by modified content
+  STEP3_NO_EXISTING_FUNCTIONS    - Step 3 creates fresh function with is_active=True when no functions exist
+  STEP3_NON_PIPE_ACTIVE          - Step 3 creates fresh function with is_active=True when only a filter is active
+  STEP3_INACTIVE_PIPE_ACTIVE     - Step 3 creates fresh function with is_active=True when existing pipe is inactive
 """
 import json
 import sys
@@ -68,7 +71,7 @@ def _seed_config(email: str, api_key: str, api_base_url: str | None = None):
         db.commit()
 
 
-# ── Shared pipe content with both Portkey valve fields ────────────────────────
+# ── Shared content fixtures ───────────────────────────────────────────────────
 
 TEST_PIPE_WITH_PORTKEY = '''"""
 title: Test Portkey Pipe
@@ -84,6 +87,19 @@ class Pipe:
 
     def __init__(self):
         self.valves = self.Valves()
+'''
+
+
+TEST_FILTER_CONTENT = '''"""
+title: Test Filter
+version: 0.1
+"""
+class Filter:
+    def inlet(self, body, __user__=None):
+        return body
+
+    def outlet(self, body, __user__=None):
+        return body
 '''
 
 
@@ -641,6 +657,7 @@ def scenario_content_match_adopted():
             Functions.update_function_by_id(fn.id, {
                 "content": canonical_raw,
                 "is_system_default": True,
+                "is_active": True,
             })
             valve_update = {
                 "PORTKEY_API_KEY": "match-key",
@@ -651,12 +668,14 @@ def scenario_content_match_adopted():
             adopted_fn = Functions.get_function_by_id(fn.id)
             break
 
+    adopted_fn_db = Functions.get_function_by_id(clone_id) if adopted_fn else None
     valves = Functions.get_function_valves_by_id(clone_id) or {}
     all_system_defaults = [f for f in Functions.get_functions(email) if f.is_system_default]
     print(json.dumps({
         "adopted": adopted_fn is not None,
         "adopted_id_is_clone": adopted_fn is not None and adopted_fn.id == clone_id,
         "no_new_function_created": len(all_system_defaults) == 1,
+        "is_active_on": adopted_fn_db is not None and adopted_fn_db.is_active,
         "valve_key_set": valves.get("PORTKEY_API_KEY") == "match-key",
         "valve_url_set": bool(valves.get("PORTKEY_API_BASE_URL")),
     }))
@@ -698,9 +717,13 @@ def scenario_content_mismatch_fresh_inactive():
         is_system_default=False,
     )
 
-    # Simulate Step 3: create fresh system default with is_active=False.
+    # Simulate Step 3: determine is_active based on whether an active pipe exists.
     canonical_raw = replace_imports(DEFAULT_SYSTEM_FUNCTION_CONTENT)
     function_id = f"{DEFAULT_SYSTEM_FUNCTION_ID}__{net_id}"
+    all_functions = Functions.get_functions(email)
+    has_active_pipe = any(fn.is_active and fn.type == "pipe" for fn in all_functions)
+    should_be_active = not has_active_pipe  # False — other_function is an active pipe
+
     new_module, new_type, new_frontmatter = load_function_module_by_id(
         function_id, content=canonical_raw
     )
@@ -714,7 +737,7 @@ def scenario_content_mismatch_fresh_inactive():
             content=canonical_raw,
             meta=FunctionMeta(description="System default LLM pipe", manifest=new_frontmatter),
         ),
-        is_active=False,
+        is_active=should_be_active,
         is_system_default=True,
     )
     Functions.update_function_valves_by_id(new_fn.id, {
@@ -793,6 +816,199 @@ def scenario_id_collision_skip():
     }))
 
 
+# ── Scenario: STEP3_NO_EXISTING_FUNCTIONS ────────────────────────────────────
+
+def scenario_step3_no_existing_functions():
+    """When the admin has no existing functions at all, Step 3 must create the
+    system default with is_active=True — nothing is running so there is no
+    conflict and chat should work immediately after setup."""
+    from open_webui.config import DEFAULT_SYSTEM_FUNCTION_CONTENT, DEFAULT_SYSTEM_FUNCTION_ID
+    from open_webui.models.functions import Functions, FunctionForm, FunctionMeta
+    from open_webui.utils.plugin import load_function_module_by_id, replace_imports
+    from open_webui.utils.portkey import find_workspace_portkey_url
+
+    net_id = "aa12947"
+    email = f"{net_id}@nyu.edu"
+    user_id = f"{net_id}-uid"
+    _seed_user(email, user_id)
+    _seed_config(email, "fresh-key-new-admin")
+
+    # No existing functions — admin has just entered their key for the first time.
+    canonical_raw = replace_imports(DEFAULT_SYSTEM_FUNCTION_CONTENT)
+    function_id = f"{DEFAULT_SYSTEM_FUNCTION_ID}__{net_id}"
+    all_functions = Functions.get_functions(email)
+    has_active_pipe = any(fn.is_active and fn.type == "pipe" for fn in all_functions)
+    should_be_active = not has_active_pipe  # True — no existing pipes
+
+    new_module, new_type, new_frontmatter = load_function_module_by_id(
+        function_id, content=canonical_raw
+    )
+    new_fn = Functions.insert_new_function(
+        user_id=user_id,
+        user_email=email,
+        type=new_type,
+        form_data=FunctionForm(
+            id=function_id,
+            name="LLM",
+            content=canonical_raw,
+            meta=FunctionMeta(description="System default LLM pipe", manifest=new_frontmatter),
+        ),
+        is_active=should_be_active,
+        is_system_default=True,
+    )
+    Functions.update_function_valves_by_id(new_fn.id, {
+        "PORTKEY_API_KEY": "fresh-key-new-admin",
+        "PORTKEY_API_BASE_URL": find_workspace_portkey_url(),
+    })
+
+    new_fn_db = Functions.get_function_by_id(function_id)
+    print(json.dumps({
+        "new_function_created": new_fn_db is not None,
+        "new_function_active": new_fn_db is not None and new_fn_db.is_active,
+        "new_function_is_system_default": new_fn_db is not None and new_fn_db.is_system_default,
+    }))
+
+
+# ── Scenario: STEP3_NON_PIPE_ACTIVE ──────────────────────────────────────────
+
+def scenario_step3_non_pipe_active():
+    """When the admin has an active non-pipe function (e.g. a filter), Step 3
+    must create the system default with is_active=True — filters do not provide
+    LLM models so there is no conflict with a new active pipe."""
+    from open_webui.config import DEFAULT_SYSTEM_FUNCTION_CONTENT, DEFAULT_SYSTEM_FUNCTION_ID
+    from open_webui.models.functions import Functions, FunctionForm, FunctionMeta
+    from open_webui.utils.plugin import load_function_module_by_id, replace_imports
+    from open_webui.utils.portkey import find_workspace_portkey_url
+
+    net_id = "aa12947"
+    email = f"{net_id}@nyu.edu"
+    user_id = f"{net_id}-uid"
+    _seed_user(email, user_id)
+    _seed_config(email, "fresh-key-filter-admin")
+
+    # Admin has an active filter — not a pipe, so no conflict.
+    filter_id = f"my_filter__{net_id}"
+    filter_module, filter_type, filter_frontmatter = load_function_module_by_id(
+        filter_id, content=TEST_FILTER_CONTENT
+    )
+    Functions.insert_new_function(
+        user_id=user_id,
+        user_email=email,
+        type=filter_type,
+        form_data=FunctionForm(
+            id=filter_id,
+            name="My Filter",
+            content=TEST_FILTER_CONTENT,
+            meta=FunctionMeta(description="active filter", manifest=filter_frontmatter),
+        ),
+        is_active=True,
+        is_system_default=False,
+    )
+
+    # Simulate Step 3: active filter must not affect should_be_active.
+    canonical_raw = replace_imports(DEFAULT_SYSTEM_FUNCTION_CONTENT)
+    function_id = f"{DEFAULT_SYSTEM_FUNCTION_ID}__{net_id}"
+    all_functions = Functions.get_functions(email)
+    has_active_pipe = any(fn.is_active and fn.type == "pipe" for fn in all_functions)
+    should_be_active = not has_active_pipe  # True — filter is not a pipe
+
+    new_module, new_type, new_frontmatter = load_function_module_by_id(
+        function_id, content=canonical_raw
+    )
+    new_fn = Functions.insert_new_function(
+        user_id=user_id,
+        user_email=email,
+        type=new_type,
+        form_data=FunctionForm(
+            id=function_id,
+            name="LLM",
+            content=canonical_raw,
+            meta=FunctionMeta(description="System default LLM pipe", manifest=new_frontmatter),
+        ),
+        is_active=should_be_active,
+        is_system_default=True,
+    )
+    Functions.update_function_valves_by_id(new_fn.id, {
+        "PORTKEY_API_KEY": "fresh-key-filter-admin",
+        "PORTKEY_API_BASE_URL": find_workspace_portkey_url(),
+    })
+
+    filter_fn_db = Functions.get_function_by_id(filter_id)
+    new_fn_db = Functions.get_function_by_id(function_id)
+    print(json.dumps({
+        "new_function_created": new_fn_db is not None,
+        "new_function_active": new_fn_db is not None and new_fn_db.is_active,
+        "new_function_is_system_default": new_fn_db is not None and new_fn_db.is_system_default,
+        "filter_still_active": filter_fn_db is not None and filter_fn_db.is_active,
+        "filter_type_confirmed": filter_fn_db is not None and filter_fn_db.type == "filter",
+    }))
+
+
+# ── Scenario: STEP3_INACTIVE_PIPE_ACTIVE ─────────────────────────────────────
+
+def scenario_step3_inactive_pipe_creates_active():
+    """When the admin has a pipe with modified content but it is toggled OFF,
+    Step 3 must create the system default with is_active=True — nothing is
+    actively running so the new default should start ON immediately."""
+    from open_webui.config import DEFAULT_SYSTEM_FUNCTION_CONTENT, DEFAULT_SYSTEM_FUNCTION_ID
+    from open_webui.models.functions import Functions, FunctionForm, FunctionMeta
+    from open_webui.utils.plugin import load_function_module_by_id, replace_imports
+    from open_webui.utils.portkey import find_workspace_portkey_url
+
+    net_id = "aa12947"
+    email = f"{net_id}@nyu.edu"
+    user_id = f"{net_id}-uid"
+    _seed_user(email, user_id)
+    _seed_config(email, "fresh-key-inactive-pipe")
+
+    # Admin has a modified pipe that is INACTIVE (toggled OFF).
+    other_id = f"other_function__{net_id}"
+    function_module, function_type, frontmatter = load_function_module_by_id(
+        other_id, content=TEST_PIPE_WITH_PORTKEY
+    )
+    Functions.insert_new_function(
+        user_id=user_id, user_email=email, type=function_type,
+        form_data=FunctionForm(
+            id=other_id, name="Other Function", content=TEST_PIPE_WITH_PORTKEY,
+            meta=FunctionMeta(description="admin's inactive pipe", manifest=frontmatter),
+        ),
+        is_active=False,   # OFF — must not block the system default from starting ON
+        is_system_default=False,
+    )
+
+    canonical_raw = replace_imports(DEFAULT_SYSTEM_FUNCTION_CONTENT)
+    function_id = f"{DEFAULT_SYSTEM_FUNCTION_ID}__{net_id}"
+    all_functions = Functions.get_functions(email)
+    has_active_pipe = any(fn.is_active and fn.type == "pipe" for fn in all_functions)
+    should_be_active = not has_active_pipe  # True — existing pipe is OFF
+
+    new_module, new_type, new_frontmatter = load_function_module_by_id(
+        function_id, content=canonical_raw
+    )
+    new_fn = Functions.insert_new_function(
+        user_id=user_id, user_email=email, type=new_type,
+        form_data=FunctionForm(
+            id=function_id, name="LLM", content=canonical_raw,
+            meta=FunctionMeta(description="System default LLM pipe", manifest=new_frontmatter),
+        ),
+        is_active=should_be_active,
+        is_system_default=True,
+    )
+    Functions.update_function_valves_by_id(new_fn.id, {
+        "PORTKEY_API_KEY": "fresh-key-inactive-pipe",
+        "PORTKEY_API_BASE_URL": find_workspace_portkey_url(),
+    })
+
+    new_fn_db = Functions.get_function_by_id(function_id)
+    other_fn_db = Functions.get_function_by_id(other_id)
+    print(json.dumps({
+        "new_function_created": new_fn_db is not None,
+        "new_function_active": new_fn_db is not None and new_fn_db.is_active,
+        "new_function_is_system_default": new_fn_db is not None and new_fn_db.is_system_default,
+        "inactive_pipe_still_inactive": other_fn_db is not None and not other_fn_db.is_active,
+    }))
+
+
 # ── Dispatch ──────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -813,4 +1029,7 @@ if __name__ == "__main__":
         "CONTENT_MATCH_ADOPTED": scenario_content_match_adopted,
         "CONTENT_MISMATCH_FRESH_INACTIVE": scenario_content_mismatch_fresh_inactive,
         "ID_COLLISION_SKIP": scenario_id_collision_skip,
+        "STEP3_NO_EXISTING_FUNCTIONS": scenario_step3_no_existing_functions,
+        "STEP3_NON_PIPE_ACTIVE": scenario_step3_non_pipe_active,
+        "STEP3_INACTIVE_PIPE_ACTIVE": scenario_step3_inactive_pipe_creates_active,
     }[scenario]()

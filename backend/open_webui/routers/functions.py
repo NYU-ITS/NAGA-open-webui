@@ -120,15 +120,16 @@ async def ensure_admin_system_default(
 
     Step 2 — content match found (existing clone with same source):
         Adopt the clone: overwrite its content with the canonical version
-        (cleaning any whitespace drift), set is_system_default=True, write valve.
-        The function's is_active state is left unchanged — admin keeps their
-        existing toggle state.
+        (cleaning any whitespace drift), set is_system_default=True, set
+        is_active=True, and write the valve.
 
     Step 3 — no match, try create fresh:
-        Create a new function with is_active=False so the admin's current active
-        function keeps running. If the derived ID is already taken by a function
-        with different content, log a warning and skip — renaming that function
-        would require chasing all references in models/groups/user-settings."""
+        Create a new function. is_active is set to True unless the admin already
+        has another active pipe function running (in which case it starts OFF so
+        the existing pipe keeps running undisturbed). If the derived ID is already
+        taken by a function with different content, log a warning and skip —
+        renaming that function would require chasing all references in
+        models/groups/user-settings."""
     from open_webui.config import (
         DEFAULT_SYSTEM_FUNCTION_CONTENT,
         DEFAULT_SYSTEM_FUNCTION_ID,
@@ -165,10 +166,12 @@ async def ensure_admin_system_default(
                 "Content match found for admin %s — adopting function %s (id=%s) as system default",
                 user.email, fn.name, fn.id,
             )
-            # Overwrite content with canonical (removes whitespace artifacts) and flag it.
+            # Overwrite content with canonical (removes whitespace artifacts), flag it,
+            # and ensure it is active — it is now the admin's system default.
             Functions.update_function_by_id(fn.id, {
                 "content": canonical_raw,
                 "is_system_default": True,
+                "is_active": True,
             })
             valve_update = {
                 "PORTKEY_API_KEY": form_data.api_key,
@@ -202,6 +205,11 @@ async def ensure_admin_system_default(
         return None
 
     try:
+        # ON unless another active pipe is already running for this admin.
+        # Pipes provide LLM models; filters/actions do not conflict.
+        has_active_pipe = any(fn.is_active and fn.type == "pipe" for fn in all_functions)
+        should_be_active = not has_active_pipe
+
         function_module, function_type, frontmatter = load_function_module_by_id(
             function_id, content=canonical_raw
         )
@@ -218,7 +226,7 @@ async def ensure_admin_system_default(
                     manifest=frontmatter,
                 ),
             ),
-            is_active=False,        # OFF — admin's existing active function keeps running
+            is_active=should_be_active,
             is_system_default=True,
         )
 
@@ -238,8 +246,8 @@ async def ensure_admin_system_default(
         invalidate_models_cache(request)
 
         log.info(
-            "Created system default function %s (is_active=False) for admin %s (key len=%d)",
-            function_id, user.email, len(form_data.api_key),
+            "Created system default function %s (is_active=%s) for admin %s (key len=%d)",
+            function_id, should_be_active, user.email, len(form_data.api_key),
         )
         return Functions.get_function_by_id(function.id)
 
