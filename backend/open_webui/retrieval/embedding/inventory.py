@@ -119,6 +119,49 @@ class ReindexFile:
         )
 
 
+@dataclass(frozen=True)
+class ReindexAdminResolver:
+    """Shared group-first governance resolver for reindex-related reads.
+
+    Build this once per database session so callers that inspect several
+    knowledge bases reuse the same user and group snapshot as the inventory
+    builder. Resolution errors intentionally remain ``EmbeddingError`` values
+    so each caller can choose whether to fail the operation or present an
+    unavailable status for one source.
+    """
+
+    roles: dict[str, str]
+    group_admins: dict[str, Optional[str]]
+    user_group_ids: dict[str, set[str]]
+
+    def resolve_knowledge(self, knowledge: Knowledge) -> str:
+        return _resolve_knowledge_admin(
+            knowledge,
+            self.roles,
+            self.group_admins,
+            self.user_group_ids,
+        )
+
+    def resolve_chat(self, chat: Chat) -> str:
+        return _resolve_chat_admin(
+            chat,
+            self.roles,
+            self.group_admins,
+            self.user_group_ids,
+        )
+
+
+def build_reindex_admin_resolver(db) -> ReindexAdminResolver:
+    """Build the authoritative admin resolver from one database snapshot."""
+    roles = _load_roles(db)
+    groups = _load_groups(db)
+    return ReindexAdminResolver(
+        roles=roles,
+        group_admins=_build_group_admins(groups, roles),
+        user_group_ids=_build_user_group_index(groups),
+    )
+
+
 def build_reindex_inventory(admin_id: str, db=None) -> list[ReindexFile]:
     """Build the deterministic reindex inventory for one admin.
 
@@ -510,10 +553,7 @@ def _iter_chat_refs(chat: Chat):
 
 
 def _build_inventory(db, admin_id: str) -> list[ReindexFile]:
-    roles = _load_roles(db)
-    groups = _load_groups(db)
-    group_admins = _build_group_admins(groups, roles)
-    user_group_ids = _build_user_group_index(groups)
+    admin_resolver = build_reindex_admin_resolver(db)
     files_by_id = _load_files(db)
 
     # file_id -> set of governing admin ids discovered via governed sources
@@ -534,9 +574,7 @@ def _build_inventory(db, admin_id: str) -> list[ReindexFile]:
         refs = list(_iter_knowledge_refs(knowledge))  # may raise MALFORMED
         if not refs:
             continue  # references no files; governs nothing in this inventory
-        admin = _resolve_knowledge_admin(
-            knowledge, roles, group_admins, user_group_ids
-        )
+        admin = admin_resolver.resolve_knowledge(knowledge)
         source_desc = f"knowledge {knowledge.id}"
         for file_id in refs:
             record(file_id, admin, source_desc, SOURCE_KNOWLEDGE)
@@ -546,7 +584,7 @@ def _build_inventory(db, admin_id: str) -> list[ReindexFile]:
         refs = list(_iter_chat_refs(chat))  # may raise MALFORMED
         if not refs:
             continue  # no uploads; chat governance is irrelevant to this inventory
-        admin = _resolve_chat_admin(chat, roles, group_admins, user_group_ids)
+        admin = admin_resolver.resolve_chat(chat)
         source_desc = f"chat {chat.id}"
         for file_id in refs:
             record(file_id, admin, source_desc, SOURCE_CHAT_UPLOAD)

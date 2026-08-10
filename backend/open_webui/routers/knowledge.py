@@ -4,10 +4,17 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, 
 import logging
 
 from open_webui.models.knowledge import (
+    Knowledge,
     Knowledges,
     KnowledgeForm,
     KnowledgeResponse,
     KnowledgeUserResponse,
+)
+from open_webui.internal.db import get_db
+from open_webui.retrieval.embedding.knowledge_status import (
+    KnowledgeIndexingStatusResponse,
+    KnowledgeIndexingStatusSummary,
+    build_knowledge_indexing_statuses,
 )
 from open_webui.models.files import Files, FileModel, FileModelResponse
 from open_webui.retrieval.vector.connector import VECTOR_DB_CLIENT
@@ -278,6 +285,80 @@ async def get_knowledge_list(user=Depends(get_verified_user)):
                 break
 
     return knowledge_with_files
+
+
+############################
+# GetKnowledgeIndexingStatus
+############################
+
+
+def _can_edit_knowledge(user, knowledge: Knowledge) -> bool:
+    """Mirror the authorization used by knowledge mutation endpoints."""
+    if user.role == "admin" or knowledge.user_id == user.id:
+        return True
+    if not isinstance(knowledge.access_control, dict):
+        return False
+    write_access = knowledge.access_control.get("write")
+    if not isinstance(write_access, dict):
+        return False
+    if not isinstance(write_access.get("group_ids", []), list):
+        return False
+    if not isinstance(write_access.get("user_ids", []), list):
+        return False
+    return has_access(user.id, "write", knowledge.access_control)
+
+
+@router.get(
+    "/indexing/status",
+    response_model=list[KnowledgeIndexingStatusSummary],
+)
+def get_knowledge_indexing_statuses(user=Depends(get_verified_user)):
+    """Return reindex summaries for knowledge bases the viewer may edit."""
+    with get_db() as db:
+        knowledge_rows = (
+            db.query(Knowledge).order_by(Knowledge.updated_at.desc()).all()
+        )
+        editable_rows = [
+            knowledge
+            for knowledge in knowledge_rows
+            if _can_edit_knowledge(user, knowledge)
+        ]
+        return build_knowledge_indexing_statuses(
+            db,
+            editable_rows,
+            viewer_id=user.id,
+            viewer_role=user.role,
+            include_failure_details=False,
+        )
+
+
+@router.get(
+    "/{id}/indexing/status",
+    response_model=KnowledgeIndexingStatusResponse,
+)
+def get_knowledge_indexing_status(id: str, user=Depends(get_verified_user)):
+    """Return detailed reindex status for one editable knowledge base."""
+    with get_db() as db:
+        knowledge = db.query(Knowledge).filter(Knowledge.id == id).first()
+        if knowledge is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Knowledge not found.",
+            )
+        if not _can_edit_knowledge(user, knowledge):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Write access is required to view indexing status.",
+            )
+
+        statuses = build_knowledge_indexing_statuses(
+            db,
+            [knowledge],
+            viewer_id=user.id,
+            viewer_role=user.role,
+            include_failure_details=True,
+        )
+        return statuses[0]
 
 
 ############################

@@ -27,7 +27,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Mapping, Optional, Sequence
+from typing import Mapping, Optional, Protocol, Sequence
 
 from sqlalchemy.exc import IntegrityError
 
@@ -72,6 +72,35 @@ FILE_STATUS_FAILED = "failed"
 
 _TERMINAL_JOB_STATUSES = frozenset({JOB_STATUS_COMPLETED, JOB_STATUS_FAILED, JOB_STATUS_PARTIALLY_FAILED})
 _ACTIVE_JOB_STATUSES = frozenset({JOB_STATUS_QUEUED, JOB_STATUS_PROCESSING})
+
+
+class _RetryableJob(Protocol):
+    status: str
+    embedding_model_id: str
+    failed_files: int
+
+
+def is_job_retry_eligible(
+    job: _RetryableJob,
+    *,
+    target_model_id: Optional[str],
+    has_active_job: bool,
+    all_files_pending: bool,
+) -> bool:
+    """Return whether a terminal job may offer the retry action.
+
+    The retry endpoint remains authoritative and revalidates source freshness
+    transactionally. This read-only predicate mirrors its stable prerequisites,
+    including the enqueue-only failure path where every file is still pending.
+    """
+    if job.status not in (JOB_STATUS_FAILED, JOB_STATUS_PARTIALLY_FAILED):
+        return False
+    if has_active_job or target_model_id != job.embedding_model_id:
+        return False
+
+    has_failed_files = job.failed_files > 0
+    is_enqueue_only_failure = job.status == JOB_STATUS_FAILED and all_files_pending
+    return has_failed_files or is_enqueue_only_failure
 
 
 @dataclass(frozen=True)
@@ -1304,6 +1333,17 @@ def _list_failed_files(db, job_id: str) -> list[EmbeddingJobFileView]:
     return [_file_to_view(row) for row in rows]
 
 
+def _list_files(db, job_id: str) -> list[EmbeddingJobFileView]:
+    """Internal: list every file row for one job in stable order."""
+    rows = (
+        db.query(EmbeddingJobFile)
+        .filter(EmbeddingJobFile.job_id == job_id)
+        .order_by(EmbeddingJobFile.file_id)
+        .all()
+    )
+    return [_file_to_view(row) for row in rows]
+
+
 def _get_job_status(db, job_id: str) -> Optional[EmbeddingJobStatusView]:
     """Internal: build a read-only status view for a job (no mutation).
 
@@ -1787,6 +1827,14 @@ class EmbeddingJobRepository:
             with get_db() as session:
                 return _list_failed_files(session, job_id)
         return _list_failed_files(db, job_id)
+
+    @staticmethod
+    def list_files(job_id: str, db=None) -> list[EmbeddingJobFileView]:
+        """List every file row for a job, sorted by file ID."""
+        if db is None:
+            with get_db() as session:
+                return _list_files(session, job_id)
+        return _list_files(db, job_id)
 
     @staticmethod
     def get_job_status(job_id: str, db=None) -> Optional[EmbeddingJobStatusView]:

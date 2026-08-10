@@ -16,7 +16,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 
 from open_webui.internal.db import get_db
-from open_webui.models.embeddings import AdminEmbeddingModelState
 from open_webui.models.users import Users
 from open_webui.retrieval.embedding.errors import (
     EmbeddingError,
@@ -32,13 +31,8 @@ from open_webui.retrieval.embedding.jobs import (
     EmbeddingJobView,
     EmbeddingJobFileView,
     EmbeddingJobStatusView,
-    JOB_STATUS_COMPLETED,
-    JOB_STATUS_FAILED,
-    JOB_STATUS_PARTIALLY_FAILED,
-    JOB_STATUS_QUEUED,
-    JOB_STATUS_PROCESSING,
-    FILE_STATUS_FAILED,
-    _TERMINAL_JOB_STATUSES,
+    FILE_STATUS_PENDING,
+    is_job_retry_eligible,
 )
 from open_webui.retrieval.embedding.enqueue import enqueue_embedding_job
 from open_webui.retrieval.embedding.state import AdminEmbeddingModelStateRepository
@@ -140,34 +134,18 @@ def _compute_retry_eligible(
 ) -> bool:
     """Compute accurate retry eligibility for a job.
 
-    Returns True only when ALL conditions are met:
-    - Job status is failed or partially_failed.
-    - No active (queued/processing) job exists for this admin.
-    - Admin state exists with a target matching the source job's model.
-    - At least one failed file row exists in the job.
+    Returns True when the stable retry prerequisites are met. The retry
+    endpoint still revalidates source freshness transactionally.
     """
-    if job_view.status not in (JOB_STATUS_FAILED, JOB_STATUS_PARTIALLY_FAILED):
-        return False
-
-    # Must have at least one failed file row
-    if job_view.failed_files <= 0:
-        return False
-
-    # Active job check
     active = EmbeddingJobRepository.get_active_job(admin_id)
-    if active is not None:
-        return False
-
-    # Target state check
     state = AdminEmbeddingModelStateRepository.get_state(admin_id)
-    if state is None:
-        return False
-    if state.target_embedding_model_id is None:
-        return False
-    if state.target_embedding_model_id != job_view.embedding_model_id:
-        return False
-
-    return True
+    files = EmbeddingJobRepository.list_files(job_view.id)
+    return is_job_retry_eligible(
+        job_view,
+        target_model_id=state.target_embedding_model_id if state else None,
+        has_active_job=active is not None,
+        all_files_pending=all(file.status == FILE_STATUS_PENDING for file in files),
+    )
 
 
 def _build_status_response(
