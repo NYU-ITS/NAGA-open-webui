@@ -50,6 +50,7 @@ EMBEDDING_INVENTORY_MALFORMED_REFERENCE = "embedding_inventory_malformed_referen
 EMBEDDING_JOB_ACTIVE_EXISTS = "embedding_job_active_exists"
 EMBEDDING_JOB_NOT_FOUND = "embedding_job_not_found"
 EMBEDDING_JOB_STALE_OPERATION = "embedding_job_stale_operation"
+EMBEDDING_JOB_LEDGER_MISMATCH = "embedding_job_ledger_mismatch"
 EMBEDDING_JOB_TERMINAL = "embedding_job_terminal"
 EMBEDDING_JOB_WRONG_STATUS = "embedding_job_wrong_status"
 EMBEDDING_FILE_NOT_FOUND = "embedding_file_not_found"

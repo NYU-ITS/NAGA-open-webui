@@ -27,6 +27,7 @@ Implements the full worker orchestration with all 17 critical fixes:
 
 import logging
 import time
+from dataclasses import replace
 from typing import Optional
 
 from langchain.text_splitter import RecursiveCharacterTextSplitter, TokenTextSplitter
@@ -258,7 +259,7 @@ def process_embedding_job(embedding_job_id: str) -> dict:
             }
         
         # Step 3: Atomically claim job as processing with duplicate detection
-        job_view = _claim_job_safe(job_view)
+        job_view, reclaim_own_processing_files = _claim_job_safe(job_view)
         if job_view is None:
             # Duplicate delivery with live owner - no-op
             return {"status": "no_op", "reason": "live_owner", "processed": 0, "failed": 0}
@@ -317,7 +318,7 @@ def process_embedding_job(embedding_job_id: str) -> dict:
                     continue
                 
                 # Update file_view with fresh status
-                file_view = file_view._replace(status=fresh_file.status)
+                file_view = replace(file_view, status=fresh_file.status)
                 
                 # Skip if now completed by another worker
                 if file_view.status == FILE_STATUS_COMPLETED:
@@ -333,6 +334,7 @@ def process_embedding_job(embedding_job_id: str) -> dict:
                     embedding_service=embedding_service,
                     vector_repo=vector_repo,
                     config=config,
+                    reclaim_own_processing_files=reclaim_own_processing_files,
                 )
                 if completed:
                     processed_count += 1
@@ -413,10 +415,14 @@ def _get_stable_error_code(error: Exception) -> str:
         return FILE_ERROR_PROCESSING_FAILED
 
 
-def _claim_job_safe(job_view: EmbeddingJobView) -> Optional[EmbeddingJobView]:
+def _claim_job_safe(
+    job_view: EmbeddingJobView,
+) -> tuple[Optional[EmbeddingJobView], bool]:
     """Atomically claim job as processing with duplicate delivery detection.
 
-    Returns None if duplicate delivery with live owner detected.
+    Returns the claimed job and whether the current invocation is the recorded
+    RQ job resuming an existing processing row. Returns ``(None, False)`` if a
+    duplicate delivery has a different live owner.
     """
     from open_webui.retrieval.embedding.jobs import _transition_to_processing
 
@@ -437,12 +443,36 @@ def _claim_job_safe(job_view: EmbeddingJobView) -> Optional[EmbeddingJobView]:
             # Fresh claim: queued → processing.  Commit immediately.
             db.commit()
             log.info(f"[EMBEDDING_WORKER] Claimed job {job_view.id} as processing")
-            return claimed
+            return claimed, False
 
-    # Job was already processing — no DB transaction to commit.
-    # Check whether a live RQ worker still owns it before reclaiming.
+    # Job was already processing — no DB transaction to commit. A retry of the
+    # same RQ job is the rightful owner even though Redis reports that job as
+    # started while this function is running.
     rq_job_id = claimed.rq_job_id
     if rq_job_id:
+        current_rq_job_id = None
+        try:
+            from rq import get_current_job
+
+            current_rq_job = get_current_job()
+            if current_rq_job is not None:
+                current_rq_job_id = current_rq_job.id
+        except Exception as current_job_error:
+            # Fail closed below if Redis still reports a live owner.
+            log.warning(
+                f"[EMBEDDING_WORKER] Could not resolve the current RQ job while "
+                f"claiming durable job {job_view.id}: {type(current_job_error).__name__}"
+            )
+
+        if current_rq_job_id == rq_job_id:
+            log.info(
+                f"[EMBEDDING_WORKER] RQ job {rq_job_id} is resuming its "
+                f"durable processing job {job_view.id}"
+            )
+            return claimed, True
+
+        # This invocation is not the recorded owner. Only reclaim when the
+        # recorded RQ job is no longer pending or processing.
         from open_webui.utils.job_queue import get_job_status
 
         rq_status = get_job_status(rq_job_id)
@@ -451,14 +481,14 @@ def _claim_job_safe(job_view: EmbeddingJobView) -> Optional[EmbeddingJobView]:
                 f"[EMBEDDING_WORKER] Duplicate delivery detected for job {job_view.id}. "
                 f"RQ job {rq_job_id} is {rq_status.get('status')}. No-op."
             )
-            return None
+            return None, False
 
     # RQ job not active or not found — safe to reclaim.
     log.info(
         f"[EMBEDDING_WORKER] Job {job_view.id} already processing, "
         f"continuing with restart/reclaim"
     )
-    return claimed
+    return claimed, False
 
 
 def _load_and_verify_admin(admin_id: str) -> User:
@@ -540,6 +570,7 @@ def _process_file(
     embedding_service: EmbeddingService,
     vector_repo: ModelAwareVectorRepository,
     config,
+    reclaim_own_processing_files: bool,
 ):
     """Process a single file with all critical fixes."""
     job_id = job_view.id
@@ -548,7 +579,11 @@ def _process_file(
     log.debug(f"[EMBEDDING_WORKER] Processing file {file_id} for job {job_id}")
     
     # Step 9: Claim file (Fix #3: use reclaim for processing rows)
-    claim_result = _claim_file_safe(job_id, file_view)
+    claim_result = _claim_file_safe(
+        job_id,
+        file_view,
+        reclaim_own_processing_files=reclaim_own_processing_files,
+    )
     
     # Fix #12: Treat failed claim as skip, not failure
     if claim_result is not True:
@@ -562,6 +597,7 @@ def _process_file(
     # Step 11: Reuse persisted rag_chunks where valid (Fix #9: validate with source hash)
     chunks, rag_chunk_ids = _load_or_parse_chunks(
         admin_id=admin.id,
+        admin_email=admin.email,
         file_id=file_id,
         source_file=source_file,
         content_hash=file_snapshot.get("content_hash"),
@@ -603,9 +639,17 @@ def _process_file(
     return True
 
 
-def _claim_file_safe(job_id: str, file_view) -> Optional[bool]:
+def _claim_file_safe(
+    job_id: str,
+    file_view,
+    *,
+    reclaim_own_processing_files: bool,
+) -> Optional[bool]:
     """Claim file for processing with proper reclaim logic (Fix #3).
-    
+
+    The same recorded RQ job may immediately reclaim a processing row left by
+    its previous attempt. Other invocations must wait for the stale threshold.
+
     Returns True if claimed, False if skipped, None if failed.
     """
     with get_db() as db:
@@ -621,10 +665,15 @@ def _claim_file_safe(job_id: str, file_view) -> Optional[bool]:
             return True
         elif file_view.status == FILE_STATUS_PROCESSING:
             # Fix #3: Reclaim stale processing file
+            stale_threshold_seconds = (
+                0
+                if reclaim_own_processing_files
+                else FILE_STALE_THRESHOLD_SECONDS
+            )
             claimed = EmbeddingJobRepository.reclaim_file(
                 job_id=job_id,
                 file_id=file_view.file_id,
-                stale_threshold_seconds=FILE_STALE_THRESHOLD_SECONDS,
+                stale_threshold_seconds=stale_threshold_seconds,
                 db=db,
             )
             if claimed is None:
@@ -668,7 +717,11 @@ def _get_file_display_name(file_id: str) -> str:
 
 
 def _load_or_parse_chunks(
-    admin_id: str, file_id: str, source_file: File, content_hash: Optional[str],
+    admin_id: str,
+    admin_email: str,
+    file_id: str,
+    source_file: File,
+    content_hash: Optional[str],
     config,
 ) -> tuple[list, list[str]]:
     """Load persisted rag_chunks or parse file content.
@@ -696,18 +749,24 @@ def _load_or_parse_chunks(
     
     # Parse file content (Fix #10: use proper parsing pipeline)
     log.debug(f"[EMBEDDING_WORKER] Parsing file {file_id} content")
-    return _parse_file_content(source_file, admin_id, file_id, config)
+    return _parse_file_content(
+        source_file,
+        admin_id,
+        admin_email,
+        file_id,
+        config,
+    )
 
 
-def _get_chunk_settings(config, admin_id: str) -> tuple[int, int]:
+def _get_chunk_settings(config, admin_email: str) -> tuple[int, int]:
     """Return (chunk_size, chunk_overlap) for the given admin.
 
     Mirrors ``_get_user_chunk_settings`` from the canonical ingestion pipeline
     but operates on the worker config (no FastAPI request object).
     """
     try:
-        chunk_size = config.CHUNK_SIZE.get(admin_id)
-        chunk_overlap = config.CHUNK_OVERLAP.get(admin_id)
+        chunk_size = config.CHUNK_SIZE.get(admin_email)
+        chunk_overlap = config.CHUNK_OVERLAP.get(admin_email)
     except Exception:
         chunk_size, chunk_overlap = None, None
 
@@ -746,7 +805,11 @@ def _make_text_splitter(config, chunk_size: int, chunk_overlap: int):
 
 
 def _parse_file_content(
-    source_file: File, admin_id: str, file_id: str, config
+    source_file: File,
+    admin_id: str,
+    admin_email: str,
+    file_id: str,
+    config,
 ) -> tuple[list, list[str]]:
     """Parse file content into chunks using the canonical splitter pipeline.
 
@@ -821,7 +884,7 @@ def _parse_file_content(
     # Apply the canonical text splitter so chunk granularity matches normal
     # ingestion.  Chunk settings come from the worker config (same source as
     # the web UI).
-    chunk_size, chunk_overlap = _get_chunk_settings(config, admin_id)
+    chunk_size, chunk_overlap = _get_chunk_settings(config, admin_email)
     if chunk_size <= 0:
         chunk_size = 1000
     if chunk_overlap < 0:

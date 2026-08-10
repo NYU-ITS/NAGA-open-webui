@@ -3061,11 +3061,9 @@ async def process_web_search(
 def _resolve_model_aware_query_context(request, user):
     """Spec 10: resolve (admin_id, embedding_model_id) via readiness gate.
 
-    Returns (None, None) when the user's admin/model space cannot be resolved
-    and no durable state exists (legacy fallback).  Raises EmbeddingError for
-    mixed-model spaces and blocked retrieval (EMBEDDING_REINDEX_NOT_READY) so
-    callers return 409 Conflict.  All durable-state resolution errors fail
-    closed — never legacy-fallback.
+    Admins without durable state use their config-resolved model. All readiness
+    and resolution failures propagate so callers fail closed instead of running
+    a model-unaware vector search.
     """
     try:
         from open_webui.retrieval.embedding.resolution import resolve_for_user
@@ -3089,7 +3087,7 @@ def _resolve_model_aware_query_context(request, user):
     except Exception as e:
         # Non-embedding resolution failure: fail closed.
         log.warning(f"model-aware query resolution failed: {e}")
-        return None, None
+        raise
 
 
 class QueryDocForm(BaseModel):

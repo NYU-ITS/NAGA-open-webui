@@ -196,7 +196,9 @@ class EmbeddingJobFile(Base):
     __tablename__ = "embedding_job_files"
 
     job_id = Column(String, ForeignKey("embedding_jobs.id", ondelete="CASCADE"), primary_key=True)
-    file_id = Column(String, ForeignKey("file.id", ondelete="CASCADE"), primary_key=True)
+    # Historical source identifier, intentionally not a foreign key. The job
+    # inventory must survive deletion of the mutable source ``file`` row.
+    file_id = Column(String, primary_key=True)
     status = Column(String(20), nullable=False)
     attempt_count = Column(Integer, nullable=False, default=0)
     error_code = Column(String(64))

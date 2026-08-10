@@ -15,11 +15,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
 from open_webui.models.knowledge import Knowledges
 from open_webui.retrieval.vector.connector import VECTOR_DB_CLIENT
-from open_webui.retrieval.embedding.errors import (
-    EmbeddingError,
-    EMBEDDING_REINDEX_NOT_READY,
-    EMBEDDING_MODEL_SPACE_MIXED,
-)
+from open_webui.retrieval.embedding.errors import EmbeddingError
 from open_webui.utils.auth import get_verified_user
 from open_webui.retrieval.web.tavily import search_tavily
 from open_webui.retrieval.web.main import SearchResult
@@ -411,19 +407,10 @@ def search_knowledge_base(query: str, user_id: str, request: Request, model, k: 
             return []
         
         try:
-            # Credential-safe: Create embedding service and callable
-            from open_webui.retrieval.embedding.service import EmbeddingService
-            from open_webui.retrieval.embedding.compatibility import make_embedding_function
-            
-            service = EmbeddingService(request.app.state.config)
-            embedding_function = make_embedding_function(service, user_id=user_id)
-            query_embedding = embedding_function(query)
-
             # Spec 10: gate readiness BEFORE embedding generation.
             from open_webui.retrieval.embedding.gate import (
                 assert_embedding_retrieval_ready,
                 RetrievalModelSpace,
-                RetrievalReadyNoState,
             )
 
             admin_id, embedding_model_id = None, None
@@ -440,14 +427,23 @@ def search_knowledge_base(query: str, user_id: str, request: Request, model, k: 
                     ctx = resolve_for_user(user_id, request.app.state.config)
                     admin_id, embedding_model_id = ctx.admin_id, ctx.model.id
             except EmbeddingError as gate_error:
-                if gate_error.code in (EMBEDDING_REINDEX_NOT_READY, EMBEDDING_MODEL_SPACE_MIXED):
-                    logging.warning(f"facilities retrieval blocked: {gate_error.detail}")
-                    return []
-                logging.debug(f"model-aware resolution unavailable for facilities: {gate_error}")
+                logging.warning(
+                    "facilities retrieval rejected: %s — %s",
+                    gate_error.code,
+                    gate_error.detail,
+                )
+                return []
             except Exception as gate_error:
-                logging.debug(f"model-aware resolution unavailable for facilities: {gate_error}")
+                logging.warning(
+                    "facilities retrieval readiness check failed: %s", gate_error
+                )
+                return []
 
             # Generate embeddings only after gate passes.
+            from open_webui.retrieval.embedding.service import EmbeddingService
+            from open_webui.retrieval.embedding.compatibility import make_embedding_function
+
+            service = EmbeddingService(request.app.state.config)
             embedding_function = make_embedding_function(service, user_id=user_id)
             query_embedding = embedding_function(query)
         except Exception as e:

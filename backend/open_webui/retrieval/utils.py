@@ -682,11 +682,10 @@ def get_sources_from_files(
     )
 
     # Phase 3: resolve the requesting user's admin/model provenance space.
-    # Best-effort: on ambiguity/resolution failure we fall back to the legacy
-    # collection-name search; on a mixed-model request we return no sources
-    # rather than risk comparing query and document vectors from different
-    # models. This guard covers both the hybrid and non-hybrid paths because a
-    # mixed request is rejected before any vector search runs.
+    # Mixed-model requests return no sources, while other model-space errors
+    # propagate so callers cannot fall back to model-unaware vector search.
+    # This guard covers both the hybrid and non-hybrid paths because invalid
+    # requests are rejected before any vector search runs.
     admin_id = None
     embedding_model_id = None
     knowledge_ids_in_scope: list[str] = [
@@ -731,13 +730,17 @@ def get_sources_from_files(
                 # "no matches" from "reindex in progress / failed."
                 log.warning(f"[RAG Query] retrieval blocked: {e.code} — {e.detail}")
                 raise
-            log.debug(
-                f"[RAG Query] model-aware resolution unavailable, using legacy search: {e.code}"
+            # Ownership, missing-source, and admin-resolution failures must
+            # fail closed rather than silently searching without provenance.
+            log.warning(
+                f"[RAG Query] retrieval rejected: {e.code} — {e.detail}"
             )
+            raise
         except Exception as e:
-            log.debug(
-                f"[RAG Query] model-aware resolution unavailable, using legacy search: {e}"
+            log.warning(
+                f"[RAG Query] retrieval readiness check failed: {e}"
             )
+            raise
 
     extracted_collections = []
     relevant_contexts = []

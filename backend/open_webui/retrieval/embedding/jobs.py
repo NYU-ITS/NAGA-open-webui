@@ -14,7 +14,7 @@ never incremented optimistically.
 Invariants enforced:
 1. One active (queued/processing) job per admin.
 2. One file row per (job_id, file_id) — enforced by composite PK.
-3. total_files equals persisted file-row count.
+3. total_files is the immutable inventory size and equals persisted file-row count.
 4. processed_files equals completed file-row count.
 5. failed_files equals failed file-row count.
 6. Aggregate counters never exceed total.
@@ -32,10 +32,15 @@ from typing import Mapping, Optional, Sequence
 from sqlalchemy.exc import IntegrityError
 
 from open_webui.internal.db import get_db
-from open_webui.models.embeddings import EmbeddingJob, EmbeddingJobFile
+from open_webui.models.embeddings import (
+    AdminEmbeddingModelState,
+    EmbeddingJob,
+    EmbeddingJobFile,
+)
 from open_webui.retrieval.embedding.errors import (
     EmbeddingError,
     EMBEDDING_JOB_ACTIVE_EXISTS,
+    EMBEDDING_JOB_LEDGER_MISMATCH,
     EMBEDDING_JOB_NOT_FOUND,
     EMBEDDING_JOB_STALE_OPERATION,
     EMBEDDING_JOB_TERMINAL,
@@ -898,8 +903,73 @@ def _reclaim_file(
     return _file_to_view(row)
 
 
+def _get_file_counts(db, job_id: str) -> tuple[int, int, int]:
+    """Return persisted ledger totals for a job."""
+    # Sessions disable autoflush globally; persist any in-transaction ledger
+    # transition before deriving counters from SQL.
+    db.flush()
+    total = (
+        db.query(EmbeddingJobFile)
+        .filter(EmbeddingJobFile.job_id == job_id)
+        .count()
+    )
+    processed = (
+        db.query(EmbeddingJobFile)
+        .filter(
+            EmbeddingJobFile.job_id == job_id,
+            EmbeddingJobFile.status == FILE_STATUS_COMPLETED,
+        )
+        .count()
+    )
+    failed = (
+        db.query(EmbeddingJobFile)
+        .filter(
+            EmbeddingJobFile.job_id == job_id,
+            EmbeddingJobFile.status == FILE_STATUS_FAILED,
+        )
+        .count()
+    )
+    return total, processed, failed
+
+
+def _fail_ledger_mismatch(
+    job_row: EmbeddingJob,
+    ledger_total: int,
+    processed: int,
+    failed: int,
+    now: int,
+) -> EmbeddingJobView:
+    """Fail closed when the durable inventory has lost or gained rows."""
+    expected_total = job_row.total_files
+    bounded_processed = min(max(processed, 0), expected_total)
+    bounded_failed = min(max(failed, 0), expected_total - bounded_processed)
+    job_row.processed_files = bounded_processed
+    job_row.failed_files = bounded_failed
+    job_row.status = JOB_STATUS_FAILED
+    job_row.error_code = EMBEDDING_JOB_LEDGER_MISMATCH
+    job_row.error_message = (
+        "Embedding job inventory is inconsistent: "
+        f"expected {expected_total} file rows, found {ledger_total}."
+    )
+    if job_row.completed_at is None:
+        job_row.completed_at = now
+    job_row.updated_at = now
+    log.error(
+        "[JOB] failing job %s because ledger cardinality changed: expected=%d, actual=%d",
+        job_row.id,
+        expected_total,
+        ledger_total,
+    )
+    return _job_to_view(job_row)
+
+
 def _recompute_counters(db, job_id: str) -> Optional[EmbeddingJobView]:
     """Internal: recompute job counters from file rows (flush only).
+
+    ``total_files`` is the immutable inventory cardinality captured when the
+    job is created. A row-count mismatch is corruption, so the job is failed
+    rather than shrinking the expected total and potentially promoting an
+    incomplete model space.
 
     Returns None if job not found.
     """
@@ -913,20 +983,12 @@ def _recompute_counters(db, job_id: str) -> Optional[EmbeddingJobView]:
     if job_row is None:
         return None
 
-    # Count file rows by status
-    total = db.query(EmbeddingJobFile).filter(EmbeddingJobFile.job_id == job_id).count()
-    processed = (
-        db.query(EmbeddingJobFile)
-        .filter(EmbeddingJobFile.job_id == job_id, EmbeddingJobFile.status == FILE_STATUS_COMPLETED)
-        .count()
-    )
-    failed = (
-        db.query(EmbeddingJobFile)
-        .filter(EmbeddingJobFile.job_id == job_id, EmbeddingJobFile.status == FILE_STATUS_FAILED)
-        .count()
-    )
+    total, processed, failed = _get_file_counts(db, job_id)
+    if total != job_row.total_files:
+        view = _fail_ledger_mismatch(job_row, total, processed, failed, now)
+        db.flush()
+        return view
 
-    job_row.total_files = total
     job_row.processed_files = processed
     job_row.failed_files = failed
     job_row.updated_at = now
@@ -980,19 +1042,12 @@ def _finalize_job(db, job_id: str) -> Optional[EmbeddingJobView]:
 
     # Recompute counters first (same transaction) — always, even for terminal jobs
     # per Spec 03 "counters must be recomputed in the same transaction as finalization"
-    total = db.query(EmbeddingJobFile).filter(EmbeddingJobFile.job_id == job_id).count()
-    processed = (
-        db.query(EmbeddingJobFile)
-        .filter(EmbeddingJobFile.job_id == job_id, EmbeddingJobFile.status == FILE_STATUS_COMPLETED)
-        .count()
-    )
-    failed = (
-        db.query(EmbeddingJobFile)
-        .filter(EmbeddingJobFile.job_id == job_id, EmbeddingJobFile.status == FILE_STATUS_FAILED)
-        .count()
-    )
+    total, processed, failed = _get_file_counts(db, job_id)
+    if total != job_row.total_files:
+        view = _fail_ledger_mismatch(job_row, total, processed, failed, now)
+        db.flush()
+        return view
 
-    job_row.total_files = total
     job_row.processed_files = processed
     job_row.failed_files = failed
 
@@ -1105,17 +1160,12 @@ def _finalize_job_success(
         return _job_to_view(job_row)
 
     # 2. Recompute and verify no files are unfinished
-    total = db.query(EmbeddingJobFile).filter(EmbeddingJobFile.job_id == job_id).count()
-    processed = (
-        db.query(EmbeddingJobFile)
-        .filter(EmbeddingJobFile.job_id == job_id, EmbeddingJobFile.status == FILE_STATUS_COMPLETED)
-        .count()
-    )
-    failed = (
-        db.query(EmbeddingJobFile)
-        .filter(EmbeddingJobFile.job_id == job_id, EmbeddingJobFile.status == FILE_STATUS_FAILED)
-        .count()
-    )
+    total, processed, failed = _get_file_counts(db, job_id)
+    if total != job_row.total_files:
+        view = _fail_ledger_mismatch(job_row, total, processed, failed, now)
+        db.flush()
+        return view
+
     unfinished = total - processed - failed
     if unfinished > 0:
         log.warning(
@@ -1123,7 +1173,6 @@ def _finalize_job_success(
             job_id,
             unfinished,
         )
-        job_row.total_files = total
         job_row.processed_files = processed
         job_row.failed_files = failed
         job_row.updated_at = now
@@ -1131,7 +1180,6 @@ def _finalize_job_success(
         return _job_to_view(job_row)
 
     # Update counters
-    job_row.total_files = total
     job_row.processed_files = processed
     job_row.failed_files = failed
 
@@ -1424,22 +1472,57 @@ class EmbeddingJobRepository:
 
     @staticmethod
     def get_latest_job(admin_id: str, db=None) -> Optional[EmbeddingJobView]:
-        """Return the latest job for an admin (by created_at DESC, id DESC), or None."""
-        if db is None:
-            with get_db() as session:
-                row = (
-                    session.query(EmbeddingJob)
-                    .filter(EmbeddingJob.admin_id == admin_id)
-                    .order_by(EmbeddingJob.created_at.desc(), EmbeddingJob.id.desc())
-                    .first()
-                )
-        else:
-            row = (
-                db.query(EmbeddingJob)
-                .filter(EmbeddingJob.admin_id == admin_id)
-                .order_by(EmbeddingJob.created_at.desc(), EmbeddingJob.id.desc())
+        """Return the admin state's authoritative latest job.
+
+        State rows created before their first model-change job legitimately
+        have a null pointer, which means there is no latest job. Timestamp
+        ordering is used only when no state row exists, for compatibility with
+        jobs created before admin state was introduced. An invalid or
+        cross-admin pointer fails closed and is logged as inconsistent state.
+        """
+
+        def load(session):
+            state_row = (
+                session.query(AdminEmbeddingModelState.latest_embedding_job_id)
+                .filter(AdminEmbeddingModelState.admin_id == admin_id)
                 .first()
             )
+            if state_row is not None:
+                latest_job_id = state_row[0]
+                if latest_job_id is None:
+                    return None
+                pointed_job = (
+                    session.query(EmbeddingJob)
+                    .filter(
+                        EmbeddingJob.id == latest_job_id,
+                        EmbeddingJob.admin_id == admin_id,
+                    )
+                    .first()
+                )
+                if pointed_job is None:
+                    log.error(
+                        "[JOB] admin %s has invalid latest job pointer %s",
+                        admin_id,
+                        latest_job_id,
+                    )
+                return pointed_job
+
+            return (
+                session.query(EmbeddingJob)
+                .filter(EmbeddingJob.admin_id == admin_id)
+                .order_by(
+                    EmbeddingJob.created_at.desc(),
+                    EmbeddingJob.updated_at.desc(),
+                    EmbeddingJob.id.desc(),
+                )
+                .first()
+            )
+
+        if db is None:
+            with get_db() as session:
+                row = load(session)
+        else:
+            row = load(db)
         return _job_to_view(row) if row else None
 
     @staticmethod
