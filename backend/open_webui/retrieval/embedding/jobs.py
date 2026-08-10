@@ -32,7 +32,12 @@ from typing import Mapping, Optional, Sequence
 from sqlalchemy.exc import IntegrityError
 
 from open_webui.internal.db import get_db
-from open_webui.models.embeddings import EmbeddingJob, EmbeddingJobFile
+from open_webui.models.embeddings import (
+    EmbeddingJob,
+    EmbeddingJobFile,
+    EmbeddingModel,
+)
+from open_webui.models.users import User
 from open_webui.retrieval.embedding.errors import (
     EmbeddingError,
     EMBEDDING_JOB_ACTIVE_EXISTS,
@@ -955,6 +960,32 @@ def _collect_job_lineage(db, job_id: str) -> list[str]:
     return lineage
 
 
+def _restore_previous_model_config(db, job_row: EmbeddingJob) -> None:
+    """Restore compatibility config to the model that remains active on failure."""
+    previous_model_id = job_row.previous_embedding_model_id
+    if previous_model_id is None:
+        return
+
+    previous_model = (
+        db.query(EmbeddingModel)
+        .filter(EmbeddingModel.id == previous_model_id)
+        .first()
+    )
+    admin = db.query(User).filter(User.id == job_row.admin_id).first()
+    if previous_model is None or admin is None:
+        raise EmbeddingError(
+            EMBEDDING_MODEL_STATE_CONFLICT,
+            detail=(
+                f"Cannot restore embedding config for failed job {job_row.id}: "
+                f"previous model or admin is missing."
+            ),
+        )
+
+    from open_webui.config import RAG_EMBEDDING_MODEL_USER
+
+    RAG_EMBEDDING_MODEL_USER.set(admin.email, previous_model.model_name, db=db)
+
+
 def _finalize_job(db, job_id: str) -> Optional[EmbeddingJobView]:
     """Internal: recompute counters and set terminal status (flush only).
 
@@ -1043,6 +1074,10 @@ def _finalize_job(db, job_id: str) -> Optional[EmbeddingJobView]:
     if job_row.completed_at is None:
         job_row.completed_at = now
     job_row.updated_at = now
+
+    if job_row.status in (JOB_STATUS_FAILED, JOB_STATUS_PARTIALLY_FAILED):
+        _restore_previous_model_config(db, job_row)
+
     db.flush()
     log.info(
         "[JOB] finalized job %s: status=%s, total=%d, processed=%d, failed=%d",
@@ -1318,7 +1353,12 @@ def _get_job_status(db, job_id: str) -> Optional[EmbeddingJobStatusView]:
 
 
 def _mark_job_failed(
-    db, job_id: str, error_code: str, error_message: str
+    db,
+    job_id: str,
+    error_code: str,
+    error_message: str,
+    *,
+    restore_previous_config: bool = False,
 ) -> Optional[EmbeddingJobView]:
     """Internal: mark job as failed with error details (flush only).
 
@@ -1349,6 +1389,9 @@ def _mark_job_failed(
     if job_row.completed_at is None:
         job_row.completed_at = now
     job_row.updated_at = now
+
+    if restore_previous_config:
+        _restore_previous_model_config(db, job_row)
 
     db.flush()
     log.info(
@@ -1727,6 +1770,8 @@ class EmbeddingJobRepository:
         error_code: str,
         error_message: str,
         db=None,
+        *,
+        restore_previous_config: bool = False,
     ) -> Optional[EmbeddingJobView]:
         """Mark job as failed with error details.
 
@@ -1741,7 +1786,19 @@ class EmbeddingJobRepository:
         """
         if db is None:
             with get_db() as session:
-                view = _mark_job_failed(session, job_id, error_code, error_message)
+                view = _mark_job_failed(
+                    session,
+                    job_id,
+                    error_code,
+                    error_message,
+                    restore_previous_config=restore_previous_config,
+                )
                 session.commit()
                 return view
-        return _mark_job_failed(db, job_id, error_code, error_message)
+        return _mark_job_failed(
+            db,
+            job_id,
+            error_code,
+            error_message,
+            restore_previous_config=restore_previous_config,
+        )
