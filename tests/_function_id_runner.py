@@ -23,6 +23,7 @@ Scenarios:
   ENSURE_IDEMPOTENT              - calling ensure twice with same key succeeds and function still exists
   PIPE_NESTED_VALVES_PREPOPULATED - _prepopulate finds Valves nested inside Pipe class
   STEP1_RETURNS_IMMEDIATELY      - Step 1 short-circuits when is_system_default=True exists, no valve update
+  STEP1_VERSION_UPGRADE          - Step 1 updates content+manifest when canonical version changed; is_active and valves untouched
   CONTENT_MATCH_ADOPTED          - Step 2 adopts existing clone with matching content, marks is_system_default=True
   CONTENT_MISMATCH_FRESH_INACTIVE - Step 3 creates fresh function with is_active=False when active pipe exists
   ID_COLLISION_SKIP              - Step 3 skips creation when derived ID is already taken by modified content
@@ -609,6 +610,88 @@ def scenario_step1_returns_immediately():
     }))
 
 
+# ── Scenario: STEP1_VERSION_UPGRADE ─────────────────────────────────────────
+
+def scenario_step1_version_upgrade():
+    """System default exists but carries an old version. Step 1 must update
+    content and manifest to match the canonical. is_active and valves must be
+    left completely untouched."""
+    from open_webui.config import DEFAULT_SYSTEM_FUNCTION_CONTENT, DEFAULT_SYSTEM_FUNCTION_ID
+    from open_webui.models.functions import Functions, FunctionForm, FunctionMeta
+    from open_webui.routers.functions import _extract_version, _normalize_content
+    from open_webui.utils.plugin import load_function_module_by_id, replace_imports
+
+    net_id = "aa12947"
+    email = f"{net_id}@nyu.edu"
+    user_id = f"{net_id}-uid"
+    _seed_user(email, user_id)
+    _seed_config(email, "upgrade-key")
+
+    canonical_raw = replace_imports(DEFAULT_SYSTEM_FUNCTION_CONTENT)
+    function_id = f"{DEFAULT_SYSTEM_FUNCTION_ID}__{net_id}"
+    canonical_version = _extract_version(canonical_raw)
+
+    # Build old content by substituting a stale version string.
+    old_content = canonical_raw.replace(
+        f'version: {canonical_version}',
+        'version: 0.0 [OldVersion]',
+    )
+
+    # Insert system default with OLD content; is_active=True (admin had it ON).
+    old_module, old_type, old_frontmatter = load_function_module_by_id(
+        function_id, content=old_content
+    )
+    function = Functions.insert_new_function(
+        user_id=user_id, user_email=email, type=old_type,
+        form_data=FunctionForm(
+            id=function_id, name="LLM", content=old_content,
+            meta=FunctionMeta(description="System default LLM pipe", manifest=old_frontmatter),
+        ),
+        is_active=True,
+        is_system_default=True,
+    )
+    # Set sentinel valve values that must survive the upgrade.
+    Functions.update_function_valves_by_id(function.id, {
+        "PORTKEY_API_KEY": "upgrade-key",
+        "PORTKEY_API_BASE_URL": "https://sentinel.example.com",
+    })
+
+    # Simulate Step 1 version check.
+    existing = Functions.get_admin_system_default_function(email)
+    stored_version = (
+        (existing.meta.manifest or {}).get('version', '')
+        if existing and existing.meta else ''
+    )
+
+    if canonical_version and canonical_version != stored_version:
+        _, _, new_frontmatter = load_function_module_by_id(existing.id, content=canonical_raw)
+        Functions.update_function_by_id(existing.id, {
+            "content": canonical_raw,
+            "meta": {
+                "description": existing.meta.description if existing.meta else "",
+                "manifest": new_frontmatter,
+            },
+        })
+
+    after = Functions.get_function_by_id(function_id)
+    valves_after = Functions.get_function_valves_by_id(function_id) or {}
+    print(json.dumps({
+        "content_updated": (
+            after is not None
+            and _normalize_content(after.content or '') == _normalize_content(canonical_raw)
+        ),
+        "version_updated": (
+            after is not None
+            and (after.meta.manifest or {}).get('version') == canonical_version
+        ),
+        "is_active_preserved": after is not None and after.is_active is True,
+        "valves_preserved": (
+            valves_after.get("PORTKEY_API_KEY") == "upgrade-key"
+            and valves_after.get("PORTKEY_API_BASE_URL") == "https://sentinel.example.com"
+        ),
+    }))
+
+
 # ── Scenario: CONTENT_MATCH_ADOPTED ─────────────────────────────────────────
 
 def scenario_content_match_adopted():
@@ -1026,6 +1109,7 @@ if __name__ == "__main__":
         "ENSURE_IDEMPOTENT": scenario_ensure_idempotent,
         "PIPE_NESTED_VALVES_PREPOPULATED": scenario_pipe_nested_valves_prepopulated,
         "STEP1_RETURNS_IMMEDIATELY": scenario_step1_returns_immediately,
+        "STEP1_VERSION_UPGRADE": scenario_step1_version_upgrade,
         "CONTENT_MATCH_ADOPTED": scenario_content_match_adopted,
         "CONTENT_MISMATCH_FRESH_INACTIVE": scenario_content_mismatch_fresh_inactive,
         "ID_COLLISION_SKIP": scenario_id_collision_skip,

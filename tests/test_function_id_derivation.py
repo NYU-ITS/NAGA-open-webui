@@ -18,6 +18,7 @@ Verifies that:
 - Step 3 creates with is_active=True when no functions exist (new admin)
 - Step 3 creates with is_active=True when only a non-pipe (filter/action) is active
 - Step 3 skips creation and returns None when the derived ID is already taken by modified content
+- Step 1 updates content and manifest when the canonical version has changed; is_active and valves are never touched
 
 Run locally (from project root):
 
@@ -381,4 +382,25 @@ def test_step3_inactive_pipe_creates_active(tmp_path):
     )
     assert data["inactive_pipe_still_inactive"] is True, (
         "the existing inactive pipe must remain inactive — ensure must not touch it"
+    )
+
+
+# ── 19: Step 1 upgrades content and manifest when canonical version changed ───
+
+def test_step1_version_upgrade(tmp_path):
+    """When a system default function exists but carries an older version, Step 1
+    must update content and manifest to the canonical version without touching
+    is_active or valves."""
+    data = run_scenario(tmp_path, "STEP1_VERSION_UPGRADE")
+    assert data["content_updated"] is True, (
+        "Step 1 must overwrite content with the current canonical version"
+    )
+    assert data["version_updated"] is True, (
+        "manifest.version must match the canonical version after the update"
+    )
+    assert data["is_active_preserved"] is True, (
+        "is_active must not be changed — admin controls this, not ensure"
+    )
+    assert data["valves_preserved"] is True, (
+        "valves must not be changed — the cascade and admin control these"
     )

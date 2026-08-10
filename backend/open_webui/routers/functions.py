@@ -94,6 +94,12 @@ def _normalize_content(content: str) -> str:
     return '\n'.join(stripped)
 
 
+def _extract_version(content: str) -> str:
+    """Extract the version field from a function's frontmatter docstring."""
+    m = re.search(r'^\s*version:\s*(.+?)\s*$', content, re.MULTILINE)
+    return m.group(1) if m else ''
+
+
 class EnsureSystemDefaultForm(BaseModel):
     api_key: str
 
@@ -144,10 +150,44 @@ async def ensure_admin_system_default(
     # ── Step 1: already provisioned ──────────────────────────────────────────
     existing = Functions.get_admin_system_default_function(user.email)
     if existing:
-        log.debug(
-            "System default already exists for admin %s (id=%s) — no action needed",
-            user.email, existing.id,
+        canonical_raw = replace_imports(DEFAULT_SYSTEM_FUNCTION_CONTENT)
+        canonical_version = _extract_version(canonical_raw)
+        stored_version = (
+            (existing.meta.manifest or {}).get('version', '')
+            if existing.meta else ''
         )
+
+        if canonical_version and canonical_version != stored_version:
+            # New deployment changed the canonical content — update content and
+            # manifest only. is_active and valves are admin-controlled; never touch them.
+            try:
+                function_module, _, new_frontmatter = load_function_module_by_id(
+                    existing.id, content=canonical_raw
+                )
+                Functions.update_function_by_id(existing.id, {
+                    "content": canonical_raw,
+                    "meta": {
+                        "description": existing.meta.description if existing.meta else "",
+                        "manifest": new_frontmatter,
+                    },
+                })
+                request.app.state.FUNCTIONS[existing.id] = function_module
+                invalidate_models_cache(request)
+                log.info(
+                    "Updated system default %s for admin %s: v%s → v%s",
+                    existing.id, user.email, stored_version, canonical_version,
+                )
+            except Exception:
+                log.exception(
+                    "Failed to update system default content for admin %s — returning existing",
+                    user.email,
+                )
+        else:
+            log.debug(
+                "System default already exists for admin %s (id=%s) — no action needed",
+                user.email, existing.id,
+            )
+
         return Functions.get_function_by_id(existing.id)
 
     # ── Step 2: scan all admin functions for content match ────────────────────
