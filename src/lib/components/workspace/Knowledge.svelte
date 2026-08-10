@@ -90,7 +90,15 @@
 			}
 		} catch (error) {
 			// Keep the last durable status on transient request failures.
-			if (!destroyed) indexingStatusLoadFailed = getHttpStatus(error) !== 403;
+			if (!destroyed) {
+				const httpStatus = getHttpStatus(error);
+				if (httpStatus === 401 || httpStatus === 403) {
+					indexingStatuses = {};
+					indexingStatusLoadFailed = false;
+				} else {
+					indexingStatusLoadFailed = true;
+				}
+			}
 		} finally {
 			indexingStatusRequestInFlight = false;
 			if (!destroyed) scheduleIndexingPolling();
@@ -142,7 +150,8 @@
 					return [];
 				}),
 				getKnowledgeIndexingStatuses(localStorage.token).catch((error) => {
-					statusLoadFailed = getHttpStatus(error) !== 403;
+					const httpStatus = getHttpStatus(error);
+					statusLoadFailed = httpStatus !== 401 && httpStatus !== 403;
 					return null;
 				})
 			]);

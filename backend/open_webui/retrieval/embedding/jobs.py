@@ -77,7 +77,6 @@ _ACTIVE_JOB_STATUSES = frozenset({JOB_STATUS_QUEUED, JOB_STATUS_PROCESSING})
 class _RetryableJob(Protocol):
     status: str
     embedding_model_id: str
-    failed_files: int
 
 
 def is_job_retry_eligible(
@@ -85,6 +84,7 @@ def is_job_retry_eligible(
     *,
     target_model_id: Optional[str],
     has_active_job: bool,
+    has_failed_files: bool,
     all_files_pending: bool,
 ) -> bool:
     """Return whether a terminal job may offer the retry action.
@@ -98,7 +98,6 @@ def is_job_retry_eligible(
     if has_active_job or target_model_id != job.embedding_model_id:
         return False
 
-    has_failed_files = job.failed_files > 0
     is_enqueue_only_failure = job.status == JOB_STATUS_FAILED and all_files_pending
     return has_failed_files or is_enqueue_only_failure
 

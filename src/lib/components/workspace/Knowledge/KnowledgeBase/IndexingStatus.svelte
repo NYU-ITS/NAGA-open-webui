@@ -76,7 +76,7 @@
 		} catch (error) {
 			if (!destroyed) {
 				const httpStatus = getHttpStatus(error);
-				if (httpStatus === 403 || httpStatus === 404) {
+				if (httpStatus === 401 || httpStatus === 403 || httpStatus === 404) {
 					status = null;
 					temporarilyUnavailable = false;
 					hiddenByAuthorization = true;
@@ -275,7 +275,7 @@
 							</div>
 						{:else}
 							<p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
-								{$i18n.t('No files from this knowledge base are in the current retry attempt.')}
+								{$i18n.t('No files from this knowledge base are in the current indexing attempt.')}
 							</p>
 						{/if}
 						<p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
@@ -331,9 +331,11 @@
 			{#if status.failed_document_count > 0 || status.job_failed_document_count > 0}
 				<details class="mt-3 rounded-xl bg-gray-50 px-3 py-2 text-xs dark:bg-gray-850">
 					<summary class="cursor-pointer font-medium">
-						{$i18n.t('{{count}} failed documents in this knowledge base', {
-							count: status.failed_document_count
-						})}
+						{status.failed_document_count > 0
+							? $i18n.t('{{count}} failed documents in this knowledge base', {
+									count: status.failed_document_count
+								})
+							: $i18n.t('Failures elsewhere in the reindex job')}
 					</summary>
 					{#if status.failed_documents?.length}
 						<ul class="mt-2 max-h-40 space-y-2 overflow-y-auto">

@@ -390,6 +390,9 @@ def build_knowledge_indexing_statuses(
                 job,
                 target_model_id=state.target_embedding_model_id if state else None,
                 has_active_job=admin_id in active_admin_ids,
+                has_failed_files=any(
+                    row.status == FILE_STATUS_FAILED for row in rows
+                ),
                 all_files_pending=all(
                     row.status == FILE_STATUS_PENDING for row in rows
                 ),

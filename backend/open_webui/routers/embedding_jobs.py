@@ -31,6 +31,7 @@ from open_webui.retrieval.embedding.jobs import (
     EmbeddingJobView,
     EmbeddingJobFileView,
     EmbeddingJobStatusView,
+    FILE_STATUS_FAILED,
     FILE_STATUS_PENDING,
     is_job_retry_eligible,
 )
@@ -144,6 +145,7 @@ def _compute_retry_eligible(
         job_view,
         target_model_id=state.target_embedding_model_id if state else None,
         has_active_job=active is not None,
+        has_failed_files=any(file.status == FILE_STATUS_FAILED for file in files),
         all_files_pending=all(file.status == FILE_STATUS_PENDING for file in files),
     )
 
