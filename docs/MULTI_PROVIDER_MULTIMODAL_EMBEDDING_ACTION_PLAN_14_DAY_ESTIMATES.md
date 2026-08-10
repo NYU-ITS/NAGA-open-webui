@@ -17,8 +17,8 @@ PGVector will remain the vector backend. Different embedding dimensions will use
 * Text ingestion and model-aware query retrieval.  
 * Different vector dimensions without padding or truncation.  
 * Reindexing through the existing Redis Queue infrastructure.  
-* Admin-visible indexing status and failed-document information.  
-* Admin settings UI for viewing and changing the selected model.  
+* Knowledge-base indexing status and failed-document information for users with existing edit access; retry remains limited to the governing admin.
+* Admin settings UI for viewing and changing the selected model (owned by the RBAC team and excluded from this plan's Phase 5 implementation).
 * Basic image storage, metadata, and provider-supported embedding.  
 * Regeneration and migration of embeddings governed by each admin.  
 * Traceability from each vector to the model that generated it.  
@@ -62,6 +62,7 @@ The source document defines the desired product behavior but does not account fo
 10. **Knowledge and chat-file RAG are the project boundary.** Chat knowledge retrieval, knowledge ingestion, chat file upload ingestion and retrieval, the file worker, and the Pilot GenAI facilities RAG path are included. User-memory embeddings remain on their current policy unless a shared dependency must be updated for compatibility.  
 11. **Existing RBAC remains authoritative.** The project will not add special handling for roles or users outside user groups because the current RBAC logic already handles those cases.  
 12. **No new OCR or captioning service.** Image-derived text will be used only when the existing processing path or selected provider already produces it.
+13. **Phase 5 ownership boundary.** The RBAC team owns model-selection, admin-settings, and related authorization changes. Phase 5 reuses existing edit authorization and the Phase 4 job/retry contracts; it adds reindex status only to Workspace → Knowledge.
 
 If any assumption is rejected, the affected schema or phase must be revised before implementation begins.
 
@@ -223,26 +224,32 @@ Exit criteria:
 
 **Expected completion:** August 3, 2026.
 
-### **Phase 5 \- Add admin settings and status UI**
+### **Phase 5 \- Add knowledge-base reindex status UI**
+
+Ownership note: the RBAC team owns the model-selection and admin-settings UI. Phase 5 does not modify Admin Settings or add model-change controls.
 
 Work:
 
-1. Add typed frontend clients for the approved model, admin-setting, and job endpoints.  
-2. Show the current provider, model, modality, latest status, and last indexed time.  
-3. Allow each admin to select an enabled model from Settings.  
-4. Show the reindex downtime warning before confirmation.  
-5. Disable further changes while a job is queued or processing.  
-6. Show failed-document count and retry when allowed.  
-7. Handle loading, empty, forbidden, conflict, failed, and partially failed states.
+1. Add credential-free status projections for the editable Knowledge list and one Knowledge detail. Authorize them through the same mutation-style edit rules already used by knowledge operations and the same group-first governing-admin resolution used by the reindex inventory.
+2. Return typed per-knowledge state: durable job ID and type, raw job status, derived display state, retrieval availability, active and target model display metadata, per-knowledge and whole-job counts, timestamps, last successful reindex time, knowledge-filtered failed-file details, and retry flags. Do not expose admin IDs, credentials, provider URLs, stack traces, or raw provider errors.
+3. Add typed frontend clients for the Knowledge status endpoints and the existing retry endpoint. Keep upload `processing_status` indicators separate.
+4. Add compact status badges to Knowledge collection cards: Ready uses the existing success badge, Queued and Partially failed use warning, Indexing uses info, Failed uses error, and Unavailable uses muted.
+5. Add a Knowledge detail status panel with active/target model context, collection and whole-job progress, retrieval availability, and localized timestamps.
+6. Show failed-document count plus expandable file IDs and safe backend messages. Only the governing admin sees Retry; other editors see guidance to contact that administrator. Confirm that retry uses the backend-defined job scope and can include documents outside the open knowledge base.
+7. Poll every five seconds for active jobs or transient status recovery, pause while the page is hidden, refresh when it becomes visible, stop at terminal state or unmount, and preserve the last known durable status on transient errors.
+8. Handle loading, no-job, forbidden, not-found, conflict, failed, partially failed, and inconsistent/unavailable states without inferring readiness in the browser.
+9. Preserve the existing visual language: add no font files, global typography, theme variables, or color tokens; retain Archivo (`font-primary`) for the collection title, inherited Inter/system typography for status content, and reuse existing gray/dark utilities, semantic Badge colors, rounded controls, and `ConfirmDialog`.
 
 Exit criteria:
 
-* The UI directly represents backend state.  
-* Refreshing during a job shows its durable status.  
-* Regular users cannot view or change an admin's embedding settings.  
-* No credential is displayed or retained in browser state.
+* Owners, group editors, and admins see status only where existing knowledge edit rules allow it; read-only and unrelated users cannot access the status projection.
+* List/detail refreshes show durable backend state, and active jobs update without a page reload.
+* Admin-wide retrieval blocking appears on every governed knowledge base, including retry jobs whose file subset does not include that knowledge base.
+* Per-knowledge failure details are filtered to that knowledge base; retry remains governing-admin-only and uses the backend-defined failed-job scope.
+* Existing upload-processing indicators remain unchanged and distinct from model-change reindex status.
+* No credential or sensitive operational value reaches browser state, and no new font or color definition is introduced.
 
-**Expected completion:** August 4, 2026.
+**Expected completion:** August 4–5, 2026.
 
 ### **Phase 6 \- Add basic image support**
 
@@ -318,7 +325,9 @@ No tests are being created or run as part of planning. When test work is explici
 * Query and document vectors use the same model.  
 * Retrieval is unavailable with a clear message during reindex.  
 * A successful model change updates both ingestion and retrieval.  
-* Admin settings permissions, inherited group behavior, and existing RBAC restrictions are enforced.  
+* Knowledge status follows existing mutation-style edit access; read-only users are excluded, only the governing admin can retry, and inherited group behavior and existing RBAC restrictions remain unchanged.
+* List/detail state mapping, shared-file counting, durable refresh, active polling, per-knowledge failure filtering, and whole-job retry confirmation behave as specified.
+* Status responses and browser state contain no admin IDs, credentials, provider URLs, stack traces, or raw provider errors.
 * Image storage and the approved image or fallback path work.
 
 ## **6\. Rollout and rollback**
@@ -348,6 +357,7 @@ During rollout, rollback means returning content governed by an admin to the ret
 | Legacy metadata identifies the wrong model | Regenerate from source files instead of copying vectors |
 | Image scope expands beyond V1 | Limit work to storage, metadata, provider support, and available text fallback |
 | Credentials appear in logs or queue payloads | Remove current diagnostics and resolve credentials server-side |
+| A status projection leaks another knowledge base or admin's job data | Authorize each knowledge base through existing edit rules, filter failed rows by persisted `knowledge_collection_ids`, and omit admin IDs and sensitive provider data |
 
 ## **8\. Supplemental work**
 
@@ -367,43 +377,46 @@ Acceptance:
 * Repository search finds no embedding credential or partial representation in application logging.  
 * We confirm that model selection and worker behavior are unchanged.
 
-### **Work item 2 \- Read-only admin embedding panel** — **Expected completion: August 4, 2026; included in Phase 5 tasks 1–2 and 7.**
+### **Work item 2 \- Knowledge list and detail status surfaces** — **Expected completion: August 4–5, 2026; included in Phase 5 tasks 1–5 and 7–9.**
 
-**Start:** After we merge the model, settings, and status GET contracts  
+**Start:** After we merge the Phase 4 status contract
 **Dependency:** Phase 4 API contract
 
 Deliverables:
 
-* Typed frontend API functions for the current admin's embedding-setting and job endpoints.  
-* An admin settings panel showing provider, model, modality, inherited user-group scope, job status, and last indexed time.  
-* Loading, empty, forbidden, queued, processing, completed, failed, and partially failed states.
+* Typed, credential-free Knowledge list and detail status clients.
+* Compact collection-card badges using the existing semantic Badge palette.
+* A Knowledge detail panel showing model context, per-knowledge and whole-job progress, retrieval availability, and last successful reindex time.
+* Loading, no-job, forbidden, queued, processing, completed, failed, partially failed, transport-unavailable, and inconsistent-state handling.
+* Independent status polling that does not overwrite or reinterpret upload `processing_status`.
 
 Acceptance:
 
-* Refreshing the page shows the same server-backed state.  
-* Regular users do not see the admin embedding settings panel.  
-* No credential value or reference is displayed.
+* Refreshing the list or detail page shows the same durable server-backed state.
+* Only knowledge bases editable under existing rules receive status data.
+* Retry-subset jobs still show admin-wide retrieval blocking on governed knowledge bases with zero rows in the current attempt.
+* No credential, new font definition, or new color token is added.
 
-### **Work item 3 \- Model change and retry controls** — **Expected completion: August 4, 2026; included in Phase 5 tasks 3–7.**
+### **Work item 3 \- Failure detail and governing-admin retry** — **Expected completion: August 5, 2026; included in Phase 5 task 6.**
 
-**Start:** After we merge the model-change and retry contracts  
+**Start:** After we merge the Knowledge detail status projection
 **Dependency:** Working reindex workflow
 
 Deliverables:
 
-* Enabled-model selector populated from the backend registry.  
-* Confirmation warning explaining retrieval downtime.  
-* Disabled controls while indexing is queued or processing.  
-* Failed-document count and approved retry action.  
-* Clear authorization, conflict, capability, and job-failure messages.
+* Knowledge-filtered failed-document count and expandable file IDs, safe messages, and attempt counts.
+* Governing-admin-only Retry using the existing Phase 4 endpoint.
+* Existing `ConfirmDialog` warning that retry follows the backend-defined job scope and may include documents outside the open knowledge base.
+* Contact-owner guidance for editors who can view status but cannot retry.
+* Conflict handling that refreshes the durable latest status.
 
 Acceptance:
 
-* Double submission cannot create two logical model changes.  
-* The UI does not report retrieval as ready before backend status is `completed`.  
-* Only the admin that owns the setting can change the model or retry.
+* Only the governing admin can retry.
+* A retry conflict reloads current status instead of leaving stale controls.
+* The UI never implies that retry is limited to the open knowledge base.
 
-### **Work item 4 \- Image status support** — **Expected completion: August 6, 2026; included in Phase 5 tasks 2 and 7 and Phase 6 tasks 6–7.**
+### **Work item 4 \- Image status support** — **Expected completion: August 6, 2026; excluded from Phase 5 and included only in Phase 6 tasks 6–7.**
 
 **Start:** After we finalize the image API response  
 **Dependency:** Phase 6 backend contract
@@ -413,6 +426,7 @@ Deliverables:
 * Display the supported modality for the selected model.  
 * Display unsupported-image and failed-image states using existing job UI patterns.  
 * Display image metadata only when supplied by the approved backend response.
+* Keep future image-processing status distinct from both model-change reindex status and existing upload processing.
 
 Acceptance:
 
