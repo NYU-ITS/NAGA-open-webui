@@ -1,4 +1,8 @@
-from open_webui.routers.chats import _export_timestamp, _linear_messages
+from open_webui.routers.chats import (
+    _export_timestamp,
+    _linear_messages,
+    _session_start,
+)
 
 
 class FakeChat:
@@ -117,10 +121,8 @@ def merge(chats):
     """The session merge from export_chats_as_zip, kept in step with the router."""
     sessions = []
     for chat in chats:
-        messages = sorted(_linear_messages(chat), key=_export_timestamp)
-        started_at = (
-            _export_timestamp(messages[0]) if messages else float(chat.created_at or 0)
-        )
+        messages = _linear_messages(chat)
+        started_at = _session_start(messages, chat)
         sessions.append((started_at, chat, messages))
     sessions.sort(key=lambda session: (session[0], session[1].created_at or 0))
 
@@ -198,6 +200,60 @@ class TestSessionMerge:
     def test_a_lone_session_gets_no_header(self):
         a = FakeChat("a", "Session A", {"messages": [message("user", "A-q1", 100)]})
         assert [m["content"] for m in merge([a])] == ["A-q1"]
+
+    def test_regenerated_reply_stays_with_its_question(self):
+        """
+        Regeneration hangs a new reply off the same user message. It carries the
+        time it was regenerated, or none at all when the backend wrote it, so
+        ordering a session by timestamp files the answer away from its question.
+        The parent chain is the order the user saw and must survive intact.
+        """
+        history = {
+            "currentId": "a2b",
+            "messages": {
+                "q1": {"role": "user", "content": "Q1", "timestamp": 100},
+                "a1": {"role": "assistant", "content": "A1", "timestamp": 110, "parentId": "q1"},
+                "q2": {"role": "user", "content": "Q2", "timestamp": 200, "parentId": "a1"},
+                "a2": {"role": "assistant", "content": "A2 old", "timestamp": 210, "parentId": "q2"},
+                # Persisted by the backend: model and content, but no timestamp.
+                "a2b": {"role": "assistant", "content": "A2 new", "parentId": "q2"},
+            },
+        }
+        chat = FakeChat("c", "Session", {"history": history})
+
+        assert [m["content"] for m in merge([chat])] == ["Q1", "A1", "Q2", "A2 new"]
+
+    def test_a_late_regenerated_reply_is_not_moved_to_the_end(self):
+        # The reply to Q1 was regenerated after the rest of the chat already
+        # existed, so it carries a timestamp later than every message that
+        # follows it in the conversation.
+        history = {
+            "currentId": "a2",
+            "messages": {
+                "q1": {"role": "user", "content": "Q1", "timestamp": 100},
+                "a1b": {"role": "assistant", "content": "A1 new", "timestamp": 9999, "parentId": "q1"},
+                "q2": {"role": "user", "content": "Q2", "timestamp": 200, "parentId": "a1b"},
+                "a2": {"role": "assistant", "content": "A2", "timestamp": 210, "parentId": "q2"},
+            },
+        }
+        chat = FakeChat("c", "Session", {"history": history})
+
+        assert [m["content"] for m in merge([chat])] == ["Q1", "A1 new", "Q2", "A2"]
+
+    def test_session_without_timestamps_does_not_jump_the_export(self):
+        """A session start of 0 would drag it above every dated session."""
+        early = FakeChat(
+            "early", "Early", {"messages": [message("user", "early", 100)]}
+        )
+        undated = FakeChat(
+            "undated",
+            "Undated",
+            {"messages": [{"role": "user", "content": "undated"}]},
+            created_at=500,
+        )
+
+        contents = [m["content"] for m in merge([undated, early])]
+        assert contents.index("early") < contents.index("undated")
 
     def test_missing_timestamps_do_not_abort_the_merge(self):
         a = FakeChat("a", "Session A", {"messages": [message("user", "A-q1", 100)]})

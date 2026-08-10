@@ -113,8 +113,39 @@ class PDFGenerator:
 
         self.css = Path(STATIC_DIR / "assets" / "pdf-style.css").read_text()
 
+    @staticmethod
+    def _coerce_epoch_seconds(timestamp) -> float | None:
+        """
+        Normalize whatever a message carries into epoch seconds.
+
+        The frontend writes seconds, but a value that has been through JSON,
+        a webhook or an import can arrive as a numeric string or in
+        milliseconds. Both used to fall through to the empty string, which is
+        why a message could show no date at all despite having a timestamp.
+        """
+        if isinstance(timestamp, bool) or timestamp is None:
+            return None
+        if isinstance(timestamp, str):
+            try:
+                timestamp = float(timestamp.strip())
+            except ValueError:
+                return None
+        if not isinstance(timestamp, (int, float)):
+            return None
+        value = float(timestamp)
+        if value <= 0:
+            return None
+        # Anything this large is not seconds; a seconds value that big would be
+        # far past year 9999. Milliseconds and microseconds both fold down.
+        while value > 1e11:
+            value /= 1000.0
+        return value
+
     def format_timestamp(self, timestamp: float) -> str:
         """Convert a UNIX timestamp to a formatted date string in Eastern Time (EST/EDT)."""
+        timestamp = self._coerce_epoch_seconds(timestamp)
+        if timestamp is None:
+            return ""
         try:
             date_time = datetime.fromtimestamp(timestamp, tz=ZoneInfo("America/New_York"))
             

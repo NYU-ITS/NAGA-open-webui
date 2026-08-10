@@ -17,6 +17,41 @@ def detect(content):
     return make_generator().detect_latex_in_message(content)
 
 
+class TestTimestampFormatting:
+    """
+    A message that carries a time must show one. Every non-seconds shape used to
+    fall through to the empty string, so the PDF silently lost the date.
+    """
+
+    SECONDS = 1754400000
+
+    def test_seconds_render(self):
+        assert make_generator().format_timestamp(self.SECONDS).startswith("August 05, 2025")
+
+    def test_milliseconds_render(self):
+        gen = make_generator()
+        assert gen.format_timestamp(self.SECONDS * 1000) == gen.format_timestamp(self.SECONDS)
+
+    def test_numeric_string_renders(self):
+        gen = make_generator()
+        assert gen.format_timestamp(str(self.SECONDS)) == gen.format_timestamp(self.SECONDS)
+
+    def test_float_renders(self):
+        gen = make_generator()
+        assert gen.format_timestamp(float(self.SECONDS)) == gen.format_timestamp(self.SECONDS)
+
+    def test_absent_time_stays_blank(self):
+        gen = make_generator()
+        for value in [None, 0, "", "later", True]:
+            assert gen.format_timestamp(value) == ""
+
+    def test_rendered_message_carries_the_date(self):
+        gen = make_generator()
+        message = {"role": "user", "content": "hi", "timestamp": self.SECONDS}
+        body, _ = gen._extract_latex(message["content"])
+        assert "August 05, 2025" in gen._build_html_message(message, body, [])
+
+
 class TestLatexDetection:
     """
     The backend must recognize the same spans as the frontend tokenizer in

@@ -888,6 +888,20 @@ def _export_timestamp(message: dict) -> float:
         return 0.0
 
 
+def _session_start(messages: list, chat) -> float:
+    """
+    When a chat began, used only to order whole sessions against each other.
+
+    The earliest real timestamp in the branch, not the first message's: a
+    message persisted without one reads as 0 and would otherwise drag every
+    session it appears in to the top of the export.
+    """
+    stamps = [t for t in (_export_timestamp(m) for m in messages) if t > 0]
+    if stamps:
+        return min(stamps)
+    return float(chat.created_at or 0)
+
+
 def _linear_messages(chat) -> list:
     """
     The conversation branch the user actually sees, newest turns included.
@@ -1001,10 +1015,13 @@ async def export_chats_as_zip(
                 # Collect and merge all messages from all chats for this user-model combination
                 sessions = []
                 for chat in group_data['chats']:
-                    messages = sorted(_linear_messages(chat), key=_export_timestamp)
-                    started_at = (
-                        _export_timestamp(messages[0]) if messages else float(chat.created_at or 0)
-                    )
+                    # Never reorder within a chat. The parent chain is already the
+                    # order the user saw, and it is the only correct one: a
+                    # regenerated reply carries the time it was regenerated, or no
+                    # time at all, so sorting on the timestamp tears answers away
+                    # from the questions they belong to.
+                    messages = _linear_messages(chat)
+                    started_at = _session_start(messages, chat)
                     sessions.append((started_at, chat, messages))
 
                 # Order the sessions themselves, then keep each one contiguous. A

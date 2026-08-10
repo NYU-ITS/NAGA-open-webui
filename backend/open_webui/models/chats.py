@@ -297,7 +297,16 @@ class ChatTable:
                 **message,
             }
         else:
-            history["messages"][message_id] = message
+            # Copied, so stamping the timestamp below cannot reach back into the
+            # caller's dict.
+            history["messages"][message_id] = dict(message)
+
+        # Callers only ever pass the fields they are updating ({"model": ...},
+        # {"content": ...}), so a message first written from here has no
+        # timestamp and nothing later adds one. Exports then show a blank date
+        # and, worse, sort it as time zero. Stamp it once, never overwrite.
+        if not history["messages"][message_id].get("timestamp"):
+            history["messages"][message_id]["timestamp"] = int(time.time())
 
         history["currentId"] = message_id
 
