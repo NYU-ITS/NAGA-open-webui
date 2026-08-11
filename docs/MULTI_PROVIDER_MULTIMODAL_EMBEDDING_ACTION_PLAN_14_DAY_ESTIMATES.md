@@ -17,7 +17,7 @@ PGVector will remain the vector backend. Different embedding dimensions will use
 * Text ingestion and model-aware query retrieval.  
 * Different vector dimensions without padding or truncation.  
 * Reindexing through the existing Redis Queue infrastructure.  
-* Admin-wide reindex status and aggregate failure count on the Knowledge overview, compact state badges on collection cards, and collection-scoped impact and failure details on detail pages only when relevant; retry remains limited to the governing admin.
+* Admin-wide reindex status and aggregate failure count on the Knowledge overview, compact state badges on collection cards, and collection-scoped impact and failure details on detail pages only when relevant; retry remains limited to the governing admin. A separate non-job Ready summary may group editable collections across governing administrators without representing them as one admin scope.
 * Admin settings UI for viewing and changing the selected model (owned by the RBAC team and excluded from this plan's Phase 5 implementation).
 * Basic image storage, metadata, and provider-supported embedding.  
 * Regeneration and migration of embeddings governed by each admin.  
@@ -234,7 +234,7 @@ Work:
 2. Return typed state for the overview: durable job ID and type, raw job status, derived display state, retrieval availability, active and target model display metadata, whole-job counts, timestamps, last successful reindex time, whole-job failure count, and retry flags. Return per-knowledge progress and knowledge-filtered failed-file details for conditional detail impact. Do not expose admin IDs, credentials, provider URLs, stack traces, raw provider errors, or unrelated file IDs.
 3. Add typed frontend clients for the overview-summary and collection-scoped detail status endpoints plus the existing retry endpoint. Keep upload `processing_status` indicators separate.
 4. Add compact status badges to Knowledge collection cards: Ready uses the existing success badge, Queued and Partially failed use warning, Indexing uses info, Failed uses error, and Unavailable uses muted.
-5. Add one full admin-wide reindex panel to the Knowledge overview per unique durable job ID. Show active and target model context, whole-job progress, retrieval availability, localized timestamps, whole-job failure count, and retry or contact guidance. Never sum the job counters repeated by per-knowledge summary rows.
+5. Add one full admin-wide reindex panel to the Knowledge overview per unique durable job ID. Show active and target model context, whole-job progress, retrieval availability, localized timestamps, whole-job failure count, and retry or contact guidance. Never sum the job counters repeated by per-knowledge summary rows. Separately render one cross-scope Ready summary for visible editable collections that are server-confirmed Ready and have no durable job; state in the always-visible copy that its listed collections may have different governing administrators. The Ready summary lists only collections already editable by the viewer, exposes no admin identifier, job counters, or retry controls, and shows a model or recorded timestamp only when identical across every included row; otherwise it shows an aggregate Multiple or Varies label rather than selecting a representative row.
 6. On a Knowledge detail page, render no reindex section for Ready or no-job state. While that knowledge base is blocked, show a compact impact notice, collection-only progress, and a link to the Knowledge overview; when its failed-document count is greater than zero, also show expandable collection-filtered file IDs and safe messages. Do not repeat model metadata, whole-job progress, failures elsewhere, or retry controls on detail.
 7. Poll the overview and relevant detail state every five seconds only while a job is queued or processing or a transient status request is recovering. Pause while the page is hidden, refresh when it becomes visible, stop at terminal state or unmount, and preserve the last known durable status on transient errors. Terminal detail impact refreshes on visibility change or navigation rather than polling indefinitely.
 8. Handle loading, no-job, forbidden, not-found, conflict, failed, partially failed, and inconsistent/unavailable states without inferring readiness in the browser or falling back to a full panel on every detail page.
@@ -248,7 +248,7 @@ Exit criteria:
 * Repeated summary rows with the same `job_id` render exactly one overview panel; identical whole-job counters are displayed once and never summed.
 * Per-knowledge file-level failure details appear only on the affected detail page and remain filtered to that knowledge base; the whole-job failure count and Retry appear only on the overview, and retry remains governing-admin-only.
 * Ready and no-job knowledge detail pages contain no embedding-index panel or empty-state message.
-* When no durable model-change job exists in a valid legacy or no-state configuration, the overview renders no full reindex panel, collection cards show Ready, and detail pages render nothing.
+* When a collection has a valid server-confirmed Ready state with no durable model-change job, the overview includes it in one cross-scope Ready summary, its card shows Ready, and its detail page renders nothing. The summary does not imply shared governance.
 * An inconsistent or unavailable state without a durable job ID produces an Unavailable card badge and a conditional detail warning but never fabricates or duplicates an overview job panel.
 * Existing upload-processing indicators remain unchanged and distinct from model-change reindex status.
 * No credential or sensitive operational value reaches browser state, and no new font or color definition is introduced.
@@ -330,7 +330,7 @@ No tests are being created or run as part of planning. When test work is explici
 * Retrieval is unavailable with a clear message during reindex.  
 * A successful model change updates both ingestion and retrieval.  
 * Knowledge status follows existing mutation-style edit access; read-only users are excluded, only the governing admin can retry, and inherited group behavior and existing RBAC restrictions remain unchanged.
-* Overview job deduplication, card-badge mapping, conditional detail visibility, shared-file counting, durable refresh and polling, collection-scoped failure filtering, and overview-only whole-job retry confirmation behave as specified.
+* Overview job deduplication, cross-scope Ready/no-job summarization, card-badge mapping, conditional detail visibility, shared-file counting, durable refresh and polling, collection-scoped failure filtering, and overview-only whole-job retry confirmation behave as specified.
 * Status responses and browser state contain no admin IDs, credentials, provider URLs, stack traces, or raw provider errors.
 * Image storage and the approved image or fallback path work.
 
@@ -391,6 +391,7 @@ Deliverables:
 * Typed, credential-free Knowledge overview-summary and collection-scoped detail status clients.
 * Compact collection-card badges using the existing semantic Badge palette.
 * One admin-wide overview panel per unique durable job showing model context, whole-job progress, retrieval availability, timestamps, and the whole-job failure count.
+* One non-job Ready overview summary for visible editable collections with server-confirmed Ready state, explicitly without inferring shared administrator governance or selecting one row's model or timestamp as representative of differing rows.
 * A compact detail impact notice only while retrieval is unavailable or status temporarily cannot be determined, with collection-only progress and failures when present; Ready and no-job detail pages render no reindex panel.
 * Loading, no-job, forbidden, queued, processing, completed, failed, partially failed, transport-unavailable, and inconsistent-state handling.
 * Independent status polling that does not overwrite or reinterpret upload `processing_status`.
@@ -400,6 +401,7 @@ Acceptance:
 * Refreshing the overview, cards, or a relevant detail impact notice shows the same durable server-backed state.
 * Only knowledge bases editable under existing rules receive status data.
 * Retry-subset jobs still show admin-wide retrieval blocking on the overview and governed collection cards; a zero-row detail may show only a compact impact notice, never a zero-progress full panel.
+* The cross-scope Ready summary contains only server-confirmed rows with `display_state=ready`, `retrieval_available=true`, and `job_id=null`; it excludes queued, processing, failed, partially failed, unavailable, transport-unknown, and durable-job rows, and lists each included collection once.
 * No credential, new font definition, or new color token is added.
 
 ### **Work item 3 \- Failure detail and governing-admin retry** — **Expected completion: August 5, 2026; included in the failure-and-retry portion of Phase 5 task 6.**
