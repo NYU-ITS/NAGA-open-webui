@@ -15,6 +15,7 @@
 		deleteKnowledgeById,
 		getKnowledgeBaseList,
 		getKnowledgeIndexingStatuses,
+		type EmbeddingModelSummary,
 		type KnowledgeIndexingStatus
 	} from '$lib/apis/knowledge';
 
@@ -29,6 +30,7 @@
 	import { capitalizeFirstLetter } from '$lib/utils';
 	import Tooltip from '../common/Tooltip.svelte';
 	import IndexingStatusBadge from './Knowledge/IndexingStatusBadge.svelte';
+	import ReadyIndexStatusPanel from './Knowledge/ReadyIndexStatusPanel.svelte';
 	import ReindexStatusPanel from './Knowledge/ReindexStatusPanel.svelte';
 
 	type ReindexKnowledgeBase = {
@@ -51,6 +53,15 @@
 		knowledgeBases: ReindexKnowledgeBase[];
 	};
 
+	type ReadyIndexSummary = {
+		knowledgeBases: Array<{ id: string; name: string }>;
+		modelPresentation:
+			| { kind: 'legacy' }
+			| { kind: 'single'; model: EmbeddingModelSummary }
+			| { kind: 'mixed' };
+		lastSuccessfulIndexedAt: number | null | 'varies';
+	};
+
 	let loaded = false;
 
 	let query = '';
@@ -67,6 +78,7 @@
 	let indexingRefreshRequested = false;
 	let indexingStatusLoadFailed = false;
 	let reindexJobGroups: ReindexJobGroup[] = [];
+	let readyWithoutJobSummary: ReadyIndexSummary | null = null;
 	let destroyed = false;
 
 	const getHttpStatus = (error: unknown) => {
@@ -181,6 +193,48 @@
 		});
 	};
 
+	const sharedTimestamp = (values: Array<number | null>): number | null | 'varies' => {
+		const firstValue = values[0] ?? null;
+		return values.every((value) => value === firstValue) ? firstValue : 'varies';
+	};
+
+	const buildReadyWithoutJobSummary = (
+		knowledgeBaseItems: KnowledgeListItemSummary[],
+		statusesByKnowledge: Record<string, KnowledgeIndexingStatus>
+	): ReadyIndexSummary | null => {
+		const readyRows = knowledgeBaseItems.flatMap((item) => {
+			if (item?.meta?.document) return [];
+			const status = statusesByKnowledge[item.id];
+			if (
+				!status ||
+				status.job_id !== null ||
+				status.display_state !== 'ready' ||
+				!status.retrieval_available
+			) {
+				return [];
+			}
+			return [{ item, status }];
+		});
+		const uniqueReadyRows = [...new Map(readyRows.map((row) => [row.item.id, row])).values()];
+		if (uniqueReadyRows.length === 0) return null;
+
+		const activeModels = uniqueReadyRows.map(({ status }) => status.active_model);
+		const firstModel = activeModels[0];
+		const modelPresentation = activeModels.every((model) => model === null)
+			? ({ kind: 'legacy' } as const)
+			: firstModel && activeModels.every((model) => model?.id === firstModel.id)
+				? ({ kind: 'single', model: firstModel } as const)
+				: ({ kind: 'mixed' } as const);
+
+		return {
+			knowledgeBases: uniqueReadyRows.map(({ item }) => ({ id: item.id, name: item.name })),
+			modelPresentation,
+			lastSuccessfulIndexedAt: sharedTimestamp(
+				uniqueReadyRows.map(({ status }) => status.last_successful_indexed_at)
+			)
+		};
+	};
+
 	const handleVisibilityChange = () => {
 		if (document.visibilityState === 'hidden') {
 			stopIndexingPolling();
@@ -204,6 +258,7 @@
 	}
 
 	$: reindexJobGroups = buildReindexJobGroups(knowledgeBases, indexingStatuses);
+	$: readyWithoutJobSummary = buildReadyWithoutJobSummary(knowledgeBases, indexingStatuses);
 
 	const deleteHandler = async (item) => {
 		const res = await deleteKnowledgeById(localStorage.token, item.id).catch((e) => {
@@ -305,7 +360,7 @@
 		</div>
 	</div>
 
-	{#if reindexJobGroups.length > 0}
+	{#if reindexJobGroups.length > 0 || readyWithoutJobSummary}
 		<div class="mb-4 space-y-3">
 			{#each reindexJobGroups as group (group.jobId)}
 				<ReindexStatusPanel
@@ -315,6 +370,14 @@
 					onRefresh={refreshIndexingStatuses}
 				/>
 			{/each}
+			{#if readyWithoutJobSummary}
+				<ReadyIndexStatusPanel
+					knowledgeBases={readyWithoutJobSummary.knowledgeBases}
+					modelPresentation={readyWithoutJobSummary.modelPresentation}
+					lastSuccessfulIndexedAt={readyWithoutJobSummary.lastSuccessfulIndexedAt}
+					statusLoadFailed={indexingStatusLoadFailed}
+				/>
+			{/if}
 		</div>
 	{/if}
 
