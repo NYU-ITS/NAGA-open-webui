@@ -17,7 +17,7 @@ PGVector will remain the vector backend. Different embedding dimensions will use
 * Text ingestion and model-aware query retrieval.  
 * Different vector dimensions without padding or truncation.  
 * Reindexing through the existing Redis Queue infrastructure.  
-* Knowledge-base indexing status and failed-document information for users with existing edit access; retry remains limited to the governing admin.
+* Admin-wide reindex status and aggregate failure count on the Knowledge overview, compact state badges on collection cards, and collection-scoped impact and failure details on detail pages only when relevant; retry remains limited to the governing admin.
 * Admin settings UI for viewing and changing the selected model (owned by the RBAC team and excluded from this plan's Phase 5 implementation).
 * Basic image storage, metadata, and provider-supported embedding.  
 * Regeneration and migration of embeddings governed by each admin.  
@@ -62,7 +62,7 @@ The source document defines the desired product behavior but does not account fo
 10. **Knowledge and chat-file RAG are the project boundary.** Chat knowledge retrieval, knowledge ingestion, chat file upload ingestion and retrieval, the file worker, and the Pilot GenAI facilities RAG path are included. User-memory embeddings remain on their current policy unless a shared dependency must be updated for compatibility.  
 11. **Existing RBAC remains authoritative.** The project will not add special handling for roles or users outside user groups because the current RBAC logic already handles those cases.  
 12. **No new OCR or captioning service.** Image-derived text will be used only when the existing processing path or selected provider already produces it.
-13. **Phase 5 ownership boundary.** The RBAC team owns model-selection, admin-settings, and related authorization changes. Phase 5 reuses existing edit authorization and the Phase 4 job/retry contracts; it adds reindex status only to Workspace → Knowledge.
+13. **Phase 5 ownership boundary.** The RBAC team owns model-selection, admin-settings, and related authorization changes. Phase 5 reuses existing edit authorization and the Phase 4 job/retry contracts; it adds reindex status to the Knowledge overview, card badges, and conditional collection-scoped detail notices.
 
 If any assumption is rejected, the affected schema or phase must be revised before implementation begins.
 
@@ -230,22 +230,26 @@ Ownership note: the RBAC team owns the model-selection and admin-settings UI. Ph
 
 Work:
 
-1. Add credential-free status projections for the editable Knowledge list and one Knowledge detail. Authorize them through the same mutation-style edit rules already used by knowledge operations and the same group-first governing-admin resolution used by the reindex inventory.
-2. Return typed per-knowledge state: durable job ID and type, raw job status, derived display state, retrieval availability, active and target model display metadata, per-knowledge and whole-job counts, timestamps, last successful reindex time, knowledge-filtered failed-file details, and retry flags. Do not expose admin IDs, credentials, provider URLs, stack traces, or raw provider errors.
-3. Add typed frontend clients for the Knowledge status endpoints and the existing retry endpoint. Keep upload `processing_status` indicators separate.
+1. Add credential-free status projections for the editable Knowledge overview and card summaries plus a collection-scoped detail projection. Authorize them through the same mutation-style edit rules already used by knowledge operations and the same group-first governing-admin resolution used by the reindex inventory. The overview owns the job-wide presentation.
+2. Return typed state for the overview: durable job ID and type, raw job status, derived display state, retrieval availability, active and target model display metadata, whole-job counts, timestamps, last successful reindex time, whole-job failure count, and retry flags. Return per-knowledge progress and knowledge-filtered failed-file details for conditional detail impact. Do not expose admin IDs, credentials, provider URLs, stack traces, raw provider errors, or unrelated file IDs.
+3. Add typed frontend clients for the overview-summary and collection-scoped detail status endpoints plus the existing retry endpoint. Keep upload `processing_status` indicators separate.
 4. Add compact status badges to Knowledge collection cards: Ready uses the existing success badge, Queued and Partially failed use warning, Indexing uses info, Failed uses error, and Unavailable uses muted.
-5. Add a Knowledge detail status panel with active/target model context, collection and whole-job progress, retrieval availability, and localized timestamps.
-6. Show failed-document count plus expandable file IDs and safe backend messages. Only the governing admin sees Retry; other editors see guidance to contact that administrator. Confirm that retry uses the backend-defined job scope and can include documents outside the open knowledge base.
-7. Poll every five seconds for active jobs or transient status recovery, pause while the page is hidden, refresh when it becomes visible, stop at terminal state or unmount, and preserve the last known durable status on transient errors.
-8. Handle loading, no-job, forbidden, not-found, conflict, failed, partially failed, and inconsistent/unavailable states without inferring readiness in the browser.
+5. Add one full admin-wide reindex panel to the Knowledge overview per unique durable job ID. Show active and target model context, whole-job progress, retrieval availability, localized timestamps, whole-job failure count, and retry or contact guidance. Never sum the job counters repeated by per-knowledge summary rows.
+6. On a Knowledge detail page, render no reindex section for Ready or no-job state. While that knowledge base is blocked, show a compact impact notice, collection-only progress, and a link to the Knowledge overview; when its failed-document count is greater than zero, also show expandable collection-filtered file IDs and safe messages. Do not repeat model metadata, whole-job progress, failures elsewhere, or retry controls on detail.
+7. Poll the overview and relevant detail state every five seconds only while a job is queued or processing or a transient status request is recovering. Pause while the page is hidden, refresh when it becomes visible, stop at terminal state or unmount, and preserve the last known durable status on transient errors. Terminal detail impact refreshes on visibility change or navigation rather than polling indefinitely.
+8. Handle loading, no-job, forbidden, not-found, conflict, failed, partially failed, and inconsistent/unavailable states without inferring readiness in the browser or falling back to a full panel on every detail page.
 9. Preserve the existing visual language: add no font files, global typography, theme variables, or color tokens; retain Archivo (`font-primary`) for the collection title, inherited Inter/system typography for status content, and reuse existing gray/dark utilities, semantic Badge colors, rounded controls, and `ConfirmDialog`.
 
 Exit criteria:
 
 * Owners, group editors, and admins see status only where existing knowledge edit rules allow it; read-only and unrelated users cannot access the status projection.
-* List/detail refreshes show durable backend state, and active jobs update without a page reload.
-* Admin-wide retrieval blocking appears on every governed knowledge base, including retry jobs whose file subset does not include that knowledge base.
-* Per-knowledge failure details are filtered to that knowledge base; retry remains governing-admin-only and uses the backend-defined failed-job scope.
+* Overview and card refreshes show durable backend state, active overview jobs update without a page reload, and relevant detail impact notices update and disappear when retrieval becomes Ready.
+* Admin-wide retrieval blocking appears through one overview panel per unique job plus every governed collection-card badge, including retry jobs whose file subset does not include that knowledge base.
+* Repeated summary rows with the same `job_id` render exactly one overview panel; identical whole-job counters are displayed once and never summed.
+* Per-knowledge file-level failure details appear only on the affected detail page and remain filtered to that knowledge base; the whole-job failure count and Retry appear only on the overview, and retry remains governing-admin-only.
+* Ready and no-job knowledge detail pages contain no embedding-index panel or empty-state message.
+* When no durable model-change job exists in a valid legacy or no-state configuration, the overview renders no full reindex panel, collection cards show Ready, and detail pages render nothing.
+* An inconsistent or unavailable state without a durable job ID produces an Unavailable card badge and a conditional detail warning but never fabricates or duplicates an overview job panel.
 * Existing upload-processing indicators remain unchanged and distinct from model-change reindex status.
 * No credential or sensitive operational value reaches browser state, and no new font or color definition is introduced.
 
@@ -326,7 +330,7 @@ No tests are being created or run as part of planning. When test work is explici
 * Retrieval is unavailable with a clear message during reindex.  
 * A successful model change updates both ingestion and retrieval.  
 * Knowledge status follows existing mutation-style edit access; read-only users are excluded, only the governing admin can retry, and inherited group behavior and existing RBAC restrictions remain unchanged.
-* List/detail state mapping, shared-file counting, durable refresh, active polling, per-knowledge failure filtering, and whole-job retry confirmation behave as specified.
+* Overview job deduplication, card-badge mapping, conditional detail visibility, shared-file counting, durable refresh and polling, collection-scoped failure filtering, and overview-only whole-job retry confirmation behave as specified.
 * Status responses and browser state contain no admin IDs, credentials, provider URLs, stack traces, or raw provider errors.
 * Image storage and the approved image or fallback path work.
 
@@ -377,44 +381,46 @@ Acceptance:
 * Repository search finds no embedding credential or partial representation in application logging.  
 * We confirm that model selection and worker behavior are unchanged.
 
-### **Work item 2 \- Knowledge list and detail status surfaces** — **Expected completion: August 4–5, 2026; included in Phase 5 tasks 1–5 and 7–9.**
+### **Work item 2 \- Knowledge overview panel, card badges, and conditional detail impact** — **Expected completion: August 4–5, 2026; included in Phase 5 tasks 1–5, the impact portion of task 6, and tasks 7–9.**
 
 **Start:** After we merge the Phase 4 status contract
 **Dependency:** Phase 4 API contract
 
 Deliverables:
 
-* Typed, credential-free Knowledge list and detail status clients.
+* Typed, credential-free Knowledge overview-summary and collection-scoped detail status clients.
 * Compact collection-card badges using the existing semantic Badge palette.
-* A Knowledge detail panel showing model context, per-knowledge and whole-job progress, retrieval availability, and last successful reindex time.
+* One admin-wide overview panel per unique durable job showing model context, whole-job progress, retrieval availability, timestamps, and the whole-job failure count.
+* A compact detail impact notice only while retrieval is unavailable or status temporarily cannot be determined, with collection-only progress and failures when present; Ready and no-job detail pages render no reindex panel.
 * Loading, no-job, forbidden, queued, processing, completed, failed, partially failed, transport-unavailable, and inconsistent-state handling.
 * Independent status polling that does not overwrite or reinterpret upload `processing_status`.
 
 Acceptance:
 
-* Refreshing the list or detail page shows the same durable server-backed state.
+* Refreshing the overview, cards, or a relevant detail impact notice shows the same durable server-backed state.
 * Only knowledge bases editable under existing rules receive status data.
-* Retry-subset jobs still show admin-wide retrieval blocking on governed knowledge bases with zero rows in the current attempt.
+* Retry-subset jobs still show admin-wide retrieval blocking on the overview and governed collection cards; a zero-row detail may show only a compact impact notice, never a zero-progress full panel.
 * No credential, new font definition, or new color token is added.
 
-### **Work item 3 \- Failure detail and governing-admin retry** — **Expected completion: August 5, 2026; included in Phase 5 task 6.**
+### **Work item 3 \- Failure detail and governing-admin retry** — **Expected completion: August 5, 2026; included in the failure-and-retry portion of Phase 5 task 6.**
 
-**Start:** After we merge the Knowledge detail status projection
+**Start:** After we merge the Knowledge overview status projection
 **Dependency:** Working reindex workflow
 
 Deliverables:
 
-* Knowledge-filtered failed-document count and expandable file IDs, safe messages, and attempt counts.
-* Governing-admin-only Retry using the existing Phase 4 endpoint.
-* Existing `ConfirmDialog` warning that retry follows the backend-defined job scope and may include documents outside the open knowledge base.
-* Contact-owner guidance for editors who can view status but cannot retry.
-* Conflict handling that refreshes the durable latest status.
+* Whole-job failed-document count on the overview and knowledge-filtered expandable file IDs, safe messages, and attempt counts only on affected detail pages.
+* Governing-admin-only Retry using the existing Phase 4 endpoint, presented only on the overview.
+* Existing `ConfirmDialog` warning that retry follows the administrator-wide backend-defined job scope and cannot target one knowledge base.
+* Contact-owner guidance for editors on the overview; detail notices link back to the overview.
+* Conflict handling that refreshes the durable latest overview status.
 
 Acceptance:
 
 * Only the governing admin can retry.
 * A retry conflict reloads current status instead of leaving stale controls.
 * The UI never implies that retry is limited to the open knowledge base.
+* No detail page displays failures elsewhere, whole-job progress, model metadata, or retry controls.
 
 ### **Work item 4 \- Image status support** — **Expected completion: August 6, 2026; excluded from Phase 5 and included only in Phase 6 tasks 6–7.**
 
