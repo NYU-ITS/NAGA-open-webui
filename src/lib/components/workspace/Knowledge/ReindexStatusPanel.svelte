@@ -1,0 +1,261 @@
+<script lang="ts">
+	import { getContext } from 'svelte';
+	import { toast } from 'svelte-sonner';
+
+	import { retryEmbeddingJob } from '$lib/apis/embedding';
+	import type { KnowledgeIndexingProgress, KnowledgeIndexingStatus } from '$lib/apis/knowledge';
+	import ConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
+	import IndexingStatusBadge from './IndexingStatusBadge.svelte';
+
+	const i18n = getContext('i18n');
+
+	type GovernedKnowledgeBase = {
+		id: string;
+		name: string;
+		failedDocumentCount: number;
+	};
+
+	export let status: KnowledgeIndexingStatus;
+	export let knowledgeBases: GovernedKnowledgeBase[] = [];
+	export let statusLoadFailed = false;
+	export let onRefresh: () => Promise<void> = async () => {};
+
+	let showRetryConfirm = false;
+	let retrying = false;
+
+	$: affectedKnowledgeBases = knowledgeBases.filter(
+		(knowledgeBase) => knowledgeBase.failedDocumentCount > 0
+	);
+
+	const getHttpStatus = (error: unknown) => {
+		if (typeof error !== 'object' || error === null || !('status' in error)) return null;
+		return Number((error as { status?: number }).status) || null;
+	};
+
+	const retryHandler = async () => {
+		if (!status.job_id || !status.can_retry || retrying) return;
+		retrying = true;
+		try {
+			await retryEmbeddingJob(localStorage.token, status.job_id);
+			toast.success($i18n.t('Embedding reindex retry queued.'));
+		} catch (error) {
+			if (getHttpStatus(error) === 409) {
+				toast.warning(
+					$i18n.t('The indexing job changed before retry. The latest status has been loaded.')
+				);
+			} else {
+				toast.error(`${error}`);
+			}
+		} finally {
+			retrying = false;
+			await onRefresh();
+		}
+	};
+
+	const formatTime = (timestamp: number | null) => {
+		if (!timestamp) return $i18n.t('Not yet');
+		return new Intl.DateTimeFormat(undefined, {
+			dateStyle: 'medium',
+			timeStyle: 'short'
+		}).format(new Date(timestamp * 1000));
+	};
+
+	const progressValue = (progress: KnowledgeIndexingProgress) =>
+		progress.processed + progress.failed;
+
+	const progressPercent = (progress: KnowledgeIndexingProgress) =>
+		progress.total > 0 ? Math.min(100, (progressValue(progress) / progress.total) * 100) : 0;
+</script>
+
+<ConfirmDialog
+	bind:show={showRetryConfirm}
+	title={$i18n.t('Retry failed documents?')}
+	message={$i18n.t(
+		'This retries every eligible failed document in this administrator-wide model-change job. Retry cannot be limited to one knowledge base and may also affect chat uploads.'
+	)}
+	confirmLabel={$i18n.t('Retry failed documents')}
+	on:confirm={retryHandler}
+/>
+
+<section
+	class="rounded-xl border border-gray-50 p-3 dark:border-gray-850"
+	aria-label={$i18n.t('Embedding reindex for {{model}}', {
+		model:
+			status.target_model?.display_name ??
+			status.active_model?.display_name ??
+			$i18n.t('Unknown model')
+	})}
+>
+	<div class="flex flex-wrap items-center justify-between gap-2">
+		<div>
+			<h2 class="text-sm font-semibold">{$i18n.t('Embedding reindex')}</h2>
+			<p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+				{status.job_type === 'retry_failed'
+					? $i18n.t(
+							"Retrieval status applies across this administrator's governed knowledge bases and chat uploads. This retry processes backend-selected failed files."
+						)
+					: $i18n.t(
+							'This model-change reindex applies to all knowledge bases and chat uploads governed by the administrator.'
+						)}
+			</p>
+			<p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+				{status.retrieval_available
+					? $i18n.t('Available for retrieval')
+					: status.display_state === 'unavailable'
+						? $i18n.t('Unavailable for retrieval')
+						: $i18n.t('Unavailable for retrieval while reindexing is incomplete')}
+			</p>
+		</div>
+		<div role="status" aria-live="polite">
+			<IndexingStatusBadge state={status.display_state} />
+		</div>
+	</div>
+
+	{#if statusLoadFailed}
+		<p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
+			{$i18n.t('The latest status could not be loaded. Showing the last known state.')}
+		</p>
+	{/if}
+
+	<div class="mt-3 grid grid-cols-1 gap-3 text-xs sm:grid-cols-2 lg:grid-cols-3">
+		<div>
+			<div class="font-medium text-gray-700 dark:text-gray-200">
+				{status.target_model ? $i18n.t('Target model') : $i18n.t('Model')}
+			</div>
+			{#if status.target_model}
+				<div class="mt-0.5 text-gray-500 dark:text-gray-400">
+					{status.target_model.display_name} · {status.target_model.provider}
+				</div>
+				<div class="text-gray-500 dark:text-gray-400">
+					{$i18n.t('Modalities')}: {status.target_model.modalities.join(', ') || $i18n.t('None')}
+				</div>
+				{#if status.active_model}
+					<div class="mt-1 text-gray-500 dark:text-gray-400">
+						{$i18n.t('Active model')}: {status.active_model.display_name}
+					</div>
+				{/if}
+			{:else if status.active_model}
+				<div class="mt-0.5 text-gray-500 dark:text-gray-400">
+					{status.active_model.display_name} · {status.active_model.provider}
+				</div>
+				<div class="text-gray-500 dark:text-gray-400">
+					{$i18n.t('Modalities')}: {status.active_model.modalities.join(', ') || $i18n.t('None')}
+				</div>
+			{:else}
+				<div class="mt-0.5 text-gray-500 dark:text-gray-400">
+					{$i18n.t('Model status unavailable')}
+				</div>
+			{/if}
+		</div>
+		<div>
+			<div class="font-medium text-gray-700 dark:text-gray-200">
+				{$i18n.t('Last successful reindex')}
+			</div>
+			<div class="mt-0.5 text-gray-500 dark:text-gray-400">
+				{formatTime(status.last_successful_indexed_at)}
+			</div>
+		</div>
+		<div>
+			<div class="font-medium text-gray-700 dark:text-gray-200">
+				{$i18n.t('Status updated')}
+			</div>
+			<div class="mt-0.5 text-gray-500 dark:text-gray-400">
+				{formatTime(status.updated_at)}
+			</div>
+		</div>
+	</div>
+
+	<div class="mt-3 rounded-xl bg-gray-50 p-3 dark:bg-gray-850">
+		<div class="flex items-center justify-between gap-2 text-xs">
+			<span class="font-medium">{$i18n.t('Reindex progress')}</span>
+			<span class="text-gray-500 dark:text-gray-400">
+				{progressValue(status.job_progress)}/{status.job_progress.total}
+			</span>
+		</div>
+		{#if status.job_progress.total > 0}
+			<div
+				class="mt-2 h-1.5 overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700"
+				role="progressbar"
+				aria-label={$i18n.t('Reindex progress')}
+				aria-valuemin="0"
+				aria-valuemax={status.job_progress.total}
+				aria-valuenow={progressValue(status.job_progress)}
+			>
+				<div
+					class="h-full bg-gray-900 dark:bg-gray-100"
+					style:width={`${progressPercent(status.job_progress)}%`}
+				/>
+			</div>
+		{/if}
+		<p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
+			{$i18n.t('Completed')}: {status.job_progress.processed} · {$i18n.t('Failed')}: {status
+				.job_progress.failed} · {$i18n.t('Remaining')}: {status.job_progress
+				.pending_or_processing}
+		</p>
+	</div>
+
+	{#if status.error_message}
+		<p class="mt-3 text-xs text-gray-600 dark:text-gray-300">{status.error_message}</p>
+	{/if}
+
+	{#if status.job_failed_document_count > 0}
+		<div class="mt-3 rounded-xl bg-gray-50 px-3 py-2 text-xs dark:bg-gray-850">
+			<p class="font-medium">
+				{$i18n.t('{{count}} documents failed in this reindex job', {
+					count: status.job_failed_document_count
+				})}
+			</p>
+			{#if affectedKnowledgeBases.length > 0}
+				<p class="mt-1 text-gray-500 dark:text-gray-400">
+					{$i18n.t('Open an affected knowledge base to view its scoped failure details.')}
+				</p>
+				<div class="mt-1 flex flex-wrap gap-x-2 gap-y-1">
+					{#each affectedKnowledgeBases as knowledgeBase}
+						<a
+							class="font-medium underline underline-offset-2"
+							href={`/workspace/knowledge/${knowledgeBase.id}`}
+						>
+							{knowledgeBase.name}
+						</a>
+					{/each}
+				</div>
+			{/if}
+		</div>
+	{/if}
+
+	<details class="mt-3 text-xs">
+		<summary class="cursor-pointer font-medium text-gray-700 dark:text-gray-200">
+			{$i18n.t('{{count}} knowledge bases you can edit inherit this reindex status', {
+				count: knowledgeBases.length
+			})}
+		</summary>
+		<ul class="mt-2 max-h-32 space-y-1 overflow-y-auto pl-4 text-gray-500 dark:text-gray-400">
+			{#each knowledgeBases as knowledgeBase}
+				<li>
+					<a class="hover:underline" href={`/workspace/knowledge/${knowledgeBase.id}`}>
+						{knowledgeBase.name}
+					</a>
+				</li>
+			{/each}
+		</ul>
+	</details>
+
+	{#if status.can_retry}
+		<div class="mt-3 flex justify-end">
+			<button
+				class="rounded-full bg-black px-3.5 py-1.5 text-sm font-medium text-white transition hover:bg-gray-900 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-white dark:text-black dark:hover:bg-gray-100"
+				type="button"
+				disabled={retrying}
+				on:click={() => {
+					showRetryConfirm = true;
+				}}
+			>
+				{retrying ? $i18n.t('Retrying…') : $i18n.t('Retry failed documents')}
+			</button>
+		</div>
+	{:else if status.retry_eligible}
+		<p class="mt-3 text-xs text-gray-500 dark:text-gray-400">
+			{$i18n.t('Only the governing administrator can retry this indexing job.')}
+		</p>
+	{/if}
+</section>

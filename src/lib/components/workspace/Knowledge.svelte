@@ -29,6 +29,27 @@
 	import { capitalizeFirstLetter } from '$lib/utils';
 	import Tooltip from '../common/Tooltip.svelte';
 	import IndexingStatusBadge from './Knowledge/IndexingStatusBadge.svelte';
+	import ReindexStatusPanel from './Knowledge/ReindexStatusPanel.svelte';
+
+	type ReindexKnowledgeBase = {
+		id: string;
+		name: string;
+		failedDocumentCount: number;
+	};
+
+	type KnowledgeListItemSummary = {
+		id: string;
+		name: string;
+		meta?: {
+			document?: boolean;
+		};
+	};
+
+	type ReindexJobGroup = {
+		jobId: string;
+		status: KnowledgeIndexingStatus;
+		knowledgeBases: ReindexKnowledgeBase[];
+	};
 
 	let loaded = false;
 
@@ -43,7 +64,9 @@
 	let indexingStatuses: Record<string, KnowledgeIndexingStatus> = {};
 	let indexingPollTimer: ReturnType<typeof setTimeout> | null = null;
 	let indexingStatusRequestInFlight = false;
+	let indexingRefreshRequested = false;
 	let indexingStatusLoadFailed = false;
+	let reindexJobGroups: ReindexJobGroup[] = [];
 	let destroyed = false;
 
 	const getHttpStatus = (error: unknown) => {
@@ -52,8 +75,11 @@
 	};
 
 	const hasActiveIndexingJob = () =>
-		Object.values(indexingStatuses).some(
-			(status) => status.job_status === 'queued' || status.job_status === 'processing'
+		knowledgeBases.some(
+			(item) =>
+				!item?.meta?.document &&
+				(indexingStatuses[item.id]?.job_status === 'queued' ||
+					indexingStatuses[item.id]?.job_status === 'processing')
 		);
 
 	const stopIndexingPolling = () => {
@@ -78,7 +104,11 @@
 	};
 
 	const refreshIndexingStatuses = async () => {
-		if (indexingStatusRequestInFlight || destroyed) return;
+		if (destroyed) return;
+		if (indexingStatusRequestInFlight) {
+			indexingRefreshRequested = true;
+			return;
+		}
 		indexingStatusRequestInFlight = true;
 		try {
 			const statuses = await getKnowledgeIndexingStatuses(localStorage.token);
@@ -101,8 +131,54 @@
 			}
 		} finally {
 			indexingStatusRequestInFlight = false;
-			if (!destroyed) scheduleIndexingPolling();
+			if (indexingRefreshRequested && !destroyed) {
+				indexingRefreshRequested = false;
+				void refreshIndexingStatuses();
+			} else if (!destroyed) {
+				scheduleIndexingPolling();
+			}
 		}
+	};
+
+	const indexingStatePriority = (status: KnowledgeIndexingStatus) => {
+		if (status.job_status === 'queued' || status.job_status === 'processing') return 0;
+		if (!status.retrieval_available) return 1;
+		return 2;
+	};
+
+	const buildReindexJobGroups = (
+		knowledgeBaseItems: KnowledgeListItemSummary[],
+		statusesByKnowledge: Record<string, KnowledgeIndexingStatus>
+	) => {
+		const groups = new Map<string, ReindexJobGroup>();
+		for (const item of knowledgeBaseItems) {
+			if (item?.meta?.document) continue;
+			const status = statusesByKnowledge[item.id];
+			if (!status?.job_id) continue;
+
+			const knowledgeBase = {
+				id: item.id,
+				name: item.name,
+				failedDocumentCount: status.failed_document_count
+			};
+			const existingGroup = groups.get(status.job_id);
+			if (existingGroup) {
+				existingGroup.knowledgeBases.push(knowledgeBase);
+			} else {
+				groups.set(status.job_id, {
+					jobId: status.job_id,
+					status,
+					knowledgeBases: [knowledgeBase]
+				});
+			}
+		}
+
+		return [...groups.values()].sort((left, right) => {
+			const priorityDifference =
+				indexingStatePriority(left.status) - indexingStatePriority(right.status);
+			if (priorityDifference !== 0) return priorityDifference;
+			return (right.status.updated_at ?? 0) - (left.status.updated_at ?? 0);
+		});
 	};
 
 	const handleVisibilityChange = () => {
@@ -126,6 +202,8 @@
 				})
 			: knowledgeBases;
 	}
+
+	$: reindexJobGroups = buildReindexJobGroups(knowledgeBases, indexingStatuses);
 
 	const deleteHandler = async (item) => {
 		const res = await deleteKnowledgeById(localStorage.token, item.id).catch((e) => {
@@ -226,6 +304,19 @@
 			</div>
 		</div>
 	</div>
+
+	{#if reindexJobGroups.length > 0}
+		<div class="mb-4 space-y-3">
+			{#each reindexJobGroups as group (group.jobId)}
+				<ReindexStatusPanel
+					status={group.status}
+					knowledgeBases={group.knowledgeBases}
+					statusLoadFailed={indexingStatusLoadFailed}
+					onRefresh={refreshIndexingStatuses}
+				/>
+			{/each}
+		</div>
+	{/if}
 
 	<div class="mb-5 grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-2">
 		{#each filteredItems as item}
