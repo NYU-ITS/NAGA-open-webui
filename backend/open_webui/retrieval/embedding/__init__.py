@@ -81,7 +81,8 @@ from .model_change import (
     ModelChangeNoOp,
     request_model_change,
 )
-from .worker import process_embedding_job
+# Keep the worker out of package-level imports: it loads file_processor, which
+# imports the retrieval router while that router is still initializing.
 from .enqueue import (
     enqueue_embedding_job,
     EMBEDDING_REINDEX_QUEUE_NAME,
@@ -167,6 +168,4 @@ __all__ = [
     # Enqueue
     "enqueue_embedding_job",
     "EMBEDDING_REINDEX_QUEUE_NAME",
-    # Worker
-    "process_embedding_job",
 ]
