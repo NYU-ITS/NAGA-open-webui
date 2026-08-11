@@ -6,11 +6,6 @@
 
 	const i18n = getContext('i18n');
 
-	type VisibleKnowledgeBase = {
-		id: string;
-		name: string;
-	};
-
 	type ModelPresentation =
 		| { kind: 'legacy' }
 		| { kind: 'single'; model: EmbeddingModelSummary }
@@ -18,7 +13,8 @@
 
 	type SharedTimestamp = number | null | 'varies';
 
-	export let knowledgeBases: VisibleKnowledgeBase[] = [];
+	export let knowledgeBaseCount = 0;
+	export let allEditableKnowledgeBasesReady = false;
 	export let modelPresentation: ModelPresentation = { kind: 'legacy' };
 	export let lastSuccessfulIndexedAt: SharedTimestamp = null;
 	export let statusLoadFailed = false;
@@ -81,24 +77,14 @@
 	</div>
 
 	<p class="mt-3 text-xs text-gray-500 dark:text-gray-400">
-		{$i18n.t(
-			'Included editable knowledge bases: {{count}}. No current durable model-change reindex job is associated with them, and their governing administrators may differ.',
-			{ count: knowledgeBases.length }
-		)}
+		{#if allEditableKnowledgeBasesReady}
+			{$i18n.t('All {{count}} editable knowledge bases are ready.', {
+				count: knowledgeBaseCount
+			})}
+		{:else}
+			{$i18n.t('{{count}} editable knowledge bases are ready.', {
+				count: knowledgeBaseCount
+			})}
+		{/if}
 	</p>
-
-	<details class="mt-2 text-xs">
-		<summary class="cursor-pointer font-medium text-gray-700 dark:text-gray-200">
-			{$i18n.t('View included knowledge bases')}
-		</summary>
-		<ul class="mt-2 max-h-32 space-y-1 overflow-y-auto pl-4 text-gray-500 dark:text-gray-400">
-			{#each knowledgeBases as knowledgeBase}
-				<li>
-					<a class="hover:underline" href={`/workspace/knowledge/${knowledgeBase.id}`}>
-						{knowledgeBase.name}
-					</a>
-				</li>
-			{/each}
-		</ul>
-	</details>
 </section>

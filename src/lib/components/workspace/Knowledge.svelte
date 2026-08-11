@@ -54,7 +54,8 @@
 	};
 
 	type ReadyIndexSummary = {
-		knowledgeBases: Array<{ id: string; name: string }>;
+		knowledgeBaseCount: number;
+		allEditableKnowledgeBasesReady: boolean;
 		modelPresentation:
 			| { kind: 'legacy' }
 			| { kind: 'single'; model: EmbeddingModelSummary }
@@ -202,6 +203,9 @@
 		knowledgeBaseItems: KnowledgeListItemSummary[],
 		statusesByKnowledge: Record<string, KnowledgeIndexingStatus>
 	): ReadyIndexSummary | null => {
+		const editableKnowledgeBaseIds = new Set(
+			knowledgeBaseItems.filter((item) => !item?.meta?.document).map((item) => item.id)
+		);
 		const readyRows = knowledgeBaseItems.flatMap((item) => {
 			if (item?.meta?.document) return [];
 			const status = statusesByKnowledge[item.id];
@@ -227,7 +231,9 @@
 				: ({ kind: 'mixed' } as const);
 
 		return {
-			knowledgeBases: uniqueReadyRows.map(({ item }) => ({ id: item.id, name: item.name })),
+			knowledgeBaseCount: uniqueReadyRows.length,
+			allEditableKnowledgeBasesReady:
+				uniqueReadyRows.length === editableKnowledgeBaseIds.size,
 			modelPresentation,
 			lastSuccessfulIndexedAt: sharedTimestamp(
 				uniqueReadyRows.map(({ status }) => status.last_successful_indexed_at)
@@ -372,7 +378,8 @@
 			{/each}
 			{#if readyWithoutJobSummary}
 				<ReadyIndexStatusPanel
-					knowledgeBases={readyWithoutJobSummary.knowledgeBases}
+					knowledgeBaseCount={readyWithoutJobSummary.knowledgeBaseCount}
+					allEditableKnowledgeBasesReady={readyWithoutJobSummary.allEditableKnowledgeBasesReady}
 					modelPresentation={readyWithoutJobSummary.modelPresentation}
 					lastSuccessfulIndexedAt={readyWithoutJobSummary.lastSuccessfulIndexedAt}
 					statusLoadFailed={indexingStatusLoadFailed}
