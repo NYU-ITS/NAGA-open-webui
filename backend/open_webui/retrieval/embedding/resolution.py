@@ -16,6 +16,7 @@ from .errors import (
     EMBEDDING_ADMIN_AMBIGUOUS,
     EMBEDDING_CREDENTIALS_MISSING,
     EMBEDDING_MODEL_SPACE_MIXED,
+    EMBEDDING_PROVIDER_UNSUPPORTED,
 )
 from .registry import get_model_spec_by_name, get_model_spec_by_id
 

@@ -234,9 +234,9 @@ def request_model_change(
             # config if it doesn't match the active model, then return no-op.
             if config is not None:
                 current_cfg = config.RAG_EMBEDDING_MODEL_USER.get(admin_email) or ""
-                if current_cfg != target_spec.name:
+                if current_cfg != target_spec.model_name:
                     config.RAG_EMBEDDING_MODEL_USER.set(
-                        admin_email, target_spec.name, db=db
+                        admin_email, target_spec.model_name, db=db
                     )
             return ModelChangeNoOp(
                 active_model_id=state_view.active_embedding_model_id,
@@ -272,7 +272,7 @@ def request_model_change(
         # failure rolls config back together with durable state.
         if config is not None:
             config.RAG_EMBEDDING_MODEL_USER.set(
-                admin_email, target_spec.name, db=db
+                admin_email, target_spec.model_name, db=db
             )
 
         # Step 12: Commit (happens automatically when exiting with block)
