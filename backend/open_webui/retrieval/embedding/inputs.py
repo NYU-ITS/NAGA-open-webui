@@ -16,9 +16,15 @@ class TextEmbeddingInput:
 class ImageEmbeddingInput:
     """Image input for embedding generation."""
 
-    image: Union[bytes, str]
-    mime_type: str
+    image: bytes
+    mime_type: Literal["image/png", "image/jpeg"]
     modality: Literal["image"] = "image"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.image, bytes):
+            raise TypeError("image must be bytes")
+        if self.mime_type not in ("image/png", "image/jpeg"):
+            raise ValueError("mime_type must be image/png or image/jpeg")
 
 
 # Union type for all embedding inputs
