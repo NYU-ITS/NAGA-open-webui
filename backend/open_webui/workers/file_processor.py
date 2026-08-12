@@ -65,6 +65,9 @@ from open_webui.config import (
     CHUNK_SIZE,  # UserScopedConfig
     CHUNK_OVERLAP,  # UserScopedConfig
     PDF_EXTRACT_IMAGES,
+    RAG_PDF_COMPLEX_PARSER_ENABLED,
+    RAG_PDF_MAX_VISUALS_PER_PAGE,
+    RAG_PDF_MAX_VISUALS_PER_DOCUMENT,
     DOCUMENT_INTELLIGENCE_ENDPOINT,
     DOCUMENT_INTELLIGENCE_KEY,
     BYPASS_EMBEDDING_AND_RETRIEVAL,
@@ -201,6 +204,15 @@ def get_worker_config():
             # First assign the PersistentConfig object (like main.py does), then override its value
             PDF_EXTRACT_IMAGES.value = False
             _worker_config.PDF_EXTRACT_IMAGES = PDF_EXTRACT_IMAGES
+            _worker_config.RAG_PDF_COMPLEX_PARSER_ENABLED = (
+                RAG_PDF_COMPLEX_PARSER_ENABLED
+            )
+            _worker_config.RAG_PDF_MAX_VISUALS_PER_PAGE = (
+                RAG_PDF_MAX_VISUALS_PER_PAGE
+            )
+            _worker_config.RAG_PDF_MAX_VISUALS_PER_DOCUMENT = (
+                RAG_PDF_MAX_VISUALS_PER_DOCUMENT
+            )
             _worker_config.DOCUMENT_INTELLIGENCE_ENDPOINT = DOCUMENT_INTELLIGENCE_ENDPOINT
             _worker_config.DOCUMENT_INTELLIGENCE_KEY = DOCUMENT_INTELLIGENCE_KEY
             _worker_config.BYPASS_EMBEDDING_AND_RETRIEVAL = BYPASS_EMBEDDING_AND_RETRIEVAL
@@ -377,6 +389,16 @@ class _FallbackConfig:
         self.TIKA_SERVER_URL = os.environ.get("TIKA_SERVER_URL", "")
         # CRITICAL: Force extract_images=False to prevent hangs (image extraction causes 2+ minute slowdowns)
         self.PDF_EXTRACT_IMAGES = False
+        self.RAG_PDF_COMPLEX_PARSER_ENABLED = (
+            os.environ.get("RAG_PDF_COMPLEX_PARSER_ENABLED", "True").lower()
+            == "true"
+        )
+        self.RAG_PDF_MAX_VISUALS_PER_PAGE = int(
+            os.environ.get("RAG_PDF_MAX_VISUALS_PER_PAGE", "6")
+        )
+        self.RAG_PDF_MAX_VISUALS_PER_DOCUMENT = int(
+            os.environ.get("RAG_PDF_MAX_VISUALS_PER_DOCUMENT", "80")
+        )
         self.TEXT_SPLITTER = os.environ.get("RAG_TEXT_SPLITTER", "recursive")
         # UserScopedConfig objects - use MockUserScopedConfig for compatibility
         # These are used in save_docs_to_vector_db and other worker code paths
@@ -1203,4 +1225,3 @@ def process_file_job(
                     log.debug(f"Detached trace context for job: file_id={file_id}")
                 except Exception as detach_error:
                     log.debug(f"Failed to detach trace context: {detach_error}")
-

@@ -2144,6 +2144,26 @@ PDF_EXTRACT_IMAGES = PersistentConfig(
     os.environ.get("PDF_EXTRACT_IMAGES", "False").lower() == "true",
 )
 
+# Complex PDF parsing owns visual extraction. PyPDFLoader image extraction remains
+# disabled so there is only one deterministic path for PDF images and table crops.
+RAG_PDF_COMPLEX_PARSER_ENABLED = PersistentConfig(
+    "RAG_PDF_COMPLEX_PARSER_ENABLED",
+    "rag.pdf_complex_parser_enabled",
+    os.environ.get("RAG_PDF_COMPLEX_PARSER_ENABLED", "True").lower() == "true",
+)
+
+RAG_PDF_MAX_VISUALS_PER_PAGE = PersistentConfig(
+    "RAG_PDF_MAX_VISUALS_PER_PAGE",
+    "rag.pdf_max_visuals_per_page",
+    int(os.environ.get("RAG_PDF_MAX_VISUALS_PER_PAGE", "6")),
+)
+
+RAG_PDF_MAX_VISUALS_PER_DOCUMENT = PersistentConfig(
+    "RAG_PDF_MAX_VISUALS_PER_DOCUMENT",
+    "rag.pdf_max_visuals_per_document",
+    int(os.environ.get("RAG_PDF_MAX_VISUALS_PER_DOCUMENT", "80")),
+)
+
 # DEPRECATED: Legacy global embedding model - NOT USED for RAG operations
 # We only use Portkey for embeddings, and each admin has their own model name (see RAG_EMBEDDING_MODEL_USER below)
 RAG_EMBEDDING_MODEL = PersistentConfig(
