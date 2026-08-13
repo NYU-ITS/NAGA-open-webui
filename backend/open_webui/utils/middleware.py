@@ -68,8 +68,13 @@ from open_webui.models.models import Models
 
 from open_webui.retrieval.embedding.errors import EmbeddingError
 from open_webui.retrieval.utils import (
+    AuthorizedAttachmentScope,
     get_sources_from_files,
     get_embedding_function,
+)
+from open_webui.retrieval.visuals import (
+    reconstruct_and_sanitize_sources,
+    sanitize_text_sources,
 )
 from open_webui.routers.retrieval import get_ef
 
@@ -86,6 +91,7 @@ from open_webui.utils.misc import (
     add_or_update_system_message,
     add_or_update_user_message,
     get_last_user_message,
+    get_last_user_message_item,
     get_last_assistant_message,
     prepend_to_first_user_message_content,
 )
@@ -177,16 +183,15 @@ async def chat_completion_tools_handler(
     tools_function_calling_prompt = tools_function_calling_generation_template(
         template, tools_specs
     )
-    log.info(f"{tools_function_calling_prompt=}")
+    log.info("Preparing tool selection | tool_count=%s", len(specs))
     payload = get_tools_function_calling_payload(
         body["messages"], task_model_id, tools_function_calling_prompt
     )
 
     try:
         response = await generate_chat_completion(request, form_data=payload, user=user)
-        log.debug(f"{response=}")
         content = await get_content_from_response(response)
-        log.debug(f"{content=}")
+        log.debug("Tool selection response received | has_content=%s", bool(content))
 
         if not content:
             return body, {}
@@ -272,7 +277,7 @@ async def chat_completion_tools_handler(
         log.exception(f"Error: {e}")
         content = None
 
-    log.debug(f"tool_contexts: {sources}")
+    log.debug("Tool contexts prepared | sources_count=%s", len(sources))
 
     if skip_files and "files" in body.get("metadata", {}):
         del body["metadata"]["files"]
@@ -554,28 +559,18 @@ async def chat_image_generation_handler(
 
 
 async def chat_completion_files_handler(
-    request: Request, body: dict, user: UserModel
-) -> tuple[dict, dict[str, list]]:
+    request: Request,
+    body: dict,
+    user: UserModel,
+    *,
+    trusted_legacy_collection_names: set[str] | None = None,
+    trusted_attachment_ids: set[int] | None = None,
+) -> tuple[dict, dict]:
     sources = []
+    authorized_scope = AuthorizedAttachmentScope(frozenset(), frozenset())
 
     if files := body.get("metadata", {}).get("files", None):
-        # RAG debug: which files/kbs are attached to this chat
-        file_ids = [str(f.get("id", "")) for f in files]
-        def _rag_file_name(f):
-            n = f.get("name") or f.get("filename")
-            if n:
-                return str(n)
-            _file = f.get("file")
-            if isinstance(_file, dict):
-                _data = _file.get("data") or {}
-                n = _data.get("name") if isinstance(_data, dict) else None
-                if n:
-                    return str(n)
-            return str(f.get("id") or "")
-        file_names = [_rag_file_name(f) for f in files]
-        log.info(
-            f"[RAG Chat] files_attached={len(files)} | file_ids={file_ids} | file_names={file_names} | user={user.email if user else None}"
-        )
+        log.info("[RAG Chat] files_attached=%s", len(files))
         queries = []
         try:
             queries_response = await generate_queries(
@@ -602,17 +597,20 @@ async def chat_completion_files_handler(
                 queries_response = {"queries": [queries_response]}
 
             queries = queries_response.get("queries", [])
-            log.info(f"[RAG Chat] query_expansion | queries_count={len(queries)} | queries={queries[:5]}{'...' if len(queries) > 5 else ''}")
-            log.debug(f"RAG query expansion generated {len(queries)} queries: {queries}")
-        except Exception as e:
+            log.info(
+                "[RAG Chat] query_expansion | queries_count=%s", len(queries)
+            )
+        except Exception as error:
             # Query expansion failed - this is OK, we'll use the user's message as fallback
             # This commonly happens when Gemini 2.5 Flash Lite is not available
-            log.debug(f"RAG query expansion failed (using user message as fallback): {e}")
+            log.debug(
+                "RAG query expansion failed; using user message | error_type=%s",
+                type(error).__name__,
+            )
 
         if len(queries) == 0:
             queries = [get_last_user_message(body["messages"])]
             log.info(f"[RAG Chat] using user message as query (expansion failed or empty) | queries_count=1")
-            log.debug(f"Using user message as RAG query fallback: {queries}")
 
         try:
             # RBAC: Create embedding function on-the-fly using user's per-admin model/key
@@ -622,62 +620,60 @@ async def chat_completion_files_handler(
                 log.error("No user email available for RAG query")
                 sources = []
             else:
-                # Credential-safe: Create embedding service and callable
-                from open_webui.retrieval.embedding.service import EmbeddingService
-                from open_webui.retrieval.embedding.compatibility import make_embedding_function
-                
                 try:
-                    service = EmbeddingService(request.app.state.config)
-                    user_embedding_function = make_embedding_function(service, user_id=user.id)
-                    
                     # Offload get_sources_from_files to module-level thread pool
                     loop = asyncio.get_running_loop()
-                    sources = await loop.run_in_executor(
+                    retrieval_result = await loop.run_in_executor(
                         _RAG_EXECUTOR,
                         lambda: get_sources_from_files(
                             request=request,
                             files=files,
                             queries=queries,
-                            embedding_function=user_embedding_function,
+                            embedding_function=None,
                             k=request.app.state.config.TOP_K.get(user.email),
                             reranking_function=request.app.state.rf,
                             r=request.app.state.config.RELEVANCE_THRESHOLD,
                             hybrid_search=request.app.state.config.ENABLE_RAG_HYBRID_SEARCH.get(user.email),
                             full_context=request.app.state.config.RAG_FULL_CONTEXT.get(user.email),
                             user=user,
+                            trusted_legacy_collection_names=trusted_legacy_collection_names,
+                            trusted_attachment_ids=trusted_attachment_ids,
                         ),
                     )
-                except Exception as e:
-                    log.error(f"Embedding service failed for RAG query: {e}")
+                    sources = retrieval_result.sources
+                    authorized_scope = retrieval_result.authorized_scope
+                except Exception as error:
+                    log.error(
+                        "Embedding service failed for RAG query | error_type=%s",
+                        type(error).__name__,
+                    )
                     sources = []
-                # RAG debug: summary of context retrieved (what the model got per file)
                 total_chunks = 0
-                summary_parts = []
                 for s in sources:
                     doc_list = s.get("document") if isinstance(s.get("document"), list) else []
-                    chunk_count = len(doc_list)
-                    total_chunks += chunk_count
-                    src = s.get("source") or {}
-                    sid = src.get("id", "")
-                    sname = src.get("name") or src.get("filename") or sid
-                    summary_parts.append(f"file_id={sid} name={sname} chunks={chunk_count}")
+                    total_chunks += len(doc_list)
                 log.info(
-                    f"[RAG Context Summary] total_chunks={total_chunks} | sources_count={len(sources)} | per_source: {' | '.join(summary_parts)}"
+                    "[RAG Context Summary] total_chunks=%s | sources_count=%s",
+                    total_chunks,
+                    len(sources),
                 )
-        except EmbeddingError as e:
+        except EmbeddingError as error:
             # Propagated blocked state (e.g. EMBEDDING_REINDEX_NOT_READY):
             # log with structured code and degrade to no-RAG gracefully.
-            log.warning(
-                f"[RAG Chat] retrieval blocked: {e.code} — {e.detail}"
+            log.warning("[RAG Chat] retrieval blocked | code=%s", error.code)
+            sources = []
+        except Exception as error:
+            log.exception(
+                "RAG retrieval failed | error_type=%s", type(error).__name__
             )
             sources = []
-        except Exception as e:
-            log.exception(e)
-            sources = []
 
-        log.debug(f"rag_contexts:sources: {sources}")
+        log.debug("RAG contexts ready | sources_count=%s", len(sources))
 
-    return body, {"sources": sources}
+    return body, {
+        "sources": sources,
+        "authorized_scope": authorized_scope,
+    }
 
 
 def apply_params_to_form_data(form_data, model):
@@ -721,7 +717,7 @@ async def process_chat_payload(request, form_data, metadata, user, model):
         f"model_id={model.get('id')}, chat_id={metadata.get('chat_id')}, session_id={metadata.get('session_id')}."
     )
     form_data = apply_params_to_form_data(form_data, model)
-    log.debug(f"form_data: {form_data}")
+    log.debug("Chat form parameters applied")
 
     log.debug(
         f"[DEBUG] [WS-CHAT 4] [inside process_chat_payload() from middleware.py] metadata before get_event_emitter: "
@@ -744,6 +740,11 @@ async def process_chat_payload(request, form_data, metadata, user, model):
         "__model__": model,
     }
 
+    # Client-provided image parts are not authorized retrieval results. Remove
+    # them before any inlet/tool/model processing; the retrieval stage below is
+    # the sole path allowed to append server-reconstructed image bytes.
+    _strip_untrusted_image_parts(form_data.get("messages", []))
+
     # Initialize events to store additional event to be sent to the client
     # Initialize contexts and citation
     if getattr(request.state, "direct", False) and hasattr(request.state, "model"):
@@ -762,6 +763,9 @@ async def process_chat_payload(request, form_data, metadata, user, model):
 
     events = []
     sources = []
+    authorized_scope = AuthorizedAttachmentScope(frozenset(), frozenset())
+    trusted_attachment_ids: set[int] = set()
+    trusted_legacy_collection_names: set[str] = set()
 
     user_message = get_last_user_message(form_data["messages"])
     model_knowledge = model.get("info", {}).get("meta", {}).get("knowledge", False)
@@ -781,24 +785,35 @@ async def process_chat_payload(request, form_data, metadata, user, model):
         knowledge_files = []
         for item in model_knowledge:
             if item.get("collection_name"):
-                knowledge_files.append(
-                    {
-                        "id": item.get("collection_name"),
-                        "name": item.get("name"),
-                        "legacy": True,
-                    }
-                )
+                collection_name = str(item.get("collection_name"))
+                trusted_legacy_collection_names.add(collection_name)
+                trusted_item = {
+                    "name": item.get("name"),
+                    "type": "collection",
+                    "collection_names": [collection_name],
+                    "legacy": True,
+                }
+                knowledge_files.append(trusted_item)
+                trusted_attachment_ids.add(id(trusted_item))
             elif item.get("collection_names"):
-                knowledge_files.append(
-                    {
-                        "name": item.get("name"),
-                        "type": "collection",
-                        "collection_names": item.get("collection_names"),
-                        "legacy": True,
-                    }
-                )
+                collection_names = [
+                    str(value)
+                    for value in item.get("collection_names")
+                    if value
+                ]
+                trusted_legacy_collection_names.update(collection_names)
+                trusted_item = {
+                    "name": item.get("name"),
+                    "type": "collection",
+                    "collection_names": collection_names,
+                    "legacy": True,
+                }
+                knowledge_files.append(trusted_item)
+                trusted_attachment_ids.add(id(trusted_item))
             else:
-                knowledge_files.append(item)
+                trusted_item = dict(item)
+                knowledge_files.append(trusted_item)
+                trusted_attachment_ids.add(id(trusted_item))
 
         files = form_data.get("files", [])
         files.extend(knowledge_files)
@@ -830,8 +845,18 @@ async def process_chat_payload(request, form_data, metadata, user, model):
     features = form_data.pop("features", None)
     if features:
         if "web_search" in features and features["web_search"]:
+            existing_attachment_ids = {
+                id(item)
+                for item in (form_data.get("files") or [])
+                if isinstance(item, dict)
+            }
             form_data = await chat_web_search_handler(
                 request, form_data, extra_params, user
+            )
+            trusted_attachment_ids.update(
+                id(item)
+                for item in (form_data.get("files") or [])
+                if isinstance(item, dict) and id(item) not in existing_attachment_ids
             )
 
         if "image_generation" in features and features["image_generation"]:
@@ -879,7 +904,7 @@ async def process_chat_payload(request, form_data, metadata, user, model):
                 "__files__": metadata.get("files", []),
             },
         )
-        log.info(f"{tools=}")
+        log.info("Resolved chat tools | count=%s", len(tools))
 
         if metadata.get("function_calling") == "native":
             # If the function calling is native, then call the tools function calling handler
@@ -903,18 +928,61 @@ async def process_chat_payload(request, form_data, metadata, user, model):
         # if True:
         try:
             form_data, flags = await chat_completion_files_handler(
-                request, form_data, user
+                request,
+                form_data,
+                user,
+                trusted_legacy_collection_names=trusted_legacy_collection_names,
+                trusted_attachment_ids=trusted_attachment_ids,
             )
             sources.extend(flags.get("sources", []))
-            s1 = f"{model}"
-            log.info(f"Working within inbuilt RAG: {s1}")
-            # Debug log for task model (may be None if user doesn't have access to Gemini Flash Lite)
-            if task_model_id and task_model_id in models:
-                log.debug(f"Task model: {models[task_model_id]}")
-        except Exception as e:
-            log.exception(e)
+            authorized_scope = flags.get("authorized_scope", authorized_scope)
+            log.info("Working within inbuilt RAG")
+        except Exception as error:
+            log.exception(
+                "Inbuilt RAG failed | error_type=%s", type(error).__name__
+            )
     else:
         log.info("Using Custom RAG")
+
+    capabilities = model.get("info", {}).get("meta", {}).get("capabilities", {})
+    vision_enabled = bool(
+        isinstance(capabilities, dict) and capabilities.get("vision") is True
+    )
+    if not vision_enabled and any(
+        isinstance(item, dict) and item.get("type") == "image"
+        for item in (metadata.get("files") or [])
+    ):
+        await event_emitter(
+            {
+                "type": "status",
+                "data": {
+                    "description": "The selected answer model cannot view image attachments; usable text sources will still be included.",
+                    "done": True,
+                },
+            }
+        )
+    retrieved_sources = sources
+    try:
+        image_parts, sources = reconstruct_and_sanitize_sources(
+            retrieved_sources,
+            authorized_scope=authorized_scope,
+            vision_enabled=vision_enabled,
+            limit=max(0, int(request.app.state.config.TOP_K.get(user.email))),
+        )
+    except Exception as reconstruction_error:
+        log.warning(
+            "Retrieved visual reconstruction failed (%s)",
+            type(reconstruction_error).__name__,
+        )
+        image_parts = []
+        sources = sanitize_text_sources(
+            retrieved_sources,
+            authorized_scope=authorized_scope,
+        )
+    if image_parts:
+        _append_image_parts_to_latest_user_message(
+            form_data["messages"], image_parts
+        )
 
     # If context is not empty, insert it into the messages
     if len(sources) > 0:
@@ -922,7 +990,8 @@ async def process_chat_payload(request, form_data, metadata, user, model):
         for source_idx, source in enumerate(sources):
             if "document" in source:
                 for doc_idx, doc_context in enumerate(source["document"]):
-                    context_string += f"<source><source_id>{source_idx}</source_id><source_context>{doc_context}</source_context></source>\n"
+                    if isinstance(doc_context, str) and doc_context.strip():
+                        context_string += f"<source><source_id>{source_idx}</source_id><source_context>{doc_context}</source_context></source>\n"
 
         context_string = context_string.strip()
         prompt = get_last_user_message(form_data["messages"])
@@ -939,7 +1008,9 @@ async def process_chat_payload(request, form_data, metadata, user, model):
 
         # Workaround for Ollama 2.0+ system prompt issue
         # TODO: replace with add_or_update_system_message
-        if model.get("owned_by") == "ollama":
+        if not context_string:
+            pass
+        elif model.get("owned_by") == "ollama":
             form_data["messages"] = prepend_to_first_user_message_content(
                 rag_template(
                     request.app.state.config.RAG_TEMPLATE.get(user.email), context_string, prompt
@@ -974,6 +1045,55 @@ async def process_chat_payload(request, form_data, metadata, user, model):
         )
 
     return form_data, metadata, events
+
+
+def _append_image_parts_to_latest_user_message(
+    messages: list[dict], image_parts: list[dict]
+) -> None:
+    """Attach only transient, server-reconstructed images to the latest user turn.
+
+    Browser/API callers are not an authority for answer-model image bytes. Drop
+    any pre-existing non-text content parts before adding the crops that were
+    reconstructed from the server-authorized retrieval scope.
+    """
+    message = get_last_user_message_item(messages)
+    if message is None:
+        return
+    content = message.get("content", "")
+    if isinstance(content, str):
+        parts = [{"type": "text", "text": content}]
+    elif isinstance(content, list):
+        parts = [
+            dict(part)
+            for part in content
+            if isinstance(part, dict)
+            and part.get("type") == "text"
+            and isinstance(part.get("text"), str)
+        ]
+    else:
+        return
+    parts.extend(image_parts)
+    message["content"] = parts
+
+
+def _strip_untrusted_image_parts(messages: list[dict]) -> None:
+    """Remove caller-supplied image parts from every chat turn in place."""
+    if not isinstance(messages, list):
+        return
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        text_parts = [
+            dict(part)
+            for part in content
+            if isinstance(part, dict)
+            and part.get("type") == "text"
+            and isinstance(part.get("text"), str)
+        ]
+        message["content"] = text_parts
 
 
 async def process_chat_response(

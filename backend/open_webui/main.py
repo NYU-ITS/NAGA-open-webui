@@ -1268,9 +1268,13 @@ async def chat_completion(
                     log.debug("Checking if the user has access to the model...")
                     check_model_access(user, model)
                     log.debug("The user has access to the model! So, we can proceed with the chat completion.")
-                except Exception as e:
-                    log.debug(f"The user does not have access to the model! So, we cannot proceed with the chat completion. The error is: {e}")
-                    raise e
+                except Exception as error:
+                    log.debug(
+                        "Model access check failed | model=%s | error_type=%s",
+                        model_id,
+                        type(error).__name__,
+                    )
+                    raise
         else:
             log.debug("The model_item is direct!")
             model = model_item
@@ -1311,11 +1315,12 @@ async def chat_completion(
 
         request.state.metadata = metadata
         form_data["metadata"] = metadata
+        messages = form_data.get("messages")
+        message_count = len(messages) if isinstance(messages, list) else 0
         log.debug(
-            f"[DEBUG] [inside chat_completion() from main.py] The chat payload is processed! The metadata is: {metadata}."
-            f"The form_data is: {form_data}."
-            f"The user is: {user.email} and user_id is: {user.id}."
-            f"The model is: {model}."
+            "Chat payload prepared | model=%s | message_count=%s",
+            form_data.get("model"),
+            message_count,
         )
 
         log.debug("Processing the chat payload...")
@@ -1323,29 +1328,42 @@ async def chat_completion(
             request, form_data, metadata, user, model
         )
 
-    except Exception as e:
-        log.debug(f"Error processing chat payload: {e}")
-        log.debug(f"[DEBUG] [inside chat_completion() from main.py] The error is: {e}...... This will be returning a 400 bad request.")
+    except Exception as error:
+        log.debug(
+            "Chat payload processing failed | model=%s | error_type=%s",
+            form_data.get("model"),
+            type(error).__name__,
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
-        )
+            detail="Error processing chat payload",
+        ) from None
 
     try:
         log.debug("Calling the chat completion handler...")
         response = await chat_completion_handler(request, form_data, user)
-        log.debug(f"[DEBUG] [inside chat_completion() from main.py] The chat completion handler returned the response: {response}. The inputs for chat_completion_handler() are: {request}, {form_data}, {user}.")
+        messages = form_data.get("messages")
+        message_count = len(messages) if isinstance(messages, list) else 0
+        log.debug(
+            "Chat completion handler returned | model=%s | message_count=%s",
+            form_data.get("model"),
+            message_count,
+        )
 
         log.debug("Calling the process_chat_response()... this is defined in middleware.py")
         return await process_chat_response(
             request, response, form_data, user, events, metadata, tasks
         )
-    except Exception as e:
-        log.debug(f"[DEBUG] [inside chat_completion() from main.py] The error is: {e}...... This will be returning a 400 bad request.")
+    except Exception as error:
+        log.debug(
+            "Chat completion failed | model=%s | error_type=%s",
+            form_data.get("model"),
+            type(error).__name__,
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
-        )
+            detail="Error generating chat completion",
+        ) from None
 
 
 # Alias for chat_completion (Legacy)

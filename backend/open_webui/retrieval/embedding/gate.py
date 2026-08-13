@@ -120,10 +120,7 @@ def assert_embedding_retrieval_ready(
         EmbeddingError (EMBEDDING_MODEL_SPACE_MIXED): when knowledge
             bases or files resolve to different model spaces.
     """
-    from open_webui.internal.db import get_db
-    from open_webui.models.files import Files
-
-    # 1. Resolve effective admin/model space and validate knowledge ownership.
+    # 1. Resolve effective admin/model space and validate knowledge read access.
     config = _get_app_config()
     admin_id, embedding_model_id = assert_single_model_space(
         requesting_user_id, knowledge_ids, config
@@ -134,7 +131,7 @@ def assert_embedding_retrieval_ready(
     #    propagate as EmbeddingError — never treated as permission success.
     if file_ids:
         for fid in file_ids:
-            owner_id = _resolve_file_owner(fid)
+            owner_id = _resolve_file_owner(fid, requesting_user_id)
             if owner_id != admin_id:
                 raise EmbeddingError(
                     EMBEDDING_MODEL_SPACE_MIXED,
@@ -237,8 +234,8 @@ def _raise_blocked(
     raise EmbeddingError(EMBEDDING_REINDEX_NOT_READY, detail=detail)
 
 
-def _resolve_file_owner(file_id: str) -> str:
-    """Resolve the admin owner of a file.
+def _resolve_file_owner(file_id: str, requesting_user_id: str) -> str:
+    """Authorize a file read and resolve its governing admin.
 
     Returns the admin user ID on success.
 
@@ -252,6 +249,8 @@ def _resolve_file_owner(file_id: str) -> str:
             ``resolve_admin_for_user``.
     """
     from open_webui.models.files import Files
+    from open_webui.models.knowledge import Knowledges
+    from open_webui.models.users import Users
     from open_webui.retrieval.embedding.resolution import resolve_admin_for_user
 
     try:
@@ -263,6 +262,17 @@ def _resolve_file_owner(file_id: str) -> str:
         ) from e
 
     if file_obj is None:
+        raise EmbeddingError(
+            EMBEDDING_FILE_NOT_FOUND,
+            detail=f"File {file_id} not found.",
+        )
+
+    requesting_user = Users.get_user_by_id(requesting_user_id)
+    if requesting_user is None or not (
+        requesting_user.role == "admin"
+        or file_obj.user_id == requesting_user_id
+        or Knowledges.user_has_read_access_to_file(requesting_user_id, file_id)
+    ):
         raise EmbeddingError(
             EMBEDDING_FILE_NOT_FOUND,
             detail=f"File {file_id} not found.",
