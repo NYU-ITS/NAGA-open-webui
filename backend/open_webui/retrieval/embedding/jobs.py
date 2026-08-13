@@ -747,7 +747,12 @@ def _create_retry_job(
         )
         db.add(file_row)
 
-    # 8. Update latest job pointer atomically.
+    # Flush the new job before pointing admin state at it. The models do not
+    # declare an ORM relationship, so SQLAlchemy cannot infer this foreign-key
+    # insert/update ordering within a single flush.
+    db.flush()
+
+    # 8. Update latest job pointer atomically in the same transaction.
     state_row.latest_embedding_job_id = new_job_id
     state_row.updated_at = now
 
