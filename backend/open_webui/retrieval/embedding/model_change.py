@@ -67,6 +67,7 @@ from open_webui.retrieval.embedding.registry import (
     get_model_spec_by_name,
     EmbeddingModelSpec,
 )
+from open_webui.retrieval.vector.model_aware import ModelAwareVectorRepository
 from open_webui.retrieval.embedding.compatibility import assert_dimension_supported
 
 log = logging.getLogger(__name__)
@@ -262,6 +263,19 @@ def request_model_change(
         if config is not None:
             config.RAG_EMBEDDING_MODEL_USER.set(
                 admin_email, target_spec.model_name, db=db
+            )
+
+        # A zero-file inventory is a real completed operation: promote it while
+        # the administrator state is still locked, without embedding or queueing.
+        if not inventory:
+            EmbeddingJobRepository.finalize_job_success(
+                job_id=job_result.job.id,
+                admin_id=admin_id,
+                target_model_id=target_spec.id,
+                previous_model_id=state_view.active_embedding_model_id,
+                vector_repo=ModelAwareVectorRepository(),
+                target_model_spec=target_spec,
+                db=db,
             )
 
         # Step 12: Commit (happens automatically when exiting with block)

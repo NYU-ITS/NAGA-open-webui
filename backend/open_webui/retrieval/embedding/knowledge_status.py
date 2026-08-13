@@ -72,6 +72,9 @@ class KnowledgeIndexingStatusSummary(BaseModel):
     display_state: KnowledgeIndexingDisplayState
     job_status: str | None = None
     retrieval_available: bool
+    current_file_count: int = 0
+    job_display_state: KnowledgeIndexingDisplayState = "ready"
+    retry_kind: str | None = None
 
     job_id: str | None = None
     job_type: str | None = None
@@ -357,9 +360,17 @@ def build_knowledge_indexing_statuses(
             continue
 
         admin_id = admin_by_knowledge[knowledge.id]
+        knowledge_data = knowledge.data if isinstance(knowledge.data, dict) else {}
+        current_file_ids = {
+            str(file_id)
+            for file_id in knowledge_data.get("file_ids", [])
+            if isinstance(file_id, str)
+        }
+        current_file_count = len(current_file_ids)
         state = state_by_admin.get(admin_id)
         job = valid_jobs_by_admin.get(admin_id)
-        display_state, retrieval_available = _derive_display_state(state, job)
+        job_display_state, _ = _derive_display_state(state, job)
+        display_state, retrieval_available = job_display_state, job_display_state == "ready"
         active_model = (
             model_by_id.get(state.active_embedding_model_id) if state else None
         )
@@ -380,10 +391,17 @@ def build_knowledge_indexing_statuses(
             display_state, retrieval_available = "unavailable", False
         rows = files_by_job.get(job.id, []) if job is not None else []
         collection_rows = _knowledge_rows_for_job(knowledge.id, rows)
+        collection_rows = [row for row in collection_rows if row.file_id in current_file_ids]
+        if current_file_count and len({row.file_id for row in collection_rows}) < current_file_count:
+            display_state, retrieval_available = "unavailable", False
         failed_rows = [
             row for row in collection_rows if row.status == FILE_STATUS_FAILED
         ]
 
+        # An empty collection is locally ready even when another governed
+        # source has a failed administrator-wide operation.
+        if current_file_count == 0:
+            display_state, retrieval_available = "ready", True
         retry_eligible = False
         if job is not None and models_available:
             retry_eligible = is_job_retry_eligible(
@@ -397,9 +415,13 @@ def build_knowledge_indexing_statuses(
                     row.status == FILE_STATUS_PENDING for row in rows
                 ),
             )
+        if current_file_count == 0:
+            retry_eligible = False
 
         error_code = job.error_code if job is not None else None
         error_message = _job_error_message(error_code)
+        if current_file_count == 0:
+            error_code = error_message = None
         if display_state in ("failed", "partial") and error_message is None:
             error_message = "The embedding indexing job did not finish successfully."
         if display_state == "unavailable" and error_message is None:
@@ -410,6 +432,8 @@ def build_knowledge_indexing_statuses(
             KnowledgeIndexingStatusResponse(
                 knowledge_id=knowledge.id,
                 display_state=display_state,
+                current_file_count=current_file_count,
+                job_display_state=job_display_state,
                 job_status=job.status if job is not None else None,
                 retrieval_available=retrieval_available,
                 job_id=job.id if job is not None else None,
@@ -419,7 +443,7 @@ def build_knowledge_indexing_statuses(
                 collection_progress=_progress_from_rows(collection_rows),
                 job_progress=_job_progress(job),
                 failed_document_count=len(failed_rows),
-                job_failed_document_count=job.failed_files if job is not None else 0,
+                job_failed_document_count=(job.failed_files if job is not None else 0),
                 error_code=error_code,
                 error_message=error_message,
                 retry_eligible=retry_eligible,
@@ -427,6 +451,10 @@ def build_knowledge_indexing_statuses(
                     retry_eligible
                     and viewer_role == "admin"
                     and viewer_id == admin_id
+                ),
+                retry_kind=(
+                    "failed_documents" if failed_rows else
+                    ("indexing_operation" if display_state in ("failed", "partial", "unavailable") and current_file_count else None)
                 ),
                 created_at=job.created_at if job is not None else None,
                 updated_at=job.updated_at if job is not None else None,

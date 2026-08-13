@@ -46,6 +46,9 @@ export type KnowledgeIndexingStatus = {
 	display_state: KnowledgeIndexingDisplayState;
 	job_status: KnowledgeIndexingJobStatus | null;
 	retrieval_available: boolean;
+	current_file_count: number;
+	job_display_state: KnowledgeIndexingDisplayState;
+	retry_kind: 'indexing_operation' | 'failed_documents' | null;
 	job_id: string | null;
 	job_type: string | null;
 	active_model: EmbeddingModelSummary | null;

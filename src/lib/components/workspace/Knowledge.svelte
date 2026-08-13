@@ -37,6 +37,7 @@
 		id: string;
 		name: string;
 		failedDocumentCount: number;
+		currentFileCount: number;
 	};
 
 	type KnowledgeListItemSummary = {
@@ -172,7 +173,8 @@
 			const knowledgeBase = {
 				id: item.id,
 				name: item.name,
-				failedDocumentCount: status.failed_document_count
+				failedDocumentCount: status.failed_document_count,
+				currentFileCount: status.current_file_count
 			};
 			const existingGroup = groups.get(status.job_id);
 			if (existingGroup) {
