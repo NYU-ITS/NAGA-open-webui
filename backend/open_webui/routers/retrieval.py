@@ -66,7 +66,7 @@ from open_webui.retrieval.embedding.model_change import (
     ModelChangeNoOp,
     request_model_change,
 )
-from open_webui.retrieval.embedding.enqueue import enqueue_embedding_job
+from open_webui.retrieval.embedding.enqueue import dispatch_embedding_job
 
 # Document loaders
 from open_webui.retrieval.loaders.main import Loader
@@ -382,7 +382,8 @@ class EmbeddingModelUpdateForm(BaseModel):
 
 @router.post("/embedding/update")
 async def update_embedding_config(
-    request: Request, form_data: EmbeddingModelUpdateForm, user=Depends(get_verified_user)
+    request: Request, form_data: EmbeddingModelUpdateForm,
+    background_tasks: BackgroundTasks, user=Depends(get_verified_user)
 ):
     log.info(
         f"Embedding config update: admin='{user.email}' engine='{form_data.embedding_engine}' "
@@ -462,9 +463,9 @@ async def update_embedding_config(
                 invalidate_user_scoped_config_cache(
                     admin_email, "rag.embedding_model_user"
                 )
-                if isinstance(change_result, ModelChangeResult):
+                if isinstance(change_result, ModelChangeResult) and change_result.status in ("queued", "processing"):
                     try:
-                        enqueue_embedding_job(change_result.job_id)
+                        dispatch_mode = dispatch_embedding_job(change_result.job_id, background_tasks)
                     except Exception as enqueue_err:
                         log.error(
                             "[EMBEDDING_UPDATE] Failed to enqueue job %s: %s",
@@ -472,29 +473,27 @@ async def update_embedding_config(
                             enqueue_err,
                             exc_info=True,
                         )
-                        try:
-                            from open_webui.retrieval.embedding.jobs import EmbeddingJobRepository
-                            EmbeddingJobRepository.mark_job_failed(
-                                job_id=change_result.job_id,
-                                error_code="enqueue_failed",
-                                error_message=f"Failed to enqueue job: {type(enqueue_err).__name__}",
-                            )
-                        except Exception as mark_err:
-                            log.error(
-                                "[EMBEDDING_UPDATE] Failed to mark job %s as failed: %s",
-                                change_result.job_id,
-                                mark_err,
-                                exc_info=True,
-                            )
                         raise HTTPException(
                             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                            detail="Model config saved, but reindex job enqueue failed. Retry from embedding jobs page.",
+                            detail={
+                                "error_code": "RQ_DISPATCH_FAILED",
+                                "message": "Model config saved, but the indexing job could not be queued. Retry from the embedding jobs page.",
+                            },
                         )
                     reindex_job = {
                         "job_id": change_result.job_id,
                         "status": change_result.status,
                         "target_model_id": change_result.target_model_id,
                         "total_files": change_result.total_files,
+                        "dispatch_mode": dispatch_mode,
+                    }
+                elif isinstance(change_result, ModelChangeResult):
+                    reindex_job = {
+                        "job_id": change_result.job_id,
+                        "status": change_result.status,
+                        "target_model_id": change_result.target_model_id,
+                        "total_files": change_result.total_files,
+                        "dispatch_mode": "background",
                     }
             except HTTPException:
                 raise

@@ -12,7 +12,7 @@ admins receive 403/404 consistent with repository conventions.
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 
 from open_webui.internal.db import get_db
@@ -36,7 +36,7 @@ from open_webui.retrieval.embedding.jobs import (
     is_job_retry_eligible,
 )
 from open_webui.retrieval.embedding.preparation import build_preparation_recipe
-from open_webui.retrieval.embedding.enqueue import enqueue_embedding_job
+from open_webui.retrieval.embedding.enqueue import dispatch_embedding_job
 from open_webui.retrieval.embedding.state import AdminEmbeddingModelStateRepository
 from open_webui.utils.auth import get_verified_user
 
@@ -110,6 +110,7 @@ class RetryResponse(BaseModel):
     job_type: str
     status: str
     total_files: int
+    dispatch_mode: str
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -295,6 +296,7 @@ def get_job_status(
 def retry_failed_job(
     job_id: str,
     request: Request,
+    background_tasks: BackgroundTasks,
     user=Depends(get_verified_user),
 ):
     """Retry failed files from a terminal embedding job.
@@ -359,7 +361,7 @@ def retry_failed_job(
     # Enqueue the job.  On failure, mark the job as failed so it does not
     # remain stuck as queued.
     try:
-        enqueue_embedding_job(result.job.id)
+        dispatch_mode = dispatch_embedding_job(result.job.id, background_tasks)
     except Exception as e:
         log.error(
             "[RETRY] Failed to enqueue job %s | type=%s",
@@ -389,4 +391,5 @@ def retry_failed_job(
         job_type=result.job.job_type,
         status=result.job.status,
         total_files=result.job.total_files,
+        dispatch_mode=dispatch_mode,
     )

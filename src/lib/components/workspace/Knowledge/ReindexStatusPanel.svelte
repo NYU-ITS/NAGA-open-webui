@@ -13,6 +13,7 @@
 		id: string;
 		name: string;
 		failedDocumentCount: number;
+		currentFileCount: number;
 	};
 
 	export let status: KnowledgeIndexingStatus;
@@ -24,7 +25,7 @@
 	let retrying = false;
 
 	$: affectedKnowledgeBases = knowledgeBases.filter(
-		(knowledgeBase) => knowledgeBase.failedDocumentCount > 0
+		(knowledgeBase) => knowledgeBase.currentFileCount > 0 && knowledgeBase.failedDocumentCount > 0
 	);
 
 	const getHttpStatus = (error: unknown) => {
@@ -69,11 +70,13 @@
 
 <ConfirmDialog
 	bind:show={showRetryConfirm}
-	title={$i18n.t('Retry failed documents?')}
+	title={$i18n.t(status.retry_kind === 'indexing_operation' ? 'Retry indexing?' : 'Retry failed documents?')}
 	message={$i18n.t(
 		'This retries every eligible failed document in this administrator-wide model-change job. Retry cannot be limited to one knowledge base and may also affect chat uploads.'
 	)}
-	confirmLabel={$i18n.t('Retry failed documents')}
+	confirmLabel={$i18n.t(
+		status.retry_kind === 'indexing_operation' ? 'Retry indexing' : 'Retry failed documents'
+	)}
 	on:confirm={retryHandler}
 />
 
@@ -107,7 +110,7 @@
 			</p>
 		</div>
 		<div role="status" aria-live="polite">
-			<IndexingStatusBadge state={status.display_state} />
+			<IndexingStatusBadge state={status.job_display_state ?? status.display_state} />
 		</div>
 	</div>
 
@@ -250,7 +253,11 @@
 					showRetryConfirm = true;
 				}}
 			>
-				{retrying ? $i18n.t('Retrying…') : $i18n.t('Retry failed documents')}
+				{retrying
+					? $i18n.t('Retrying…')
+					: status.retry_kind === 'indexing_operation'
+						? $i18n.t('Retry indexing')
+						: $i18n.t('Retry failed documents')}
 			</button>
 		</div>
 	{:else if status.retry_eligible}

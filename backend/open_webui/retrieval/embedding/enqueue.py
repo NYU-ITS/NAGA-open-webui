@@ -43,6 +43,7 @@ from open_webui.utils.job_queue import get_job_queue
 from open_webui.env import (
     JOB_RESULT_TTL,
     JOB_FAILURE_TTL,
+    ENABLE_JOB_QUEUE,
 )
 
 log = logging.getLogger(__name__)
@@ -58,6 +59,18 @@ EMBEDDING_MAX_RETRIES = 3
 
 # Retry delay in seconds
 EMBEDDING_RETRY_DELAY = 60  # 1 minute
+
+
+def dispatch_embedding_job(embedding_job_id: str, background_tasks=None) -> str:
+    """Dispatch a committed job through the configured durable executor."""
+    if not ENABLE_JOB_QUEUE:
+        if background_tasks is None:
+            raise RuntimeError("BackgroundTasks is required when job queue is disabled")
+        from open_webui.workers.embedding_worker import process_embedding_job
+        background_tasks.add_task(process_embedding_job, embedding_job_id)
+        return "background"
+    enqueue_embedding_job(embedding_job_id)
+    return "rq"
 
 
 def _make_rq_job_id(embedding_job_id: str) -> str:
