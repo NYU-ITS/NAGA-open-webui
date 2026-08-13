@@ -10,6 +10,8 @@ poll and the download. Without Redis the store falls back to process memory,
 which is correct for a single replica deployment and for local development.
 """
 
+import base64
+import binascii
 import logging
 import os
 import threading
@@ -103,6 +105,29 @@ def _drop_redis() -> None:
         _redis_client = None
 
 
+def _encode_payload(data: bytes) -> str:
+    """
+    Wrap the PDF for a Redis client that decodes replies as text.
+
+    The pool this module borrows is built with decode_responses=True, because
+    the socket layer keeps JSON strings in it. Handing that client raw PDF
+    bytes stores them fine but fails on the way back out, when redis-py tries
+    to decode them as UTF-8. Base64 keeps the payload inside what such a
+    client can return.
+    """
+    return base64.b64encode(data).decode("ascii")
+
+
+def _decode_payload(raw) -> bytes:
+    """Undo _encode_payload, tolerating a value written before it existed."""
+    if isinstance(raw, str):
+        raw = raw.encode("ascii", "ignore")
+    try:
+        return base64.b64decode(raw, validate=True)
+    except (binascii.Error, ValueError):
+        return raw
+
+
 def _prune_memory_jobs() -> None:
     now = time.time()
     for job_id, job in list(_memory_jobs.items()):
@@ -118,7 +143,7 @@ def _write(job_id: str, fields: Dict[str, Any], data: Optional[bytes] = None) ->
             client.hset(key, mapping={k: str(v) for k, v in fields.items()})
             client.expire(key, JOB_TTL_SEC)
             if data is not None:
-                client.set(f"{key}:data", data, ex=JOB_TTL_SEC)
+                client.set(f"{key}:data", _encode_payload(data), ex=JOB_TTL_SEC)
             return
         except Exception as e:
             log.warning(f"Failed to persist PDF job {job_id} in Redis: {e}")
@@ -157,13 +182,18 @@ def _read(job_id: str) -> Optional[Dict[str, Any]]:
 def _read_data(job_id: str) -> Optional[bytes]:
     client = _get_redis()
     if client is not None:
+        raw = None
+        # Only the call itself is guarded. Decoding the payload outside the
+        # try keeps a bad value from being mistaken for a dead connection:
+        # _drop_redis() blinds this process for _REDIS_RETRY_SEC, which turns
+        # one unreadable result into a minute of "job not found".
         try:
-            data = client.get(f"{_REDIS_PREFIX}{job_id}:data")
-            if data:
-                return data
+            raw = client.get(f"{_REDIS_PREFIX}{job_id}:data")
         except Exception as e:
             log.warning(f"Failed to read PDF job payload {job_id} from Redis: {e}")
             _drop_redis()
+        if raw:
+            return _decode_payload(raw)
 
     with _memory_lock:
         job = _memory_jobs.get(job_id)
