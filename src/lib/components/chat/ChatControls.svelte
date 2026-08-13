@@ -171,6 +171,7 @@
 								{modelId}
 								{chatId}
 								{eventTarget}
+								bind:prompt
 								on:close={() => {
 									showControls.set(false);
 								}}
@@ -247,6 +248,7 @@
 					{modelId}
 					{chatId}
 					{eventTarget}
+					bind:prompt
 					on:close={() => {
 						showControls.set(false);
 					}}
@@ -294,6 +296,7 @@
 									{modelId}
 									{chatId}
 									{eventTarget}
+									bind:prompt
 									on:close={() => {
 										showControls.set(false);
 									}}

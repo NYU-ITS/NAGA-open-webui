@@ -12,7 +12,8 @@
 
 	import { get, type Unsubscriber, type Writable } from 'svelte/store';
 	import type { i18n as i18nType } from 'i18next';
-	import { WEBUI_BASE_URL } from '$lib/constants';
+	import { WEBUI_API_BASE_URL, WEBUI_BASE_URL } from '$lib/constants';
+	import { serializeStandaloneImageDescriptor } from '$lib/utils/file-upload';
 
 	import {
 		chatId,
@@ -160,7 +161,6 @@
 	$: if (chatIdProp) {
 		(async () => {
 			loading = true;
-			console.log(chatIdProp);
 
 			prompt = '';
 			files = [];
@@ -176,8 +176,8 @@
 					try {
 						const input = JSON.parse(localStorage.getItem(`chat-input-${chatIdProp}`));
 
-						prompt = input.prompt;
-						files = input.files;
+						prompt = input.prompt ?? '';
+						files = restorePersistedAttachments(input.files);
 						selectedToolIds = input.selectedToolIds;
 						webSearchEnabled = input.webSearchEnabled;
 						imageGenerationEnabled = input.imageGenerationEnabled;
@@ -202,7 +202,6 @@
 			return;
 		}
 		sessionStorage.selectedModels = JSON.stringify(selectedModels);
-		console.log('saveSessionSelectedModels', selectedModels, sessionStorage.selectedModels);
 	};
 
 	$: if (selectedModels) {
@@ -257,8 +256,6 @@
 	};
 
 	const chatEventHandler = async (event, cb) => {
-		console.log(event);
-
 		if (event.chat_id === $chatId) {
 			await tick();
 			let message = history.messages[event.message_id];
@@ -366,7 +363,7 @@
 						toast.info(toastContent);
 					}
 				} else {
-					console.log('Unknown message type', data);
+					console.warn('Unknown chat event type');
 				}
 
 				history.messages[event.message_id] = message;
@@ -384,8 +381,6 @@
 
 		// Replace with your iframe's origin
 		if (event.data.type === 'input:prompt') {
-			console.debug(event.data.text);
-
 			const inputElement = document.getElementById('chat-input');
 
 			if (inputElement) {
@@ -395,8 +390,6 @@
 		}
 
 		if (event.data.type === 'action:submit') {
-			console.debug(event.data.text);
-
 			if (prompt !== '') {
 				await tick();
 				submitPrompt(prompt);
@@ -404,8 +397,6 @@
 		}
 
 		if (event.data.type === 'input:prompt:submit') {
-			console.debug(event.data.text);
-
 			if (prompt !== '') {
 				await tick();
 				submitPrompt(event.data.text);
@@ -414,7 +405,6 @@
 	};
 
 	onMount(async () => {
-		console.log('mounted');
 		window.addEventListener('message', onMessageHandler);
 		$socket?.on('chat-events', chatEventHandler);
 
@@ -431,8 +421,8 @@
 		if (localStorage.getItem(`chat-input-${chatIdProp}`)) {
 			try {
 				const input = JSON.parse(localStorage.getItem(`chat-input-${chatIdProp}`));
-				prompt = input.prompt;
-				files = input.files;
+				prompt = input.prompt ?? '';
+				files = restorePersistedAttachments(input.files);
 				selectedToolIds = input.selectedToolIds;
 				webSearchEnabled = input.webSearchEnabled;
 				imageGenerationEnabled = input.imageGenerationEnabled;
@@ -481,15 +471,6 @@
 	// File upload functions
 
 	const uploadGoogleDriveFile = async (fileData) => {
-		console.log('Starting uploadGoogleDriveFile with:', {
-			id: fileData.id,
-			name: fileData.name,
-			url: fileData.url,
-			headers: {
-				Authorization: `Bearer ${token}`
-			}
-		});
-
 		// Validate input
 		if (!fileData?.id || !fileData?.name || !fileData?.url || !fileData?.headers?.Authorization) {
 			throw new Error('Invalid file data provided');
@@ -511,7 +492,6 @@
 
 		try {
 			files = [...files, fileItem];
-			console.log('Processing web file with URL:', fileData.url);
 
 			// Configure fetch options with proper headers
 			const fetchOptions = {
@@ -523,7 +503,6 @@
 			};
 
 			// Attempt to fetch the file
-			console.log('Fetching file content from Google Drive...');
 			const fileResponse = await fetch(fileData.url, fetchOptions);
 
 			if (!fileResponse.ok) {
@@ -533,30 +512,17 @@
 
 			// Get content type from response
 			const contentType = fileResponse.headers.get('content-type') || 'application/octet-stream';
-			console.log('Response received with content-type:', contentType);
 
 			// Convert response to blob
-			console.log('Converting response to blob...');
 			const fileBlob = await fileResponse.blob();
 
 			if (fileBlob.size === 0) {
 				throw new Error('Retrieved file is empty');
 			}
 
-			console.log('Blob created:', {
-				size: fileBlob.size,
-				type: fileBlob.type || contentType
-			});
-
 			// Create File object with proper MIME type
 			const file = new File([fileBlob], fileData.name, {
 				type: fileBlob.type || contentType
-			});
-
-			console.log('File object created:', {
-				name: file.name,
-				size: file.size,
-				type: file.type
 			});
 
 			if (file.size === 0) {
@@ -564,14 +530,11 @@
 			}
 
 			// Upload file to server
-			console.log('Uploading file to server...');
 			const uploadedFile = await uploadFile(localStorage.token, file);
 
 			if (!uploadedFile) {
 				throw new Error('Server returned null response for file upload');
 			}
-
-			console.log('File uploaded successfully:', uploadedFile);
 
 			// Update file item with upload results
 			fileItem.status = 'uploaded';
@@ -579,12 +542,11 @@
 			fileItem.id = uploadedFile.id;
 			fileItem.size = file.size;
 			fileItem.collection_name = uploadedFile?.meta?.collection_name;
-			fileItem.url = `${WEBUI_API_BASE_URL}/files/${uploadedFile.id}`;
+			fileItem.url = `${WEBUI_API_BASE_URL}/files/${encodeURIComponent(uploadedFile.id)}`;
 
 			files = files;
 			toast.success($i18n.t('File uploaded successfully'));
 		} catch (e) {
-			console.error('Error uploading file:', e);
 			files = files.filter((f) => f.itemId !== tempItemId);
 			toast.error(
 				$i18n.t('Error uploading file: {{error}}', {
@@ -595,8 +557,6 @@
 	};
 
 	const uploadWeb = async (url) => {
-		console.log(url);
-
 		const fileItem = {
 			type: 'doc',
 			name: url,
@@ -628,8 +588,6 @@
 	};
 
 	const uploadYoutubeTranscription = async (url) => {
-		console.log(url);
-
 		const fileItem = {
 			type: 'doc',
 			name: url,
@@ -699,7 +657,6 @@
 				if ($settings?.models) {
 					selectedModels = $settings?.models;
 				} else if ($config?.default_models) {
-					console.log($config?.default_models.split(',') ?? '');
 					selectedModels = $config?.default_models.split(',');
 				}
 			}
@@ -816,10 +773,6 @@
 					const parsed = JSON.parse(chatBoundRaw);
 					if (parsed?.assignmentId) {
 						shouldRestorePracticePanel = true;
-						console.log('[Chat]-[LoadChat]-[AutoRestoredPractice]:', {
-							chatId: targetChatId,
-							assignmentId: parsed.assignmentId
-						});
 					}
 				}
 			} catch (e) {
@@ -829,16 +782,15 @@
 			const chatContent = chat.chat;
 
 			if (chatContent) {
-				console.log(chatContent);
-
 				selectedModels =
 					(chatContent?.models ?? undefined) !== undefined
 						? chatContent.models
 						: [chatContent.models ?? ''];
-				history =
+				history = serializeHistoryAttachments(
 					(chatContent?.history ?? undefined) !== undefined
 						? chatContent.history
-						: convertMessagesToHistory(chatContent.messages);
+						: convertMessagesToHistory(chatContent.messages)
+				);
 
 				chatTitle.set(chatContent.title);
 
@@ -851,7 +803,7 @@
 				}
 
 				params = chatContent?.params ?? {};
-				chatFiles = chatContent?.files ?? [];
+				chatFiles = restorePersistedAttachments(chatContent?.files);
 
 				autoScroll = true;
 				await tick();
@@ -924,10 +876,10 @@
 			if (!$temporaryChatEnabled) {
 				chat = await updateChatById(localStorage.token, chatId, {
 					models: selectedModels,
-					messages: messages,
-					history: history,
+					messages: messages.map(serializeMessage),
+					history: serializeHistoryAttachments(history),
 					params: params,
-					files: chatFiles
+					files: restorePersistedAttachments(chatFiles)
 				});
 
 				currentChatPage.set(1);
@@ -977,10 +929,10 @@
 			if (!$temporaryChatEnabled) {
 				chat = await updateChatById(localStorage.token, chatId, {
 					models: selectedModels,
-					messages: messages,
-					history: history,
+					messages: messages.map(serializeMessage),
+					history: serializeHistoryAttachments(history),
 					params: params,
-					files: chatFiles
+					files: restorePersistedAttachments(chatFiles)
 				});
 
 				currentChatPage.set(1);
@@ -1027,9 +979,8 @@
 				parentId: userMessageId,
 				childrenIds: [],
 				role: 'assistant',
-				content: _raw ? userPrompt : `[RESPONSE] ${responseMessageId}`,
+				content: `[RESPONSE] ${responseMessageId}`,
 				done: true,
-				sources: _raw ? sources : undefined,
 
 				model: modelId,
 				modelName: model.name ?? model.id,
@@ -1141,9 +1092,7 @@
 			} else {
 				// Stream response
 				let value = choices[0]?.delta?.content ?? '';
-				if (message.content == '' && value == '\n') {
-					console.log('Empty response');
-				} else {
+				if (!(message.content == '' && value == '\n')) {
 					message.content += value;
 
 					if (navigator.vibrate && ($settings?.hapticFeedback ?? false)) {
@@ -1261,7 +1210,6 @@
 			);
 		}
 
-		console.log(data);
 		if (autoScroll) {
 			scrollToBottom();
 		}
@@ -1270,10 +1218,94 @@
 	//////////////////////////
 	// Chat functions
 	//////////////////////////
+	function serializeAttachment(attachment) {
+		if (!attachment) {
+			return null;
+		}
+		if (attachment?.type !== 'image') {
+			return JSON.parse(JSON.stringify(attachment));
+		}
 
-	const submitPrompt = async (userPrompt, { _raw = false, sources = [] } = {}) => {
-		console.log('submitPrompt', userPrompt, $chatId);
+		return serializeStandaloneImageDescriptor(attachment);
+	}
 
+	function restorePersistedAttachments(attachments) {
+		return (Array.isArray(attachments) ? attachments : [])
+			.map(serializeAttachment)
+			.filter(Boolean);
+	}
+
+	function serializeMessageAttachment(attachment) {
+		if (!attachment) {
+			return null;
+		}
+		if (attachment.type !== 'image') {
+			return JSON.parse(JSON.stringify(attachment));
+		}
+
+		const attachmentId = String(attachment.id ?? '').trim();
+		if (attachmentId) {
+			const descriptor = serializeStandaloneImageDescriptor(attachment);
+			if (descriptor) {
+				return descriptor;
+			}
+
+			// Retain legacy ID-only images for display, but never persist their prior URL payload.
+			return {
+				type: 'image',
+				id: attachmentId,
+				name: String(
+					attachment.name ?? attachment.filename ?? attachment.meta?.name ?? 'Image'
+				),
+				size: Number(attachment.size ?? attachment.meta?.size ?? 0) || 0,
+				status: String(attachment.status ?? 'uploaded'),
+				processing_status: String(
+					attachment.processing_status ?? attachment.meta?.processing_status ?? 'completed'
+				),
+				collection_name: String(
+					attachment.collection_name ?? attachment.meta?.collection_name ?? ''
+				)
+			};
+		}
+
+		const url = typeof attachment.url === 'string' ? attachment.url.trim() : '';
+		const normalizedUrl = url.toLowerCase();
+		if (normalizedUrl.startsWith('blob:') || normalizedUrl.startsWith('data:')) {
+			return null;
+		}
+		return JSON.parse(JSON.stringify(attachment));
+	}
+
+	function serializeMessage(message) {
+		const serializedMessage = JSON.parse(JSON.stringify(message));
+		if (Array.isArray(serializedMessage?.files)) {
+			serializedMessage.files = serializedMessage.files
+				.map(serializeMessageAttachment)
+				.filter(Boolean);
+		}
+		return serializedMessage;
+	}
+
+	function serializeHistoryAttachments(chatHistory) {
+		const serializedHistory = JSON.parse(
+			JSON.stringify(chatHistory ?? { messages: {}, currentId: null })
+		);
+		if (serializedHistory?.messages && typeof serializedHistory.messages === 'object') {
+			serializedHistory.messages = Object.fromEntries(
+				Object.entries(serializedHistory.messages).map(([messageId, message]) => [
+					messageId,
+					serializeMessage(message)
+				])
+			);
+		}
+		return serializedHistory;
+	}
+
+	const submitPrompt = async (
+		userPrompt,
+		_options: { _raw?: boolean; sources?: any[] } = {}
+	) => {
+		userPrompt = typeof userPrompt === 'string' ? userPrompt : '';
 		const messages = createMessagesList(history, history.currentId);
 		const _selectedModels = selectedModels.map((modelId) =>
 			$models.map((m) => m.id).includes(modelId) ? modelId : ''
@@ -1282,8 +1314,12 @@
 			selectedModels = _selectedModels;
 		}
 
-		if (userPrompt === '' && files.length === 0) {
+		if (userPrompt.trim().length === 0 && files.length === 0) {
 			toast.error($i18n.t('Please enter a prompt'));
+			return;
+		}
+		if (files.some((file) => file.type === 'image') && userPrompt.trim().length === 0) {
+			toast.error($i18n.t('Please enter a prompt for the attached image.'));
 			return;
 		}
 		if (selectedModels.includes('')) {
@@ -1301,12 +1337,27 @@
 			return;
 		}
 		if (
-			files.length > 0 &&
-			files.filter((file) => file.type !== 'image' && file.status === 'uploading').length > 0
+			files.some((file) =>
+				['uploading', 'not_started', 'pending', 'processing'].some(
+					(status) => status === file.status || status === file.processing_status
+				)
+			)
 		) {
 			toast.error(
-				$i18n.t(`Oops! There are files still uploading. Please wait for the upload to complete.`)
+				$i18n.t(`Attachments are still uploading or processing. Please wait for them to finish.`)
 			);
+			return;
+		}
+		if (
+			files.some(
+				(file) => file.status === 'error' || file.processing_status === 'error'
+			)
+		) {
+			toast.error($i18n.t('Retry or remove failed attachments before submitting.'));
+			return;
+		}
+		if (files.some((file) => file.type === 'image' && !file.id)) {
+			toast.error($i18n.t('Remove and upload the image again before submitting.'));
 			return;
 		}
 		if (
@@ -1332,8 +1383,10 @@
 			chatInputElement.style.height = Math.min(chatInputElement.scrollHeight, 320) + 'px';
 		}
 
-		const _files = JSON.parse(JSON.stringify(files));
-		chatFiles.push(..._files.filter((item) => ['doc', 'file', 'collection'].includes(item.type)));
+		const _files = restorePersistedAttachments(files);
+		chatFiles.push(
+			..._files.filter((item) => ['doc', 'file', 'image', 'collection'].includes(item.type))
+		);
 		chatFiles = chatFiles.filter(
 			// Remove duplicates
 			(item, index, array) =>
@@ -1441,24 +1494,9 @@
 
 		await Promise.all(
 			selectedModelIds.map(async (modelId, _modelIdx) => {
-				console.log('modelId', modelId);
 				const model = $models.filter((m) => m.id === modelId).at(0);
 
 				if (model) {
-					const messages = createMessagesList(_history, parentId);
-					// If there are image files, check if model is vision capable
-					const hasImages = messages.some((message) =>
-						message.files?.some((file) => file.type === 'image')
-					);
-
-					if (hasImages && !(model.info?.meta?.capabilities?.vision ?? true)) {
-						toast.error(
-							$i18n.t('Model {{modelName}} is not vision capable', {
-								modelName: model.name ?? model.id
-							})
-						);
-					}
-
 					let responseMessageId =
 						responseMessageIds[`${modelId}-${modelIdx ? modelIdx : _modelIdx}`];
 					let responseMessage = _history.messages[responseMessageId];
@@ -1481,7 +1519,6 @@
 									}, '');
 								}
 
-								console.log(userContext);
 							}
 						}
 					}
@@ -1507,10 +1544,12 @@
 		const responseMessage = _history.messages[responseMessageId];
 		const userMessage = _history.messages[responseMessage.parentId];
 
-		let files = JSON.parse(JSON.stringify(chatFiles));
+		let files = restorePersistedAttachments(chatFiles);
 		files.push(
-			...(userMessage?.files ?? []).filter((item) =>
-				['doc', 'file', 'collection'].includes(item.type)
+			...restorePersistedAttachments(
+				(userMessage?.files ?? []).filter((item) =>
+					['doc', 'file', 'image', 'collection'].includes(item.type)
+				)
 			),
 			...(responseMessage?.files ?? []).filter((item) => ['web_search_results'].includes(item.type))
 		);
@@ -1563,29 +1602,9 @@
 		].filter((message) => message);
 
 		messages = messages
-			.map((message, idx, arr) => ({
+			.map((message) => ({
 				role: message.role,
-				...((message.files?.filter((file) => file.type === 'image').length > 0 ?? false) &&
-				message.role === 'user'
-					? {
-							content: [
-								{
-									type: 'text',
-									text: message?.merged?.content ?? message.content
-								},
-								...message.files
-									.filter((file) => file.type === 'image')
-									.map((file) => ({
-										type: 'image_url',
-										image_url: {
-											url: file.url
-										}
-									}))
-							]
-						}
-					: {
-							content: message?.merged?.content ?? message.content
-						})
+				content: message?.merged?.content ?? message.content
 			}))
 			.filter((message) => message?.role === 'user' || message?.content?.trim());
 
@@ -1681,8 +1700,6 @@
 			history.currentId = responseMessageId;
 			return null;
 		});
-
-		console.log(res);
 
 		if (res) {
 			taskId = res.task_id;
@@ -1780,8 +1797,6 @@
 	};
 
 	const regenerateResponse = async (message) => {
-		console.log('regenerateResponse');
-
 		if (history.currentId) {
 			let userMessage = history.messages[message.parentId];
 			let userPrompt = userMessage.content;
@@ -1801,7 +1816,6 @@
 	};
 
 	const continueResponse = async () => {
-		console.log('continueResponse');
 		const _chatId = JSON.parse(JSON.stringify($chatId));
 
 		if (history.currentId && history.messages[history.currentId].done == true) {
@@ -1820,7 +1834,6 @@
 	};
 
 	const mergeResponses = async (messageId, responses, _chatId) => {
-		console.log('mergeResponses', messageId, responses);
 		const message = history.messages[messageId];
 		const mergedResponse = {
 			status: true,
@@ -1858,12 +1871,8 @@
 				}
 
 				await saveChatHandler(_chatId, history);
-			} else {
-				console.error(res);
 			}
-		} catch (e) {
-			console.error(e);
-		}
+		} catch {}
 	};
 
 	const initChatHandler = async (history) => {
@@ -1873,14 +1882,15 @@
 			const practiceTitle = $page.url.searchParams.get('practicing')
 				? buildPracticeChatTitleFromPending()
 				: null;
+			const persistedHistory = serializeHistoryAttachments(history);
 			chat = await createNewChat(localStorage.token, {
 				id: _chatId,
 				title: practiceTitle ?? $i18n.t('New Chat'),
 				models: selectedModels,
 				system: $settings.system ?? undefined,
 				params: params,
-				history: history,
-				messages: createMessagesList(history, history.currentId),
+				history: persistedHistory,
+				messages: createMessagesList(persistedHistory, persistedHistory.currentId),
 				tags: [],
 				timestamp: Date.now()
 			});
@@ -1893,10 +1903,6 @@
 				if (pendingRaw) {
 					localStorage.setItem(`aiTutorPracticeAssignment-${_chatId}`, pendingRaw);
 					localStorage.removeItem('aiTutorPracticeAssignmentPending');
-					console.log('[Chat]-[InitChat]-[MigratedPracticeAssignment]:', {
-						chatId: _chatId,
-						pendingCleared: true
-					});
 				}
 			} catch (e) {
 				console.error('[Chat]-[InitChat]-[MigrateError]:', e);
@@ -1919,12 +1925,13 @@
 	const saveChatHandler = async (_chatId, history) => {
 		if ($chatId == _chatId) {
 			if (!$temporaryChatEnabled) {
+				const persistedHistory = serializeHistoryAttachments(history);
 				chat = await updateChatById(localStorage.token, _chatId, {
 					models: selectedModels,
-					history: history,
-					messages: createMessagesList(history, history.currentId),
+					history: persistedHistory,
+					messages: createMessagesList(persistedHistory, persistedHistory.currentId),
 					params: params,
-					files: chatFiles
+					files: restorePersistedAttachments(chatFiles)
 				});
 				currentChatPage.set(1);
 				await chats.set(await getChatList(localStorage.token, $currentChatPage));
@@ -2077,8 +2084,14 @@
 								{stopResponse}
 								{createMessagePair}
 								onChange={(input) => {
-									if (input.prompt) {
-										localStorage.setItem(`chat-input-${$chatId}`, JSON.stringify(input));
+									if (input.prompt || (input.files?.length ?? 0) > 0) {
+										localStorage.setItem(
+											`chat-input-${$chatId}`,
+											JSON.stringify({
+												...input,
+												files: restorePersistedAttachments(input.files)
+											})
+										);
 									} else {
 										localStorage.removeItem(`chat-input-${$chatId}`);
 									}

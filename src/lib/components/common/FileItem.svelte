@@ -20,14 +20,41 @@
 	export let item = null;
 	export let edit = false;
 	export let small = false;
+	export let showProcessingDetails = false;
 
 	export let name: string;
 	export let type: string;
 	export let size: number;
 
-	import { deleteFileById } from '$lib/apis/files';
-
 	let showModal = false;
+	let processingWarnings: string[] = [];
+	let visualSummary: Record<string, any> | null = null;
+	let processingFailed = false;
+	let processingErrorCode: string | null = null;
+	let processingError = '';
+
+	$: processingWarnings = Array.isArray(item?.processing_warnings)
+		? item.processing_warnings.filter(
+				(warning: unknown): warning is string => typeof warning === 'string'
+			)
+		: Array.isArray(item?.meta?.processing_warnings)
+			? item.meta.processing_warnings.filter(
+					(warning: unknown): warning is string => typeof warning === 'string'
+				)
+			: [];
+	$: visualSummary = item?.visual_summary ?? item?.meta?.visual_summary ?? null;
+	$: processingFailed =
+		item?.status === 'error' ||
+		item?.processing_status === 'error' ||
+		item?.meta?.processing_status === 'error';
+	$: processingErrorCode =
+		item?.processing_error_code ?? item?.meta?.processing_error_code ?? null;
+	$: processingError = item?.error ?? item?.processing_error ?? item?.meta?.processing_error ?? '';
+
+	const formatProcessingWarning = (warning: string) =>
+		warning.includes('_')
+			? warning.replaceAll('_', ' ').replace(/^./, (character) => character.toUpperCase())
+			: warning;
 </script>
 
 {#if item}
@@ -80,7 +107,11 @@
 	{/if}
 
 	{#if !small}
-		<div class="flex flex-col justify-center -space-y-0.5 px-2.5 w-full">
+		<div
+			class="flex flex-col justify-center {showProcessingDetails
+				? 'space-y-0.5'
+				: '-space-y-0.5'} px-2.5 w-full"
+		>
 			<div class=" dark:text-gray-100 text-sm font-medium line-clamp-1 mb-1">
 				{name}
 			</div>
@@ -99,10 +130,40 @@
 					<span class="capitalize">{formatFileSize(size)}</span>
 				{/if}
 			</div>
+
+			{#if showProcessingDetails && processingFailed}
+				<div class="mt-1 break-words text-xs text-red-600 dark:text-red-400">
+					<div class="font-medium">{$i18n.t('File processing failed')}</div>
+					{#if processingErrorCode}
+						<div>{formatProcessingWarning(processingErrorCode)}</div>
+					{/if}
+					{#if processingError}
+						<div>{processingError}</div>
+					{/if}
+				</div>
+			{/if}
+
+			{#if showProcessingDetails && (processingWarnings.length > 0 || visualSummary)}
+				<div class="mt-1 space-y-0.5 text-xs text-gray-500 dark:text-gray-400">
+					{#each processingWarnings as warning}
+						<div class="break-words text-amber-600 dark:text-amber-400">
+							{formatProcessingWarning(warning)}
+						</div>
+					{/each}
+					{#if visualSummary}
+						<div class="flex flex-wrap gap-x-2 gap-y-0.5 capitalize">
+							<span>Figures: {Number(visualSummary.figure_count ?? 0)}</span>
+							<span>Image tables: {Number(visualSummary.table_image_count ?? 0)}</span>
+							<span>Image chunks: {Number(visualSummary.image_chunk_count ?? 0)}</span>
+							<span>Text chunks: {Number(visualSummary.text_chunk_count ?? 0)}</span>
+						</div>
+					{/if}
+				</div>
+			{/if}
 		</div>
 	{:else}
 		<Tooltip content={name} className="flex flex-col w-full" placement="top-start">
-			<div class="flex flex-col justify-center -space-y-0.5 px-2.5 w-full">
+			<div class="flex flex-col justify-center px-2.5 w-full">
 				<div class=" dark:text-gray-100 text-sm flex justify-between items-center">
 					{#if loading}
 						<div class=" shrink-0 mr-2">
@@ -112,6 +173,36 @@
 					<div class="font-medium line-clamp-1 flex-1">{name}</div>
 					<div class="text-gray-500 text-xs capitalize shrink-0">{formatFileSize(size)}</div>
 				</div>
+
+				{#if showProcessingDetails && processingFailed}
+					<div class="mt-1 break-words text-xs text-red-600 dark:text-red-400">
+						<div class="font-medium">{$i18n.t('File processing failed')}</div>
+						{#if processingErrorCode}
+							<div>{formatProcessingWarning(processingErrorCode)}</div>
+						{/if}
+						{#if processingError}
+							<div>{processingError}</div>
+						{/if}
+					</div>
+				{/if}
+
+				{#if showProcessingDetails && (processingWarnings.length > 0 || visualSummary)}
+					<div class="mt-1 space-y-0.5 text-xs text-gray-500 dark:text-gray-400">
+						{#each processingWarnings as warning}
+							<div class="break-words text-amber-600 dark:text-amber-400">
+								{formatProcessingWarning(warning)}
+							</div>
+						{/each}
+						{#if visualSummary}
+							<div class="flex flex-wrap gap-x-2 gap-y-0.5 capitalize">
+								<span>Figures: {Number(visualSummary.figure_count ?? 0)}</span>
+								<span>Image tables: {Number(visualSummary.table_image_count ?? 0)}</span>
+								<span>Image chunks: {Number(visualSummary.image_chunk_count ?? 0)}</span>
+								<span>Text chunks: {Number(visualSummary.text_chunk_count ?? 0)}</span>
+							</div>
+						{/if}
+					</div>
+				{/if}
 			</div>
 		</Tooltip>
 	{/if}

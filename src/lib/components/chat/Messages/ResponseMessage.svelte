@@ -16,6 +16,7 @@
 	import { generateTags } from '$lib/apis';
 
 	import { config, models, settings, temporaryChatEnabled, TTSWorker, user } from '$lib/stores';
+	import { WEBUI_API_BASE_URL } from '$lib/constants';
 	import { synthesizeOpenAISpeech } from '$lib/apis/audio';
 	import { imageGenerations } from '$lib/apis/images';
 	import {
@@ -49,7 +50,7 @@
 		id: string;
 		model: string;
 		content: string;
-		files?: { type: string; url: string }[];
+		files?: { type: string; id?: string; url?: string; name?: string }[];
 		timestamp: number;
 		role: string;
 		statusHistory?: {
@@ -68,7 +69,8 @@
 		};
 		done: boolean;
 		error?: boolean | { content: string };
-		sources?: string[];
+		sources?: any[];
+		citations?: any[];
 		code_executions?: {
 			uuid: string;
 			name: string;
@@ -106,6 +108,11 @@
 			message = JSON.parse(JSON.stringify(history.messages[messageId]));
 		}
 	}
+
+	const getImageUrl = (file: { id?: string; url?: string }) =>
+		file?.id
+			? `${WEBUI_API_BASE_URL}/files/${encodeURIComponent(file.id)}/content`
+			: (file?.url ?? '');
 
 	export let siblings;
 
@@ -222,12 +229,8 @@
 							)
 							?.at(0) ?? undefined;
 
-					console.log(voice);
-
 					const speak = new SpeechSynthesisUtterance(message.content);
 					speak.rate = $settings.audio?.tts?.playbackRate ?? 1;
-
-					console.log(speak);
 
 					speak.onend = () => {
 						speaking = false;
@@ -252,15 +255,12 @@
 			);
 
 			if (!messageContentParts.length) {
-				console.log('No content to speak');
 				toast.info($i18n.t('No content to speak'));
 
 				speaking = false;
 				loadingSpeech = false;
 				return;
 			}
-
-			console.debug('Prepared message content for TTS', messageContentParts);
 
 			audioParts = messageContentParts.reduce(
 				(acc, _sentence, idx) => {
@@ -311,11 +311,7 @@
 					const selectedVoice = $settings?.audio?.tts?.defaultVoice === $config.audio.tts.voice
 						? ($settings?.audio?.tts?.voice ?? $config?.audio?.tts?.voice)
 						: $config?.audio?.tts?.voice;
-					
-					console.log('TTS Debug - Config voice:', $config?.audio?.tts?.voice);
-					console.log('TTS Debug - Settings voice:', $settings?.audio?.tts?.voice);
-					console.log('TTS Debug - Selected voice:', selectedVoice);
-					
+
 					const res = await synthesizeOpenAISpeech(
 						localStorage.token,
 						selectedVoice,
@@ -388,8 +384,6 @@
 		const res = await imageGenerations(localStorage.token, message.content).catch((error) => {
 			toast.error(`${error}`);
 		});
-		console.log(res);
-
 		if (res) {
 			const files = res.map((image) => ({
 				type: 'image',
@@ -409,7 +403,6 @@
 
 	const feedbackHandler = async (rating: number | null = null, details: object | null = null) => {
 		feedbackLoading = true;
-		console.log('Feedback', rating, details);
 
 		const updatedMessage = {
 			...message,
@@ -488,7 +481,6 @@
 			}
 		}
 
-		console.log(updatedMessage);
 		saveMessage(message.id, updatedMessage);
 
 		await tick();
@@ -504,8 +496,6 @@
 						return [];
 					}
 				);
-				console.log(tags);
-
 				if (tags) {
 					updatedMessage.annotation.tags = tags;
 					feedbackItem.data.tags = tags;
@@ -536,14 +526,9 @@
 	}
 
 	onMount(async () => {
-		// console.log('ResponseMessage mounted');
-
 		await tick();
 		if (buttonsContainerElement) {
-			console.log(buttonsContainerElement);
 			buttonsContainerElement.addEventListener('wheel', function (event) {
-				// console.log(event.deltaY);
-
 				event.preventDefault();
 				if (event.deltaY !== 0) {
 					// Adjust horizontal scroll position based on vertical scroll
@@ -600,7 +585,7 @@
 						{#each message.files as file}
 							<div>
 								{#if file.type === 'image'}
-									<Image src={file.url} alt={message.content} />
+									<Image src={getImageUrl(file)} alt={message.content} />
 								{/if}
 							</div>
 						{/each}
@@ -761,11 +746,7 @@
 										floatingButtons={message?.done}
 										save={!readOnly}
 										{model}
-										onTaskClick={async (e) => {
-											console.log(e);
-										}}
 										onSourceClick={async (id, idx) => {
-											console.log(id, idx);
 											let sourceButton = document.getElementById(`source-${message.id}-${idx}`);
 											const sourcesCollapsible = document.getElementById(`collapsible-sources`);
 
@@ -1111,9 +1092,6 @@
 											class=" {isLastMessage
 												? 'visible'
 												: 'invisible group-hover:visible'} p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-white hover:text-black transition whitespace-pre-wrap"
-											on:click={() => {
-												console.log(message);
-											}}
 											id="info-{message.id}"
 										>
 											<svg

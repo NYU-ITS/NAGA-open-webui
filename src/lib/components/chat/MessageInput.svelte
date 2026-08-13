@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { toast } from 'svelte-sonner';
 	import { v4 as uuidv4 } from 'uuid';
-	import { createPicker, getAuthToken } from '$lib/utils/google-drive-picker';
+	import { createPicker } from '$lib/utils/google-drive-picker';
 	import { pickAndDownloadFile } from '$lib/utils/onedrive-file-picker';
 
 	import { onMount, tick, getContext, createEventDispatcher, onDestroy } from 'svelte';
@@ -22,19 +22,20 @@
 		TTSWorker
 	} from '$lib/stores';
 
-	import { blobToFile, compressImage, createMessagesList, findWordIndices } from '$lib/utils';
-	import { transcribeAudio } from '$lib/apis/audio';
+	import { createMessagesList, findWordIndices } from '$lib/utils';
+	import { normalizeStandaloneImageUpload } from '$lib/utils/file-upload';
 	import { uploadFile, getFileProcessingStatus } from '$lib/apis/files';
+	import { processFile } from '$lib/apis/retrieval';
 	import { generateAutoCompletion } from '$lib/apis';
 	import { deleteFileById } from '$lib/apis/files';
 
 	import { WEBUI_BASE_URL, WEBUI_API_BASE_URL, PASTED_TEXT_CHARACTER_LIMIT } from '$lib/constants';
 
-import InputMenu from './MessageInput/InputMenu.svelte';
-import VoiceRecording from './MessageInput/VoiceRecording.svelte';
-import FilesOverlay from './MessageInput/FilesOverlay.svelte';
-import Commands from './MessageInput/Commands.svelte';
-import CallModeModal from './MessageInput/CallModeModal.svelte';
+	import InputMenu from './MessageInput/InputMenu.svelte';
+	import VoiceRecording from './MessageInput/VoiceRecording.svelte';
+	import FilesOverlay from './MessageInput/FilesOverlay.svelte';
+	import Commands from './MessageInput/Commands.svelte';
+	import CallModeModal from './MessageInput/CallModeModal.svelte';
 
 	import RichTextInput from '../common/RichTextInput.svelte';
 	import Tooltip from '../common/Tooltip.svelte';
@@ -44,7 +45,6 @@ import CallModeModal from './MessageInput/CallModeModal.svelte';
 	import XMark from '../icons/XMark.svelte';
 	import Headphone from '../icons/Headphone.svelte';
 	import GlobeAlt from '../icons/GlobeAlt.svelte';
-	import PhotoSolid from '../icons/PhotoSolid.svelte';
 	import Photo from '../icons/Photo.svelte';
 	import CommandLine from '../icons/CommandLine.svelte';
 	import { KokoroWorker } from '$lib/workers/KokoroWorker';
@@ -97,13 +97,46 @@ import CallModeModal from './MessageInput/CallModeModal.svelte';
 	let inputFiles;
 	let dragged = false;
 
-	let user = null;
-	export let placeholder = '';
+	const FILE_PROCESSING_POLL_INTERVAL_MS = 2000;
+	const FILE_PROCESSING_POLL_TIMEOUT_MS = 300000;
 
-	let visionCapableModels = [];
-	$: visionCapableModels = [...(atSelectedModel ? [atSelectedModel] : selectedModels)].filter(
-		(model) => $models.find((m) => m.id === model)?.info?.meta?.capabilities?.vision ?? true
+	const attachmentPreviewUrls = new Map<string, string>();
+	const processingPollIntervals = new Map<string, number>();
+	const processingPollTimeouts = new Map<string, number>();
+	const statusRefreshes = new Set<string>();
+	const removedAttachmentIds = new Set<string>();
+	const transientImageUploads = new Set<string>();
+
+	let attachmentSubmissionBlocked = false;
+	let standaloneImageNeedsPrompt = false;
+	let inputCanSubmit = false;
+
+	$: attachmentSubmissionBlocked = files.some((file) =>
+		(file?.type === 'image' && !file?.id) ||
+		['uploading', 'not_started', 'pending', 'processing', 'error'].some(
+			(status) => status === file?.status || status === file?.processing_status
+		)
 	);
+	$: standaloneImageNeedsPrompt =
+		files.some((file) => file?.type === 'image') && String(prompt ?? '').trim().length === 0;
+	$: inputCanSubmit =
+		(String(prompt ?? '').trim().length > 0 || files.length > 0) &&
+		!attachmentSubmissionBlocked &&
+		!standaloneImageNeedsPrompt;
+
+	$: {
+		const activeItemIds = new Set(files.map((file) => file?.itemId).filter(Boolean));
+		for (const itemId of attachmentPreviewUrls.keys()) {
+			if (!activeItemIds.has(itemId)) {
+				releaseAttachmentPreview(itemId);
+			}
+		}
+		for (const itemId of processingPollIntervals.keys()) {
+			if (!activeItemIds.has(itemId)) clearProcessingPoll(itemId);
+		}
+	}
+
+	export let placeholder = '';
 
 	const startCallWithMode = async (mode: 'live_text' | 'transcript_at_end') => {
 		if ($settings.audio?.tts?.engine === 'browser-kokoro') {
@@ -129,73 +162,317 @@ import CallModeModal from './MessageInput/CallModeModal.svelte';
 		});
 	};
 
-	const screenCaptureHandler = async () => {
+	function releaseAttachmentPreview(itemId: string) {
+		const previewUrl = attachmentPreviewUrls.get(itemId);
+		if (previewUrl) {
+			URL.revokeObjectURL(previewUrl);
+			attachmentPreviewUrls.delete(itemId);
+		}
+	}
+
+	const getImagePreviewUrl = (file: { itemId?: string; id?: string; url?: string }) =>
+		(file?.itemId ? attachmentPreviewUrls.get(file.itemId) : undefined) ??
+		(file?.id
+			? `${WEBUI_API_BASE_URL}/files/${encodeURIComponent(file.id)}/content`
+			: (file?.url ?? ''));
+
+	function clearProcessingPoll(itemId: string) {
+		const interval = processingPollIntervals.get(itemId);
+		if (interval !== undefined) {
+			window.clearInterval(interval);
+			processingPollIntervals.delete(itemId);
+		}
+
+		const timeout = processingPollTimeouts.get(itemId);
+		if (timeout !== undefined) {
+			window.clearTimeout(timeout);
+			processingPollTimeouts.delete(itemId);
+		}
+	}
+
+	const normalizeProcessingWarnings = (warnings: unknown): string[] =>
+		Array.isArray(warnings)
+			? warnings.filter(
+					(warning: unknown): warning is string => typeof warning === 'string'
+				)
+			: [];
+
+	const applyProcessingStatus = (fileItem, statusResponse) => {
+		const processingStatus = statusResponse?.processing_status;
+		fileItem.processing_status = processingStatus ?? fileItem.processing_status;
+		fileItem.collection_name = statusResponse?.collection_name ?? fileItem.collection_name;
+		fileItem.processing_error_code =
+			statusResponse?.processing_error_code ?? fileItem.processing_error_code;
+		fileItem.error = statusResponse?.processing_error ?? fileItem.error;
+
+		if (Array.isArray(statusResponse?.processing_warnings)) {
+			fileItem.processing_warnings = normalizeProcessingWarnings(
+				statusResponse.processing_warnings
+			);
+		}
+		if (statusResponse?.visual_summary) {
+			fileItem.visual_summary = statusResponse.visual_summary;
+		}
+
+		if (processingStatus === 'completed') {
+			fileItem.status = 'uploaded';
+			fileItem.polling_timed_out = false;
+			fileItem.error = '';
+			fileItem.processing_error_code = null;
+		} else if (processingStatus === 'error') {
+			fileItem.status = 'error';
+			fileItem.error = fileItem.error || 'Processing failed';
+		} else if (['not_started', 'pending', 'processing'].includes(processingStatus)) {
+			fileItem.status = 'processing';
+		}
+
+		files = files;
+		return processingStatus;
+	};
+
+	const refreshFileStatus = async (fileItem, notify = true) => {
+		if (!fileItem?.id || statusRefreshes.has(fileItem.itemId)) {
+			return fileItem?.processing_status ?? null;
+		}
+
+		statusRefreshes.add(fileItem.itemId);
+		fileItem.status_refreshing = true;
+		files = files;
 		try {
-			// Request screen media
-			const mediaStream = await navigator.mediaDevices.getDisplayMedia({
-				video: { cursor: 'never' },
-				audio: false
-			});
-			// Once the user selects a screen, temporarily create a video element
-			const video = document.createElement('video');
-			video.srcObject = mediaStream;
-			// Ensure the video loads without affecting user experience or tab switching
-			await video.play();
-			// Set up the canvas to match the video dimensions
-			const canvas = document.createElement('canvas');
-			canvas.width = video.videoWidth;
-			canvas.height = video.videoHeight;
-			// Grab a single frame from the video stream using the canvas
-			const context = canvas.getContext('2d');
-			context.drawImage(video, 0, 0, canvas.width, canvas.height);
-			// Stop all video tracks (stop screen sharing) after capturing the image
-			mediaStream.getTracks().forEach((track) => track.stop());
+			const statusResponse = await getFileProcessingStatus(localStorage.token, fileItem.id);
+			const processingStatus = applyProcessingStatus(fileItem, statusResponse);
 
-			// bring back focus to this current tab, so that the user can see the screen capture
-			window.focus();
+			if (processingStatus === 'completed' || processingStatus === 'error') {
+				clearProcessingPoll(fileItem.itemId);
+			}
 
-			// Convert the canvas to a Base64 image URL
-			const imageUrl = canvas.toDataURL('image/png');
-			// Add the captured image to the files array to render it
-			files = [...files, { type: 'image', url: imageUrl }];
-			// Clean memory: Clear video srcObject
-			video.srcObject = null;
+			if (notify) {
+				if (processingStatus === 'completed') {
+					toast.success($i18n.t('File processing completed and ready for queries'));
+				} else if (processingStatus === 'error') {
+					toast.error(
+						$i18n.t('File processing failed: {{error}}', {
+							error: fileItem.error || 'Unknown error'
+						})
+					);
+				} else {
+					toast.info($i18n.t('File is still processing.'));
+				}
+			}
+
+			return processingStatus;
 		} catch (error) {
-			// Handle any errors (e.g., user cancels screen sharing)
-			console.error('Error capturing screen:', error);
+			console.error('Error refreshing file processing status:', error);
+			if (notify) {
+				toast.error($i18n.t('Unable to refresh file processing status.'));
+			}
+			return null;
+		} finally {
+			statusRefreshes.delete(fileItem.itemId);
+			fileItem.status_refreshing = false;
+			files = files;
 		}
 	};
 
-	const uploadFileHandler = async (file, fullContext: boolean = false) => {
+	const startProcessingPoll = (fileItem) => {
+		clearProcessingPoll(fileItem.itemId);
+		fileItem.status = 'processing';
+		fileItem.polling_timed_out = false;
+		files = files;
+
+		const interval = window.setInterval(async () => {
+			const previousStatus = fileItem.processing_status;
+			const processingStatus = await refreshFileStatus(fileItem, false);
+			if (processingStatus === 'completed' && previousStatus !== 'completed') {
+				toast.success($i18n.t('File processing completed and ready for queries'));
+			} else if (processingStatus === 'error' && previousStatus !== 'error') {
+				toast.error(
+					$i18n.t('File processing failed: {{error}}', {
+						error: fileItem.error || 'Unknown error'
+					})
+				);
+			}
+		}, FILE_PROCESSING_POLL_INTERVAL_MS);
+		processingPollIntervals.set(fileItem.itemId, interval);
+
+		const timeout = window.setTimeout(() => {
+			clearProcessingPoll(fileItem.itemId);
+			if (fileItem.status === 'processing') {
+				fileItem.polling_timed_out = true;
+				files = files;
+				toast.warning(
+					$i18n.t('File is still processing. Refresh its status before submitting.')
+				);
+			}
+		}, FILE_PROCESSING_POLL_TIMEOUT_MS);
+		processingPollTimeouts.set(fileItem.itemId, timeout);
+	};
+
+	const retryFileProcessing = async (fileItem) => {
+		if (!fileItem?.id) return;
+
+		fileItem.status = 'processing';
+		fileItem.processing_status = 'pending';
+		fileItem.error = '';
+		fileItem.processing_error_code = null;
+		fileItem.polling_timed_out = false;
+		files = files;
+
+		try {
+			const retryResult = await processFile(
+				localStorage.token,
+				fileItem.id,
+				fileItem.collection_name || null
+			);
+			if (!retryResult || retryResult.status === 'error') {
+				fileItem.status = 'error';
+				fileItem.processing_status = 'error';
+				fileItem.processing_error_code = retryResult?.processing_error_code ?? null;
+				fileItem.error = retryResult?.error || $i18n.t('Unable to retry file processing.');
+				files = files;
+				toast.error(fileItem.error);
+				return;
+			}
+			startProcessingPoll(fileItem);
+			await refreshFileStatus(fileItem, false);
+		} catch (error) {
+			fileItem.status = 'error';
+			fileItem.processing_status = 'error';
+			fileItem.error = `${error}`;
+			files = files;
+			toast.error($i18n.t('Unable to retry file processing.'));
+		}
+	};
+
+	const removeAttachment = async (fileItem) => {
+		if (fileItem.itemId) removedAttachmentIds.add(fileItem.itemId);
+		clearProcessingPoll(fileItem.itemId);
+		releaseAttachmentPreview(fileItem.itemId);
+		files = files.filter((item) => item !== fileItem);
+
+		if (fileItem?.id && fileItem.type !== 'collection' && !fileItem?.collection) {
+			await deleteFileById(localStorage.token, fileItem.id).catch((error) => {
+				console.error('Error deleting attachment:', error);
+				toast.error($i18n.t('Unable to delete the uploaded file.'));
+			});
+			if (fileItem.itemId) removedAttachmentIds.delete(fileItem.itemId);
+		}
+	};
+
+	const formatVisualSummary = (summary) => {
+		if (!summary) return '';
+
+		return [
+			`Figures: ${Number(summary.figure_count ?? 0)}`,
+			`Image tables: ${Number(summary.table_image_count ?? 0)}`,
+			`Image chunks: ${Number(summary.image_chunk_count ?? 0)}`,
+			`Text chunks: ${Number(summary.text_chunk_count ?? 0)}`
+		].join(', ');
+	};
+	const formatProcessingWarning = (warning: string) =>
+		warning.includes('_')
+			? warning.replaceAll('_', ' ').replace(/^./, (character) => character.toUpperCase())
+			: warning;
+
+	const screenCaptureHandler = async () => {
+		let mediaStream: MediaStream | null = null;
+		let video: HTMLVideoElement | null = null;
+		try {
+			const hasPermission =
+				$_user?.role === 'admin' || ($_user?.permissions?.chat?.file_upload ?? true);
+			if (!$_user || !hasPermission) {
+				toast.error($i18n.t('You do not have permission to upload files.'));
+				return;
+			}
+
+			mediaStream = await navigator.mediaDevices.getDisplayMedia({
+				video: { cursor: 'never' },
+				audio: false
+			});
+			video = document.createElement('video');
+			video.srcObject = mediaStream;
+			await video.play();
+
+			const canvas = document.createElement('canvas');
+			canvas.width = video.videoWidth;
+			canvas.height = video.videoHeight;
+			const context = canvas.getContext('2d');
+			if (!context) throw new Error('Unable to create screen capture');
+			context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+			const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'));
+			if (!blob) throw new Error('Unable to encode screen capture');
+
+			window.focus();
+			const timestamp = new Date().toISOString().replaceAll(':', '-');
+			await uploadFileHandler(
+				new File([blob], `Screen Capture ${timestamp}.png`, { type: 'image/png' })
+			);
+		} catch (error) {
+			console.error('Error capturing screen:', error);
+		} finally {
+			mediaStream?.getTracks().forEach((track) => track.stop());
+			if (video) video.srcObject = null;
+		}
+	};
+
+	const uploadFileHandler = async (sourceFile: File, fullContext: boolean = false) => {
 		// Check if user is loaded and has permissions
 		if (!$_user) {
 			toast.error($i18n.t('User not loaded. Please refresh the page.'));
 			return null;
 		}
-		
+
 		// Admin always has permission, otherwise check permissions
 		const hasPermission = $_user.role === 'admin' || ($_user?.permissions?.chat?.file_upload ?? true);
 		if (!hasPermission) {
 			toast.error($i18n.t('You do not have permission to upload files.'));
 			return null;
 		}
+		if (
+			($config?.file?.max_size ?? null) !== null &&
+			sourceFile.size > ($config?.file?.max_size ?? 0) * 1024 * 1024
+		) {
+			toast.error(
+				$i18n.t('File size should not exceed {{maxSize}} MB.', {
+					maxSize: $config?.file?.max_size
+				})
+			);
+			return null;
+		}
+
+		const normalizedUpload = normalizeStandaloneImageUpload(sourceFile);
+		if (normalizedUpload.unsupported) {
+			toast.error($i18n.t('Only PNG and JPEG image uploads are supported.'));
+			return null;
+		}
+
+		const file = normalizedUpload.file;
+		const isStandaloneImage = normalizedUpload.isStandaloneImage;
 
 		const tempItemId = uuidv4();
-		const fileItem = {
-			type: 'file',
-			file: '',
+		const fileItem: any = {
+			type: isStandaloneImage ? 'image' : 'file',
 			id: null,
 			url: '',
 			name: file.name,
+			mime_type: normalizedUpload.mimeType,
 			collection_name: '',
 			status: 'uploading',
+			processing_status: 'uploading',
 			size: file.size,
 			error: '',
 			itemId: tempItemId,
 			...(fullContext ? { context: 'full' } : {})
 		};
+		if (!isStandaloneImage) {
+			fileItem.file = '';
+		} else {
+			attachmentPreviewUrls.set(tempItemId, URL.createObjectURL(file));
+		}
 
 		if (fileItem.size == 0) {
+			releaseAttachmentPreview(tempItemId);
 			toast.error($i18n.t('You cannot upload an empty file.'));
 			return null;
 		}
@@ -207,81 +484,66 @@ import CallModeModal from './MessageInput/CallModeModal.svelte';
 			const uploadedFile = await uploadFile(localStorage.token, file);
 
 			if (uploadedFile) {
-				console.log('File upload completed:', {
-					id: uploadedFile.id,
-					name: fileItem.name,
-					collection: uploadedFile?.meta?.collection_name,
-					processing_status: uploadedFile?.meta?.processing_status
-				});
+				if (removedAttachmentIds.has(tempItemId)) {
+					await deleteFileById(localStorage.token, uploadedFile.id).catch(() => null);
+					return null;
+				}
 
 				if (uploadedFile.error) {
-					console.warn('File upload warning:', uploadedFile.error);
 					toast.warning(uploadedFile.error);
 				}
 
-				fileItem.file = uploadedFile;
+				const canonicalMimeType = String(
+					uploadedFile?.meta?.content_type || fileItem.mime_type || ''
+				)
+					.split(';', 1)[0]
+					.trim()
+					.toLowerCase();
+				const canonicalStandaloneImage = ['image/png', 'image/jpeg'].includes(
+					canonicalMimeType
+				);
+				fileItem.type = canonicalStandaloneImage ? 'image' : 'file';
+				if (canonicalStandaloneImage) {
+					delete fileItem.file;
+				} else {
+					fileItem.file = uploadedFile;
+					releaseAttachmentPreview(tempItemId);
+				}
 				fileItem.id = uploadedFile.id;
+				fileItem.mime_type = canonicalMimeType || fileItem.mime_type;
+				fileItem.size = uploadedFile?.meta?.size ?? fileItem.size;
 				fileItem.collection_name =
 					uploadedFile?.meta?.collection_name || uploadedFile?.collection_name;
-				fileItem.url = `${WEBUI_API_BASE_URL}/files/${uploadedFile.id}`;
+				fileItem.url = `${WEBUI_API_BASE_URL}/files/${encodeURIComponent(uploadedFile.id)}${
+					canonicalStandaloneImage ? '/content' : ''
+				}`;
+				fileItem.processing_error_code = uploadedFile?.meta?.processing_error_code ?? null;
+				fileItem.processing_warnings = normalizeProcessingWarnings(
+					uploadedFile?.meta?.processing_warnings
+				);
+				fileItem.visual_summary = uploadedFile?.meta?.visual_summary ?? null;
 
 				// Check processing status from upload response
 				const processingStatus = uploadedFile?.meta?.processing_status;
-				
+				fileItem.processing_status = processingStatus;
+
 				// If processing is pending or in progress, keep showing processing state
-				if (processingStatus === 'pending' || processingStatus === 'processing') {
-					fileItem.status = 'processing';
-					console.log(`File ${uploadedFile.id} is processing. Polling for completion...`);
-					
-					// Poll for processing completion
-					const pollInterval = setInterval(async () => {
-						try {
-							const statusResponse = await getFileProcessingStatus(localStorage.token, uploadedFile.id);
-							if (statusResponse) {
-								const currentStatus = statusResponse.processing_status;
-								console.log(`File ${uploadedFile.id} processing status: ${currentStatus}`);
-								
-								if (currentStatus === 'completed') {
-									clearInterval(pollInterval);
-									fileItem.status = 'uploaded';
-									fileItem.collection_name = statusResponse.collection_name || fileItem.collection_name;
-									files = files;
-									console.log(`File ${uploadedFile.id} processing completed!`);
-									toast.success($i18n.t('File processing completed and ready for queries'));
-								} else if (currentStatus === 'error') {
-									clearInterval(pollInterval);
-									fileItem.status = 'error';
-									fileItem.error = statusResponse.processing_error || 'Processing failed';
-									files = files;
-									console.error(`File ${uploadedFile.id} processing failed:`, statusResponse.processing_error);
-									toast.error($i18n.t('File processing failed: {{error}}', { error: statusResponse.processing_error || 'Unknown error' }));
-								}
-								// If still processing or pending, continue polling
-							}
-						} catch (pollError) {
-							console.error('Error polling file processing status:', pollError);
-							// Don't clear interval - keep trying
-						}
-					}, 2000); // Poll every 2 seconds
-					
-					// Stop polling after 5 minutes (timeout)
-					setTimeout(() => {
-						clearInterval(pollInterval);
-						if (fileItem.status === 'processing') {
-							console.warn(`File ${uploadedFile.id} processing timeout after 5 minutes`);
-							fileItem.status = 'uploaded'; // Show as uploaded even if still processing
-							files = files;
-							toast.warning($i18n.t('File upload complete. Processing may still be in progress.'));
-						}
-					}, 300000); // 5 minutes timeout
+				if (
+					processingStatus === 'not_started' ||
+					processingStatus === 'pending' ||
+					processingStatus === 'processing'
+				) {
+					startProcessingPoll(fileItem);
 				} else if (processingStatus === 'completed') {
-					// Already completed
 					fileItem.status = 'uploaded';
 				} else if (processingStatus === 'error') {
-					// Processing failed
 					fileItem.status = 'error';
 					fileItem.error = uploadedFile?.meta?.processing_error || 'Processing failed';
 					toast.error($i18n.t('File processing failed: {{error}}', { error: fileItem.error }));
+				} else if (canonicalStandaloneImage) {
+					// Standalone images must be indexed before they can be submitted.
+					fileItem.processing_status = 'processing';
+					startProcessingPoll(fileItem);
 				} else {
 					// No status or unknown - assume uploaded (legacy behavior)
 					fileItem.status = 'uploaded';
@@ -290,77 +552,133 @@ import CallModeModal from './MessageInput/CallModeModal.svelte';
 				files = files;
 			} else {
 				files = files.filter((item) => item?.itemId !== tempItemId);
+				releaseAttachmentPreview(tempItemId);
 			}
 		} catch (e) {
-			toast.error(`${e}`);
+			if (!removedAttachmentIds.has(tempItemId)) {
+				toast.error(`${e}`);
+			}
 			files = files.filter((item) => item?.itemId !== tempItemId);
+			releaseAttachmentPreview(tempItemId);
+		} finally {
+			removedAttachmentIds.delete(tempItemId);
 		}
 	};
 
-	const inputFilesHandler = async (inputFiles) => {
-		console.log('Input files handler called with:', inputFiles);
-		inputFiles.forEach((file) => {
-			console.log('Processing file:', {
-				name: file.name,
-				type: file.type,
-				size: file.size,
-				extension: file.name.split('.').at(-1)
-			});
+	const uploadTransientImageAttachment = async (attachment: any) => {
+		const sourceUrl = typeof attachment?.url === 'string' ? attachment.url : '';
+		const normalizedSourceUrl = sourceUrl.toLowerCase();
+		attachment.itemId = attachment.itemId || uuidv4();
+		if (attachment?.id || transientImageUploads.has(attachment.itemId)) {
+			return;
+		}
+		if (
+			!(normalizedSourceUrl.startsWith('blob:') || normalizedSourceUrl.startsWith('data:image/'))
+		) {
+			if (attachment.status === 'error' && attachment.processing_status === 'error') {
+				return;
+			}
+			attachment.status = 'error';
+			attachment.processing_status = 'error';
+			attachment.error = $i18n.t('Unable to upload the selected image.');
+			attachment.url = '';
+			files = files;
+			return;
+		}
 
-			if (
-				($config?.file?.max_size ?? null) !== null &&
-				file.size > ($config?.file?.max_size ?? 0) * 1024 * 1024
-			) {
-				console.log('File exceeds max size limit:', {
-					fileSize: file.size,
-					maxSize: ($config?.file?.max_size ?? 0) * 1024 * 1024
-				});
-				toast.error(
-					$i18n.t(`File size should not exceed {{maxSize}} MB.`, {
-						maxSize: $config?.file?.max_size
-					})
-				);
+		transientImageUploads.add(attachment.itemId);
+		attachment.status = 'uploading';
+		attachment.processing_status = 'uploading';
+		files = files;
+
+		try {
+			const response = await fetch(sourceUrl);
+			if (!response.ok) {
+				throw new Error('Unable to read the selected image');
+			}
+			const blob = await response.blob();
+			if (!files.includes(attachment)) {
 				return;
 			}
 
-			if (
-				['image/gif', 'image/webp', 'image/jpeg', 'image/png', 'image/avif'].includes(file['type'])
-			) {
-				if (visionCapableModels.length === 0) {
-					toast.error($i18n.t('Selected model(s) do not support image inputs'));
-					return;
-				}
-				let reader = new FileReader();
-				reader.onload = async (event) => {
-					let imageUrl = event.target.result;
-
-					if ($settings?.imageCompression ?? false) {
-						const width = $settings?.imageCompressionSize?.width ?? null;
-						const height = $settings?.imageCompressionSize?.height ?? null;
-
-						if (width || height) {
-							imageUrl = await compressImage(imageUrl, width, height);
-						}
-					}
-
-					files = [
-						...files,
-						{
-							type: 'image',
-							url: `${imageUrl}`
-						}
-					];
-				};
-				reader.readAsDataURL(file);
-			} else {
-				uploadFileHandler(file);
+			const dataUrlMimeType = sourceUrl.match(/^data:(image\/[^;,]+)/i)?.[1] ?? '';
+			const mimeType = (blob.type || dataUrlMimeType).split(';', 1)[0].toLowerCase();
+			if (!mimeType.startsWith('image/')) {
+				throw new Error('Unable to determine the selected image type');
 			}
+			const extension =
+				mimeType === 'image/jpeg'
+					? 'jpg'
+					: mimeType === 'image/png'
+						? 'png'
+						: mimeType.split('/').at(-1) || 'img';
+			files = files.filter((item) => item !== attachment);
+			await uploadFileHandler(
+				new File([blob], `Pasted Image ${Date.now()}.${extension}`, { type: mimeType })
+			);
+		} catch (error) {
+			if (files.includes(attachment)) {
+				attachment.status = 'error';
+				attachment.processing_status = 'error';
+				attachment.error = $i18n.t('Unable to upload the selected image.');
+				attachment.url = '';
+				files = files;
+				toast.error(attachment.error);
+			}
+		} finally {
+			if (normalizedSourceUrl.startsWith('blob:')) {
+				URL.revokeObjectURL(sourceUrl);
+			}
+			transientImageUploads.delete(attachment.itemId);
+		}
+	};
+
+	$: {
+		for (const attachment of files) {
+			if (attachment?.type === 'image' && !attachment?.id) {
+				void uploadTransientImageAttachment(attachment);
+			}
+		}
+	}
+
+	const inputFilesHandler = async (inputFiles) => {
+		inputFiles.forEach((file: File) => {
+			void uploadFileHandler(file);
 		});
+	};
+
+	const pasteHandler = async (event: ClipboardEvent) => {
+		const clipboardData = event.clipboardData || (window as any).clipboardData;
+		if (!clipboardData?.items) return;
+
+		for (const item of clipboardData.items) {
+			if (item.type.startsWith('image/')) {
+				event.preventDefault();
+				const blob = item.getAsFile();
+				if (!blob) continue;
+
+				const extension = blob.type === 'image/jpeg' ? 'jpg' : blob.type.split('/').at(-1) || 'png';
+				const file =
+					blob instanceof File && blob.name
+						? blob
+						: new File([blob], `Pasted Image ${Date.now()}.${extension}`, { type: blob.type });
+				await uploadFileHandler(file);
+			} else if (item.type === 'text/plain' && ($settings?.largeTextAsFile ?? false)) {
+				const text = clipboardData.getData('text/plain');
+				if (text.length > PASTED_TEXT_CHARACTER_LIMIT) {
+					event.preventDefault();
+					const blob = new Blob([text], { type: 'text/plain' });
+					const file = new File([blob], `Pasted_Text_${Date.now()}.txt`, {
+						type: 'text/plain'
+					});
+					await uploadFileHandler(file, true);
+				}
+			}
+		}
 	};
 
 	const handleKeyDown = (event: KeyboardEvent) => {
 		if (event.key === 'Escape') {
-			console.log('Escape');
 			dragged = false;
 		}
 	};
@@ -382,12 +700,10 @@ import CallModeModal from './MessageInput/CallModeModal.svelte';
 
 	const onDrop = async (e) => {
 		e.preventDefault();
-		console.log(e);
 
 		if (e.dataTransfer?.files) {
 			const inputFiles = Array.from(e.dataTransfer?.files);
 			if (inputFiles && inputFiles.length > 0) {
-				console.log(inputFiles);
 				inputFilesHandler(inputFiles);
 			}
 		}
@@ -396,6 +712,7 @@ import CallModeModal from './MessageInput/CallModeModal.svelte';
 	};
 
 	onMount(async () => {
+		files = files.map((file) => (file?.itemId ? file : { ...file, itemId: uuidv4() }));
 		loaded = true;
 
 		window.setTimeout(() => {
@@ -415,8 +732,13 @@ import CallModeModal from './MessageInput/CallModeModal.svelte';
 	});
 
 	onDestroy(() => {
-		console.log('destroy');
 		window.removeEventListener('keydown', handleKeyDown);
+		for (const itemId of processingPollIntervals.keys()) {
+			clearProcessingPoll(itemId);
+		}
+		for (const itemId of attachmentPreviewUrls.keys()) {
+			releaseAttachmentPreview(itemId);
+		}
 
 		const dropzoneElement = document.getElementById('chat-container');
 
@@ -656,7 +978,7 @@ import CallModeModal from './MessageInput/CallModeModal.svelte';
 								await tick();
 								document.getElementById('chat-input')?.focus();
 
-								if ($settings?.speechAutoSend ?? false) {
+								if (($settings?.speechAutoSend ?? false) && inputCanSubmit) {
 									dispatch('submit', prompt);
 								}
 							}}
@@ -665,8 +987,7 @@ import CallModeModal from './MessageInput/CallModeModal.svelte';
 						<form
 							class="w-full flex gap-1.5"
 							on:submit|preventDefault={() => {
-								// check if selectedModels support image input
-								dispatch('submit', prompt);
+								if (inputCanSubmit) dispatch('submit', prompt);
 							}}
 						>
 							<div
@@ -675,89 +996,106 @@ import CallModeModal from './MessageInput/CallModeModal.svelte';
 							>
 								{#if files.length > 0}
 									<div class="mx-2 mt-2.5 -mb-1 flex items-center flex-wrap gap-2">
-										{#each files as file, fileIdx}
-											{#if file.type === 'image'}
-												<div class=" relative group">
-													<div class="relative flex items-center">
-														<Image
-															src={file.url}
-															alt="input"
-															imageClassName=" size-14 rounded-xl object-cover"
-														/>
-														{#if atSelectedModel ? visionCapableModels.length === 0 : selectedModels.length !== visionCapableModels.length}
-															<Tooltip
-																className=" absolute top-1 left-1"
-																content={$i18n.t('{{ models }}', {
-																	models: [
-																		...(atSelectedModel ? [atSelectedModel] : selectedModels)
-																	]
-																		.filter((id) => !visionCapableModels.includes(id))
-																		.join(', ')
-																})}
+										{#each files as file}
+											<div class="flex flex-col gap-1">
+												{#if file.type === 'image'}
+													<div class="relative group w-fit">
+														<div class="relative flex items-center">
+															<Image
+																src={getImagePreviewUrl(file)}
+																alt="input"
+																imageClassName=" size-14 rounded-xl object-cover"
+															/>
+															{#if file.status === 'uploading' || file.status === 'processing'}
+																<div
+																	class="absolute inset-0 flex items-center justify-center rounded-xl bg-black/55 px-1 text-center text-[10px] font-medium text-white pointer-events-none"
+																>
+																	{file.status === 'uploading'
+																		? $i18n.t('Uploading')
+																		: $i18n.t('Processing')}
+																</div>
+															{/if}
+														</div>
+														<div class=" absolute -top-1 -right-1">
+															<button
+																class=" bg-white text-black border border-white rounded-full group-hover:visible invisible transition"
+																type="button"
+																on:click={() => removeAttachment(file)}
 															>
 																<svg
 																	xmlns="http://www.w3.org/2000/svg"
-																	viewBox="0 0 24 24"
+																	viewBox="0 0 20 20"
 																	fill="currentColor"
-																	class="size-4 fill-yellow-300"
+																	class="size-4"
 																>
 																	<path
-																		fill-rule="evenodd"
-																		d="M9.401 3.003c1.155-2 4.043-2 5.197 0l7.355 12.748c1.154 2-.29 4.5-2.599 4.5H4.645c-2.309 0-3.752-2.5-2.598-4.5L9.4 3.003ZM12 8.25a.75.75 0 0 1 .75.75v3.75a.75.75 0 0 1-1.5 0V9a.75.75 0 0 1 .75-.75Zm0 8.25a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Z"
-																		clip-rule="evenodd"
+																		d="M6.28 5.22a.75.75 0 00-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 101.06 1.06L10 11.06l3.72 3.72a.75.75 0 101.06-1.06L11.06 10l3.72-3.72a.75.75 0 00-1.06-1.06L10 8.94 6.28 5.22z"
 																	/>
 																</svg>
-															</Tooltip>
+															</button>
+														</div>
+													</div>
+												{:else}
+													<FileItem
+														item={file}
+														name={file.name}
+														type={file.type}
+														size={file?.size}
+														loading={file.status === 'uploading' || file.status === 'processing'}
+														dismissible={true}
+														edit={true}
+														on:dismiss={() => removeAttachment(file)}
+													/>
+												{/if}
+
+												{#if file.status === 'processing' || file.status === 'error' || file.processing_warnings?.length || file.visual_summary}
+													<div class="max-w-60 px-1 text-xs text-gray-500 dark:text-gray-400">
+														{#if file.status === 'processing'}
+															<div>
+																{file.polling_timed_out
+																	? $i18n.t('Still processing; refresh for the latest status.')
+																	: $i18n.t('Processing attachment…')}
+															</div>
+														{:else if file.status === 'error'}
+															<div class="text-red-600 dark:text-red-400">
+																{file.processing_error_code ? `${file.processing_error_code}: ` : ''}{file.error ||
+																	$i18n.t('Processing failed')}
+															</div>
+														{/if}
+
+														{#each file.processing_warnings ?? [] as warning}
+															<div class="text-amber-600 dark:text-amber-400">
+																{formatProcessingWarning(warning)}
+															</div>
+														{/each}
+														{#if file.visual_summary && formatVisualSummary(file.visual_summary)}
+															<div class="capitalize">{formatVisualSummary(file.visual_summary)}</div>
+														{/if}
+
+														{#if file.id && (file.status === 'processing' || file.status === 'error')}
+															<div class="mt-0.5 flex gap-2">
+																<button
+																	type="button"
+																	class="underline hover:text-gray-700 dark:hover:text-gray-200 disabled:opacity-50"
+																	disabled={file.status_refreshing}
+																	on:click={() => refreshFileStatus(file)}
+																>
+																	{$i18n.t('Refresh')}
+																</button>
+																{#if file.status === 'error' || file.polling_timed_out}
+																	<button
+																		type="button"
+																		class="underline hover:text-gray-700 dark:hover:text-gray-200"
+																		on:click={() => retryFileProcessing(file)}
+																	>
+																		{$i18n.t('Retry')}
+																	</button>
+																{/if}
+															</div>
 														{/if}
 													</div>
-													<div class=" absolute -top-1 -right-1">
-														<button
-															class=" bg-white text-black border border-white rounded-full group-hover:visible invisible transition"
-															type="button"
-															on:click={() => {
-																files.splice(fileIdx, 1);
-																files = files;
-															}}
-														>
-															<svg
-																xmlns="http://www.w3.org/2000/svg"
-																viewBox="0 0 20 20"
-																fill="currentColor"
-																class="size-4"
-															>
-																<path
-																	d="M6.28 5.22a.75.75 0 00-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 101.06 1.06L10 11.06l3.72 3.72a.75.75 0 101.06-1.06L11.06 10l3.72-3.72a.75.75 0 00-1.06-1.06L10 8.94 6.28 5.22z"
-																/>
-															</svg>
-														</button>
-													</div>
-												</div>
-											{:else}
-												<FileItem
-													item={file}
-													name={file.name}
-													type={file.type}
-													size={file?.size}
-													loading={file.status === 'uploading' || file.status === 'processing'}
-													dismissible={true}
-													edit={true}
-													on:dismiss={async () => {
-														if (file.type !== 'collection' && !file?.collection) {
-															if (file.id) {
-																// This will handle both file deletion and Chroma cleanup
-																await deleteFileById(localStorage.token, file.id);
-															}
-														}
-
-														// Remove from UI state
-														files.splice(fileIdx, 1);
-														files = files;
-													}}
-													on:click={() => {
-														console.log(file);
-													}}
-												/>
-											{/if}
+												{/if}
+											</div>
 										{/each}
 									</div>
 								{/if}
@@ -793,13 +1131,10 @@ import CallModeModal from './MessageInput/CallModeModal.svelte';
 														history?.currentId
 															? createMessagesList(history, history.currentId)
 															: null
-													).catch((error) => {
-														console.log(error);
-
+													).catch(() => {
 														return null;
 													});
 
-													console.log(res);
 													return res;
 												}}
 												on:keydown={async (e) => {
@@ -822,7 +1157,6 @@ import CallModeModal from './MessageInput/CallModeModal.svelte';
 													// Check if Ctrl + R is pressed
 													if (prompt === '' && isCtrlPressed && e.key.toLowerCase() === 'r') {
 														e.preventDefault();
-														console.log('regenerate');
 
 														const regenerateButton = [
 															...document.getElementsByClassName('regenerate-response-button')
@@ -909,7 +1243,7 @@ import CallModeModal from './MessageInput/CallModeModal.svelte';
 
 															// Submit the prompt when Enter key is pressed
 															if (
-																(prompt !== '' || files.length > 0) &&
+																inputCanSubmit &&
 																e.keyCode === 13 &&
 																!e.shiftKey
 															) {
@@ -919,7 +1253,6 @@ import CallModeModal from './MessageInput/CallModeModal.svelte';
 													}
 
 													if (e.key === 'Escape') {
-														console.log('Escape');
 														atSelectedModel = undefined;
 														selectedToolIds = [];
 														webSearchEnabled = false;
@@ -927,45 +1260,7 @@ import CallModeModal from './MessageInput/CallModeModal.svelte';
 													}
 												}}
 												on:paste={async (e) => {
-													e = e.detail.event;
-													console.log(e);
-
-													const clipboardData = e.clipboardData || window.clipboardData;
-
-													if (clipboardData && clipboardData.items) {
-														for (const item of clipboardData.items) {
-															if (item.type.indexOf('image') !== -1) {
-																const blob = item.getAsFile();
-																const reader = new FileReader();
-
-																reader.onload = function (e) {
-																	files = [
-																		...files,
-																		{
-																			type: 'image',
-																			url: `${e.target.result}`
-																		}
-																	];
-																};
-
-																reader.readAsDataURL(blob);
-															} else if (item.type === 'text/plain') {
-																if ($settings?.largeTextAsFile ?? false) {
-																	const text = clipboardData.getData('text/plain');
-
-																	if (text.length > PASTED_TEXT_CHARACTER_LIMIT) {
-																		e.preventDefault();
-																		const blob = new Blob([text], { type: 'text/plain' });
-																		const file = new File([blob], `Pasted_Text_${Date.now()}.txt`, {
-																			type: 'text/plain'
-																		});
-
-																		await uploadFileHandler(file, true);
-																	}
-																}
-															}
-														}
-													}
+													await pasteHandler(e.detail.event);
 												}}
 											/>
 										</div>
@@ -992,7 +1287,7 @@ import CallModeModal from './MessageInput/CallModeModal.svelte';
 
 													// Submit the prompt when Enter key is pressed
 													if (
-														(prompt !== '' || files.length > 0) &&
+														inputCanSubmit &&
 														e.key === 'Enter' &&
 														!e.shiftKey
 													) {
@@ -1017,7 +1312,6 @@ import CallModeModal from './MessageInput/CallModeModal.svelte';
 												// Check if Ctrl + R is pressed
 												if (prompt === '' && isCtrlPressed && e.key.toLowerCase() === 'r') {
 													e.preventDefault();
-													console.log('regenerate');
 
 													const regenerateButton = [
 														...document.getElementsByClassName('regenerate-response-button')
@@ -1036,8 +1330,6 @@ import CallModeModal from './MessageInput/CallModeModal.svelte';
 													const editButton = [
 														...document.getElementsByClassName('edit-user-message-button')
 													]?.at(-1);
-
-													console.log(userMessageElement);
 
 													userMessageElement.scrollIntoView({ block: 'center' });
 													editButton?.click();
@@ -1110,7 +1402,6 @@ import CallModeModal from './MessageInput/CallModeModal.svelte';
 												}
 
 												if (e.key === 'Escape') {
-													console.log('Escape');
 													atSelectedModel = undefined;
 													selectedToolIds = [];
 													webSearchEnabled = false;
@@ -1127,42 +1418,7 @@ import CallModeModal from './MessageInput/CallModeModal.svelte';
 												e.target.style.height = Math.min(e.target.scrollHeight, 320) + 'px';
 											}}
 											on:paste={async (e) => {
-												const clipboardData = e.clipboardData || window.clipboardData;
-
-												if (clipboardData && clipboardData.items) {
-													for (const item of clipboardData.items) {
-														if (item.type.indexOf('image') !== -1) {
-															const blob = item.getAsFile();
-															const reader = new FileReader();
-
-															reader.onload = function (e) {
-																files = [
-																	...files,
-																	{
-																		type: 'image',
-																		url: `${e.target.result}`
-																	}
-																];
-															};
-
-															reader.readAsDataURL(blob);
-														} else if (item.type === 'text/plain') {
-															if ($settings?.largeTextAsFile ?? false) {
-																const text = clipboardData.getData('text/plain');
-
-																if (text.length > PASTED_TEXT_CHARACTER_LIMIT) {
-																	e.preventDefault();
-																	const blob = new Blob([text], { type: 'text/plain' });
-																	const file = new File([blob], `Pasted_Text_${Date.now()}.txt`, {
-																		type: 'text/plain'
-																	});
-
-																	await uploadFileHandler(file, true);
-																}
-															}
-														}
-													}
-												}
+												await pasteHandler(e);
 											}}
 										/>
 									{/if}
@@ -1185,8 +1441,6 @@ import CallModeModal from './MessageInput/CallModeModal.svelte';
 															type: fileData.blob.type
 														});
 														await uploadFileHandler(file);
-													} else {
-														console.log('No file was selected from Google Drive');
 													}
 												} catch (error) {
 													console.error('Google Drive Error:', error);
@@ -1205,8 +1459,6 @@ import CallModeModal from './MessageInput/CallModeModal.svelte';
 															type: fileData.blob.type || 'application/octet-stream'
 														});
 														await uploadFileHandler(file);
-													} else {
-														console.log('No file was selected from OneDrive');
 													}
 												} catch (error) {
 													console.error('OneDrive Error:', error);
@@ -1413,13 +1665,13 @@ import CallModeModal from './MessageInput/CallModeModal.svelte';
 													<Tooltip content={$i18n.t('Send message')}>
 														<button
 															id="send-message-button"
-															class="{!(prompt === '' && files.length === 0)
+															class="{inputCanSubmit
 																? webSearchEnabled || ($settings?.webSearch ?? false) === 'always'
 																	? 'bg-blue-500 text-white hover:bg-blue-400 '
 																	: 'bg-black text-white hover:bg-gray-900 dark:bg-white dark:text-black dark:hover:bg-gray-100 '
 																: 'text-white bg-gray-200 dark:text-gray-900 dark:bg-gray-700 disabled'} transition rounded-full p-1.5 self-center"
 															type="submit"
-															disabled={prompt === '' && files.length === 0}
+															disabled={!inputCanSubmit}
 														>
 															<svg
 																xmlns="http://www.w3.org/2000/svg"

@@ -8,15 +8,86 @@
 	const i18n = getContext('i18n');
 
 	export let id = '';
-	export let sources = [];
+	export let sources: any[] = [];
 
-	let citations = [];
+	let citations: any[] = [];
 	let showPercentage = false;
 	let showRelevance = true;
 
 	let showCitationModal = false;
 	let selectedCitation: any = null;
 	let isCollapsibleOpen = false;
+
+	type CitationMetadata = {
+		file_id?: unknown;
+		name?: unknown;
+		source?: unknown;
+		modality?: unknown;
+		content_kind?: unknown;
+		visual_asset_id?: unknown;
+		page_number?: unknown;
+		element_number?: unknown;
+	};
+
+	const visualContentKinds = new Set(['standalone_image', 'pdf_figure', 'pdf_table']);
+
+	const displayText = (value: unknown) =>
+		typeof value === 'string' || typeof value === 'number' ? String(value).trim() : '';
+
+	const positiveInteger = (value: unknown) => {
+		const number = typeof value === 'number' ? value : Number(value);
+		return Number.isInteger(number) && number > 0 ? number : null;
+	};
+	const finiteNumber = (value: unknown) => {
+		if (value === null || value === undefined || value === '') return undefined;
+		const number = typeof value === 'number' ? value : Number(value);
+		return Number.isFinite(number) ? number : undefined;
+	};
+
+	const isVisualMetadata = (metadata?: CitationMetadata) =>
+		metadata?.modality === 'image' ||
+		visualContentKinds.has(displayText(metadata?.content_kind));
+
+	const getVisualKindLabel = (metadata?: CitationMetadata) => {
+		const elementNumber = positiveInteger(metadata?.element_number);
+		switch (metadata?.content_kind) {
+			case 'pdf_figure':
+				return elementNumber ? `Figure ${elementNumber}` : 'Figure';
+			case 'pdf_table':
+				return elementNumber ? `Table ${elementNumber}` : 'Table';
+			case 'standalone_image':
+				return 'Standalone image';
+			default:
+				return 'Image';
+		}
+	};
+
+	const normalizeSourceDescriptor = (source: unknown): Record<string, any> => {
+		if (typeof source === 'string') {
+			return {
+				name: source,
+				...(source.startsWith('http://') || source.startsWith('https://')
+					? { url: source }
+					: {})
+			};
+		}
+		return source && typeof source === 'object' && !Array.isArray(source)
+			? { ...(source as Record<string, any>) }
+			: {};
+	};
+
+	const getVisualCitationLabel = (source: any, metadata?: CitationMetadata) => {
+		const parentName =
+			displayText(metadata?.name) ||
+			displayText(metadata?.source) ||
+			displayText(source?.name) ||
+			displayText(source?.filename) ||
+			'Image';
+		const pageNumber = positiveInteger(metadata?.page_number);
+		return [parentName, pageNumber ? `page ${pageNumber}` : '', getVisualKindLabel(metadata)]
+			.filter(Boolean)
+			.join(' · ');
+	};
 
 	function calculateShowRelevance(sources: any[]) {
 		const distances = sources.flatMap((citation) => citation.distances ?? []);
@@ -43,46 +114,88 @@
 	}
 
 	$: {
-		console.log('sources', sources);
-		citations = sources.reduce((acc, source) => {
-			if (Object.keys(source).length === 0) {
+		citations = (Array.isArray(sources) ? sources : []).reduce<any[]>(
+			(acc, source, sourceIndex) => {
+				if (!source || typeof source !== 'object' || Object.keys(source).length === 0) {
+					return acc;
+				}
+
+				const documents = Array.isArray(source.document)
+					? source.document
+					: source.document !== undefined
+						? [source.document]
+						: [];
+				const metadatas = Array.isArray(source.metadata)
+					? source.metadata
+					: source.metadata
+						? [source.metadata]
+						: [];
+				const distances = Array.isArray(source.distances) ? source.distances : [];
+				const itemCount = Math.max(documents.length, metadatas.length);
+				const sourceDescriptor = normalizeSourceDescriptor(source.source);
+
+				for (let index = 0; index < itemCount; index += 1) {
+					const document = documents[index] ?? '';
+					const metadata = metadatas[index] as CitationMetadata | undefined;
+					const distance = finiteNumber(distances[index]);
+					const visual = isVisualMetadata(metadata);
+
+					// Within the same citation there could be multiple documents
+					const regularSourceId =
+						displayText(metadata?.source) ||
+						displayText(sourceDescriptor?.id) ||
+						displayText(sourceDescriptor?.url) ||
+						displayText(sourceDescriptor?.name) ||
+						`source:${sourceIndex}`;
+					const id = visual
+						? displayText(metadata?.visual_asset_id) ||
+							`${displayText(metadata?.file_id) || regularSourceId}:visual:${sourceIndex}:${index}`
+						: regularSourceId;
+					let _source: Record<string, any> = { ...sourceDescriptor };
+
+					if (visual) {
+						_source.name = getVisualCitationLabel(sourceDescriptor, metadata);
+					} else if (displayText(metadata?.name)) {
+						_source.name = displayText(metadata?.name);
+					}
+
+					if (id.startsWith('http://') || id.startsWith('https://')) {
+						_source = { ..._source, name: id, url: id };
+					}
+					if (!displayText(_source.name)) {
+						_source.name =
+							displayText(metadata?.source) || displayText(sourceDescriptor?.id) || 'Source';
+					}
+
+					const existingSource = acc.find((item) => item.id === id);
+
+					if (existingSource) {
+						existingSource.document.push(document);
+						existingSource.metadata.push(metadata);
+						if (distance !== undefined) {
+							if (!existingSource.distances) {
+								existingSource.distances = Array(
+									existingSource.document.length - 1
+								).fill(undefined);
+							}
+							existingSource.distances.push(distance);
+						} else if (existingSource.distances) {
+							existingSource.distances.push(undefined);
+						}
+					} else {
+						acc.push({
+							id: id,
+							source: _source,
+							document: [document],
+							metadata: [metadata],
+							distances: distance !== undefined ? [distance] : undefined
+						});
+					}
+				}
 				return acc;
-			}
-
-			source.document.forEach((document, index) => {
-				const metadata = source.metadata?.[index];
-				const distance = source.distances?.[index];
-
-				// Within the same citation there could be multiple documents
-				const id = metadata?.source ?? source?.source?.id ?? 'N/A';
-				let _source = source?.source;
-
-				if (metadata?.name) {
-					_source = { ..._source, name: metadata.name };
-				}
-
-				if (id.startsWith('http://') || id.startsWith('https://')) {
-					_source = { ..._source, name: id, url: id };
-				}
-
-				const existingSource = acc.find((item) => item.id === id);
-
-				if (existingSource) {
-					existingSource.document.push(document);
-					existingSource.metadata.push(metadata);
-					if (distance !== undefined) existingSource.distances.push(distance);
-				} else {
-					acc.push({
-						id: id,
-						source: _source,
-						document: [document],
-						metadata: metadata ? [metadata] : [],
-						distances: distance !== undefined ? [distance] : undefined
-					});
-				}
-			});
-			return acc;
-		}, []);
+			},
+			[]
+		);
 
 		showRelevance = calculateShowRelevance(citations);
 		showPercentage = shouldShowPercentage(citations);
