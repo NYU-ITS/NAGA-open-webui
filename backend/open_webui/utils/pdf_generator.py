@@ -31,6 +31,9 @@ RENDER_TIMEOUT_PER_MESSAGE_SEC = 2.0
 LATEX_PLACEHOLDER = "xkatexph{index}endx"
 LATEX_PLACEHOLDER_RE = re.compile(r"xkatexph(\d+)endx")
 
+# Spans a whole tag, so placeholder substitution can tell markup from text.
+HTML_TAG_RE = re.compile(r"<[^>]*>")
+
 
 # Character class the frontend tokenizer requires on both sides of a math span:
 # whitespace or punctuation. A delimiter glued to a letter or a digit (a price
@@ -81,6 +84,84 @@ RIGID_ENVIRONMENT_RE = re.compile(
 # Short expressions fit on one line, so the soft breaks would only show up as
 # extra spacing around operators.
 SOFT_BREAK_MIN_LENGTH = 60
+
+# A math font macro takes one group. An alignment tab, a row break, or a \right
+# closing a \left that was opened outside can never legally sit inside it. A
+# model that puts the closing brace in the wrong place -- \mathbf{v_1 &= ...}
+# for \mathbf{v_1} &= ... -- produces markup a full TeX engine digests, because
+# TeX only sees alignment tabs at the outermost brace level, but that KaTeX
+# refuses outright. Closing the group at the offending token is the smallest
+# edit that makes it parse. Text macros are left alone: an ampersand inside
+# \text{} is ordinary prose.
+FONT_MACROS = ("\\mathbf", "\\boldsymbol", "\\bm", "\\mathrm", "\\mathit",
+               "\\mathsf", "\\mathtt", "\\mathbb", "\\mathcal", "\\mathfrak")
+
+
+def _matching_brace(expr: str, open_idx: int) -> int:
+    """Index of the brace closing the one at open_idx, or -1 if unbalanced."""
+    depth = 0
+    i = open_idx
+    while i < len(expr):
+        char = expr[i]
+        if char == "\\":
+            i += 2  # an escaped brace is a character, not a group
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+
+def _first_illegal_in_font_group(arg: str) -> int:
+    """
+    Offset of the first token that cannot appear inside a font macro group.
+
+    Alignment tabs and row breaks only count at the top level of the argument:
+    inside a nested group or a \\begin{...}\\end{...} they belong to that
+    construct and are perfectly legal.
+    """
+    depth = env = pending_left = 0
+    i = 0
+    while i < len(arg):
+        char = arg[i]
+        if char == "\\":
+            if arg.startswith(r"\\", i):
+                if depth == 0 and env == 0:
+                    return i
+                i += 2
+                continue
+            if arg.startswith(r"\begin", i):
+                env += 1
+                i += 6
+                continue
+            if arg.startswith(r"\end", i):
+                env -= 1
+                i += 4
+                continue
+            if arg.startswith(r"\left", i):
+                pending_left += 1
+                i += 5
+                continue
+            if arg.startswith(r"\right", i):
+                if pending_left == 0 and depth == 0 and env == 0:
+                    return i
+                pending_left -= 1
+                i += 6
+                continue
+            i += 2
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+        elif char == "&" and depth == 0 and env == 0:
+            return i
+        i += 1
+    return -1
 
 
 def _weasyprint_worker(result_queue, doc_html: str, base_url: str | None) -> None:
@@ -365,9 +446,13 @@ class PDFGenerator:
 
         # Convert markdown to HTML with extensions that preserve formatting
         # Use markdown extensions for better formatting support
+        # No 'toc': it slugifies heading text into an id, and the LaTeX
+        # placeholder is part of that text. The id then received a whole KaTeX
+        # fragment, whose first quote closed the attribute and spilled the rest
+        # into the document as markup. A PDF has nothing to anchor to anyway.
         html_content = markdown.markdown(
             html_content,
-            extensions=['fenced_code', 'tables', 'toc']
+            extensions=['fenced_code', 'tables']
         )
 
         html_content = self._apply_latex_fragments(html_content, fragments)
@@ -483,6 +568,10 @@ class PDFGenerator:
             if latex['delimiter'] in ['\\boxed{}', '\\ce{}', '\\pu{}']:
                 expr = latex['delimiter'].replace('{}', '{' + expr + '}')
 
+            # Repair before breaking: soft breaks assume the expression parses.
+            expr = self._repair_font_macro_groups(expr)
+            expr = self._close_unbalanced_groups(expr)
+
             # Insert soft breaks to allow long expressions to wrap in PDF
             if len(expr) >= SOFT_BREAK_MIN_LENGTH:
                 expr = self._insert_soft_breaks(expr)
@@ -494,6 +583,75 @@ class PDFGenerator:
 
         parts.append(escape(content[cursor:], quote=False))
         return "".join(parts), to_render
+
+    def _repair_font_macro_groups(self, expr: str) -> str:
+        """
+        Close a font macro group at the first token that cannot live inside it.
+
+        \\mathbf{v_1 &= \\begin{pmatrix}...\\end{pmatrix}} becomes
+        \\mathbf{v_1} &= \\begin{pmatrix}...\\end{pmatrix}. Nothing is added or
+        dropped, the closing brace only moves, so an expression that already
+        parses is returned untouched.
+        """
+        for macro in FONT_MACROS:
+            start = 0
+            while True:
+                idx = expr.find(macro, start)
+                if idx == -1:
+                    break
+
+                cursor = idx + len(macro)
+                while cursor < len(expr) and expr[cursor] == " ":
+                    cursor += 1
+                if cursor >= len(expr) or expr[cursor] != "{":
+                    start = idx + len(macro)
+                    continue
+
+                close = _matching_brace(expr, cursor)
+                if close == -1:
+                    start = idx + len(macro)
+                    continue
+
+                arg = expr[cursor + 1:close]
+                offset = _first_illegal_in_font_group(arg)
+                head = arg[:offset].rstrip() if offset != -1 else ""
+                if offset == -1 or not head:
+                    # Nothing to repair, or the offender is the whole argument
+                    # and closing early would leave an empty group.
+                    start = close + 1
+                    continue
+
+                expr = expr[:cursor + 1] + head + "}" + arg[offset:] + expr[close + 1:]
+                start = cursor + 1 + len(head) + 1
+
+        return expr
+
+    def _close_unbalanced_groups(self, expr: str) -> str:
+        """
+        Append the closing braces an expression is missing.
+
+        A model sometimes drops a brace outright, leaving \\boxed{ open to the
+        end of the expression. KaTeX rejects the whole thing, so the reader
+        gets red source instead of maths. Only ever adds braces, and only when
+        some are missing, so an expression that already balances is untouched
+        and one that already fails cannot be made worse.
+        """
+        depth = 0
+        i = 0
+        while i < len(expr):
+            char = expr[i]
+            if char == "\\":
+                i += 2  # an escaped brace is a character, not a group
+                continue
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth < 0:  # more closers than openers, not ours to fix
+                    return expr
+            i += 1
+
+        return expr + "}" * depth if depth > 0 else expr
 
     def _apply_latex_fragments(self, html_content: str, fragments: List[str]) -> str:
         """Swap the placeholders in rendered markdown for their KaTeX fragments."""
@@ -512,7 +670,19 @@ class PDFGenerator:
                     return fragment
             return fragment
 
-        return LATEX_PLACEHOLDER_RE.sub(_replace, html_content)
+        # Substitute in text only. A placeholder that markdown copied into an
+        # attribute (a heading id, an image alt) must not receive a KaTeX
+        # fragment: the fragment's own quotes would close the attribute and the
+        # rest of it would land in the document as markup.
+        pieces: List[str] = []
+        cursor = 0
+        for tag in HTML_TAG_RE.finditer(html_content):
+            pieces.append(LATEX_PLACEHOLDER_RE.sub(_replace, html_content[cursor:tag.start()]))
+            pieces.append(LATEX_PLACEHOLDER_RE.sub("", tag.group(0)))
+            cursor = tag.end()
+        pieces.append(LATEX_PLACEHOLDER_RE.sub(_replace, html_content[cursor:]))
+
+        return "".join(pieces)
 
     def _render_timeout(self) -> float:
         """Scale the render budget with the size of the conversation."""

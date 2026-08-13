@@ -1,4 +1,5 @@
 import random
+import re
 import shutil
 import string
 
@@ -15,6 +16,108 @@ def make_generator(messages=None):
 
 def detect(content):
     return make_generator().detect_latex_in_message(content)
+
+
+class TestMathInHeadings:
+    """
+    Markdown extensions can copy heading text into an id, and the LaTeX
+    placeholder travels with it. Substituting a KaTeX fragment there closes the
+    attribute on its own first quote and spills the rest into the document,
+    which is why a heading with maths rendered twice: once as wreckage, once
+    correctly.
+    """
+
+    HEADING = "#### For \\( x_1 = 2 + \\frac{2\\sqrt{2}}{\\sqrt{3}} \\):\n\nBody text.\n"
+
+    def render(self, source):
+        gen = make_generator()
+        body, to_render = gen._extract_latex(source)
+        fragments = gen.katex_compiler.render_many_to_html(to_render) if to_render else []
+        message = {"role": "assistant", "content": source}
+        return gen._build_html_message(message, body, fragments)
+
+    def test_heading_math_does_not_leak_into_an_attribute(self):
+        html = self.render(self.HEADING)
+        assert not re.search(r'=\"[^\"]*<span', html)
+
+    def test_heading_still_contains_the_rendered_maths(self):
+        html = self.render(self.HEADING)
+        heading = re.search(r"<h4[^>]*>For .*?</h4>", html, re.S)
+        assert heading and "katex" in heading.group(0)
+
+    def test_no_placeholder_survives(self):
+        assert not re.search(r"xkatexph\d+endx", self.render(self.HEADING))
+
+    def test_placeholder_inside_a_tag_is_never_given_markup(self):
+        gen = make_generator()
+        fragment = '<span class="katex">rendered</span>'
+        out = gen._apply_latex_fragments(
+            '<h4 id="for-xkatexph0endx">For xkatexph0endx:</h4>', [fragment]
+        )
+        assert out.count(fragment) == 1        # text only
+        assert 'id="for-"' in out              # attribute left inert
+        assert not re.search(r"xkatexph\d+endx", out)
+
+
+class TestLatexRepair:
+    """
+    KaTeX only accepts alignment tabs at the top level of an alignment, where a
+    full TeX engine hides them inside brace groups. A model that misplaces a
+    closing brace therefore produces markup QuickLaTeX renders and KaTeX shows
+    as red source. These repairs move or add braces, never remove content.
+    """
+
+    EIGEN = (
+        r"\boxed{ \begin{aligned} \text{Eigenvalue } \lambda_1 &= 11 "
+        r"& \text{Eigenvector } \mathbf{v_1 &= \begin{pmatrix} 1 \\ 1 \end{pmatrix}}; \\ "
+        r"\text{Eigenvalue } \lambda_2 &= 2 & \text{Eigenvector } "
+        r"\mathbf{v_2 &= \begin{pmatrix} 2 \\ -1 \end{pmatrix}}. \end{aligned} }"
+    )
+
+    def repair(self, expr):
+        gen = make_generator()
+        return gen._close_unbalanced_groups(gen._repair_font_macro_groups(expr))
+
+    def test_alignment_tab_closes_the_font_group(self):
+        # The brace lands straight after the symbol; spacing around & is
+        # insignificant to TeX, so the assertion does not depend on it.
+        repaired = self.repair(self.EIGEN)
+        assert r"\mathbf{v_1}" in repaired
+        assert r"\mathbf{v_2}" in repaired
+        assert r"\mathbf{v_1 &" not in repaired
+        assert r"\mathbf{v_2 &" not in repaired
+
+    def test_repair_moves_the_brace_without_changing_the_count(self):
+        repaired = self.repair(self.EIGEN)
+        assert repaired.count("{") == self.EIGEN.count("{")
+        assert repaired.count("}") == self.EIGEN.count("}")
+
+    def test_missing_closing_brace_is_appended(self):
+        expr = r"\boxed{\left\{ \mathbf{u_1} = \frac{1}{\sqrt{138}} \right\}"
+        assert self.repair(expr) == expr + "}"
+
+    def test_balanced_expression_is_untouched(self):
+        for expr in [
+            r"\mathbf{v}",
+            r"\mathbf{v_1} &= \begin{pmatrix} 1 \\ 2 \end{pmatrix}",
+            r"\begin{pmatrix} 1 & 2 \\ 3 & 4 \end{pmatrix}",
+            r"\mathbf{\begin{pmatrix} 1 & 2 \\ 3 & 4 \end{pmatrix}}",
+            r"\mathbf{\left( x \right)}",
+            r"\text{Rules & Regulations}",
+            r"\begin{aligned} a &= 1 \\ b &= 2 \end{aligned}",
+            r"\mathbf{\frac{1}{\sqrt{138}}}",
+            r"\mathbfit{x}",
+        ]:
+            assert self.repair(expr) == expr, expr
+
+    def test_extra_closing_braces_are_left_alone(self):
+        """Too many closers is a different defect; adding more cannot help."""
+        expr = r"\frac{1}{2}}"
+        assert self.repair(expr) == expr
+
+    def test_tabs_inside_nested_constructs_are_not_offenders(self):
+        expr = r"\mathbf{\begin{pmatrix} a & b \end{pmatrix}}"
+        assert self.repair(expr) == expr
 
 
 class TestTimestampFormatting:
