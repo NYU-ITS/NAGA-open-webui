@@ -757,7 +757,7 @@ def prepare_file_for_embedding(
         )
 
     if source_kind == "pdf":
-        if recipe.complex_pdf_parser_enabled:
+        if recipe.complex_pdf_parser_enabled and "image" in model.modalities:
             return _prepare_complex_pdf(
                 source_bytes=source_bytes,
                 source_path=source_path,
@@ -812,6 +812,18 @@ def _prepare_complex_pdf(
     base_metadata: dict,
     chunk_settings: tuple[int, int, str, str],
 ) -> PreparedFile:
+    # Always obtain text from the legacy loader. The complex parser is strictly
+    # a visual sidecar and must not alter text, normalization, or chunking.
+    legacy_documents = _load_legacy_documents(
+        source_path=source_path, filename=filename, content_type="application/pdf",
+        config=config, content_override=None, base_metadata=base_metadata,
+        content_extraction_engine=preparation_recipe.content_extraction_engine,
+    )
+    legacy_chunks = _prepare_text_documents(legacy_documents, chunk_settings)
+    legacy_text = "\n\n".join(
+        document.page_content.strip() for document in legacy_documents
+        if document.page_content and document.page_content.strip()
+    )
     try:
         extraction = ComplexPDFExtractor(
             max_visuals_per_page=preparation_recipe.max_visuals_per_page,
@@ -824,29 +836,10 @@ def _prepare_complex_pdf(
     except ComplexPDFExtractionError:
         if "image" in model.modalities:
             raise EmbeddingError(PDF_VISUAL_EXTRACTION_FAILED) from None
-        fallback_documents = _load_legacy_documents(
-            source_path=source_path,
-            filename=filename,
-            content_type="application/pdf",
-            config=config,
-            content_override=None,
-            base_metadata=base_metadata,
-            content_extraction_engine=(
-                preparation_recipe.content_extraction_engine
-            ),
-        )
-        fallback_chunks = _prepare_text_documents(
-            fallback_documents, chunk_settings
-        )
-        if not fallback_chunks:
+        if not legacy_chunks:
             raise EmbeddingError(EMBEDDING_MODALITY_UNSUPPORTED) from None
         return PreparedFile(
-            chunks=tuple(fallback_chunks),
-            text_content="\n\n".join(
-                document.page_content.strip()
-                for document in fallback_documents
-                if document.page_content and document.page_content.strip()
-            ),
+            chunks=tuple(legacy_chunks), text_content=legacy_text,
             source_sha256=hashlib.sha256(source_bytes).hexdigest(),
             extraction_version=COMPLEX_PDF_EXTRACTION_VERSION,
             warnings=(
@@ -857,14 +850,13 @@ def _prepare_complex_pdf(
                 figure_count=0,
                 table_image_count=0,
                 image_chunk_count=0,
-                text_chunk_count=len(fallback_chunks),
+                text_chunk_count=len(legacy_chunks),
             ),
         )
     except Exception:
         raise EmbeddingError(PDF_VISUAL_EXTRACTION_FAILED) from None
 
-    chunks: list[PreparedChunk] = []
-    text_blocks: list[str] = []
+    visual_chunks: list[PreparedChunk] = []
     visual_supported = "image" in model.modalities
     warning_codes = [warning.code for warning in extraction.warnings]
 
@@ -882,16 +874,6 @@ def _prepare_complex_pdf(
         if isinstance(block, TextBlock):
             if not block.text.strip():
                 continue
-            text_blocks.append(block.text.strip())
-            metadata = {
-                **common,
-                "modality": "text",
-                "content_kind": (
-                    "pdf_table_text" if block.kind == "table_text" else "pdf_paragraph"
-                ),
-            }
-            documents = [Document(page_content=block.text, metadata=metadata)]
-            chunks.extend(_prepare_text_documents(documents, chunk_settings))
             continue
 
         if not isinstance(block, VisualBlock) or not visual_supported:
@@ -919,7 +901,7 @@ def _prepare_complex_pdf(
             "pixel_height": block.pixel_height,
             "image_sha256": block.content_sha256,
         }
-        chunks.append(
+        visual_chunks.append(
             PreparedChunk(
                 content="",
                 content_type="image",
@@ -940,11 +922,26 @@ def _prepare_complex_pdf(
     if not chunks and visual_count and not visual_supported:
         raise EmbeddingError(EMBEDDING_MODALITY_UNSUPPORTED)
 
-    image_chunk_count = sum(chunk.modality == "image" for chunk in chunks)
-    text_chunk_count = sum(chunk.modality == "text" for chunk in chunks)
+    def page_index(chunk: PreparedChunk) -> int:
+        value = chunk.chunk_metadata.get("page", chunk.chunk_metadata.get("page_index", 0))
+        return int(value) if isinstance(value, int) else 0
+
+    text_by_page: dict[int, list[PreparedChunk]] = {}
+    for chunk in legacy_chunks:
+        text_by_page.setdefault(page_index(chunk), []).append(chunk)
+    visual_by_page: dict[int, list[PreparedChunk]] = {}
+    for chunk in visual_chunks:
+        visual_by_page.setdefault(page_index(chunk), []).append(chunk)
+    chunks = []
+    for page in sorted(set(text_by_page) | set(visual_by_page)):
+        chunks.extend(text_by_page.get(page, []))
+        chunks.extend(visual_by_page.get(page, []))
+
+    image_chunk_count = len(visual_chunks)
+    text_chunk_count = len(legacy_chunks)
     return PreparedFile(
         chunks=tuple(chunks),
-        text_content="\n\n".join(text_blocks),
+        text_content=legacy_text,
         source_sha256=extraction.source_sha256,
         extraction_version=extraction.extraction_version,
         warnings=tuple(warning_codes),

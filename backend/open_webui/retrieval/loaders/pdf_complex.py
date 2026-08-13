@@ -27,7 +27,7 @@ import fitz
 import pdfplumber
 
 
-COMPLEX_PDF_EXTRACTION_VERSION = "complex_pdf_visual_v1"
+COMPLEX_PDF_EXTRACTION_VERSION = "complex_pdf_visual_v2"
 PDF_FIGURE_MIN_WIDTH = 64.0
 PDF_FIGURE_MIN_HEIGHT = 64.0
 PDF_FIGURE_MIN_AREA = 10_000.0
@@ -253,7 +253,7 @@ class _PageCandidate:
 
     @property
     def visual_count(self) -> int:
-        return len(self.table_assignments) + len(self.figures)
+        return len(self.tables) + len(self.figures)
 
 
 @dataclass(frozen=True)
@@ -626,56 +626,17 @@ class ComplexPDFExtractor:
                     ),
                 )
                 continue
-            try:
-                markdown = _table_to_markdown(table.extract() or [])
-            except Exception as error:
-                _raise_extraction_error("table_text_extraction", page_index, error)
             tables.append(
                 _TableCandidate(
                     bbox=display_bbox,
-                    markdown=markdown,
+                    # Legacy PyPDF text is authoritative. Tables are detected
+                    # here only so PyMuPDF can render a visual sidecar.
+                    markdown="",
                     source_sequence=source_sequence,
                 )
             )
 
-        try:
-            words = list(
-                visible_plumber_page.extract_words(keep_blank_chars=False) or []
-            )
-        except Exception as error:
-            _raise_extraction_error("word_extraction", page_index, error)
-
-        filtered_words = []
-        for word in words:
-            word_bbox = _valid_bbox(
-                (
-                    word.get("x0"),
-                    word.get("top"),
-                    word.get("x1"),
-                    word.get("bottom"),
-                )
-            )
-            if word_bbox is None:
-                continue
-            if any(
-                _bbox_intersects(word_bbox, table_bbox)
-                for table_bbox in raw_table_bboxes
-            ):
-                continue
-            filtered_words.append(word)
-
         paragraphs: list[_TextCandidate] = []
-        for line in _words_to_lines(filtered_words):
-            display_bbox = geometry.plumber_to_display(line.bbox)
-            if display_bbox is None:
-                continue
-            paragraphs.append(
-                _TextCandidate(
-                    text=line.text,
-                    bbox=display_bbox,
-                    source_sequence=line.source_sequence,
-                )
-            )
 
         placements = self._extract_image_placements(
             page=mupdf_page,
@@ -872,8 +833,6 @@ class ComplexPDFExtractor:
                         )
                     )
 
-                if table.source_sequence not in page_candidate.table_assignments:
-                    continue
                 page_blocks.append(
                     self._render_visual(
                         page=page,
@@ -931,7 +890,7 @@ class ComplexPDFExtractor:
                     table_contained_image_count=table_contained_image_count,
                     figure_count=figure_count,
                     image_bearing_table_count=image_bearing_table_count,
-                    visual_block_count=figure_count + image_bearing_table_count,
+                    visual_block_count=len(page_candidate.tables) + figure_count,
                     warning_count=len(page_candidate.warnings),
                 )
             )
