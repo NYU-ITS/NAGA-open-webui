@@ -37,6 +37,10 @@ from open_webui.retrieval.embedding.jobs import (
 )
 from open_webui.retrieval.embedding.preparation import build_preparation_recipe
 from open_webui.retrieval.embedding.enqueue import dispatch_embedding_job
+from open_webui.retrieval.embedding.model_change import (
+    ModelChangeResult,
+    request_model_change,
+)
 from open_webui.retrieval.embedding.state import AdminEmbeddingModelStateRepository
 from open_webui.utils.auth import get_verified_user
 
@@ -238,6 +242,43 @@ def _get_job_for_admin(job_id: str, admin_id: str) -> EmbeddingJobView:
     return job
 
 
+def _retry_http_error(error: EmbeddingError) -> HTTPException:
+    """Map retry/model-change errors to the stable public API envelope."""
+    if error.code in (EMBEDDING_JOB_ACTIVE_EXISTS, EMBEDDING_RETRY_ACTIVE_EXISTS):
+        return HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error_code": error.code,
+                "message": "Another embedding indexing operation is already active.",
+            },
+        )
+    if error.code == EMBEDDING_REINDEX_SOURCE_CHANGED:
+        return HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error_code": error.code,
+                "message": "Source content or preparation settings changed. Start a fresh model-change operation.",
+            },
+        )
+    if error.code == EMBEDDING_JOB_NOT_FOUND:
+        return HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Embedding job not found.",
+        )
+    if error.code in (EMBEDDING_JOB_WRONG_STATUS, EMBEDDING_MODEL_STATE_CONFLICT):
+        return HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error_code": error.code,
+                "message": "The embedding indexing operation cannot be retried in its current state.",
+            },
+        )
+    return HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="The embedding indexing operation could not be retried.",
+    )
+
+
 # ─── Endpoints ───────────────────────────────────────────────────────────────
 
 
@@ -301,14 +342,21 @@ def retry_failed_job(
 ):
     """Retry failed files from a terminal embedding job.
 
-    Creates a new ``retry_failed`` job containing only the source job's failed
-    files.  The source job is never modified.  Returns 409 if an active job
-    exists, the source content has changed, or the target is mismatched.
+    Creates a new ``retry_failed`` job containing the failed inventory. An
+    untouched enqueue failure whose frozen recipe is obsolete is replaced by a
+    fresh model-change job. Partially processed stale jobs continue to fail
+    closed with 409.
     """
     admin_id = _require_admin(user)
 
     # Verify source job belongs to this admin before attempting retry.
-    _get_job_for_admin(job_id, admin_id)
+    source_job = _get_job_for_admin(job_id, admin_id)
+    source_files = EmbeddingJobRepository.list_files(job_id)
+    enqueue_only_failure = bool(source_files) and all(
+        file.status == FILE_STATUS_PENDING for file in source_files
+    )
+
+    result_job = None
 
     try:
         with get_db() as db:
@@ -322,62 +370,72 @@ def retry_failed_job(
                 db=db,
             )
             db.commit()
-    except EmbeddingError as e:
-        if e.code in (EMBEDDING_JOB_ACTIVE_EXISTS, EMBEDDING_RETRY_ACTIVE_EXISTS):
-            detail = {
-                "error_code": e.code,
-                "message": "Another embedding indexing operation is already active.",
-            }
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=detail,
+            result_job = result.job
+    except EmbeddingError as error:
+        if error.code != EMBEDDING_REINDEX_SOURCE_CHANGED or not enqueue_only_failure:
+            raise _retry_http_error(error)
+
+        # No file was ever claimed, so no v1/v2 or old/new source projection can
+        # be mixed. Replace the untouched operation with a fresh current inventory.
+        try:
+            replacement, _ = request_model_change(
+                admin_id=admin_id,
+                target_model_id=source_job.embedding_model_id,
+                authenticated_user_id=admin_id,
+                config=request.app.state.config,
             )
-        if e.code == EMBEDDING_REINDEX_SOURCE_CHANGED:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={
-                    "error_code": e.code,
-                    "message": "Source content or preparation settings changed. Start a fresh model-change operation.",
-                },
-            )
-        if e.code == EMBEDDING_JOB_NOT_FOUND:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Embedding job not found.",
-            )
-        if e.code in (EMBEDDING_JOB_WRONG_STATUS, EMBEDDING_MODEL_STATE_CONFLICT):
+        except EmbeddingError as replacement_error:
+            raise _retry_http_error(replacement_error)
+        if not isinstance(replacement, ModelChangeResult):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={
-                    "error_code": e.code,
-                    "message": "The embedding indexing operation cannot be retried in its current state.",
+                    "error_code": EMBEDDING_MODEL_STATE_CONFLICT,
+                    "message": "The indexing operation no longer requires a retry.",
                 },
             )
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="The embedding indexing operation could not be retried.",
+        result_job = EmbeddingJobRepository.get_job(replacement.job_id)
+        if result_job is None:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="The replacement indexing job could not be loaded.",
+            )
+        from open_webui.config import invalidate_user_scoped_config_cache
+
+        invalidate_user_scoped_config_cache(
+            user.email,
+            "rag.embedding_model_user",
+        )
+        log.info(
+            "[RETRY] Replaced untouched stale job %s with fresh job %s",
+            job_id,
+            result_job.id,
         )
 
     # Enqueue the job.  On failure, mark the job as failed so it does not
     # remain stuck as queued.
     try:
-        dispatch_mode = dispatch_embedding_job(result.job.id, background_tasks)
+        dispatch_mode = (
+            dispatch_embedding_job(result_job.id, background_tasks)
+            if result_job.status in ("queued", "processing")
+            else "background"
+        )
     except Exception as e:
         log.error(
             "[RETRY] Failed to enqueue job %s | type=%s",
-            result.job.id,
+            result_job.id,
             type(e).__name__,
         )
         try:
             EmbeddingJobRepository.mark_job_failed(
-                job_id=result.job.id,
+                job_id=result_job.id,
                 error_code="enqueue_failed",
                 error_message=f"Failed to enqueue retry job: {type(e).__name__}",
             )
         except Exception as persist_err:
             log.error(
                 "[RETRY] Failed to mark job %s after enqueue error | type=%s",
-                result.job.id,
+                result_job.id,
                 type(persist_err).__name__,
             )
         raise HTTPException(
@@ -386,10 +444,10 @@ def retry_failed_job(
         )
 
     return RetryResponse(
-        job_id=result.job.id,
+        job_id=result_job.id,
         source_job_id=job_id,
-        job_type=result.job.job_type,
-        status=result.job.status,
-        total_files=result.job.total_files,
+        job_type=result_job.job_type,
+        status=result_job.status,
+        total_files=result_job.total_files,
         dispatch_mode=dispatch_mode,
     )
