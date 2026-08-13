@@ -1060,16 +1060,32 @@ def _fail_job_files_safe(job_id: str, error: EmbeddingError) -> None:
         db.commit()
 
 
-def _mark_job_failed_safe(job_id: str, error_code: str, error_message: str):
-    """Mark job as failed (Fix #7)."""
+def _invalidate_embedding_model_config(admin_id: str) -> None:
+    """Invalidate compatibility-config caches after an atomic rollback commits."""
     with get_db() as db:
-        EmbeddingJobRepository.mark_job_failed(
+        admin = db.query(User).filter(User.id == admin_id).first()
+    if admin is None:
+        return
+
+    from open_webui.config import invalidate_user_scoped_config_cache
+
+    invalidate_user_scoped_config_cache(admin.email, "rag.embedding_model_user")
+
+
+def _mark_job_failed_safe(job_id: str, error_code: str, error_message: str):
+    """Mark job failed and atomically restore compatibility config (Fix #7)."""
+    with get_db() as db:
+        job_view = EmbeddingJobRepository.mark_job_failed(
             job_id=job_id,
             error_code=error_code,
             error_message=error_message,
             db=db,
+            restore_previous_config=True,
         )
         db.commit()
+
+    if job_view is not None and job_view.status == JOB_STATUS_FAILED:
+        _invalidate_embedding_model_config(job_view.admin_id)
 
 
 def _finalize_job_safe(job_id: str):
@@ -1127,7 +1143,7 @@ def _finalize_job_safe(job_id: str):
                     db=db,
                 )
 
-                EmbeddingJobRepository.finalize_job_success(
+                finalized = EmbeddingJobRepository.finalize_job_success(
                     job_id=job_id,
                     admin_id=admin_id,
                     target_model_id=target_model_id,
@@ -1137,10 +1153,17 @@ def _finalize_job_safe(job_id: str):
                     db=db,
                 )
             else:
-                # Partial/failure finalization: set terminal status, no promotion
-                EmbeddingJobRepository.finalize_job(job_id=job_id, db=db)
+                # Partial/failure finalization: set terminal status and restore
+                # compatibility config in the same transaction; no promotion.
+                finalized = EmbeddingJobRepository.finalize_job(job_id=job_id, db=db)
 
             db.commit()
+
+        if finalized is not None and finalized.status in (
+            JOB_STATUS_FAILED,
+            JOB_STATUS_PARTIALLY_FAILED,
+        ):
+            _invalidate_embedding_model_config(admin_id)
 
         log.info(f"[EMBEDDING_WORKER] Finalized job {job_id}")
 
