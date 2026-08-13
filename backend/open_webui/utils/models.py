@@ -2,6 +2,7 @@ import asyncio
 import json
 import time
 import logging
+import re
 import sys
 import threading
 from contextlib import nullcontext
@@ -136,6 +137,70 @@ def get_affected_user_ids_for_model(model) -> list:
 logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["MAIN"])
+
+
+_OPENAI_GPT_4O_VISION_PATTERN = re.compile(
+    r"(?:^|[./@])gpt-4o(?:-mini)?(?:$|[-./@])",
+    re.IGNORECASE,
+)
+_OPENAI_NON_VISION_VARIANTS = (
+    "-audio",
+    "-realtime",
+    "-transcribe",
+    "-tts",
+)
+
+
+def model_supports_vision(model: dict) -> bool:
+    """Resolve answer-model vision support from metadata, then known model IDs.
+
+    Explicit model metadata remains authoritative. The fallback covers raw
+    Portkey manifold entries, which carry the routed GPT-4o model ID but no
+    ``info.meta.capabilities`` record.
+    """
+    if not isinstance(model, dict):
+        return False
+
+    info = model.get("info") if isinstance(model.get("info"), dict) else {}
+    meta = info.get("meta") if isinstance(info.get("meta"), dict) else {}
+    capabilities = (
+        meta.get("capabilities")
+        if isinstance(meta.get("capabilities"), dict)
+        else {}
+    )
+    explicit_vision = capabilities.get("vision")
+    if isinstance(explicit_vision, bool):
+        return explicit_vision
+
+    identifiers = (model.get("id"), info.get("base_model_id"))
+    for identifier in identifiers:
+        normalized = str(identifier or "").strip().lower()
+        if not normalized or any(
+            variant in normalized for variant in _OPENAI_NON_VISION_VARIANTS
+        ):
+            continue
+        if _OPENAI_GPT_4O_VISION_PATTERN.search(normalized):
+            return True
+    return False
+
+
+def _add_inferred_model_capabilities(model: dict) -> None:
+    """Expose inferred capabilities to both the API response and chat cache."""
+    if not model_supports_vision(model):
+        return
+    info = model.get("info")
+    if not isinstance(info, dict):
+        info = {}
+        model["info"] = info
+    meta = info.get("meta")
+    if not isinstance(meta, dict):
+        meta = {}
+        info["meta"] = meta
+    capabilities = meta.get("capabilities")
+    if not isinstance(capabilities, dict):
+        capabilities = {}
+        meta["capabilities"] = capabilities
+    capabilities.setdefault("vision", True)
 
 
 async def get_all_base_models(request: Request, user: UserModel = None):
@@ -351,6 +416,7 @@ async def get_all_models(request, user: UserModel = None):
     current_user_email = user.email if user else None
 
     for model in models:
+        _add_inferred_model_capabilities(model)
         action_ids = [
             action_id
             for action_id in list(set(model.pop("action_ids", []) + global_action_ids))

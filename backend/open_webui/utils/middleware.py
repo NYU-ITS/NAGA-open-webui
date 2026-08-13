@@ -21,7 +21,7 @@ import atexit
 
 from fastapi import Request
 
-from open_webui.utils.models import get_models_for_user
+from open_webui.utils.models import get_models_for_user, model_supports_vision
 
 from open_webui.env import RAG_THREAD_POOL_SIZE
 
@@ -944,10 +944,7 @@ async def process_chat_payload(request, form_data, metadata, user, model):
     else:
         log.info("Using Custom RAG")
 
-    capabilities = model.get("info", {}).get("meta", {}).get("capabilities", {})
-    vision_enabled = bool(
-        isinstance(capabilities, dict) and capabilities.get("vision") is True
-    )
+    vision_enabled = model_supports_vision(model)
     if not vision_enabled and any(
         isinstance(item, dict) and item.get("type") == "image"
         for item in (metadata.get("files") or [])
