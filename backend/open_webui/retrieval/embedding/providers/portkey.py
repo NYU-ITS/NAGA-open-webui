@@ -122,8 +122,12 @@ class PortkeyEmbeddingProvider:
     ) -> Sequence[Sequence[float]]:
         """Embed mixed text/image inputs while preserving their logical order.
 
-        Text inputs are sent in one request. Vertex multimodal embeddings accept
-        one image instance per request, so images are deliberately serialized.
+        The approved Vertex multimodal gateway contract returns one embedding
+        per request, even when ``input`` contains multiple text entries. Send
+        every logical text or image input separately and restore the caller's
+        original order. One HTTP session retains connection reuse without
+        persisting credentials or provider responses.
+
         Base64 encoding is confined to this adapter and never leaves it in an
         exception or durable record.
         """
@@ -145,50 +149,40 @@ class PortkeyEmbeddingProvider:
 
         ordered: list[Sequence[float] | None] = [None] * len(inputs)
         try:
-            if indexed_texts:
-                text_vectors = self._post_embeddings(
-                    {
-                        "model": model.model_name,
-                        "input": [item.text for _, item in indexed_texts],
-                        "dimensions": model.dimension,
-                        "encoding_format": "float",
-                    },
-                    expected_modality="text",
-                )
-                if len(text_vectors) != len(indexed_texts):
-                    raise EmbeddingError(
-                        EMBEDDING_PROVIDER_FAILED,
-                        detail="The embedding provider returned an unexpected number of vectors.",
+            with requests.Session() as session:
+                for index, item in indexed_texts:
+                    ordered[index] = self._post_single_embedding(
+                        session,
+                        {
+                            "model": model.model_name,
+                            "input": [item.text],
+                            "dimensions": model.dimension,
+                            "encoding_format": "float",
+                        },
+                        expected_modality="text",
                     )
-                for (index, _), vector in zip(indexed_texts, text_vectors):
-                    ordered[index] = vector
 
-            for index, item in indexed_images:
-                image_vectors = self._post_embeddings(
-                    {
-                        "model": model.model_name,
-                        "input": [
-                            {
-                                "text": "",
-                                "image": {
-                                    "base64": base64.b64encode(item.image).decode(
-                                        "ascii"
-                                    ),
-                                    "mimeType": item.mime_type,
-                                },
-                            }
-                        ],
-                        "dimensions": model.dimension,
-                        "encoding_format": "float",
-                    },
-                    expected_modality="image",
-                )
-                if len(image_vectors) != 1:
-                    raise EmbeddingError(
-                        EMBEDDING_PROVIDER_FAILED,
-                        detail="The embedding provider returned an unexpected number of vectors.",
+                for index, item in indexed_images:
+                    ordered[index] = self._post_single_embedding(
+                        session,
+                        {
+                            "model": model.model_name,
+                            "input": [
+                                {
+                                    "text": "",
+                                    "image": {
+                                        "base64": base64.b64encode(item.image).decode(
+                                            "ascii"
+                                        ),
+                                        "mimeType": item.mime_type,
+                                    },
+                                }
+                            ],
+                            "dimensions": model.dimension,
+                            "encoding_format": "float",
+                        },
+                        expected_modality="image",
                     )
-                ordered[index] = image_vectors[0]
 
             if any(vector is None for vector in ordered):
                 raise EmbeddingError(
@@ -201,13 +195,34 @@ class PortkeyEmbeddingProvider:
         except Exception as error:
             self._raise_provider_failure(model, error)
 
+    def _post_single_embedding(
+        self,
+        session: requests.Session,
+        payload: dict[str, Any],
+        *,
+        expected_modality: str,
+    ) -> Sequence[float]:
+        vectors = self._post_embeddings(
+            payload,
+            expected_modality=expected_modality,
+            session=session,
+        )
+        if len(vectors) != 1:
+            raise EmbeddingError(
+                EMBEDDING_PROVIDER_FAILED,
+                detail="The embedding provider returned an unexpected number of vectors.",
+            )
+        return vectors[0]
+
     def _post_embeddings(
         self,
         payload: dict[str, Any],
         *,
         expected_modality: str,
+        session: requests.Session | None = None,
     ) -> list[Sequence[float]]:
-        response = requests.post(
+        requester = session or requests
+        response = requester.post(
             f"{self._base_url.rstrip('/')}/embeddings",
             headers={
                 "Authorization": f"Bearer {self._credential}",
