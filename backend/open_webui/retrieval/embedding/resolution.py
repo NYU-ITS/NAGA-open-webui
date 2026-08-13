@@ -363,6 +363,34 @@ def resolve_model_space_for_knowledge(knowledge_id: str, config) -> tuple[str, s
     return (admin.id, model.id)
 
 
+def _assert_knowledge_read_access(knowledge_id: str, requesting_user_id: str) -> None:
+    """Fail closed unless the requester may read the knowledge base."""
+    from open_webui.models.knowledge import Knowledges
+    from open_webui.utils.access_control import has_access
+    from open_webui.utils.workspace_access import item_assigned_to_user_groups
+
+    knowledge = Knowledges.get_knowledge_by_id(knowledge_id)
+    requesting_user = Users.get_user_by_id(requesting_user_id)
+    if knowledge is None or requesting_user is None:
+        raise EmbeddingError(
+            EMBEDDING_ADMIN_UNRESOLVED,
+            detail=f"Knowledge {knowledge_id} not found or inaccessible.",
+        )
+
+    if (
+        requesting_user.role == "admin"
+        or knowledge.user_id == requesting_user_id
+        or has_access(requesting_user_id, "read", knowledge.access_control)
+        or item_assigned_to_user_groups(requesting_user_id, knowledge, "read")
+    ):
+        return
+
+    raise EmbeddingError(
+        EMBEDDING_ADMIN_UNRESOLVED,
+        detail=f"Knowledge {knowledge_id} not found or inaccessible.",
+    )
+
+
 def assert_single_model_space(
     requesting_user_id: str,
     knowledge_ids,
@@ -392,6 +420,7 @@ def assert_single_model_space(
     effective = (admin.id, model.id)
 
     for knowledge_id in knowledge_ids or []:
+        _assert_knowledge_read_access(knowledge_id, requesting_user_id)
         space = resolve_model_space_for_knowledge(knowledge_id, config)
         if space != effective:
             raise EmbeddingError(

@@ -138,8 +138,8 @@ def _request_target(
     is left unchanged.
 
     When *replace_existing* is True the caller has already validated that the
-    existing target's job is terminal-failed and a different target is being
-    requested, so the pending target may be overwritten.
+    existing target's job is terminal-failed, so the pending target may be
+    overwritten by a freshly inventoried operation for either target.
     """
     admin = resolve_admin_for_admin_id(admin_id)
     target = get_model_spec_by_id(target_model_id)  # NOT_CONFIGURED / DISABLED
@@ -229,6 +229,36 @@ def _promote_target(
     return _to_view(row)
 
 
+def _clear_failed_target(
+    db,
+    admin_id: str,
+    expected_job_id: str | None,
+) -> AdminEmbeddingModelStateView:
+    """Clear a terminal failed target while preserving the active model.
+
+    The failed job remains in the job ledger, but it must no longer be the
+    state's readiness pointer or retrieval would continue to fail closed after
+    the target has been abandoned.
+    """
+    row = (
+        db.query(AdminEmbeddingModelState)
+        .filter_by(admin_id=admin_id)
+        .with_for_update()
+        .first()
+    )
+    if (
+        row is None
+        or row.target_embedding_model_id is None
+        or row.latest_embedding_job_id != expected_job_id
+    ):
+        raise EmbeddingError(EMBEDDING_MODEL_STATE_CONFLICT)
+    row.target_embedding_model_id = None
+    row.latest_embedding_job_id = None
+    row.updated_at = _now()
+    db.flush()
+    return _to_view(row)
+
+
 class AdminEmbeddingModelStateRepository:
     """Transactional, admin-scoped embedding model state manager."""
 
@@ -298,8 +328,8 @@ class AdminEmbeddingModelStateRepository:
         replayed operation cannot be silently overwritten.
 
         When *replace_existing* is True the caller has already validated that
-        the existing target's job is terminal-failed and a different target is
-        being requested, so the pending target may be overwritten.
+        the existing target's job is terminal-failed, so the pending target may
+        be overwritten by a freshly inventoried operation for either target.
         """
         if db is None:
             with get_db() as session:
@@ -332,6 +362,24 @@ class AdminEmbeddingModelStateRepository:
                 session.commit()
                 return view
         return _promote_target(db, admin_id, expected_job_id)
+
+    @staticmethod
+    def clear_failed_target(
+        admin_id: str,
+        expected_job_id: str | None,
+        db=None,
+    ) -> AdminEmbeddingModelStateView:
+        """Abandon a terminal failed target without changing the active model."""
+        if db is None:
+            with get_db() as session:
+                view = _clear_failed_target(
+                    session,
+                    admin_id,
+                    expected_job_id,
+                )
+                session.commit()
+                return view
+        return _clear_failed_target(db, admin_id, expected_job_id)
 
     @staticmethod
     def record_failure(

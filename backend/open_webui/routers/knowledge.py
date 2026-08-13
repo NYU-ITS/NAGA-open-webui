@@ -1,5 +1,7 @@
-from typing import List, Optional
-from pydantic import BaseModel
+from io import BytesIO
+from typing import List, Literal, Optional
+
+from pydantic import BaseModel, Field
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, Request, UploadFile, File
 import logging
 
@@ -7,6 +9,7 @@ from open_webui.models.knowledge import (
     Knowledge,
     Knowledges,
     KnowledgeForm,
+    KnowledgeModel,
     KnowledgeResponse,
     KnowledgeUserResponse,
 )
@@ -17,18 +20,18 @@ from open_webui.retrieval.embedding.knowledge_status import (
     build_knowledge_indexing_statuses,
 )
 from open_webui.models.files import Files, FileModel, FileModelResponse
-from open_webui.retrieval.vector.connector import VECTOR_DB_CLIENT
 from open_webui.routers.retrieval import (
     process_file,
     ProcessFileForm,
     process_files_batch,
     BatchProcessFilesForm,
+    BatchProcessFilesResult,
 )
 from open_webui.utils.job_queue import is_job_queue_available
 from open_webui.storage.provider import Storage
 from open_webui.routers.audio import transcribe
 from open_webui.utils.file_cleanup import (
-    cleanup_file_completely,
+    cleanup_knowledge_collection,
     cleanup_file_from_knowledge_only,
 )
 
@@ -197,10 +200,11 @@ async def get_knowledge(user=Depends(get_verified_user)):
     
     # Batch update knowledge bases with missing files removed
     for kb_update in knowledge_bases_to_update:
-        data = kb_update["knowledge_base"].data or {}
         file_ids = [fid for fid in kb_update["file_ids"] if fid not in kb_update["missing_files"]]
-        data["file_ids"] = file_ids
-        Knowledges.update_knowledge_data_by_id(id=kb_update["knowledge_base"].id, data=data)
+        Knowledges.remove_files_from_knowledge_by_id(
+            id=kb_update["knowledge_base"].id,
+            file_ids=kb_update["missing_files"],
+        )
         
         # Update the response with corrected files
         for kb_response in knowledge_with_files:
@@ -273,10 +277,11 @@ async def get_knowledge_list(user=Depends(get_verified_user)):
     
     # Batch update knowledge bases with missing files removed
     for kb_update in knowledge_bases_to_update:
-        data = kb_update["knowledge_base"].data or {}
         file_ids = [fid for fid in kb_update["file_ids"] if fid not in kb_update["missing_files"]]
-        data["file_ids"] = file_ids
-        Knowledges.update_knowledge_data_by_id(id=kb_update["knowledge_base"].id, data=data)
+        Knowledges.remove_files_from_knowledge_by_id(
+            id=kb_update["knowledge_base"].id,
+            file_ids=kb_update["missing_files"],
+        )
         
         # Update the response with corrected files
         for kb_response in knowledge_with_files:
@@ -403,8 +408,15 @@ async def create_new_knowledge(
 ############################
 
 
-class KnowledgeFilesResponse(KnowledgeResponse):
-    files: list[FileModel]
+class KnowledgeFilesWarning(BaseModel):
+    code: Literal["file_processing_partial_failure"]
+    message: str
+
+
+class KnowledgeFilesResponse(KnowledgeModel):
+    files: list[FileModelResponse]
+    warnings: list[KnowledgeFilesWarning] = Field(default_factory=list)
+    failures: list[BatchProcessFilesResult] = Field(default_factory=list)
 
 
 # @router.get("/{id}", response_model=Optional[KnowledgeFilesResponse])
@@ -570,6 +582,48 @@ async def add_file_to_knowledge_by_id(
     filename = os.path.basename(unsanitized_filename)
     file_id = str(uuid.uuid4())
     name = filename
+
+    from open_webui.retrieval.embedding.errors import (
+        EMBEDDING_IMAGE_FORMAT_UNSUPPORTED,
+        FILE_PROCESSING_FAILED,
+        EmbeddingError,
+        safe_file_processing_error_message,
+    )
+    from open_webui.retrieval.embedding.preparation import (
+        UploadByteLimitExceededError,
+        canonical_upload_content_type,
+        read_upload_bytes,
+    )
+
+    try:
+        max_size_mb = request.app.state.config.FILE_MAX_SIZE
+    except (AttributeError, KeyError):
+        max_size_mb = None
+    try:
+        upload_bytes = read_upload_bytes(file, max_size_mb)
+    except UploadByteLimitExceededError as error:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=ERROR_MESSAGES.FILE_TOO_LARGE(size=f"{error.max_size_mb}MB"),
+        ) from None
+    try:
+        upload_content_type = canonical_upload_content_type(
+            upload_bytes,
+            filename,
+            file.content_type,
+        )
+    except EmbeddingError as error:
+        raise HTTPException(
+            status_code=(
+                status.HTTP_415_UNSUPPORTED_MEDIA_TYPE
+                if error.code == EMBEDDING_IMAGE_FORMAT_UNSUPPORTED
+                else status.HTTP_400_BAD_REQUEST
+            ),
+            detail={
+                "code": error.code,
+                "message": safe_file_processing_error_message(error.code),
+            },
+        )
     
     # Create OTEL span for file upload
     # CRITICAL: Use safe_trace_span_async to ensure OTEL failures never prevent file uploads
@@ -578,7 +632,7 @@ async def add_file_to_knowledge_by_id(
         attributes={
             "file.id": file_id,
             "file.name": name,
-            "file.content_type": file.content_type,
+            "file.content_type": upload_content_type,
             "knowledge.id": id,
             "user.id": str(user.id) if user else None,
         },
@@ -587,12 +641,14 @@ async def add_file_to_knowledge_by_id(
             safe_add_span_event("file.upload.started", {"file_id": file_id, "filename": name})
             
             filename = f"{file_id}_{filename}"
-            contents, file_path = Storage.upload_file(file.file, filename)
+            contents, file_path = Storage.upload_file(
+                BytesIO(upload_bytes), filename
+            )
             
             # Update span with file size after upload
             safe_set_span_attribute(span, "file.size", len(contents))
             
-            safe_add_span_event("file.upload.stored", {"file_path": file_path, "file_size": len(contents)})
+            safe_add_span_event("file.upload.stored", {"file_size": len(contents)})
 
             file_item = Files.insert_new_file(
                 user.id,
@@ -603,20 +659,47 @@ async def add_file_to_knowledge_by_id(
                         "path": file_path,
                         "meta": {
                             "name": name,
-                            "content_type": file.content_type,
+                            "content_type": upload_content_type,
                             "size": len(contents),
                             "data": file_metadata,
+                            "processing_error_code": None,
+                            "processing_warnings": [],
+                            "visual_summary": {
+                                "figure_count": 0,
+                                "table_image_count": 0,
+                                "image_chunk_count": 0,
+                                "text_chunk_count": 0,
+                            },
                         },
                     }
                 ),
             )
+
+            if file_item is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=ERROR_MESSAGES.DEFAULT("Error uploading file"),
+                )
+
+            # Persist membership before dispatch. RQ can start immediately, so
+            # the processing worker must never rely on a membership that the
+            # request intends to write only after enqueueing.
+            updated_knowledge = Knowledges.add_files_to_knowledge_by_id(
+                id=id,
+                file_ids=[file_id],
+            )
+            if updated_knowledge is None:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Failed to update knowledge base metadata.",
+                )
 
             # Process file in background
             # Use job queue if available (distributed processing), otherwise use BackgroundTasks
             job_id = None
             if background_tasks or is_job_queue_available():
                 try:
-                    if file.content_type in [
+                    if upload_content_type in [
                         "audio/mpeg",
                         "audio/wav",
                         "audio/ogg",
@@ -645,11 +728,15 @@ async def add_file_to_knowledge_by_id(
                         )
                     safe_add_span_event("file.upload.queued", {"file_id": file_id})
                 except Exception as e:
-                    log.exception(e)
+                    log.error(
+                        "Background processing dispatch failed for file %s (%s)",
+                        file_id,
+                        type(e).__name__,
+                    )
                     log.error(f"Error starting background processing for file: {file_id}")
                     safe_add_span_event("file.upload.queue_failed", {
                         "file_id": file_id,
-                        "error": str(e)[:200]
+                        "error_type": type(e).__name__,
                     })
                     # Mark file as error since background task failed to start
                     try:
@@ -657,91 +744,44 @@ async def add_file_to_knowledge_by_id(
                             file_id,
                             {
                                 "processing_status": "error",
-                                "processing_error": f"Failed to start background processing: {str(e)}",
+                                "processing_error_code": FILE_PROCESSING_FAILED,
+                                "processing_error": safe_file_processing_error_message(
+                                    FILE_PROCESSING_FAILED
+                                ),
                             },
                         )
                     except Exception as update_error:
                         log.exception(f"Failed to update file status after background task error: {update_error}")
                     # Continue anyway - file is uploaded, user can retry processing manually
             
-            # Get file item to return
-            file_item = Files.get_file_by_id(id=file_id)
-
-            # Update knowledge base metadata
-            # Note: File is added to knowledge base immediately, but processing happens in background.
-            # The file will have processing_status="pending" or "processing" until embeddings are generated.
-            # This is acceptable - the file appears in the knowledge base UI but may not be ready for use
-            # until processing completes. Frontend should check processing_status before using files.
-            if file_item:
-                # Re-fetch knowledge to get latest state (avoid race conditions)
-                knowledge = Knowledges.get_knowledge_by_id(id=id)
-                if not knowledge:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=ERROR_MESSAGES.NOT_FOUND,
-                    )
-                
-                log.info(f"Adding file {file_id} to knowledge {id} by user {user.id} (email: {user.email})")
-                log.info(f"Knowledge owner: {knowledge.user_id}, current data: {knowledge.data}")
-                
-                # Ensure data is initialized properly
-                data = knowledge.data if knowledge.data is not None else {}
-                if not isinstance(data, dict):
-                    data = {}
-                file_ids = data.get("file_ids", [])
-                if not isinstance(file_ids, list):
-                    file_ids = []
-
-                # Add file_id if not already present (avoid duplicates)
-                if file_id not in file_ids:
-                    file_ids.append(file_id)
-                data["file_ids"] = file_ids
-
-                log.info(f"Updating knowledge {id} with data: {data}")
-
-                # Update knowledge base with new file_ids
-                updated_knowledge = Knowledges.update_knowledge_data_by_id(id=id, data=data)
-
-                if not updated_knowledge:
-                    log.error(f"Failed to update knowledge {id} with file {file_id} for user {user.id} (email: {user.email})")
-                    raise HTTPException(
-                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        detail="Failed to update knowledge base metadata. File was uploaded but may not appear in the UI.",
-                    )
-                
-                log.info(f"Update returned knowledge {id} with data: {updated_knowledge.data}")
-                
-                # Verify the update succeeded by checking file_id is in the response
-                if updated_knowledge.data and file_id in updated_knowledge.data.get("file_ids", []):
-                    files = Files.get_files_by_ids(updated_knowledge.data.get("file_ids", []))
-
-                    log.info(f"Successfully updated knowledge {id}: file {file_id} is in file_ids list")
-                    safe_add_span_event("file.upload.completed", {"file_id": file_id, "knowledge_id": id})
-                    return KnowledgeFilesResponse(
-                        **updated_knowledge.model_dump(),
-                        files=files,
-                    )
-                else:
-                    log.error(f"File {file_id} not found in updated knowledge {id} data. Updated data: {updated_knowledge.data}")
-                    raise HTTPException(
-                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        detail="File was uploaded but failed to update knowledge base metadata.",
-                    )
-            else:
+            updated_knowledge = Knowledges.get_knowledge_by_id(id=id)
+            if updated_knowledge is None:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=ERROR_MESSAGES.DEFAULT("Error uploading file"),
+                    detail=ERROR_MESSAGES.NOT_FOUND,
                 )
+            files = Files.get_files_by_ids(
+                (updated_knowledge.data or {}).get("file_ids", [])
+            )
+            safe_add_span_event(
+                "file.upload.completed",
+                {"file_id": file_id, "knowledge_id": id},
+            )
+            return KnowledgeFilesResponse(
+                **updated_knowledge.model_dump(),
+                files=files,
+            )
 
+        except HTTPException:
+            raise
         except Exception as e:
-            log.exception(e)
+            log.error("Knowledge file upload failed (%s)", type(e).__name__)
             safe_add_span_event("file.upload.error", {
                 "error.type": type(e).__name__,
-                "error.message": str(e)[:200],
             })
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=ERROR_MESSAGES.DEFAULT(e),
+                detail=ERROR_MESSAGES.DEFAULT("Error uploading file"),
             )
 
 
@@ -778,12 +818,17 @@ def update_file_from_knowledge_by_id(
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
 
-    # Remove content from the vector database
-    VECTOR_DB_CLIENT.delete(
-        collection_name=knowledge.id, filter={"file_id": form_data.file_id}
-    )
+    data = knowledge.data if isinstance(knowledge.data, dict) else {}
+    file_ids = data.get("file_ids", [])
+    if not isinstance(file_ids, list) or form_data.file_id not in file_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.DEFAULT("File is not in this knowledge collection"),
+        )
 
-    # Add content to the vector database (in background)
+    # Reconcile the existing projection in the background. The model-aware
+    # ingestion transaction replaces current rows only after preparation and
+    # every embedding succeed, so do not pre-delete the active projection.
     # Use job queue if available (distributed processing), otherwise use BackgroundTasks or synchronous
     if background_tasks or is_job_queue_available():
         # Process in background (uses job queue if available)
@@ -791,6 +836,7 @@ def update_file_from_knowledge_by_id(
             request,
             ProcessFileForm(file_id=form_data.file_id, collection_name=id),
             user=user,
+            knowledge_id=id,
             background_tasks=background_tasks,
         )
     else:
@@ -804,9 +850,6 @@ def update_file_from_knowledge_by_id(
         )
 
     if knowledge:
-        data = knowledge.data or {}
-        file_ids = data.get("file_ids", [])
-
         files = Files.get_files_by_ids(file_ids)
 
         return KnowledgeFilesResponse(
@@ -833,10 +876,9 @@ def remove_file_from_knowledge_by_id(
 ):
     """
     Remove a file from a knowledge collection.
-    
-    If the file is only in this knowledge collection, it will be completely deleted
-    (vector DB, SQL, physical file). If it's in multiple knowledge collections,
-    it will only be removed from this one.
+
+    This removes only the membership and its knowledge projection. The file
+    itself remains available until explicitly deleted through the file endpoint.
     """
     knowledge = Knowledges.get_knowledge_by_id(id=id)
     if not knowledge:
@@ -876,59 +918,22 @@ def remove_file_from_knowledge_by_id(
             detail=ERROR_MESSAGES.DEFAULT("File is not in this knowledge collection"),
         )
 
-    # Check if file is used in other knowledge collections
-    all_knowledge_bases = Knowledges.get_knowledge_bases_by_file_id(form_data.file_id)
-    other_knowledge_bases = [
-        kb for kb in all_knowledge_bases if kb.id != id
-    ]
-
-    if other_knowledge_bases:
-        # File is used in other knowledge collections, only remove from this one
-        log.info(
-            f"File {form_data.file_id} is used in {len(other_knowledge_bases)} other "
-            f"knowledge collections, removing from {id} only"
+    # Always remove only this membership. File lifecycle is independent of KB
+    # membership; an explicit file delete owns full cleanup. This avoids an
+    # unlocked last-reference decision racing a simultaneous add/remove.
+    success, details = cleanup_file_from_knowledge_only(form_data.file_id, id)
+    if not success:
+        log.error(
+            "Failed to remove file %s from knowledge collection %s",
+            form_data.file_id,
+            id,
         )
-        success, details = cleanup_file_from_knowledge_only(
-            form_data.file_id, id
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=ERROR_MESSAGES.DEFAULT(
+                "Error removing file from knowledge collection"
+            ),
         )
-        
-        if not success:
-            log.error(
-                f"Failed to remove file {form_data.file_id} from knowledge collection {id}: "
-                f"{details.get('errors', [])}"
-            )
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=ERROR_MESSAGES.DEFAULT(
-                    f"Error removing file from knowledge collection: {details.get('errors', [])}"
-                ),
-            )
-    else:
-        # File is only in this knowledge collection, do complete cleanup
-        log.info(
-            f"File {form_data.file_id} is only in knowledge collection {id}, "
-            f"performing complete cleanup"
-        )
-        # Don't exclude current knowledge base - we want to remove from everywhere
-        success, details = cleanup_file_completely(
-            file_id=form_data.file_id,
-            exclude_knowledge_id=None,  # Remove from all knowledge bases including this one
-            delete_physical_file=True,
-        )
-        
-        if not success:
-            log.error(
-                f"Failed to completely cleanup file {form_data.file_id}: "
-                f"{details.get('errors', [])}"
-            )
-            # Check if critical operations failed
-            if not details.get("sql_deleted") or not details.get("vector_db_cleaned"):
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=ERROR_MESSAGES.DEFAULT(
-                        f"Error deleting file: {details.get('errors', [])}"
-                    ),
-                )
 
     # Refresh knowledge base to get updated file list
     knowledge = Knowledges.get_knowledge_by_id(id=id)
@@ -1007,14 +1012,13 @@ async def delete_knowledge_by_id(id: str, user=Depends(get_verified_user)):
                 )
                 Models.update_model_by_id(model.id, model_form)
 
-    # Clean up vector DB
-    try:
-        VECTOR_DB_CLIENT.delete_collection(collection_name=id)
-    except Exception as e:
-        log.debug(e)
-        pass
-    result = Knowledges.delete_knowledge_by_id(id=id)
-    return result
+    result = cleanup_knowledge_collection(id, delete_knowledge=True)
+    if not result:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=ERROR_MESSAGES.DEFAULT("Knowledge base could not be deleted."),
+        )
+    return True
 
 
 ############################
@@ -1041,13 +1045,12 @@ async def reset_knowledge_by_id(id: str, user=Depends(get_verified_user)):
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
         )
 
-    try:
-        VECTOR_DB_CLIENT.delete_collection(collection_name=id)
-    except Exception as e:
-        log.debug(e)
-        pass
-
-    knowledge = Knowledges.update_knowledge_data_by_id(id=id, data={"file_ids": []})
+    if not cleanup_knowledge_collection(id):
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=ERROR_MESSAGES.DEFAULT("Knowledge base could not be reset."),
+        )
+    knowledge = Knowledges.get_knowledge_by_id(id=id)
 
     return knowledge
 
@@ -1094,7 +1097,27 @@ def add_files_to_knowledge_batch(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"File {form.file_id} not found",
             )
+        if user.role != "admin" and file.user_id != user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+            )
         files.append(file)
+
+    # Persist memberships before synchronous processing. The shared ingestion
+    # path accepts only current knowledge memberships, which prevents orphaned
+    # collection vectors if a request or worker races with metadata updates.
+    knowledge = Knowledges.add_files_to_knowledge_by_id(
+        id=id,
+        file_ids=[file.id for file in files],
+    )
+    if knowledge is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=ERROR_MESSAGES.DEFAULT("Knowledge membership could not be updated."),
+        )
+
+    existing_file_ids = list((knowledge.data or {}).get("file_ids", []))
 
     # Process files
     try:
@@ -1103,35 +1126,29 @@ def add_files_to_knowledge_batch(
             form_data=BatchProcessFilesForm(files=files, collection_name=id),
             user=user,
         )
-    except Exception as e:
+    except Exception as error:
         log.error(
-            f"add_files_to_knowledge_batch: Exception occurred: {e}", exc_info=True
+            "Knowledge batch processing failed | knowledge_id=%s | type=%s",
+            id,
+            type(error).__name__,
         )
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-
-    # Add successful files to knowledge base
-    data = knowledge.data or {}
-    existing_file_ids = data.get("file_ids", [])
-
-    # Only add files that were successfully processed
-    successful_file_ids = [r.file_id for r in result.results if r.status == "completed"]
-    for file_id in successful_file_ids:
-        if file_id not in existing_file_ids:
-            existing_file_ids.append(file_id)
-
-    data["file_ids"] = existing_file_ids
-    knowledge = Knowledges.update_knowledge_data_by_id(id=id, data=data)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.DEFAULT("Some files could not be processed."),
+        )
 
     # If there were any errors, include them in the response
     if result.errors:
-        error_details = [f"{err.file_id}: {err.error}" for err in result.errors]
         return KnowledgeFilesResponse(
             **knowledge.model_dump(),
             files=Files.get_files_by_ids(existing_file_ids),
-            warnings={
-                "message": "Some files failed to process",
-                "errors": error_details,
-            },
+            warnings=[
+                KnowledgeFilesWarning(
+                    code="file_processing_partial_failure",
+                    message="Some files could not be processed.",
+                )
+            ],
+            failures=result.errors,
         )
 
     return KnowledgeFilesResponse(

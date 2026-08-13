@@ -38,12 +38,14 @@ uploaded file when its ``type`` is not one of ``collection``/``web_search``/
 
 The result is sorted by ``file_id`` and every nested collection id is sorted,
 so persistence (Spec 03/04) produces a deterministic snapshot. ``ReindexFile``
-round-trips through JSON so the job repository can persist the snapshot
-including content hash and update timestamp (used by Spec 11's
+round-trips through JSON so the job repository can persist source freshness
+fields plus the canonical preparation recipe and its digest (used by Spec 11's
 ``REINDEX_SOURCE_CHANGED`` staleness check).
 """
 
+import hashlib
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -62,6 +64,16 @@ from open_webui.retrieval.embedding.errors import (
     EMBEDDING_INVENTORY_MISSING_FILE,
     EMBEDDING_INVENTORY_MALFORMED_REFERENCE,
 )
+from open_webui.retrieval.embedding.file_processing import (
+    CONTENT_ORIGIN_OVERRIDE,
+    CONTENT_ORIGIN_STORED_SOURCE,
+    read_stored_content_provenance,
+)
+from open_webui.retrieval.embedding.preparation import (
+    PreparationRecipe,
+    preparation_recipe_from_snapshot,
+)
+from open_webui.storage.provider import Storage
 
 log = logging.getLogger(__name__)
 
@@ -81,8 +93,10 @@ class ReindexFile:
     or provider details. ``knowledge_collection_ids`` are the knowledge base
     ids whose vector collections contain this file; the worker writes every
     knowledge collection plus ``file_collection_name`` (``file-{file_id}``).
-    ``content_hash`` and ``updated_at`` are captured at snapshot time so Spec
-    11 can detect stale source content.
+    ``content_hash``, ``updated_at``, and the non-PDF content-override origin
+    and digest are captured at snapshot time so Spec 11 can detect stale
+    source content. ``preparation_recipe`` freezes every extraction, render,
+    and chunking input needed to reproduce preparation.
     """
 
     file_id: str
@@ -90,20 +104,62 @@ class ReindexFile:
     knowledge_collection_ids: tuple[str, ...]
     file_collection_name: str
     admin_id: str
+    preparation_recipe: PreparationRecipe
     content_hash: Optional[str] = None
+    source_sha256: str = ""
+    content_origin: str = CONTENT_ORIGIN_STORED_SOURCE
+    content_override_sha256: Optional[str] = None
     updated_at: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.preparation_recipe, PreparationRecipe):
+            raise TypeError("reindex snapshots require a preparation recipe")
+        if (
+            not isinstance(self.source_sha256, str)
+            or len(self.source_sha256) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.source_sha256
+            )
+        ):
+            raise ValueError("reindex snapshots require a source SHA-256 digest")
+        if self.content_origin not in {
+            CONTENT_ORIGIN_STORED_SOURCE,
+            CONTENT_ORIGIN_OVERRIDE,
+        }:
+            raise ValueError("invalid reindex content origin")
+        if (
+            self.content_origin == CONTENT_ORIGIN_STORED_SOURCE
+            and self.content_override_sha256 is not None
+        ):
+            raise ValueError("stored-source snapshots cannot carry an override hash")
+        if self.content_origin == CONTENT_ORIGIN_OVERRIDE and (
+            not isinstance(self.content_override_sha256, str)
+            or len(self.content_override_sha256) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.content_override_sha256
+            )
+        ):
+            raise ValueError("override snapshots require a SHA-256 digest")
 
     def to_dict(self) -> dict[str, Any]:
         """Deterministic JSON-safe snapshot of this inventory item."""
-        return {
+        snapshot = {
             "file_id": self.file_id,
             "source_contexts": sorted(self.source_contexts),
             "knowledge_collection_ids": list(self.knowledge_collection_ids),
             "file_collection_name": self.file_collection_name,
             "admin_id": self.admin_id,
             "content_hash": self.content_hash,
+            "source_sha256": self.source_sha256,
+            "content_origin": self.content_origin,
+            "content_override_sha256": self.content_override_sha256,
             "updated_at": self.updated_at,
         }
+        snapshot["preparation_recipe"] = self.preparation_recipe.to_dict()
+        snapshot["preparation_recipe_sha256"] = self.preparation_recipe.sha256
+        return snapshot
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ReindexFile":
@@ -115,7 +171,14 @@ class ReindexFile:
             file_collection_name=data["file_collection_name"],
             admin_id=data["admin_id"],
             content_hash=data.get("content_hash"),
+            source_sha256=data.get("source_sha256"),
+            content_origin=data.get(
+                "content_origin",
+                CONTENT_ORIGIN_STORED_SOURCE,
+            ),
+            content_override_sha256=data.get("content_override_sha256"),
             updated_at=data.get("updated_at"),
+            preparation_recipe=preparation_recipe_from_snapshot(data),
         )
 
 
@@ -162,7 +225,12 @@ def build_reindex_admin_resolver(db) -> ReindexAdminResolver:
     )
 
 
-def build_reindex_inventory(admin_id: str, db=None) -> list[ReindexFile]:
+def build_reindex_inventory(
+    admin_id: str,
+    db=None,
+    *,
+    preparation_recipe: PreparationRecipe,
+) -> list[ReindexFile]:
     """Build the deterministic reindex inventory for one admin.
 
     Args:
@@ -170,6 +238,8 @@ def build_reindex_inventory(admin_id: str, db=None) -> list[ReindexFile]:
         db: Optional caller-owned session. When provided, all reads use that
             session and nothing is committed (read-only); otherwise a session
             is opened and closed here.
+        preparation_recipe: Canonical admin-scoped extraction and chunking
+            settings to persist identically on every file snapshot.
 
     Returns:
         Inventory items sorted by ``file_id``.
@@ -183,9 +253,9 @@ def build_reindex_inventory(admin_id: str, db=None) -> list[ReindexFile]:
     if db is None:
         with get_db() as session:
             _assert_admin(session, admin_id)
-            return _build_inventory(session, admin_id)
+            return _build_inventory(session, admin_id, preparation_recipe)
     _assert_admin(db, admin_id)
-    return _build_inventory(db, admin_id)
+    return _build_inventory(db, admin_id, preparation_recipe)
 
 
 def _assert_admin(db, admin_id: str) -> None:
@@ -552,7 +622,11 @@ def _iter_chat_refs(chat: Chat):
 # ──────────────────────────────────────────────────────────────────────
 
 
-def _build_inventory(db, admin_id: str) -> list[ReindexFile]:
+def _build_inventory(
+    db,
+    admin_id: str,
+    preparation_recipe: PreparationRecipe,
+) -> list[ReindexFile]:
     admin_resolver = build_reindex_admin_resolver(db)
     files_by_id = _load_files(db)
 
@@ -620,6 +694,22 @@ def _build_inventory(db, admin_id: str) -> list[ReindexFile]:
             )
 
         file_row = files_by_id[file_id]
+        try:
+            content_provenance = read_stored_content_provenance(file_row)
+        except ValueError:
+            raise EmbeddingError(
+                EMBEDDING_INVENTORY_MALFORMED_REFERENCE,
+                detail=f"File {file_id!r} has invalid content provenance.",
+            ) from None
+        source_sha256 = source_sha256_for_file(file_row)
+        if source_sha256 is None:
+            raise EmbeddingError(
+                EMBEDDING_INVENTORY_MISSING_FILE,
+                detail=(
+                    f"Referenced file {file_id!r} could not be read from storage "
+                    "while freezing the reindex inventory."
+                ),
+            )
         items.append(
             ReindexFile(
                 file_id=file_id,
@@ -628,7 +718,13 @@ def _build_inventory(db, admin_id: str) -> list[ReindexFile]:
                 file_collection_name=f"file-{file_id}",
                 admin_id=admin_id,
                 content_hash=file_row.hash,
+                source_sha256=source_sha256,
+                content_origin=content_provenance.origin,
+                content_override_sha256=(
+                    content_provenance.content_override_sha256
+                ),
                 updated_at=file_row.updated_at,
+                preparation_recipe=preparation_recipe,
             )
         )
 
@@ -640,3 +736,24 @@ def _build_inventory(db, admin_id: str) -> list[ReindexFile]:
         ", ".join(sorted({c for item in items for c in item.source_contexts})) or "none",
     )
     return items
+
+
+def source_sha256_for_file(file_row: File) -> Optional[str]:
+    """Hash the current original object addressed by a file row.
+
+    Never trust cached file metadata for freshness checks. The path may still
+    address different bytes even when ``meta.source_sha256`` has not changed.
+    """
+    if not file_row.path:
+        return None
+    try:
+        source_path = Storage.get_file(file_row.path)
+        if not source_path or not os.path.isfile(source_path):
+            return None
+        digest = hashlib.sha256()
+        with open(source_path, "rb") as source:
+            for block in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()
+    except Exception:
+        return None

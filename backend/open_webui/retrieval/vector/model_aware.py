@@ -4,9 +4,9 @@ Phase 3 of the multi-provider multimodal embedding plan. Routes an embedding
 model's dimension to its approved physical pgvector table and centralizes the
 provenance shape written alongside every vector.
 
-Today only the 1536-dimensional Portkey/OpenAI text model is registered, backed
-by the renamed ``embeddings_1536`` table (formerly ``document_chunk``). Adding a
-new dimension requires:
+The approved text-only and multimodal models both use 1536 dimensions, backed
+by the renamed ``embeddings_1536`` table (formerly ``document_chunk``). Adding
+a new dimension requires:
 
 1. an Alembic migration creating the ``embeddings_<dim>`` table with the same
    provenance columns, and
@@ -27,6 +27,7 @@ from typing import Optional, Sequence
 from open_webui.retrieval.embedding.inputs import EmbeddingModelSpec
 from open_webui.retrieval.embedding.errors import (
     EmbeddingError,
+    EMBEDDING_MODALITY_UNSUPPORTED,
     EMBEDDING_STORAGE_DIMENSION_UNSUPPORTED,
 )
 from open_webui.retrieval.vector.main import SearchResult, VectorItem
@@ -106,6 +107,7 @@ class ModelAwareVectorRepository:
         model: EmbeddingModelSpec,
         file_id: Optional[str],
         knowledge_id: Optional[str],
+        modalities: Optional[Sequence[str]] = None,
         modality: str = "text",
         embedding_status: str = VECTOR_STATUS_ACTIVE,
         embedding_job_id: Optional[str] = None,
@@ -126,29 +128,46 @@ class ModelAwareVectorRepository:
                 do not align in length.
         """
         assert_dimension_supported(model.dimension)
-        if not (len(texts) == len(vectors) == len(metadata) == len(rag_chunk_ids)):
+        if modalities is None:
+            modalities = [modality] * len(texts)
+        if not (
+            len(texts)
+            == len(vectors)
+            == len(metadata)
+            == len(rag_chunk_ids)
+            == len(modalities)
+        ):
             raise EmbeddingError(
                 EMBEDDING_STORAGE_DIMENSION_UNSUPPORTED,
-                detail="texts, vectors, metadata, and rag_chunk_ids must align in length.",
+                detail=(
+                    "texts, vectors, metadata, rag_chunk_ids, and modalities "
+                    "must align in length."
+                ),
             )
 
         items: list[VectorItem] = []
-        for text, vector, meta, rag_chunk_id in zip(
-            texts, vectors, metadata, rag_chunk_ids
+        for text, vector, meta, rag_chunk_id, item_modality in zip(
+            texts, vectors, metadata, rag_chunk_ids, modalities
         ):
+            if item_modality not in {"text", "image"}:
+                raise EmbeddingError(EMBEDDING_MODALITY_UNSUPPORTED)
             items.append(
                 {
                     "id": str(uuid.uuid4()),
                     "text": text,
                     "vector": vector,
-                    "metadata": meta,
+                    "metadata": {
+                        **meta,
+                        "rag_chunk_id": rag_chunk_id,
+                        "modality": item_modality,
+                    },
                     # Model-aware provenance (no credentials, no PII).
                     "admin_id": admin_id,
                     "embedding_model_id": model.id,
                     "file_id": file_id,
                     "knowledge_id": knowledge_id,
                     "rag_chunk_id": rag_chunk_id,
-                    "modality": modality,
+                    "modality": item_modality,
                     "embedding_status": embedding_status,
                     "embedding_job_id": embedding_job_id,
                 }
@@ -184,6 +203,31 @@ class ModelAwareVectorRepository:
             )
         client.reconcile_model_aware(
             collection_name=collection_name, items=list(items)
+        )
+
+    def reconcile_model_aware_many(
+        self,
+        *,
+        projections: Sequence[tuple[str, Sequence[VectorItem]]],
+        model: EmbeddingModelSpec,
+        session=None,
+    ) -> None:
+        """Atomically reconcile all collection projections for a file."""
+        collection_names = [name for name, _ in projections]
+        if len(collection_names) != len(set(collection_names)):
+            raise EmbeddingError(EMBEDDING_STORAGE_DIMENSION_UNSUPPORTED)
+        client = self._client_for(model.dimension)
+        if not hasattr(client, "reconcile_model_aware_many"):
+            raise EmbeddingError(
+                EMBEDDING_STORAGE_DIMENSION_UNSUPPORTED,
+                detail=(
+                    f"Vector client {type(client).__name__} does not support "
+                    "multi-projection reconcile."
+                ),
+            )
+        client.reconcile_model_aware_many(
+            [(name, list(items)) for name, items in projections],
+            session=session,
         )
 
     def activate_target_vectors(
@@ -247,6 +291,25 @@ class ModelAwareVectorRepository:
             embedding_model_id=model.id,
             from_status=VECTOR_STATUS_ACTIVE,
             to_status="inactive",
+            session=session,
+        )
+
+    def get_job_vector_manifest(
+        self,
+        *,
+        admin_id: str,
+        model: EmbeddingModelSpec,
+        job_id: str,
+        session=None,
+    ) -> dict[tuple[str, str], tuple[str, ...]]:
+        """Return exact building chunk identities for a durable reindex job."""
+        client = self._client_for(model.dimension)
+        if not hasattr(client, "get_job_vector_manifest"):
+            raise EmbeddingError(EMBEDDING_STORAGE_DIMENSION_UNSUPPORTED)
+        return client.get_job_vector_manifest(
+            admin_id=admin_id,
+            embedding_model_id=model.id,
+            job_id=job_id,
             session=session,
         )
 

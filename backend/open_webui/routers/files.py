@@ -1,6 +1,7 @@
 import logging
 import os
 import uuid
+from io import BytesIO
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
@@ -11,10 +12,11 @@ from open_webui.constants import ERROR_MESSAGES
 from open_webui.env import SRC_LOG_LEVELS
 from open_webui.models.files import (
     FileForm,
-    FileModel,
     FileModelResponse,
     Files,
+    sanitize_public_visual_summary,
 )
+from open_webui.models.knowledge import Knowledges
 from open_webui.routers.retrieval import ProcessFileForm, process_file
 from open_webui.utils.job_queue import is_job_queue_available
 from open_webui.routers.audio import transcribe
@@ -28,6 +30,14 @@ log.setLevel(SRC_LOG_LEVELS["MODELS"])
 
 
 router = APIRouter()
+
+
+def _can_read_file(user, file) -> bool:
+    if file is None:
+        return False
+    if user.role == "admin" or file.user_id == user.id:
+        return True
+    return Knowledges.user_has_read_access_to_file(user.id, file.id)
 
 ############################
 # Upload File
@@ -47,11 +57,44 @@ def upload_file(
         unsanitized_filename = file.filename
         filename = os.path.basename(unsanitized_filename)
 
+        from open_webui.retrieval.embedding.errors import (
+            EmbeddingError,
+            FILE_PROCESSING_FAILED,
+            safe_file_processing_error_message,
+        )
+        from open_webui.retrieval.embedding.preparation import (
+            UploadByteLimitExceededError,
+            canonical_upload_content_type,
+            read_upload_bytes,
+        )
+
+        try:
+            max_size_mb = request.app.state.config.FILE_MAX_SIZE
+        except (AttributeError, KeyError):
+            max_size_mb = None
+        try:
+            upload_bytes = read_upload_bytes(file, max_size_mb)
+        except UploadByteLimitExceededError as error:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=ERROR_MESSAGES.FILE_TOO_LARGE(
+                    size=f"{error.max_size_mb}MB"
+                ),
+            ) from None
+
+        upload_content_type = canonical_upload_content_type(
+            upload_bytes,
+            filename,
+            file.content_type,
+        )
+
         # replace filename with uuid
         id = str(uuid.uuid4())
         name = filename
         filename = f"{id}_{filename}"
-        contents, file_path = Storage.upload_file(file.file, filename)
+        contents, file_path = Storage.upload_file(
+            BytesIO(upload_bytes), filename
+        )
 
         file_item = Files.insert_new_file(
             user.id,
@@ -62,9 +105,17 @@ def upload_file(
                     "path": file_path,
                     "meta": {
                         "name": name,
-                        "content_type": file.content_type,
+                        "content_type": upload_content_type,
                         "size": len(contents),
                         "data": file_metadata,
+                        "processing_error_code": None,
+                        "processing_warnings": [],
+                        "visual_summary": {
+                            "figure_count": 0,
+                            "table_image_count": 0,
+                            "image_chunk_count": 0,
+                            "text_chunk_count": 0,
+                        },
                     },
                 }
             ),
@@ -76,7 +127,7 @@ def upload_file(
         # Use job queue if available (distributed processing), otherwise use BackgroundTasks
         if background_tasks or is_job_queue_available():
             try:
-                if file.content_type in [
+                if upload_content_type in [
                     "audio/mpeg",
                     "audio/wav",
                     "audio/ogg",
@@ -100,7 +151,11 @@ def upload_file(
                         background_tasks=background_tasks,
                     )
             except Exception as e:
-                log.exception(e)
+                log.error(
+                    "Background processing dispatch failed for file %s (%s)",
+                    id,
+                    type(e).__name__,
+                )
                 log.error(f"Error starting background processing for file: {id}")
                 # Mark file as error since background task failed to start
                 try:
@@ -108,7 +163,10 @@ def upload_file(
                         id,
                         {
                             "processing_status": "error",
-                            "processing_error": f"Failed to start background processing: {str(e)}",
+                            "processing_error_code": FILE_PROCESSING_FAILED,
+                            "processing_error": safe_file_processing_error_message(
+                                FILE_PROCESSING_FAILED
+                            ),
                         },
                     )
                 except Exception as update_error:
@@ -119,18 +177,32 @@ def upload_file(
         file_item = Files.get_file_by_id(id=id)
 
         if file_item:
-            return file_item
+            return FileModelResponse.model_validate(file_item)
         else:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=ERROR_MESSAGES.DEFAULT("Error uploading file"),
             )
 
+    except EmbeddingError as e:
+        raise HTTPException(
+            status_code=(
+                status.HTTP_415_UNSUPPORTED_MEDIA_TYPE
+                if e.code == "embedding_image_format_unsupported"
+                else status.HTTP_400_BAD_REQUEST
+            ),
+            detail={
+                "code": e.code,
+                "message": safe_file_processing_error_message(e.code),
+            },
+        )
+    except HTTPException:
+        raise
     except Exception as e:
-        log.exception(e)
+        log.error("File upload failed (%s)", type(e).__name__)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=ERROR_MESSAGES.DEFAULT(e),
+            detail=ERROR_MESSAGES.DEFAULT("Error uploading file"),
         )
 
 
@@ -157,7 +229,7 @@ async def download_by_id(id: str, user=Depends(get_verified_user)):
         
     
     
-    if file and (file.user_id == user.id or user.role == "admin"):
+    if _can_read_file(user, file):
         try:
             file_path = Storage.get_file(file.path)
             file_path = Path(file_path)
@@ -220,7 +292,7 @@ async def list_files(user=Depends(get_verified_user)):
         files = Files.get_files()
     else:
         files = Files.get_files_by_user_id(user.id)
-    return files
+    return [FileModelResponse.model_validate(file) for file in files]
 
 
 ############################
@@ -254,12 +326,12 @@ async def delete_all_files(user=Depends(get_admin_user)):
 ############################
 
 
-@router.get("/{id}", response_model=Optional[FileModel])
+@router.get("/{id}", response_model=Optional[FileModelResponse])
 async def get_file_by_id(id: str, user=Depends(get_verified_user)):
     file = Files.get_file_by_id(id)
 
-    if file and (file.user_id == user.id or user.role == "admin"):
-        return file
+    if _can_read_file(user, file):
+        return FileModelResponse.model_validate(file)
     else:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -303,7 +375,7 @@ def get_file_processing_status(id: str, user=Depends(get_verified_user)):
         )
     
     # Check permissions
-    if file.user_id != user.id and user.role != "admin":
+    if not _can_read_file(user, file):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
@@ -323,13 +395,33 @@ def get_file_processing_status(id: str, user=Depends(get_verified_user)):
             # File that has never been processed
             processing_status = "not_started"
     
+    from open_webui.retrieval.embedding.errors import (
+        FILE_PROCESSING_FAILED,
+        safe_file_processing_error_code,
+        safe_file_processing_error_message,
+        safe_file_processing_warnings,
+    )
+
+    error_code = safe_file_processing_error_code(meta.get("processing_error_code"))
+    processing_error = None
+    if processing_status == "error":
+        if error_code is None:
+            error_code = FILE_PROCESSING_FAILED
+        processing_error = safe_file_processing_error_message(error_code)
+
+    warnings = safe_file_processing_warnings(meta.get("processing_warnings"))
+    visual_summary = sanitize_public_visual_summary(meta.get("visual_summary"))
+
     return {
         "file_id": id,
         "filename": file.filename,
         "processing_status": processing_status,
         "processing_started_at": meta.get("processing_started_at"),
         "processing_completed_at": meta.get("processing_completed_at"),
-        "processing_error": meta.get("processing_error"),
+        "processing_error": processing_error,
+        "processing_error_code": error_code,
+        "processing_warnings": warnings,
+        "visual_summary": visual_summary,
         "collection_name": meta.get("collection_name"),
     }
 
@@ -338,7 +430,7 @@ def get_file_processing_status(id: str, user=Depends(get_verified_user)):
 async def get_file_data_content_by_id(id: str, user=Depends(get_verified_user)):
     file = Files.get_file_by_id(id)
 
-    if file and (file.user_id == user.id or user.role == "admin"):
+    if _can_read_file(user, file):
         return {"content": file.data.get("content", "")}
     else:
         raise HTTPException(
@@ -396,7 +488,7 @@ async def update_file_data_content_by_id(
 @router.get("/{id}/content")
 async def get_file_content_by_id(id: str, user=Depends(get_verified_user)):
     file = Files.get_file_by_id(id)
-    if file and (file.user_id == user.id or user.role == "admin"):
+    if _can_read_file(user, file):
         try:
             file_path = Storage.get_file(file.path)
             file_path = Path(file_path)
@@ -448,7 +540,7 @@ async def get_file_content_by_id(id: str, user=Depends(get_verified_user)):
 @router.get("/{id}/content/html")
 async def get_html_file_content_by_id(id: str, user=Depends(get_verified_user)):
     file = Files.get_file_by_id(id)
-    if file and (file.user_id == user.id or user.role == "admin"):
+    if _can_read_file(user, file):
         try:
             file_path = Storage.get_file(file.path)
             file_path = Path(file_path)
@@ -480,7 +572,7 @@ async def get_html_file_content_by_id(id: str, user=Depends(get_verified_user)):
 async def get_file_content_by_id(id: str, user=Depends(get_verified_user)):
     file = Files.get_file_by_id(id)
 
-    if file and (file.user_id == user.id or user.role == "admin"):
+    if _can_read_file(user, file):
         file_path = file.path
 
         # Handle Unicode filenames

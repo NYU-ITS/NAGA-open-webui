@@ -61,7 +61,9 @@ from open_webui.config import (
     RAG_OLLAMA_BASE_URL,
     RAG_OLLAMA_API_KEY,
     CONTENT_EXTRACTION_ENGINE,
+    TIKA_SERVER_URL,
     RAG_TEXT_SPLITTER,
+    TIKTOKEN_ENCODING_NAME,
     CHUNK_SIZE,  # UserScopedConfig
     CHUNK_OVERLAP,  # UserScopedConfig
     PDF_EXTRACT_IMAGES,
@@ -190,7 +192,9 @@ def get_worker_config():
             _worker_config.RAG_OLLAMA_BASE_URL = RAG_OLLAMA_BASE_URL
             _worker_config.RAG_OLLAMA_API_KEY = RAG_OLLAMA_API_KEY
             _worker_config.CONTENT_EXTRACTION_ENGINE = CONTENT_EXTRACTION_ENGINE
+            _worker_config.TIKA_SERVER_URL = TIKA_SERVER_URL
             _worker_config.TEXT_SPLITTER = RAG_TEXT_SPLITTER
+            _worker_config.TIKTOKEN_ENCODING_NAME = TIKTOKEN_ENCODING_NAME
             _worker_config.CHUNK_SIZE = CHUNK_SIZE  # UserScopedConfig
             _worker_config.CHUNK_OVERLAP = CHUNK_OVERLAP  # UserScopedConfig
             # Additional UserScopedConfig objects used in worker code paths
@@ -400,6 +404,9 @@ class _FallbackConfig:
             os.environ.get("RAG_PDF_MAX_VISUALS_PER_DOCUMENT", "80")
         )
         self.TEXT_SPLITTER = os.environ.get("RAG_TEXT_SPLITTER", "recursive")
+        self.TIKTOKEN_ENCODING_NAME = os.environ.get(
+            "TIKTOKEN_ENCODING_NAME", "cl100k_base"
+        )
         # UserScopedConfig objects - use MockUserScopedConfig for compatibility
         # These are used in save_docs_to_vector_db and other worker code paths
         self.CHUNK_SIZE = MockUserScopedConfig(int(os.environ.get("CHUNK_SIZE", "1000")))
@@ -442,7 +449,7 @@ def _create_fallback_config():
 log.debug("file_processor.py module loaded successfully")
 
 
-def process_file_job(
+def _process_file_job_legacy(
     file_id: str,
     content: Optional[str] = None,
     collection_name: Optional[str] = None,
@@ -1225,3 +1232,79 @@ def process_file_job(
                     log.debug(f"Detached trace context for job: file_id={file_id}")
                 except Exception as detach_error:
                     log.debug(f"Failed to detach trace context: {detach_error}")
+
+
+def process_file_job(
+    file_id: str,
+    content: Optional[str] = None,
+    collection_name: Optional[str] = None,
+    knowledge_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    admin_id: Optional[str] = None,
+    embedding_model_id: Optional[str] = None,
+    _otel_trace_context: Optional[dict] = None,
+) -> dict:
+    """Process an RQ file job through the shared mixed-modality pipeline."""
+
+    config = get_worker_config()
+    bypass_value = getattr(config, "BYPASS_EMBEDDING_AND_RETRIEVAL", False)
+    bypass_embedding = bool(getattr(bypass_value, "value", bypass_value))
+    if bypass_embedding:
+        from open_webui.retrieval.embedding.file_processing import (
+            load_authoritative_content_override,
+        )
+
+        return _process_file_job_legacy(
+            file_id=file_id,
+            content=load_authoritative_content_override(file_id),
+            collection_name=collection_name,
+            knowledge_id=knowledge_id,
+            user_id=user_id,
+            admin_id=admin_id,
+            embedding_model_id=embedding_model_id,
+            _otel_trace_context=_otel_trace_context,
+        )
+
+    from open_webui.retrieval.embedding.errors import EmbeddingError
+    from open_webui.retrieval.embedding.file_processing import (
+        FILE_PROCESSING_FAILED,
+        process_stored_file_for_embedding,
+    )
+
+    started_at = time.time()
+    try:
+        result = process_stored_file_for_embedding(
+            config=config,
+            file_id=file_id,
+            admin_id=admin_id or "",
+            embedding_model_id=embedding_model_id or "",
+            knowledge_id=knowledge_id,
+            collection_name=collection_name,
+        )
+        return {
+            "status": "success",
+            "file_id": result.file_id,
+            "collection_name": result.collection_names[0],
+            "collection_names": list(result.collection_names),
+            "chunk_count": result.chunk_count,
+            "visual_summary": dict(result.visual_summary),
+            "elapsed_time": time.time() - started_at,
+        }
+    except Exception as error:
+        error_code = (
+            error.code
+            if isinstance(error, EmbeddingError)
+            else FILE_PROCESSING_FAILED
+        )
+        log.error(
+            "RQ file processing failed | file_id=%s | code=%s | type=%s",
+            file_id,
+            error_code,
+            type(error).__name__,
+        )
+        raise EmbeddingError(error_code) from None
+    finally:
+        try:
+            Session.remove()
+        except Exception:
+            log.warning("RQ file processing session cleanup failed")

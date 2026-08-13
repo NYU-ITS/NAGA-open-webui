@@ -1,8 +1,18 @@
 """Persistence models for the Phase 1 embedding registry and indexing ledger."""
 
+import hashlib
+import json
+import time
+import uuid
+
 from sqlalchemy import BigInteger, Column, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 
 from open_webui.internal.db import Base, JSONField
+
+
+RAG_CHUNK_LEGACY_MANIFEST_ID = "0" * 64
 
 
 class EmbeddingModel(Base):
@@ -42,11 +52,25 @@ class EmbeddingModel(Base):
 
 class RagChunk(Base):
     __tablename__ = "rag_chunks"
-    __table_args__ = (UniqueConstraint("admin_id", "file_id", "chunk_index"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "admin_id",
+            "file_id",
+            "manifest_id",
+            "chunk_index",
+            name="uq_rag_chunks_admin_file_manifest_chunk",
+        ),
+    )
 
     id = Column(String, primary_key=True)
     admin_id = Column(String, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
     file_id = Column(String, ForeignKey("file.id", ondelete="CASCADE"), nullable=False)
+    manifest_id = Column(
+        String(64),
+        nullable=False,
+        default=RAG_CHUNK_LEGACY_MANIFEST_ID,
+        server_default=RAG_CHUNK_LEGACY_MANIFEST_ID,
+    )
     chunk_index = Column(Integer, nullable=False)
     content = Column(Text)
     content_type = Column(String(16), nullable=False)
@@ -56,107 +80,279 @@ class RagChunk(Base):
     updated_at = Column(BigInteger, nullable=False)
 
     @staticmethod
-    def insert_chunks(admin_id: str, file_id: str, chunks: list[dict]) -> list[str]:
-        """Persist extracted content for one admin/file as ordered rag_chunks.
+    def build_manifest_id(
+        chunks: list[dict],
+        *,
+        source_sha256: str | None = None,
+        extraction_version: str | None = None,
+    ) -> str:
+        """Return the canonical ID for an exact, ordered chunk manifest.
 
-        ``chunks`` is a list of dicts with ``content`` (str), ``content_type``
-        (``"text"``/``"image"``), and optional ``chunk_metadata`` (dict). The
-        list order defines ``chunk_index``.
-
-        Logical chunk identity is ``(admin_id, file_id, chunk_index)``. This is
-        an upsert by that identity (Spec 07):
-
-        1. Existing chunks for ``(admin_id, file_id)`` are loaded by index.
-        2. Each incoming index updates the existing row in place, preserving its
-           id (and original ``created_at``).
-        3. A new row is inserted only for an index that does not yet exist.
-        4. No rows are deleted here. Chunk rows are shared across collection
-           memberships and vector models (``rag_chunk_id`` is ``ON DELETE
-           CASCADE``), so deleting them during a target build would cascade
-           away other collections' and the old active model's vectors. Stale
-           target vectors are instead removed per projection by the vector
-           repository reconcile, and chunk-row cleanup is deferred until no
-           active or building vectors reference them (promotion/retirement).
-
-        The content hash detects changed content; it is not treated as the sole
-        identity because repeated text may occur at multiple positions.
-
-        Returns the rag_chunk_ids for ``chunks`` in the same order so the caller
-        can stamp each generated vector with its rag_chunk_id. Re-processing the
-        same file yields the same ids for chunk positions that persist.
+        The source hash and extraction version are explicit inputs because the
+        same text can be produced from different source bytes or extraction
+        recipes. Chunk order, modality, content hash, and the complete JSON
+        metadata payload are all covered by the digest.
         """
-        import hashlib
-        import time
-        import uuid
-
-        from open_webui.internal.db import get_db
-
-        now = int(time.time())
-
-        with get_db() as db:
-            existing = {
-                row.chunk_index: row
-                for row in (
-                    db.query(RagChunk)
-                    .filter(RagChunk.admin_id == admin_id, RagChunk.file_id == file_id)
-                    .all()
-                )
-            }
-
-            ids: list[str] = []
-            for index, chunk in enumerate(chunks):
-                content = chunk.get("content") or ""
-                content_type = chunk.get("content_type") or "text"
-                chunk_metadata = chunk.get("chunk_metadata") or {}
-                digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-
-                row = existing.get(index)
-                if row is None:
-                    # New index: insert a fresh row.
-                    chunk_id = str(uuid.uuid4())
-                    ids.append(chunk_id)
-                    db.add(
-                        RagChunk(
-                            id=chunk_id,
-                            admin_id=admin_id,
-                            file_id=file_id,
-                            chunk_index=index,
-                            content=content,
-                            content_type=content_type,
-                            chunk_metadata=chunk_metadata,
-                            content_sha256=digest,
-                            created_at=now,
-                            updated_at=now,
-                        )
-                    )
-                else:
-                    # Existing index: update in place, preserving the id.
-                    row.content = content
-                    row.content_type = content_type
-                    row.chunk_metadata = chunk_metadata
-                    row.content_sha256 = digest
-                    row.updated_at = now
-                    ids.append(row.id)
-            db.commit()
-        return ids
+        records = RagChunk._normalize_chunks(chunks)
+        if source_sha256 is not None:
+            RagChunk._validate_sha256(source_sha256, "source_sha256")
+        if extraction_version is not None and not isinstance(extraction_version, str):
+            raise ValueError("extraction_version must be a string or None")
+        payload = {
+            "schema": "rag_chunk_manifest_v1",
+            "source_sha256": source_sha256,
+            "extraction_version": extraction_version,
+            "chunks": [
+                {
+                    "chunk_index": index,
+                    "content_type": record["content_type"],
+                    "content_sha256": record["content_sha256"],
+                    "chunk_metadata": record["chunk_metadata"],
+                }
+                for index, record in enumerate(records)
+            ],
+        }
+        encoded = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
 
     @staticmethod
-    def get_ids_by_file(admin_id: str, file_id: str) -> list[str]:
-        """Return rag_chunk_ids for a file in chunk_index order."""
+    def insert_chunks(
+        admin_id: str,
+        file_id: str,
+        chunks: list[dict],
+        *,
+        manifest_id: str | None = None,
+        db=None,
+    ) -> list[str]:
+        """Create or reuse one immutable, exact ordered chunk manifest.
+
+        ``chunks`` is a list of dicts with ``content`` (str), ``content_type``
+        (``"text"``/``"image"``), optional ``chunk_metadata`` (dict), and an
+        optional caller-provided ``content_sha256``. Image chunks must provide
+        the SHA-256 of their source/rendered bytes because their persisted text
+        content is intentionally empty. The list order defines ``chunk_index``.
+
+        ``manifest_id`` should be built with :meth:`build_manifest_id`. For
+        compatibility, callers that omit it receive a deterministic ID derived
+        from the ordered chunks alone. Existing rows are reused only when every
+        persisted field matches. A reused ID with different content fails
+        closed; prior manifests are never updated or deleted here.
+
+        Returns rag_chunk IDs in chunk order. A concurrent creator of the same
+        exact manifest is handled by re-reading after the uniqueness conflict.
+        """
+        from open_webui.internal.db import get_db
+
+        records = RagChunk._normalize_chunks(chunks)
+        resolved_manifest_id = manifest_id or RagChunk.build_manifest_id(chunks)
+        RagChunk._validate_sha256(resolved_manifest_id, "manifest_id")
+        now = int(time.time())
+
+        def _insert(session, *, recover_concurrent_insert: bool) -> list[str]:
+            existing = RagChunk._get_manifest_rows(
+                session, admin_id, file_id, resolved_manifest_id
+            )
+            if existing:
+                return RagChunk._exact_manifest_ids(existing, records)
+
+            ids = [str(uuid.uuid4()) for _ in records]
+            rows = [
+                {
+                    "id": chunk_id,
+                    "admin_id": admin_id,
+                    "file_id": file_id,
+                    "manifest_id": resolved_manifest_id,
+                    "chunk_index": index,
+                    "content": record["content"],
+                    "content_type": record["content_type"],
+                    "chunk_metadata": record["chunk_metadata"],
+                    "content_sha256": record["content_sha256"],
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                for index, (chunk_id, record) in enumerate(zip(ids, records))
+            ]
+            try:
+                bind = session.get_bind()
+                if bind.dialect.name == "postgresql":
+                    statement = (
+                        pg_insert(RagChunk)
+                        .values(rows)
+                        .on_conflict_do_nothing(
+                            constraint="uq_rag_chunks_admin_file_manifest_chunk"
+                        )
+                    )
+                    session.execute(statement)
+                    session.flush()
+                    existing = RagChunk._get_manifest_rows(
+                        session, admin_id, file_id, resolved_manifest_id
+                    )
+                    return RagChunk._exact_manifest_ids(existing, records)
+
+                for row in rows:
+                    session.add(RagChunk(**row))
+                session.flush()
+                return ids
+            except IntegrityError:
+                if not recover_concurrent_insert:
+                    # The caller owns a wider transaction. Let it roll the
+                    # transaction back rather than discarding unrelated work
+                    # while attempting to recover this single insert.
+                    raise
+                session.rollback()
+                existing = RagChunk._get_manifest_rows(
+                    session, admin_id, file_id, resolved_manifest_id
+                )
+                if existing:
+                    return RagChunk._exact_manifest_ids(existing, records)
+                raise ValueError("chunk manifest could not be created") from None
+
+        if db is not None:
+            return _insert(db, recover_concurrent_insert=False)
+        with get_db() as session:
+            ids = _insert(session, recover_concurrent_insert=True)
+            session.commit()
+            return ids
+
+    @staticmethod
+    def get_ids_by_file(
+        admin_id: str,
+        file_id: str,
+        manifest_id: str | None = None,
+    ) -> list[str]:
+        """Return IDs for one file manifest in chunk order.
+
+        The optional form preserves legacy callers only while a file has zero
+        or one manifest. Once multiple immutable generations exist, callers
+        must select a ``manifest_id`` instead of receiving an arbitrary one.
+        """
         from open_webui.internal.db import get_db
 
         with get_db() as db:
-            rows = (
-                db.query(RagChunk)
-                .filter(RagChunk.admin_id == admin_id, RagChunk.file_id == file_id)
-                .order_by(RagChunk.chunk_index)
-                .all()
-            )
+            if manifest_id is None:
+                manifest_ids = [
+                    value
+                    for (value,) in (
+                        db.query(RagChunk.manifest_id)
+                        .filter(
+                            RagChunk.admin_id == admin_id,
+                            RagChunk.file_id == file_id,
+                        )
+                        .distinct()
+                        .limit(2)
+                        .all()
+                    )
+                ]
+                if not manifest_ids:
+                    return []
+                if len(manifest_ids) != 1:
+                    raise ValueError(
+                        "manifest_id is required when a file has multiple manifests"
+                    )
+                manifest_id = manifest_ids[0]
+            RagChunk._validate_sha256(manifest_id, "manifest_id")
+            rows = RagChunk._get_manifest_rows(db, admin_id, file_id, manifest_id)
             return [row.id for row in rows]
 
     @staticmethod
+    def _normalize_chunks(chunks: list[dict]) -> list[dict]:
+        records: list[dict] = []
+        for chunk in chunks:
+            if not isinstance(chunk, dict):
+                raise ValueError("each chunk must be a dictionary")
+            raw_content = chunk.get("content", "")
+            content = "" if raw_content is None else raw_content
+            if not isinstance(content, str):
+                raise ValueError("chunk content must be a string")
+            content_type = chunk.get("content_type") or "text"
+            if content_type not in {"text", "image"}:
+                raise ValueError("content_type must be text or image")
+            if content_type == "image" and content:
+                raise ValueError("image chunk content must be empty")
+
+            chunk_metadata = chunk.get("chunk_metadata") or {}
+            if not isinstance(chunk_metadata, dict):
+                raise ValueError("chunk_metadata must be a dictionary")
+            try:
+                canonical_metadata = json.loads(
+                    json.dumps(
+                        chunk_metadata,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                        allow_nan=False,
+                    )
+                )
+            except (TypeError, ValueError):
+                raise ValueError("chunk_metadata must contain JSON values") from None
+
+            text_digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            provided_digest = chunk.get("content_sha256")
+            if provided_digest is not None:
+                RagChunk._validate_sha256(provided_digest, "content_sha256")
+                if content_type == "text" and provided_digest != text_digest:
+                    raise ValueError("text content_sha256 does not match content")
+                digest = provided_digest
+            elif content_type == "image":
+                raise ValueError("image chunks require content_sha256")
+            else:
+                digest = text_digest
+            records.append(
+                {
+                    "content": content,
+                    "content_type": content_type,
+                    "chunk_metadata": canonical_metadata,
+                    "content_sha256": digest,
+                }
+            )
+        return records
+
+    @staticmethod
+    def _validate_sha256(value: str, field_name: str) -> None:
+        if (
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise ValueError(f"{field_name} must be a lowercase SHA-256 hex digest")
+
+    @staticmethod
+    def _get_manifest_rows(db, admin_id: str, file_id: str, manifest_id: str):
+        return (
+            db.query(RagChunk)
+            .filter(
+                RagChunk.admin_id == admin_id,
+                RagChunk.file_id == file_id,
+                RagChunk.manifest_id == manifest_id,
+            )
+            .order_by(RagChunk.chunk_index)
+            .all()
+        )
+
+    @staticmethod
+    def _exact_manifest_ids(rows, records: list[dict]) -> list[str]:
+        if len(rows) != len(records):
+            raise ValueError("manifest_id already exists with different chunks")
+        for index, (row, record) in enumerate(zip(rows, records)):
+            if (
+                row.chunk_index != index
+                or (row.content or "") != record["content"]
+                or row.content_type != record["content_type"]
+                or (row.chunk_metadata or {}) != record["chunk_metadata"]
+                or row.content_sha256 != record["content_sha256"]
+            ):
+                raise ValueError("manifest_id already exists with different chunks")
+        return [row.id for row in rows]
+
+    @staticmethod
     def delete_by_file(admin_id: str, file_id: str) -> int:
-        """Delete all rag_chunks for a file. Returns the number deleted."""
+        """Delete all manifests for a file. Returns the number deleted."""
         from open_webui.internal.db import get_db
 
         with get_db() as db:

@@ -6,7 +6,7 @@ import time
 
 import uuid
 from datetime import datetime
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, List, Literal, Optional
 from uuid import UUID
 
 from fastapi import (
@@ -28,12 +28,15 @@ from open_webui.utils.job_queue import (
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 import tiktoken
+from sqlalchemy import cast, func
+from sqlalchemy.dialects.postgresql import JSONB
 
 
 from langchain.text_splitter import RecursiveCharacterTextSplitter, TokenTextSplitter
 from langchain_core.documents import Document
 
-from open_webui.models.files import FileModel, Files
+from open_webui.internal.db import get_db
+from open_webui.models.files import File as FileRecord, FileModel, Files
 from open_webui.models.knowledge import Knowledges
 from open_webui.models.users import Users
 from open_webui.storage.provider import Storage
@@ -46,6 +49,7 @@ from open_webui.retrieval.embedding.errors import (
     EmbeddingError,
     EMBEDDING_ADMIN_UNRESOLVED,
     EMBEDDING_CREDENTIALS_MISSING,
+    EMBEDDING_FILE_NOT_FOUND,
     EMBEDDING_JOB_ACTIVE_EXISTS,
     EMBEDDING_MODEL_DISABLED,
     EMBEDDING_MODEL_NOT_CONFIGURED,
@@ -53,6 +57,9 @@ from open_webui.retrieval.embedding.errors import (
     EMBEDDING_PROVIDER_UNSUPPORTED,
     EMBEDDING_REINDEX_NOT_READY,
     EMBEDDING_STORAGE_DIMENSION_UNSUPPORTED,
+    FILE_PROCESSING_FAILED,
+    safe_file_processing_error_code,
+    safe_file_processing_error_message,
 )
 from open_webui.retrieval.embedding.model_change import (
     ModelChangeResult,
@@ -99,6 +106,7 @@ from open_webui.utils.misc import (
     calculate_sha256_string,
 )
 from open_webui.utils.auth import get_admin_user, get_verified_user
+from open_webui.utils.access_control import has_access
 
 
 from open_webui.config import (
@@ -1712,7 +1720,184 @@ class ProcessFileForm(BaseModel):
     collection_name: Optional[str] = None
 
 
-def _process_file_sync(
+def _claim_file_processing_dispatch(
+    file_id: str,
+    stale_pending_seconds: int,
+) -> tuple[bool, dict[str, Any], Optional[str], bool]:
+    """Atomically claim a file-processing dispatch lease.
+
+    A running worker (``processing``) is never reclaimable. A ``pending``
+    dispatch is reclaimable only after its last durable update has aged past
+    the configured bound. The updated-at compare-and-swap complements the row
+    lock for databases such as SQLite that do not implement ``FOR UPDATE``.
+    """
+
+    now = int(time.time())
+    with get_db() as db:
+        file_row = (
+            db.query(FileRecord)
+            .filter(FileRecord.id == file_id)
+            .with_for_update()
+            .first()
+        )
+        if file_row is None:
+            return False, {}, None, False
+
+        meta = dict(file_row.meta or {})
+        raw_status = meta.get("processing_status")
+        if raw_status is not None and not isinstance(raw_status, str):
+            # Fail closed on malformed state rather than overwrite a status
+            # that cannot be compared portably across supported databases.
+            return False, meta, None, False
+        current_status = raw_status
+
+        if current_status == "processing":
+            return False, meta, current_status, False
+
+        reclaiming_stale_pending = False
+        if current_status == "pending":
+            lease_at = file_row.updated_at
+            if not isinstance(lease_at, int) or isinstance(lease_at, bool):
+                lease_at = file_row.created_at
+            if not isinstance(lease_at, int) or isinstance(lease_at, bool):
+                # A pending row without a trustworthy lease timestamp cannot
+                # be reclaimed without risking duplicate live work.
+                return False, meta, current_status, False
+            if now - lease_at < stale_pending_seconds:
+                return False, meta, current_status, False
+            reclaiming_stale_pending = True
+
+        observed_updated_at = file_row.updated_at
+        claimed_updated_at = now + 1 if observed_updated_at == now else now
+        claimed_meta = {**meta, "processing_status": "pending"}
+
+        claim_query = db.query(FileRecord).filter(FileRecord.id == file_id)
+        if observed_updated_at is None:
+            claim_query = claim_query.filter(FileRecord.updated_at.is_(None))
+        else:
+            claim_query = claim_query.filter(
+                FileRecord.updated_at == observed_updated_at
+            )
+
+        dialect_name = db.get_bind().dialect.name
+        if dialect_name == "postgresql":
+            status_expression = cast(FileRecord.meta, JSONB)[
+                "processing_status"
+            ].astext
+        elif dialect_name == "sqlite":
+            status_expression = func.json_extract(
+                FileRecord.meta,
+                "$.processing_status",
+            )
+        else:
+            # JSONField is text-backed, so exact metadata comparison remains a
+            # safe compare-and-swap fallback for other SQL dialects.
+            status_expression = None
+
+        if status_expression is None:
+            if file_row.meta is None:
+                claim_query = claim_query.filter(FileRecord.meta.is_(None))
+            else:
+                claim_query = claim_query.filter(FileRecord.meta == file_row.meta)
+        elif current_status is None:
+            claim_query = claim_query.filter(status_expression.is_(None))
+        else:
+            claim_query = claim_query.filter(status_expression == current_status)
+
+        claimed = (
+            claim_query.update(
+                {
+                    FileRecord.meta: claimed_meta,
+                    FileRecord.updated_at: claimed_updated_at,
+                },
+                synchronize_session=False,
+            )
+            == 1
+        )
+        if claimed:
+            db.commit()
+            return True, claimed_meta, "pending", reclaiming_stale_pending
+
+        db.rollback()
+        latest_row = db.query(FileRecord).filter(FileRecord.id == file_id).first()
+        if latest_row is None:
+            return False, {}, None, False
+        latest_meta = dict(latest_row.meta or {})
+        latest_status = latest_meta.get("processing_status")
+        if not isinstance(latest_status, str):
+            latest_status = None
+        return False, latest_meta, latest_status, False
+
+
+def _effective_process_knowledge_id(
+    form_data: ProcessFileForm,
+    knowledge_id: Optional[str],
+) -> Optional[str]:
+    collection_knowledge_id = (
+        form_data.collection_name
+        if form_data.collection_name
+        and form_data.collection_name != f"file-{form_data.file_id}"
+        else None
+    )
+    if (
+        knowledge_id
+        and collection_knowledge_id
+        and knowledge_id != collection_knowledge_id
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Conflicting knowledge collection IDs.",
+        )
+    return knowledge_id or collection_knowledge_id
+
+
+def _require_file_processing_access(
+    *,
+    file: FileModel,
+    user,
+    knowledge_id: Optional[str],
+):
+    is_admin = user.role == "admin"
+    is_file_owner = file.user_id == user.id
+
+    if knowledge_id is None:
+        if not is_admin and not is_file_owner:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+            )
+        return None
+
+    knowledge = Knowledges.get_knowledge_by_id(id=knowledge_id)
+    if knowledge is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    can_write_knowledge = (
+        is_admin
+        or knowledge.user_id == user.id
+        or has_access(user.id, "write", knowledge.access_control)
+    )
+    if not can_write_knowledge:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    data = knowledge.data if isinstance(knowledge.data, dict) else {}
+    file_ids = data.get("file_ids", [])
+    if not isinstance(file_ids, list) or file.id not in file_ids:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    return knowledge
+
+
+def _process_file_sync_legacy(
     request: Request,
     file_id: str,
     content: Optional[str] = None,
@@ -2151,6 +2336,70 @@ def _process_file_sync(
             )
 
 
+def _process_file_sync(
+    request: Request,
+    file_id: str,
+    content: Optional[str] = None,
+    collection_name: Optional[str] = None,
+    knowledge_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    admin_id: Optional[str] = None,
+    embedding_model_id: Optional[str] = None,
+) -> None:
+    """Process a stored file through the shared mixed-modality pipeline."""
+
+    bypass_value = getattr(
+        request.app.state.config,
+        "BYPASS_EMBEDDING_AND_RETRIEVAL",
+        False,
+    )
+    bypass_embedding = bool(getattr(bypass_value, "value", bypass_value))
+    if bypass_embedding:
+        from open_webui.retrieval.embedding.file_processing import (
+            load_authoritative_content_override,
+        )
+
+        _process_file_sync_legacy(
+            request=request,
+            file_id=file_id,
+            content=load_authoritative_content_override(file_id),
+            collection_name=collection_name,
+            knowledge_id=knowledge_id,
+            user_id=user_id,
+            admin_id=admin_id,
+            embedding_model_id=embedding_model_id,
+        )
+        return
+
+    from open_webui.retrieval.embedding.file_processing import (
+        FILE_PROCESSING_FAILED,
+        process_stored_file_for_embedding,
+    )
+    from open_webui.retrieval.embedding.errors import EmbeddingError
+
+    try:
+        process_stored_file_for_embedding(
+            config=request.app.state.config,
+            file_id=file_id,
+            admin_id=admin_id or "",
+            embedding_model_id=embedding_model_id or "",
+            knowledge_id=knowledge_id,
+            collection_name=collection_name,
+        )
+    except Exception as error:
+        error_code = (
+            error.code
+            if isinstance(error, EmbeddingError)
+            else FILE_PROCESSING_FAILED
+        )
+        log.error(
+            "Background file processing failed | file_id=%s | code=%s | type=%s",
+            file_id,
+            error_code,
+            type(error).__name__,
+        )
+
+
 @router.post("/process/file")
 def process_file(
     request: Request,
@@ -2183,6 +2432,24 @@ def process_file(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
+
+    effective_knowledge_id = _effective_process_knowledge_id(
+        form_data,
+        knowledge_id,
+    )
+    _require_file_processing_access(
+        file=file,
+        user=user,
+        knowledge_id=effective_knowledge_id,
+    )
+    if form_data.content is not None and not (
+        user.role == "admin" or file.user_id == user.id
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
     # Cache file object and metadata for reuse throughout the function
     cached_file = file
     cached_meta = file.meta or {}
@@ -2211,6 +2478,12 @@ def process_file(
             return default
     
     lock_timeout = _safe_int_env("FILE_PROCESSING_LOCK_TIMEOUT", 3600, min_value=60, max_value=86400)  # 1 min to 24 hours
+    pending_reclaim_timeout = _safe_int_env(
+        "FILE_PROCESSING_PENDING_RECLAIM_TIMEOUT",
+        300,
+        min_value=60,
+        max_value=86400,
+    )
     lock_name = f"open-webui:file_processing_lock:{form_data.file_id}"
     
     processing_lock = None
@@ -2244,6 +2517,26 @@ def process_file(
                         # Reuse the existing connection
                         processing_lock.redis.ping()
                         redis_available = True
+                        # Redis is available but the lock is held, so another
+                        # request still owns the dispatch window.
+                        meta = cached_meta
+                        current_status = meta.get(
+                            "processing_status",
+                            "processing",
+                        )
+
+                        log.info(
+                            f"File {form_data.file_id} is already being processed (lock held by another pod), "
+                            f"skipping duplicate processing request from user {user.id}"
+                        )
+                        return {
+                            "status": current_status,
+                            "file_id": form_data.file_id,
+                            "filename": cached_file.filename,
+                            "message": f"File is already {current_status}. Please wait for completion.",
+                            "collection_name": meta.get("collection_name"),
+                            "content": None,
+                        }
                     else:
                         # If processing_lock doesn't have redis, it means initialization failed
                         # Don't create a new connection (resource leak), just mark as unavailable
@@ -2252,23 +2545,6 @@ def process_file(
                             "Marking Redis as unavailable."
                         )
                         redis_available = False
-                    # Redis is available but lock is held - another pod is processing
-                    # BUG #7 fix: Use cached file object instead of fetching again
-                    meta = cached_meta
-                    current_status = meta.get("processing_status", "processing")
-                    
-                    log.info(
-                        f"File {form_data.file_id} is already being processed (lock held by another pod), "
-                        f"skipping duplicate processing request from user {user.id}"
-                    )
-                    return {
-                        "status": current_status,
-                        "file_id": form_data.file_id,
-                        "filename": cached_file.filename,
-                        "message": f"File is already {current_status}. Please wait for completion.",
-                        "collection_name": meta.get("collection_name"),
-                        "content": None,
-                    }
                 except Exception as redis_test_error:
                     # Redis is unavailable - fall through to database check
                     log.warning(
@@ -2287,245 +2563,77 @@ def process_file(
         redis_available = False
         lock_acquired = False
     
-    # If Redis lock is not available, fall back to database-level checking
-    # This provides graceful degradation when Redis is unavailable
-    if not redis_available or not lock_acquired:
-        # Fallback: Check database status (double-check pattern)
-        # BUG #7 fix: Use cached file object, but refresh metadata to get latest status
-        # Re-fetch only metadata to get latest processing status
-        refreshed_file = Files.get_file_by_id(form_data.file_id)
-        if not refreshed_file:
+    # Redis protects the short dispatch window across replicas. The database
+    # lease is authoritative in both Redis and degraded modes, so a fresh
+    # pending request is deduplicated while a stranded pending request becomes
+    # reclaimable after a bounded interval.
+    try:
+        (
+            dispatch_claimed,
+            cached_meta,
+            current_status,
+            reclaimed_stale_pending,
+        ) = _claim_file_processing_dispatch(
+            form_data.file_id,
+            pending_reclaim_timeout,
+        )
+        if not cached_meta and current_status is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=ERROR_MESSAGES.NOT_FOUND,
             )
-        # Update cached metadata with latest values
-        cached_meta = refreshed_file.meta or {}
-        # BUG #3 fix: Try to keep cached_file.meta in sync, but don't fail if assignment doesn't work
-        # (Pydantic models are mutable by default, but assignment might fail in edge cases)
         try:
             cached_file.meta = cached_meta
         except (AttributeError, TypeError) as assign_error:
-            # Assignment failed - not critical, we'll use cached_meta directly
-            log.debug(f"Could not update cached_file.meta: {assign_error}, using cached_meta directly")
-        meta = cached_meta
-        current_status = meta.get("processing_status")
-        
-        # Check if already processing
-        # CRITICAL FIX: Only skip if status is "processing" (job running), not "pending" (job queued)
-        if current_status == "processing":
-            log.info(
-                f"File {form_data.file_id} is already {current_status} "
-                f"(Redis unavailable, using database check), "
-                f"skipping duplicate processing request from user {user.id}"
+            log.debug(
+                "Could not update cached_file.meta: %s; using cached metadata",
+                assign_error,
             )
+
+        if not dispatch_claimed:
+            effective_status = current_status or "processing"
+            log.info(
+                "File %s already has live processing state %s; skipping "
+                "duplicate request from user %s",
+                form_data.file_id,
+                effective_status,
+                user.id,
+            )
+            if processing_lock and lock_acquired and not lock_released:
+                processing_lock.release_lock()
+                lock_released = True
             return {
-                "status": current_status,
+                "status": effective_status,
                 "file_id": form_data.file_id,
                 "filename": cached_file.filename,
-                "message": f"File is already {current_status}. Please wait for completion.",
-                "collection_name": meta.get("collection_name"),
+                "message": (
+                    f"File is already {effective_status}. "
+                    "Please wait for completion."
+                ),
+                "collection_name": cached_meta.get("collection_name"),
                 "content": None,
             }
-        
-        # Set initial status (database-level check passed)
-        # BUG #2 fix: Use atomic database update to prevent race condition
-        # Only update if status is not already "pending" or "processing"
-        # This provides some protection against race conditions in fallback path
-        try:
-            from open_webui.internal.db import get_db, engine
-            from sqlalchemy import text
-            
-            # Detect database type for appropriate SQL syntax
-            # BUG #6 fix: Use engine.dialect.name for reliable database type detection
-            try:
-                is_postgresql = engine.dialect.name == 'postgresql'
-            except (AttributeError, Exception) as db_detect_error:
-                # Fallback to string matching if dialect.name not available
-                log.warning(f"Could not detect database type via dialect.name: {db_detect_error}, using string matching")
-                is_postgresql = "postgresql" in str(engine.url) if engine and engine.url else False
-            
-            with get_db() as db:
-                if is_postgresql:
-                    # PostgreSQL: Use JSONB functions for atomic update
-                    # Cast meta to jsonb first (meta column is JSON type, but jsonb_set requires jsonb)
-                    result = db.execute(
-                        text("""
-                            UPDATE file 
-                            SET meta = jsonb_set(
-                                COALESCE(meta::jsonb, '{}'::jsonb),
-                                '{processing_status}',
-                                '"pending"',
-                                true
-                            )
-                            WHERE id = :file_id
-                            AND (
-                                meta->>'processing_status' IS NULL 
-                                OR meta->>'processing_status' NOT IN ('pending', 'processing')
-                            )
-                            RETURNING id
-                        """),
-                        {"file_id": form_data.file_id}
-                    )
-                else:
-                    # SQLite: Use JSON functions (json_set, json_extract)
-                    result = db.execute(
-                        text("""
-                            UPDATE file 
-                            SET meta = json_set(
-                                COALESCE(meta, '{}'),
-                                '$.processing_status',
-                                'pending'
-                            )
-                            WHERE id = :file_id
-                            AND (
-                                json_extract(meta, '$.processing_status') IS NULL 
-                                OR json_extract(meta, '$.processing_status') NOT IN ('pending', 'processing')
-                            )
-                        """),
-                        {"file_id": form_data.file_id}
-                    )
-                db.commit()
-                
-                # Check if update actually happened (row was updated)
-                # For SQLite, check rowcount; for PostgreSQL, check RETURNING result
-                if is_postgresql:
-                    updated_row = result.fetchone()
-                    update_succeeded = updated_row is not None
-                else:
-                    update_succeeded = result.rowcount > 0
-                
-                if not update_succeeded:
-                    # Another request already set status to pending/processing
-                    # Re-fetch to get current status
-                    refreshed_file = Files.get_file_by_id(form_data.file_id)
-                    if refreshed_file:
-                        meta = refreshed_file.meta or {}
-                        current_status = meta.get("processing_status", "processing")
-                        log.info(
-                            f"File {form_data.file_id} status changed to {current_status} during atomic update, "
-                            f"skipping duplicate processing request from user {user.id}"
-                        )
-                        return {
-                            "status": current_status,
-                            "file_id": form_data.file_id,
-                            "filename": cached_file.filename,
-                            "message": f"File is already {current_status}. Please wait for completion.",
-                            "collection_name": meta.get("collection_name"),
-                            "content": None,
-                        }
-        except Exception as atomic_update_error:
-            # If atomic update fails (e.g., database doesn't support JSON functions), fall back to regular update
+
+        status_update_succeeded = True
+        if reclaimed_stale_pending:
             log.warning(
-                f"Atomic update failed for file {form_data.file_id}: {atomic_update_error}. "
-                "Falling back to regular update (may have race condition).",
-                exc_info=True
-            )
-            # BUG #4 fix: Check return value in fallback path too
-            result = Files.update_file_metadata_by_id(
+                "Reclaimed stale pending file-processing dispatch | "
+                "file_id=%s | stale_after_seconds=%s | user_id=%s",
                 form_data.file_id,
-                {
-                    "processing_status": "pending",
-                },
+                pending_reclaim_timeout,
+                user.id,
             )
-            if result is None:
-                log.error(
-                    f"Failed to update file status in fallback path for file_id={form_data.file_id}: "
-                    "update_file_metadata_by_id returned None"
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Failed to update file processing status. Please try again."
-                )
-    else:
-        # We have the Redis lock, now check status atomically
-        # BUG #5 fix: Wrap entire section in try-finally to ensure lock is always released
-        # Note: lock_released is initialized at function level to avoid scope issues
-        try:
-            # BUG #7 fix: Re-fetch only metadata to get latest state (file object cached)
-            refreshed_file = Files.get_file_by_id(form_data.file_id)
-            if not refreshed_file:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=ERROR_MESSAGES.NOT_FOUND,
-                )
-            # Update cached metadata with latest values
-            cached_meta = refreshed_file.meta or {}
-            # BUG #3 fix: Try to keep cached_file.meta in sync, but don't fail if assignment doesn't work
-            # (Pydantic models are mutable by default, but assignment might fail in edge cases)
+    except Exception:
+        if processing_lock and lock_acquired and not lock_released:
             try:
-                cached_file.meta = cached_meta
-            except (AttributeError, TypeError) as assign_error:
-                # Assignment failed - not critical, we'll use cached_meta directly
-                log.debug(f"Could not update cached_file.meta: {assign_error}, using cached_meta directly")
-            meta = cached_meta
-            current_status = meta.get("processing_status")
-            
-            # Check if already processing (double-check after acquiring lock)
-            # CRITICAL FIX: Only skip if status is "processing" (job running), not "pending" (job queued)
-            # "pending" means job is queued but not started - we should allow re-enqueueing if needed
-            # "processing" means job is currently running - we should skip to avoid duplicates
-            if current_status == "processing":
-                log.info(
-                    f"File {form_data.file_id} status is {current_status} after acquiring lock, "
-                    f"skipping duplicate processing request from user {user.id}"
-                )
-                # Release lock before returning (BUG #5 fix)
-                if processing_lock and lock_acquired and not lock_released:
-                    processing_lock.release_lock()
-                    lock_released = True
-                    log.debug(f"Released file processing lock for file_id={form_data.file_id} (already processing)")
-                return {
-                    "status": current_status,
-                    "file_id": form_data.file_id,
-                    "filename": cached_file.filename,
-                    "message": f"File is already {current_status}. Please wait for completion.",
-                    "collection_name": meta.get("collection_name"),
-                    "content": None,
-                }
-            # If status is "pending", we can proceed - it means job was queued but may have failed or needs re-enqueueing
-            # If status is None/"not_started"/"completed"/"error", we can also proceed
-            
-            # Set initial status (we have the lock, so this is safe)
-            # Status update must succeed before we can proceed
-            try:
-                # Check return value to detect silent failures
-                result = Files.update_file_metadata_by_id(
-                    form_data.file_id,
-                    {
-                        "processing_status": "pending",
-                    },
-                )
-                # Check if update actually succeeded (returns FileModel on success, None on failure)
-                if result is None:
-                    # Update failed silently - don't release lock
-                    log.error(
-                        f"Failed to update file status for file_id={form_data.file_id}: "
-                        "update_file_metadata_by_id returned None"
-                    )
-                    status_update_succeeded = False
-                    raise Exception("File status update failed: update returned None")
-                # Status update succeeded
-                status_update_succeeded = True
-            except Exception as status_error:
-                # Status update failed - don't release lock to prevent another request from starting
+                processing_lock.release_lock()
+                lock_released = True
+            except Exception as release_error:
                 log.error(
-                    f"Failed to update file status for file_id={form_data.file_id}: {status_error}. "
-                    "Lock will not be released to prevent duplicate processing."
+                    "Failed to release file-processing lock after claim error: %s",
+                    release_error,
                 )
-                status_update_succeeded = False
-                raise  # Re-raise to let caller know it failed
-        except Exception as outer_error:
-            # If any other error occurs (e.g., file not found), ensure lock is released
-            # Only release if not already released
-            if processing_lock and lock_acquired and not lock_released:
-                try:
-                    processing_lock.release_lock()
-                    lock_released = True
-                    log.debug(f"Released file processing lock for file_id={form_data.file_id} after error")
-                except Exception as release_error:
-                    log.error(f"Failed to release lock after error: {release_error}")
-            raise  # Re-raise the original error
+        raise
     
     # Enqueue job to distributed job queue (RQ) if available, otherwise fall back to BackgroundTasks
     # This enables distributed processing across multiple pods in Kubernetes
@@ -2538,39 +2646,77 @@ def process_file(
     
     # Credential-safe: Resolve frozen IDs (no credentials in payload)
     from open_webui.retrieval.embedding.resolution import freeze_for_enqueue, freeze_for_knowledge_enqueue
-    from open_webui.retrieval.embedding.errors import EmbeddingError
-    
+
     try:
         admin_id, embedding_model_id = (
-            freeze_for_knowledge_enqueue(knowledge_id, user.id, request.app.state.config)
-            if knowledge_id
+            freeze_for_knowledge_enqueue(
+                effective_knowledge_id,
+                user.id,
+                request.app.state.config,
+            )
+            if effective_knowledge_id
             else freeze_for_enqueue(user.id, request.app.state.config)
         )
-    except EmbeddingError as e:
-        log.error(f"Embedding resolution failed for file_id={form_data.file_id}: {e.code}")
+    except Exception as error:
+        error_code = (
+            error.code if isinstance(error, EmbeddingError) else FILE_PROCESSING_FAILED
+        )
+        public_error = safe_file_processing_error_message(error_code)
+        log.error(
+            "Embedding resolution failed | file_id=%s | code=%s | type=%s",
+            form_data.file_id,
+            error_code,
+            type(error).__name__,
+        )
+        status_result = Files.update_file_metadata_by_id(
+            form_data.file_id,
+            {
+                "processing_status": "error",
+                "processing_completed_at": int(time.time()),
+                "processing_error_code": error_code,
+                "processing_error": public_error,
+            },
+        )
         if processing_lock and lock_acquired and not lock_released:
             try:
                 processing_lock.release_lock()
                 lock_released = True
             except Exception:
                 pass
+        if status_result is None:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=public_error,
+            )
         return {
-            "status": False,
+            "status": "error",
             "file_id": form_data.file_id,
-            "error": e.code,
+            "processing_error_code": error_code,
+            "error": public_error,
         }
     
     log.info(f"[PROCESS FILE] file_id={form_data.file_id} admin_id={admin_id} embedding_model_id={embedding_model_id}")
     
     try:
+        from open_webui.retrieval.embedding.file_processing import (
+            persist_content_provenance_before_dispatch,
+        )
+
+        # Background and RQ workers must read one durable, authoritative input;
+        # never rely on an ephemeral request/queue payload for text overrides.
+        persist_content_provenance_before_dispatch(
+            form_data.file_id,
+            form_data.content,
+        )
+
         # Try to use job queue first if available
         if is_job_queue_available():
             try:
                 job_id = enqueue_file_processing_job(
                     file_id=form_data.file_id,
-                    content=form_data.content,
+                    content=None,
                     collection_name=form_data.collection_name,
-                    knowledge_id=knowledge_id,
+                    knowledge_id=effective_knowledge_id,
                     user_id=user.id,
                     admin_id=admin_id,
                     embedding_model_id=embedding_model_id,
@@ -2598,9 +2744,9 @@ def process_file(
                     _process_file_sync,
                     request=request,
                     file_id=form_data.file_id,
-                    content=form_data.content,
+                    content=None,
                     collection_name=form_data.collection_name,
-                    knowledge_id=knowledge_id,
+                    knowledge_id=effective_knowledge_id,
                     user_id=user.id,
                     admin_id=admin_id,
                     embedding_model_id=embedding_model_id,
@@ -2617,7 +2763,32 @@ def process_file(
         # Only mark as successful if we actually enqueued/added a task
         if not (job_enqueued or background_task_added):
             raise Exception("Failed to enqueue job or add BackgroundTask - no task was created")
-            
+    except Exception as error:
+        public_error = safe_file_processing_error_message(FILE_PROCESSING_FAILED)
+        Files.update_file_metadata_by_id(
+            form_data.file_id,
+            {
+                "processing_status": "error",
+                "processing_completed_at": int(time.time()),
+                "processing_error_code": FILE_PROCESSING_FAILED,
+                "processing_error": public_error,
+            },
+        )
+        log.error(
+            "File processing dispatch failed | file_id=%s | type=%s",
+            form_data.file_id,
+            type(error).__name__,
+        )
+        if processing_lock and lock_acquired and not lock_released:
+            try:
+                processing_lock.release_lock()
+                lock_released = True
+            except Exception:
+                pass
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=public_error,
+        ) from None
     finally:
         # CRITICAL FIX: Release lock AFTER successfully enqueueing job or adding BackgroundTask
         # This ensures no race condition can occur
@@ -3058,7 +3229,13 @@ async def process_web_search(
         )
 
 
-def _resolve_model_aware_query_context(request, user):
+def _resolve_model_aware_query_context(
+    request,
+    user,
+    *,
+    knowledge_ids: Optional[list[str]] = None,
+    file_ids: Optional[list[str]] = None,
+):
     """Spec 10: resolve (admin_id, embedding_model_id) via readiness gate.
 
     Admins without durable state use their config-resolved model. All readiness
@@ -3070,11 +3247,12 @@ def _resolve_model_aware_query_context(request, user):
         from open_webui.retrieval.embedding.gate import (
             assert_embedding_retrieval_ready,
             RetrievalModelSpace,
-            RetrievalReadyNoState,
         )
 
         result = assert_embedding_retrieval_ready(
             requesting_user_id=user.id,
+            knowledge_ids=knowledge_ids,
+            file_ids=file_ids,
         )
         if isinstance(result, RetrievalModelSpace):
             return result.admin_id, result.active_model_id
@@ -3084,10 +3262,42 @@ def _resolve_model_aware_query_context(request, user):
     except EmbeddingError:
         # All embedding errors (MIXED, NOT_READY, resolution failures) propagate.
         raise
-    except Exception as e:
+    except Exception as error:
         # Non-embedding resolution failure: fail closed.
-        log.warning(f"model-aware query resolution failed: {e}")
+        log.warning(
+            "Model-aware query resolution failed | type=%s",
+            type(error).__name__,
+        )
         raise
+
+
+def _resolve_authorized_query_collections(
+    collection_names: list[str],
+) -> tuple[list[str], list[str]]:
+    """Derive file/knowledge scope from client-requested collection names.
+
+    Direct query endpoints have no server-owned legacy collection allowlist, so
+    every requested name must be a canonical file or Knowledge collection. The
+    readiness gate performs the corresponding read-access and model-space checks.
+    """
+    from open_webui.models.knowledge import Knowledges
+
+    knowledge_ids: list[str] = []
+    file_ids: list[str] = []
+    for raw_name in collection_names:
+        collection_name = str(raw_name or "").strip()
+        if not collection_name:
+            raise EmbeddingError(EMBEDDING_FILE_NOT_FOUND)
+        if collection_name.startswith("file-"):
+            file_id = collection_name.removeprefix("file-")
+            if not file_id or Files.get_file_by_id(file_id) is None:
+                raise EmbeddingError(EMBEDDING_FILE_NOT_FOUND)
+            file_ids.append(file_id)
+            continue
+        if Knowledges.get_knowledge_by_id(collection_name) is None:
+            raise EmbeddingError(EMBEDDING_FILE_NOT_FOUND)
+        knowledge_ids.append(collection_name)
+    return list(dict.fromkeys(knowledge_ids)), list(dict.fromkeys(file_ids))
 
 
 class QueryDocForm(BaseModel):
@@ -3105,13 +3315,26 @@ def query_doc_handler(
     user=Depends(get_verified_user),
 ):
     try:
-        # Create embedding function using the service
+        knowledge_ids, file_ids = _resolve_authorized_query_collections(
+            [form_data.collection_name]
+        )
+        admin_id, embedding_model_id = _resolve_model_aware_query_context(
+            request,
+            user,
+            knowledge_ids=knowledge_ids,
+            file_ids=file_ids,
+        )
+
+        # Bind query generation to the exact model approved by the gate.
         from open_webui.retrieval.embedding.service import EmbeddingService
         from open_webui.retrieval.embedding.compatibility import make_embedding_function
-        
+
         service = EmbeddingService(request.app.state.config)
-        embedding_function = make_embedding_function(service, user_id=user.id)
-        admin_id, embedding_model_id = _resolve_model_aware_query_context(request, user)
+        embedding_function = make_embedding_function(
+            service,
+            admin_id=admin_id,
+            embedding_model_id=embedding_model_id,
+        )
 
         if request.app.state.config.ENABLE_RAG_HYBRID_SEARCH.get(user.email):
             return query_doc_with_hybrid_search(
@@ -3127,6 +3350,8 @@ def query_doc_handler(
                 ),
                 admin_id=admin_id,
                 embedding_model_id=embedding_model_id,
+                knowledge_ids=knowledge_ids or None,
+                file_ids=file_ids or None,
             )
         else:
             return query_doc(
@@ -3136,6 +3361,8 @@ def query_doc_handler(
                 user=user,
                 admin_id=admin_id,
                 embedding_model_id=embedding_model_id,
+                knowledge_ids=knowledge_ids or None,
+                file_ids=file_ids or None,
             )
     except EmbeddingError as e:
         if e.code == EMBEDDING_REINDEX_NOT_READY:
@@ -3173,13 +3400,26 @@ def query_collection_handler(
     user=Depends(get_verified_user),
 ):
     try:
-        # Create embedding function using the service
+        knowledge_ids, file_ids = _resolve_authorized_query_collections(
+            form_data.collection_names
+        )
+        admin_id, embedding_model_id = _resolve_model_aware_query_context(
+            request,
+            user,
+            knowledge_ids=knowledge_ids,
+            file_ids=file_ids,
+        )
+
+        # Bind query generation to the exact model approved by the gate.
         from open_webui.retrieval.embedding.service import EmbeddingService
         from open_webui.retrieval.embedding.compatibility import make_embedding_function
-        
+
         service = EmbeddingService(request.app.state.config)
-        embedding_function = make_embedding_function(service, user_id=user.id)
-        admin_id, embedding_model_id = _resolve_model_aware_query_context(request, user)
+        embedding_function = make_embedding_function(
+            service,
+            admin_id=admin_id,
+            embedding_model_id=embedding_model_id,
+        )
 
         if request.app.state.config.ENABLE_RAG_HYBRID_SEARCH.get(user.email):
             return query_collection_with_hybrid_search(
@@ -3195,6 +3435,8 @@ def query_collection_handler(
                 ),
                 admin_id=admin_id,
                 embedding_model_id=embedding_model_id,
+                knowledge_ids=knowledge_ids or None,
+                file_ids=file_ids or None,
             )
         else:
             return query_collection(
@@ -3204,6 +3446,8 @@ def query_collection_handler(
                 k=form_data.k if form_data.k else request.app.state.config.TOP_K.get(user.email),
                 admin_id=admin_id,
                 embedding_model_id=embedding_model_id,
+                knowledge_ids=knowledge_ids or None,
+                file_ids=file_ids or None,
             )
 
     except EmbeddingError as e:
@@ -3303,8 +3547,9 @@ class BatchProcessFilesForm(BaseModel):
 
 class BatchProcessFilesResult(BaseModel):
     file_id: str
-    status: str
-    error: Optional[str] = None
+    status: Literal["completed", "failed"]
+    error_code: Optional[str] = None
+    message: Optional[str] = None
 
 
 class BatchProcessFilesResponse(BaseModel):
@@ -3325,64 +3570,118 @@ def process_files_batch(
     errors: List[BatchProcessFilesResult] = []
     collection_name = form_data.collection_name
 
-    # Prepare all documents first
-    all_docs: List[Document] = []
-    for file in form_data.files:
-        try:
-            text_content = file.data.get("content", "")
+    knowledge = Knowledges.get_knowledge_by_id(id=collection_name)
+    if knowledge is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+    if (
+        user.role != "admin"
+        and knowledge.user_id != user.id
+        and not has_access(user.id, "write", knowledge.access_control)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
 
-            docs: List[Document] = [
-                Document(
-                    page_content=text_content.replace("<br/>", "\n"),
-                    metadata={
-                        **file.meta,
-                        "name": file.filename,
-                        "created_by": file.user_id,
-                        "file_id": file.id,
-                        "source": file.filename,
-                    },
-                )
-            ]
-
-            hash = calculate_sha256_string(text_content)
-            Files.update_file_hash_by_id(file.id, hash)
-            Files.update_file_data_by_id(file.id, {"content": text_content})
-
-            all_docs.extend(docs)
-            results.append(BatchProcessFilesResult(file_id=file.id, status="prepared"))
-
-        except Exception as e:
-            log.error(f"process_files_batch: Error processing file {file.id}: {str(e)}")
-            errors.append(
-                BatchProcessFilesResult(file_id=file.id, status="failed", error=str(e))
+    # Never trust caller-supplied FileModel fields. Rehydrate each file from the
+    # database and require ownership (or admin authority) for this add flow.
+    files: List[FileModel] = []
+    for submitted_file in form_data.files:
+        file = Files.get_file_by_id(submitted_file.id)
+        if file is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=ERROR_MESSAGES.NOT_FOUND,
             )
+        if user.role != "admin" and file.user_id != user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+            )
+        files.append(file)
 
-    # Save all documents in one batch
-    if all_docs:
+    from open_webui.retrieval.embedding.file_processing import (
+        process_stored_file_for_embedding,
+    )
+    from open_webui.retrieval.embedding.resolution import (
+        freeze_for_knowledge_enqueue,
+    )
+
+    try:
+        admin_id, embedding_model_id = freeze_for_knowledge_enqueue(
+            collection_name,
+            user.id,
+            request.app.state.config,
+        )
+    except Exception as error:
+        raw_error_code = (
+            error.code if isinstance(error, EmbeddingError) else FILE_PROCESSING_FAILED
+        )
+        error_code = (
+            safe_file_processing_error_code(raw_error_code)
+            or FILE_PROCESSING_FAILED
+        )
+        public_error = safe_file_processing_error_message(error_code)
+        log.error(
+            "Batch embedding resolution failed | knowledge_id=%s | code=%s | type=%s",
+            collection_name,
+            error_code,
+            type(error).__name__,
+        )
+        for file in files:
+            failure = BatchProcessFilesResult(
+                file_id=file.id,
+                status="failed",
+                error_code=error_code,
+                message=public_error,
+            )
+            results.append(failure)
+            errors.append(failure)
+        return BatchProcessFilesResponse(results=results, errors=errors)
+
+    # The shared processor reads the authoritative stored bytes, prepares all
+    # modalities, and reconciles the file plus every current knowledge
+    # membership governed by this frozen admin/model context.
+    for file in files:
         try:
-            save_docs_to_vector_db(
-                request=request,
-                docs=all_docs,
+            process_stored_file_for_embedding(
+                config=request.app.state.config,
+                file_id=file.id,
+                admin_id=admin_id,
+                embedding_model_id=embedding_model_id,
+                knowledge_id=collection_name,
                 collection_name=collection_name,
-                add=True,
-                user=user,
             )
-
-            # Update all files with collection name
-            for result in results:
-                Files.update_file_metadata_by_id(
-                    result.file_id, {"collection_name": collection_name}
-                )
-                result.status = "completed"
-
-        except Exception as e:
+            results.append(
+                BatchProcessFilesResult(file_id=file.id, status="completed")
+            )
+        except Exception as error:
+            raw_error_code = (
+                error.code
+                if isinstance(error, EmbeddingError)
+                else FILE_PROCESSING_FAILED
+            )
+            error_code = (
+                safe_file_processing_error_code(raw_error_code)
+                or FILE_PROCESSING_FAILED
+            )
+            public_error = safe_file_processing_error_message(error_code)
             log.error(
-                f"process_files_batch: Error saving documents to vector DB: {str(e)}"
+                "Batch file processing failed | file_id=%s | code=%s | type=%s",
+                file.id,
+                error_code,
+                type(error).__name__,
             )
-            for result in results:
-                result.status = "failed"
-                errors.append(
-                    BatchProcessFilesResult(file_id=result.file_id, error=str(e))
-                )
+            failure = BatchProcessFilesResult(
+                file_id=file.id,
+                status="failed",
+                error_code=error_code,
+                message=public_error,
+            )
+            results.append(failure)
+            errors.append(failure)
 
     return BatchProcessFilesResponse(results=results, errors=errors)

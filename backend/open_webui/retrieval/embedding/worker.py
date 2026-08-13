@@ -26,16 +26,16 @@ Implements the full worker orchestration with all 17 critical fixes:
 """
 
 import logging
+import hashlib
+import os
 import time
 from dataclasses import replace
 from typing import Optional
 
-from langchain.text_splitter import RecursiveCharacterTextSplitter, TokenTextSplitter
-from langchain_core.documents import Document
-
 from open_webui.internal.db import get_db
-from open_webui.models.embeddings import EmbeddingJobFile, RagChunk
+from open_webui.models.embeddings import EmbeddingJob, EmbeddingJobFile, RagChunk
 from open_webui.models.files import File
+from open_webui.models.knowledge import Knowledge
 from open_webui.models.users import User
 from open_webui.retrieval.embedding.errors import (
     EmbeddingError,
@@ -53,13 +53,30 @@ from open_webui.retrieval.embedding.errors import (
     EMBEDDING_PROVIDER_FAILED,
     EMBEDDING_PROVIDER_UNSUPPORTED,
     EMBEDDING_MODALITY_UNSUPPORTED,
+    EMBEDDING_IMAGE_FORMAT_UNSUPPORTED,
+    EMBEDDING_IMAGE_INVALID,
+    PDF_VISUAL_EXTRACTION_FAILED,
+    PDF_VISUAL_LIMIT_EXCEEDED,
     EMBEDDING_INVENTORY_AMBIGUOUS_SOURCE,
     EMBEDDING_INVENTORY_AMBIGUOUS_ADMIN,
     EMBEDDING_INVENTORY_UNRESOLVED_SOURCE,
     EMBEDDING_INVENTORY_MALFORMED_REFERENCE,
     EMBEDDING_INVENTORY_MISSING_FILE,
+    EMBEDDING_REINDEX_SOURCE_CHANGED,
 )
-from open_webui.retrieval.embedding.inputs import TextEmbeddingInput
+from open_webui.retrieval.embedding.file_processing import (
+    CONTENT_ORIGIN_STORED_SOURCE,
+    read_stored_content_provenance,
+    resolve_authoritative_content_provenance,
+)
+from open_webui.retrieval.embedding.preparation import (
+    PreparedChunk,
+    PreparedFile,
+    PreparationRecipe,
+    build_persisted_chunks,
+    prepare_file_for_embedding,
+    preparation_recipe_from_snapshot,
+)
 from open_webui.retrieval.embedding.jobs import (
     EmbeddingJobRepository,
     EmbeddingJobView,
@@ -72,17 +89,15 @@ from open_webui.retrieval.embedding.jobs import (
     FILE_STATUS_PENDING,
     FILE_STATUS_PROCESSING,
 )
+from open_webui.retrieval.embedding.inventory import source_sha256_for_file
 from open_webui.retrieval.embedding.registry import get_model_spec_by_id
 from open_webui.retrieval.embedding.service import EmbeddingService
 from open_webui.retrieval.vector.model_aware import (
     ModelAwareVectorRepository,
     VECTOR_STATUS_BUILDING,
 )
-from open_webui.retrieval.vector.main import VectorItem
 from open_webui.storage.provider import Storage
-from open_webui.retrieval.loaders.main import Loader
-from open_webui.workers.file_processor import get_worker_config
-from open_webui.routers.retrieval import VECTOR_DB_CLIENT
+from open_webui.workers.config import get_worker_config
 
 log = logging.getLogger(__name__)
 
@@ -121,9 +136,9 @@ _EMBEDDING_CODE_MAP = {
     EMBEDDING_MODEL_NOT_CONFIGURED: FILE_ERROR_ADMIN_MODEL_RESOLUTION,
     EMBEDDING_MODEL_DISABLED: FILE_ERROR_ADMIN_MODEL_RESOLUTION,
     EMBEDDING_CREDENTIALS_MISSING: FILE_ERROR_CREDENTIALS_MISSING,
-    EMBEDDING_PROVIDER_FAILED: FILE_ERROR_PROVIDER_EMBEDDING_FAILED,
+    EMBEDDING_PROVIDER_FAILED: EMBEDDING_PROVIDER_FAILED,
     EMBEDDING_PROVIDER_UNSUPPORTED: FILE_ERROR_PROVIDER_EMBEDDING_FAILED,
-    EMBEDDING_MODALITY_UNSUPPORTED: FILE_ERROR_EMBEDDING_FAILED,
+    EMBEDDING_MODALITY_UNSUPPORTED: EMBEDDING_MODALITY_UNSUPPORTED,
     EMBEDDING_INVENTORY_AMBIGUOUS_SOURCE: FILE_ERROR_OWNERSHIP_AMBIGUOUS,
     EMBEDDING_INVENTORY_AMBIGUOUS_ADMIN: FILE_ERROR_OWNERSHIP_AMBIGUOUS,
     EMBEDDING_INVENTORY_UNRESOLVED_SOURCE: FILE_ERROR_OWNERSHIP_AMBIGUOUS,
@@ -167,6 +182,16 @@ _FILE_SAFE_CAUSES = {
     FILE_ERROR_STALE_CLAIM: "the worker was interrupted or the claim became stale",
     FILE_ERROR_CHUNK_REUSE_INVALID: "persisted chunks could not be reused because the source content changed",
     FILE_ERROR_PROCESSING_FAILED: "processing failed",
+    EMBEDDING_PROVIDER_FAILED: "the embedding provider request failed",
+    EMBEDDING_MODALITY_UNSUPPORTED: (
+        "the selected embedding model does not support this content type"
+    ),
+    EMBEDDING_IMAGE_FORMAT_UNSUPPORTED: "only PNG and JPEG images are supported",
+    EMBEDDING_IMAGE_INVALID: "the image file is invalid or could not be decoded",
+    PDF_VISUAL_EXTRACTION_FAILED: "the PDF visual content could not be processed",
+    PDF_VISUAL_LIMIT_EXCEEDED: (
+        "the PDF exceeds the configured visual processing limit"
+    ),
 }
 
 # Safe, bounded job-level messages (no exception text is persisted).
@@ -593,43 +618,97 @@ def _process_file(
     # Step 10: Load source file and inventory membership
     source_file = _load_source_file(file_id)
     file_snapshot = file_view.file_snapshot
-    
-    # Step 11: Reuse persisted rag_chunks where valid (Fix #9: validate with source hash)
-    chunks, rag_chunk_ids = _load_or_parse_chunks(
-        admin_id=admin.id,
-        admin_email=admin.email,
-        file_id=file_id,
-        source_file=source_file,
-        content_hash=file_snapshot.get("content_hash"),
-        config=config,
+    try:
+        preparation_recipe = preparation_recipe_from_snapshot(file_snapshot)
+    except (TypeError, ValueError):
+        raise EmbeddingError(EMBEDDING_REINDEX_SOURCE_CHANGED) from None
+
+    expected_source_sha256 = file_snapshot.get("source_sha256")
+    expected_updated_at = file_snapshot.get("updated_at")
+    expected_content_hash = file_snapshot.get("content_hash")
+    expected_content_origin = file_snapshot.get(
+        "content_origin",
+        CONTENT_ORIGIN_STORED_SOURCE,
     )
+    expected_content_override_sha256 = file_snapshot.get(
+        "content_override_sha256"
+    )
+    try:
+        current_content_provenance = read_stored_content_provenance(source_file)
+    except ValueError:
+        raise EmbeddingError(EMBEDDING_REINDEX_SOURCE_CHANGED) from None
+    if (
+        expected_updated_at is not None
+        and source_file.updated_at != expected_updated_at
+    ) or source_file.hash != expected_content_hash or (
+        current_content_provenance.origin != expected_content_origin
+        or current_content_provenance.content_override_sha256
+        != expected_content_override_sha256
+    ):
+        raise EmbeddingError(EMBEDDING_REINDEX_SOURCE_CHANGED)
     
-    # Fix #11: Raise error for empty content
-    if not chunks:
+    # Step 11: Re-read immutable source bytes and use the canonical preparation
+    # path. Cached text/vector documents are never sufficient for visual input.
+    prepared = _prepare_source_file(
+        source_file=source_file,
+        admin_email=admin.email,
+        target_model=target_model,
+        config=config,
+        preparation_recipe=preparation_recipe,
+    )
+
+    if not prepared.chunks:
         raise EmbeddingError(
             FILE_ERROR_EMPTY_CONTENT,
             detail=f"File {file_id} contains no extractable content",
         )
-    
-    # Step 12: Generate target-model vectors (Fix #1: use frozen context)
+
+    if expected_source_sha256 != prepared.source_sha256:
+        raise EmbeddingError(EMBEDDING_REINDEX_SOURCE_CHANGED)
+
+    # Generate and fully validate all vectors before mutating chunks/projections.
     embeddings = _generate_embeddings(
-        chunks=chunks,
+        chunks=prepared.chunks,
         admin_id=admin.id,
         target_model_id=target_model.id,
         embedding_service=embedding_service,
     )
-    
-    # Step 13: Reconcile vector projections (Fix #4, #5, Spec 07)
+
+    persisted_chunks = build_persisted_chunks(
+        prepared,
+        admin_id=admin.id,
+        file_id=file_id,
+    )
+    manifest_id = RagChunk.build_manifest_id(
+        persisted_chunks,
+        source_sha256=prepared.source_sha256,
+        extraction_version=prepared.extraction_version,
+    )
+    rag_chunk_ids = RagChunk.insert_chunks(
+        admin.id,
+        file_id,
+        persisted_chunks,
+        manifest_id=manifest_id,
+    )
+
     _write_vectors(
         vector_repo=vector_repo,
         admin_id=admin.id,
         file_id=file_id,
-        chunks=chunks,
+        chunks=prepared.chunks,
         embeddings=embeddings,
         rag_chunk_ids=rag_chunk_ids,
+        metadata=[chunk["chunk_metadata"] for chunk in persisted_chunks],
         file_snapshot=file_snapshot,
         target_model=target_model,
         job_id=job_id,
+    )
+    _stage_prepared_manifest(
+        job_id,
+        file_id,
+        prepared,
+        manifest_id,
+        rag_chunk_ids,
     )
 
     # Step 14: Mark file completed
@@ -716,208 +795,94 @@ def _get_file_display_name(file_id: str) -> str:
     return file_id
 
 
-def _load_or_parse_chunks(
-    admin_id: str,
-    admin_email: str,
-    file_id: str,
+def _prepare_source_file(
+    *,
     source_file: File,
-    content_hash: Optional[str],
+    admin_email: str,
+    target_model,
     config,
-) -> tuple[list, list[str]]:
-    """Load persisted rag_chunks or parse file content.
-    
-    Returns tuple of (chunks, rag_chunk_ids).
-    Fix #9: Validate chunk reuse with source file hash, not content hash.
-    """
-    # Try to load existing rag_chunks
-    with get_db() as db:
-        existing_chunks = (
-            db.query(RagChunk)
-            .filter(RagChunk.admin_id == admin_id, RagChunk.file_id == file_id)
-            .order_by(RagChunk.chunk_index)
-            .all()
-        )
-    
-    if existing_chunks and content_hash:
-        # Fix #9: Validate all chunks have matching source provenance
-        # Check if source file hash matches (not chunk content hash)
-        # For now, we'll re-parse to ensure correctness
-        # TODO: Implement proper source hash validation with chunk provenance
-        log.debug(
-            f"[EMBEDDING_WORKER] Re-parsing file {file_id} for chunk reuse validation"
-        )
-    
-    # Parse file content (Fix #10: use proper parsing pipeline)
-    log.debug(f"[EMBEDDING_WORKER] Parsing file {file_id} content")
-    return _parse_file_content(
-        source_file,
-        admin_id,
-        admin_email,
-        file_id,
-        config,
-    )
-
-
-def _get_chunk_settings(config, admin_email: str) -> tuple[int, int]:
-    """Return (chunk_size, chunk_overlap) for the given admin.
-
-    Mirrors ``_get_user_chunk_settings`` from the canonical ingestion pipeline
-    but operates on the worker config (no FastAPI request object).
-    """
+    preparation_recipe: PreparationRecipe,
+) -> PreparedFile:
+    """Read original storage bytes and invoke the shared preparation pipeline."""
+    if not source_file.path:
+        raise EmbeddingError(FILE_ERROR_STORAGE_READ_FAILED)
     try:
-        chunk_size = config.CHUNK_SIZE.get(admin_email)
-        chunk_overlap = config.CHUNK_OVERLAP.get(admin_email)
+        source_path = Storage.get_file(source_file.path)
+        if not source_path or not os.path.isfile(source_path):
+            raise OSError("source unavailable")
+        with open(source_path, "rb") as source_handle:
+            source_bytes = source_handle.read()
     except Exception:
-        chunk_size, chunk_overlap = None, None
+        raise EmbeddingError(FILE_ERROR_STORAGE_READ_FAILED) from None
 
-    if not chunk_size or chunk_size <= 0:
-        chunk_size = 1000
-    if chunk_overlap is None or chunk_overlap < 0:
-        chunk_overlap = 200
-    return chunk_size, chunk_overlap
-
-
-def _make_text_splitter(config, chunk_size: int, chunk_overlap: int):
-    """Build the configured text splitter (mirrors canonical pipeline)."""
-    splitter_name = getattr(config, "TEXT_SPLITTER", "") or ""
-    if splitter_name in ("", "character"):
-        return RecursiveCharacterTextSplitter(
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            add_start_index=True,
+    try:
+        content_provenance = resolve_authoritative_content_provenance(
+            source_file,
+            source_bytes,
         )
-    elif splitter_name == "token":
-        encoding_name = getattr(config, "TIKTOKEN_ENCODING_NAME", "cl100k_base")
-        import tiktoken
-        tiktoken.get_encoding(str(encoding_name))
-        return TokenTextSplitter(
-            encoding_name=str(encoding_name),
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            add_start_index=True,
+        return prepare_file_for_embedding(
+            source_bytes=source_bytes,
+            source_path=source_path,
+            filename=source_file.filename,
+            content_type=(source_file.meta or {}).get("content_type"),
+            file_id=source_file.id,
+            created_by=source_file.user_id,
+            model=target_model,
+            config=config,
+            admin_email=admin_email,
+            preparation_recipe=preparation_recipe,
+            content_override=content_provenance.content_override,
         )
-    # Fallback: character splitter (same as canonical pipeline default)
-    return RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        add_start_index=True,
-    )
+    except EmbeddingError:
+        raise
+    except Exception:
+        raise EmbeddingError(FILE_ERROR_EXTRACTION_FAILED) from None
 
 
-def _parse_file_content(
-    source_file: File,
-    admin_id: str,
-    admin_email: str,
+def _stage_prepared_manifest(
+    job_id: str,
     file_id: str,
-    config,
-) -> tuple[list, list[str]]:
-    """Parse file content into chunks using the canonical splitter pipeline.
-
-    Returns tuple of (chunks, rag_chunk_ids).
-    Uses the same Loader + text splitter pipeline as normal file ingestion
-    so reindexed vectors match the granularity and metadata of original vectors.
-    """
-    # Load file content from storage
-    docs = None
-    file_content = None
-    if source_file.data and isinstance(source_file.data, dict):
-        file_content = source_file.data.get("content", "")
-
-    # If no content in data, try to read from storage (Fix #10, Spec 08)
-    if not file_content and source_file.path:
-        # Storage read stage: distinguish an unreadable/missing blob (Spec 08
-        # storage_read_failed) from a loader/extraction failure below.
-        try:
-            file_path = Storage.get_file(source_file.path)
-            storage_readable = bool(file_path and Storage.file_exists(file_path))
-            if not storage_readable:
-                raise EmbeddingError(
-                    FILE_ERROR_STORAGE_READ_FAILED,
-                    detail="The source file is unavailable in storage",
-                )
-        except EmbeddingError:
-            raise
-        except Exception as e:
-            log.error(f"[EMBEDDING_WORKER] Failed to read file {file_id} from storage: {e}")
-            raise EmbeddingError(
-                FILE_ERROR_STORAGE_READ_FAILED,
-                detail=f"Storage read failed: {type(e).__name__}",
+    prepared: PreparedFile,
+    manifest_id: str,
+    rag_chunk_ids: list[str],
+) -> None:
+    """Stage prepared cache/status for publication only after promotion."""
+    with get_db() as db:
+        job_file = (
+            db.query(EmbeddingJobFile)
+            .filter(
+                EmbeddingJobFile.job_id == job_id,
+                EmbeddingJobFile.file_id == file_id,
             )
-
-        if storage_readable:
-            # Extraction stage: loader failures are extraction_failed.
-            try:
-                loader = Loader()
-                docs = loader.load(
-                    filename=source_file.filename,
-                    content_type=source_file.content_type,
-                    file_path=file_path,
-                )
-            except Exception as e:
-                log.error(f"[EMBEDDING_WORKER] Failed to extract file {file_id}: {e}")
-                raise EmbeddingError(
-                    FILE_ERROR_EXTRACTION_FAILED,
-                    detail=f"File extraction failed: {type(e).__name__}",
-                )
-
-    # Build Document objects with full metadata (matches canonical pipeline)
-    if docs:
-        file_content = " ".join(doc.page_content for doc in docs)
-    if not file_content or not file_content.strip():
-        raise EmbeddingError(
-            FILE_ERROR_EMPTY_CONTENT,
-            detail=f"File {file_id} contains no extractable content",
+            .first()
         )
-
-    base_metadata = {
-        "name": source_file.filename,
-        "created_by": source_file.user_id,
-        "file_id": source_file.id,
-        "source": source_file.filename,
-    }
-    if docs:
-        for doc in docs:
-            doc.metadata.update(base_metadata)
-    else:
-        docs = [Document(page_content=file_content, metadata=dict(base_metadata))]
-
-    # Apply the canonical text splitter so chunk granularity matches normal
-    # ingestion.  Chunk settings come from the worker config (same source as
-    # the web UI).
-    chunk_size, chunk_overlap = _get_chunk_settings(config, admin_email)
-    if chunk_size <= 0:
-        chunk_size = 1000
-    if chunk_overlap < 0:
-        chunk_overlap = 0
-    if chunk_overlap >= chunk_size:
-        chunk_overlap = chunk_size // 4
-
-    text_splitter = _make_text_splitter(config, chunk_size, chunk_overlap)
-    docs = text_splitter.split_documents(docs)
-
-    # Convert split Documents to the chunk dict format expected downstream
-    chunks = [
-        {
-            "content": doc.page_content,
-            "content_type": "text",
-            "metadata": dict(doc.metadata),
+        if job_file is None:
+            raise EmbeddingError(EMBEDDING_FILE_NOT_FOUND)
+        snapshot = dict(job_file.file_snapshot or {})
+        projection_ids = _current_snapshot_knowledge_ids(
+            file_id=file_id,
+            knowledge_ids=snapshot.get("knowledge_collection_ids", []),
+        )
+        snapshot["prepared_processing_summary"] = {
+            "text_content": prepared.text_content,
+            "content_hash": hashlib.sha256(
+                prepared.text_content.encode("utf-8")
+            ).hexdigest(),
+            "source_sha256": prepared.source_sha256,
+            "extraction_version": prepared.extraction_version,
+            "manifest_id": manifest_id,
+            "chunk_count": len(prepared.chunks),
+            "rag_chunk_ids": list(rag_chunk_ids),
+            "projection_ids": [f"file-{file_id}", *projection_ids],
+            "processing_warnings": list(dict.fromkeys(prepared.warnings)),
+            "visual_summary": dict(prepared.visual_summary),
         }
-        for doc in docs
-    ]
-
-    # Persist chunks as rag_chunks
-    rag_chunk_ids = _persist_chunks(admin_id, file_id, chunks)
-
-    return chunks, rag_chunk_ids
-
-
-def _persist_chunks(admin_id: str, file_id: str, chunks: list) -> list[str]:
-    """Persist chunks as rag_chunks and return their IDs."""
-    return RagChunk.insert_chunks(admin_id, file_id, chunks)
+        job_file.file_snapshot = snapshot
+        db.commit()
 
 
 def _generate_embeddings(
-    chunks: list,
+    chunks: tuple[PreparedChunk, ...],
     admin_id: str,
     target_model_id: str,
     embedding_service: EmbeddingService,
@@ -926,27 +891,12 @@ def _generate_embeddings(
     if not chunks:
         return []
     
-    # Convert chunks to embedding inputs
-    inputs = []
-    for chunk in chunks:
-        if chunk["content_type"] == "text":
-            inputs.append(TextEmbeddingInput(text=chunk["content"]))
-        else:
-            # Fix #11: Raise error for unsupported modalities
-            raise EmbeddingError(
-                EMBEDDING_MODALITY_UNSUPPORTED,
-                detail=f"Unsupported chunk modality: {chunk['content_type']}",
-            )
-    
-    if not inputs:
-        return []
-    
     # Fix #1: Use embed_for_frozen_context with target model ID
     # Spec 08: preserve the original stable EmbeddingError code so the caller's
     # error mapping can record a distinct stage (credentials_missing,
     # provider_embedding_failed, ...) instead of collapsing every failure.
     batch = embedding_service.embed_for_frozen_context(
-        inputs=inputs,
+        inputs=[chunk.embedding_input for chunk in chunks],
         admin_id=admin_id,
         embedding_model_id=target_model_id,
     )
@@ -957,9 +907,10 @@ def _write_vectors(
     vector_repo: ModelAwareVectorRepository,
     admin_id: str,
     file_id: str,
-    chunks: list,
+    chunks: tuple[PreparedChunk, ...],
     embeddings: list,
     rag_chunk_ids: list[str],
+    metadata: list[dict],
     file_snapshot: dict,
     target_model,
     job_id: str,
@@ -981,19 +932,15 @@ def _write_vectors(
     
     # Extract collection info from snapshot
     file_collection_name = file_snapshot.get("file_collection_name", f"file-{file_id}")
-    knowledge_collection_ids = file_snapshot.get("knowledge_collection_ids", [])
+    snapshot_knowledge_ids = file_snapshot.get("knowledge_collection_ids", [])
+    knowledge_collection_ids = _current_snapshot_knowledge_ids(
+        file_id=file_id,
+        knowledge_ids=snapshot_knowledge_ids,
+    )
     
     # Fix #5: Build items with full provenance using ModelAwareVectorRepository
-    texts = [chunk["content"] for chunk in chunks]
-    metadata = [
-        {
-            **chunk.get("metadata", {}),
-            "chunk_index": i,
-            "admin_id": admin_id,
-            "file_id": file_id,
-        }
-        for i, chunk in enumerate(chunks)
-    ]
+    texts = [chunk.content for chunk in chunks]
+    modalities = [chunk.modality for chunk in chunks]
     
     # Build items for file collection
     try:
@@ -1006,21 +953,13 @@ def _write_vectors(
             model=target_model,
             file_id=file_id,
             knowledge_id=None,
-            modality="text",
+            modalities=modalities,
             embedding_status=VECTOR_STATUS_BUILDING,
             embedding_job_id=job_id,
         )
         
-        # Write to file collection (Spec 07: transactional per-projection reconcile)
-        vector_repo.reconcile_model_aware(
-            collection_name=file_collection_name,
-            items=file_items,
-            model=target_model,
-        )
-        
-        # Write to knowledge collections
+        projections = [(file_collection_name, file_items)]
         for knowledge_id in knowledge_collection_ids:
-            knowledge_collection_name = f"knowledge-{knowledge_id}"
             knowledge_items = vector_repo.make_items(
                 texts=texts,
                 vectors=embeddings,
@@ -1030,24 +969,50 @@ def _write_vectors(
                 model=target_model,
                 file_id=file_id,
                 knowledge_id=knowledge_id,
-                modality="text",
+                modalities=modalities,
                 embedding_status=VECTOR_STATUS_BUILDING,
                 embedding_job_id=job_id,
             )
-            vector_repo.reconcile_model_aware(
-                collection_name=knowledge_collection_name,
-                items=knowledge_items,
-                model=target_model,
-            )
-        
+            projections.append((str(knowledge_id), knowledge_items))
+
+        vector_repo.reconcile_model_aware_many(
+            projections=projections,
+            model=target_model,
+        )
+
         log.debug(
             f"[EMBEDDING_WORKER] Reconcile wrote {len(file_items)} vectors to {1 + len(knowledge_collection_ids)} collections"
         )
-    except Exception as e:
+    except Exception:
         raise EmbeddingError(
             FILE_ERROR_VECTOR_WRITE_FAILED,
-            detail=f"Vector write failed: {type(e).__name__}",
-        ) from e
+        ) from None
+
+
+def _current_snapshot_knowledge_ids(
+    *, file_id: str, knowledge_ids
+) -> list[str]:
+    """Filter a reindex snapshot through current file memberships."""
+    requested = {
+        str(value)
+        for value in (knowledge_ids if isinstance(knowledge_ids, list) else [])
+        if value
+    }
+    if not requested:
+        return []
+    current: list[str] = []
+    with get_db() as db:
+        rows = (
+            db.query(Knowledge.id, Knowledge.data)
+            .filter(Knowledge.id.in_(requested))
+            .all()
+        )
+        for row in rows:
+            data = row.data if isinstance(row.data, dict) else {}
+            file_ids = data.get("file_ids", [])
+            if isinstance(file_ids, list) and file_id in file_ids:
+                current.append(str(row.id))
+    return sorted(current)
 
 
 def _mark_file_completed_safe(job_id: str, file_id: str):
@@ -1157,6 +1122,11 @@ def _finalize_job_safe(job_id: str):
                 # Load target model spec within the session
                 target_model_spec = get_model_spec_by_id(target_model_id)
 
+                _apply_staged_processing_summaries(
+                    job_id=job_id,
+                    db=db,
+                )
+
                 EmbeddingJobRepository.finalize_job_success(
                     job_id=job_id,
                     admin_id=admin_id,
@@ -1174,35 +1144,126 @@ def _finalize_job_safe(job_id: str):
 
         log.info(f"[EMBEDDING_WORKER] Finalized job {job_id}")
 
-    except EmbeddingError as e:
-        if e.code == EMBEDDING_JOB_STALE_OPERATION:
-            # Stale job: mark as failed with stale-operation error
-            log.warning(
-                f"[EMBEDDING_WORKER] Job {job_id} is stale (no longer latest); marking failed"
-            )
-            _mark_job_failed_safe(
-                job_id, EMBEDDING_JOB_STALE_OPERATION, str(e.detail or "Stale operation")
-            )
-        elif e.code == EMBEDDING_MODEL_STATE_CONFLICT:
-            log.warning(
-                f"[EMBEDDING_WORKER] Model state conflict during finalization of job {job_id}: {e.detail}"
-            )
-            _mark_job_failed_safe(
-                job_id, EMBEDDING_MODEL_STATE_CONFLICT, str(e.detail or "Model state conflict")
-            )
-        else:
-            log.error(
-                f"[EMBEDDING_WORKER] EmbeddingError during finalization of job {job_id}: {e}",
-                exc_info=True,
-            )
-            _mark_job_failed_safe(job_id, e.code, _sanitize_error_message("unexpected", e))
-    except Exception as e:
+    except EmbeddingError as error:
+        # Promotion is retryable as an operation. Keep the completed file
+        # ledger and target state intact; a redelivered job revalidates every
+        # staged vector before promotion. Never persist exception detail.
         log.error(
-            f"[EMBEDDING_WORKER] Unexpected error during finalization of job {job_id}: {e}",
-            exc_info=True,
-        )
-        _mark_job_failed_safe(
+            "Embedding job promotion failed | job_id=%s | code=%s",
             job_id,
-            _get_stable_error_code(e),
-            _sanitize_error_message("unexpected", e),
+            error.code,
         )
+        _mark_promotion_retryable(job_id, error.code)
+    except Exception as error:
+        log.error(
+            "Embedding job promotion failed | job_id=%s | type=%s",
+            job_id,
+            type(error).__name__,
+        )
+        _mark_promotion_retryable(job_id, FILE_ERROR_PROCESSING_FAILED)
+
+
+def _mark_promotion_retryable(job_id: str, error_code: str) -> None:
+    """Mark a completed-ledger promotion failure as operation-retryable."""
+    with get_db() as db:
+        row = db.query(EmbeddingJob).filter(EmbeddingJob.id == job_id).first()
+        if row is None or row.status in (JOB_STATUS_COMPLETED,):
+            return
+        row.status = JOB_STATUS_FAILED
+        row.error_code = error_code
+        row.error_message = "Embedding model promotion could not be completed. Retry the operation."
+        row.completed_at = None
+        row.updated_at = int(time.time())
+        db.commit()
+
+
+def _apply_staged_processing_summaries(*, job_id: str, db) -> None:
+    """Publish staged file cache/status in the promotion transaction."""
+    now = int(time.time())
+    rows = (
+        db.query(EmbeddingJobFile)
+        .filter(
+            EmbeddingJobFile.job_id == job_id,
+            EmbeddingJobFile.status == FILE_STATUS_COMPLETED,
+        )
+        .all()
+    )
+    for job_file in rows:
+        snapshot = (
+            job_file.file_snapshot
+            if isinstance(job_file.file_snapshot, dict)
+            else {}
+        )
+        summary = snapshot.get("prepared_processing_summary")
+        if not isinstance(summary, dict):
+            raise EmbeddingError(FILE_ERROR_PROCESSING_FAILED)
+        file_row = (
+            db.query(File)
+            .filter(File.id == job_file.file_id)
+            .with_for_update()
+            .first()
+        )
+        if file_row is None:
+            raise EmbeddingError(EMBEDDING_FILE_NOT_FOUND)
+        text_content = summary.get("text_content")
+        content_hash = summary.get("content_hash")
+        source_sha256 = summary.get("source_sha256")
+        manifest_id = summary.get("manifest_id")
+        if not isinstance(text_content, str):
+            raise EmbeddingError(FILE_ERROR_PROCESSING_FAILED)
+        for digest in (content_hash, source_sha256, manifest_id):
+            if (
+                not isinstance(digest, str)
+                or len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)
+            ):
+                raise EmbeddingError(FILE_ERROR_PROCESSING_FAILED)
+
+        # The worker validated this snapshot before provider calls, but another
+        # file in the same job may take minutes. Revalidate the locked source
+        # immediately before cache publication and vector activation so a
+        # concurrent edit can never promote stale vectors or overwrite newer
+        # extracted content.
+        expected_source_sha256 = snapshot.get("source_sha256")
+        if expected_source_sha256 != source_sha256:
+            raise EmbeddingError(EMBEDDING_REINDEX_SOURCE_CHANGED)
+        if source_sha256_for_file(file_row) != source_sha256:
+            raise EmbeddingError(EMBEDDING_REINDEX_SOURCE_CHANGED)
+        if file_row.hash != snapshot.get("content_hash"):
+            raise EmbeddingError(EMBEDDING_REINDEX_SOURCE_CHANGED)
+        expected_updated_at = snapshot.get("updated_at")
+        if (
+            expected_updated_at is not None
+            and file_row.updated_at != expected_updated_at
+        ):
+            raise EmbeddingError(EMBEDDING_REINDEX_SOURCE_CHANGED)
+        try:
+            current_provenance = read_stored_content_provenance(file_row)
+        except ValueError:
+            raise EmbeddingError(EMBEDDING_REINDEX_SOURCE_CHANGED) from None
+        if (
+            current_provenance.origin
+            != snapshot.get("content_origin", CONTENT_ORIGIN_STORED_SOURCE)
+            or current_provenance.content_override_sha256
+            != snapshot.get("content_override_sha256")
+        ):
+            raise EmbeddingError(EMBEDDING_REINDEX_SOURCE_CHANGED)
+
+        file_row.data = {**(file_row.data or {}), "content": text_content}
+        file_row.hash = content_hash
+        file_row.meta = {
+            **(file_row.meta or {}),
+            "collection_name": f"file-{file_row.id}",
+            "source_sha256": source_sha256,
+            "extraction_version": summary.get("extraction_version"),
+            "chunk_manifest_id": manifest_id,
+            "processing_warnings": list(
+                dict.fromkeys(summary.get("processing_warnings") or [])
+            ),
+            "visual_summary": dict(summary.get("visual_summary") or {}),
+            "processing_status": "completed",
+            "processing_completed_at": now,
+            "processing_error": None,
+            "processing_error_code": None,
+        }
+        file_row.updated_at = now

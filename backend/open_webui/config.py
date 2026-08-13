@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 import requests
 from pydantic import BaseModel
 from sqlalchemy import JSON, Column, DateTime, Integer, func, Any, String
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm.attributes import flag_modified
 from open_webui.models.groups import (
     Groups)
@@ -2004,6 +2005,30 @@ if VECTOR_DB == "pgvector" and not (PGVECTOR_DB_URL or DATABASE_URL).startswith(
     raise ValueError(
         "Pgvector requires setting PGVECTOR_DB_URL or using Postgres with vector extension as the primary database."
     )
+if VECTOR_DB == "pgvector" and PGVECTOR_DB_URL:
+    primary_url = make_url(DATABASE_URL)
+    vector_url = make_url(PGVECTOR_DB_URL)
+
+    def _canonical_postgres_target(url):
+        drivername = (
+            "postgresql" if url.drivername.startswith("postgresql") else url.drivername
+        )
+        return (
+            drivername,
+            url.username,
+            url.password,
+            url.host,
+            url.port or (5432 if drivername == "postgresql" else None),
+            url.database,
+            tuple(sorted(url.query.items())),
+        )
+
+    if _canonical_postgres_target(primary_url) != _canonical_postgres_target(
+        vector_url
+    ):
+        raise ValueError(
+            "PGVECTOR_DB_URL must be unset or target the same database as DATABASE_URL."
+        )
 PGVECTOR_INITIALIZE_MAX_VECTOR_LENGTH = int(
     os.environ.get("PGVECTOR_INITIALIZE_MAX_VECTOR_LENGTH", "1536")
 )

@@ -165,6 +165,25 @@ class PgvectorClient:
             "updated_at": now,
         }
 
+    @staticmethod
+    def _result_metadata(row) -> dict:
+        """Merge internal row identity into metadata returned to retrieval.
+
+        These fields are needed for modality-aware ranking and authorized image
+        reconstruction. Public response construction must sanitize them before
+        emitting citations.
+        """
+        metadata = dict(row.vmetadata or {})
+        metadata.update(
+            {
+                "rag_chunk_id": row.rag_chunk_id,
+                "modality": row.modality or "text",
+                "file_id": row.file_id or metadata.get("file_id"),
+                "knowledge_id": row.knowledge_id,
+            }
+        )
+        return metadata
+
     def insert(self, collection_name: str, items: List[VectorItem]) -> None:
         log.info("[PGVECTOR] insert START | collection=%s | items_count=%s", collection_name, len(items))
         try:
@@ -282,86 +301,9 @@ class PgvectorClient:
             return
 
         try:
-            from sqlalchemy.dialects.postgresql import insert as pg_insert
-
-            now = int(time.time())
-            current_ids: set[str] = set()
-            rows = []
-            for item in items:
-                if not self._is_model_aware(item) or not item.get("rag_chunk_id"):
-                    raise ValueError(
-                        "reconcile_model_aware requires provenance "
-                        "(admin_id, embedding_model_id, rag_chunk_id)"
-                    )
-                current_ids.add(item["rag_chunk_id"])
-                rows.append(
-                    {
-                        "id": str(uuid.uuid4()),
-                        "vector": item["vector"],
-                        "collection_name": collection_name,
-                        "text": item["text"],
-                        "vmetadata": item["metadata"],
-                        "admin_id": item["admin_id"],
-                        "embedding_model_id": item["embedding_model_id"],
-                        "file_id": item.get("file_id"),
-                        "knowledge_id": item.get("knowledge_id"),
-                        "rag_chunk_id": item["rag_chunk_id"],
-                        "modality": item.get("modality") or "text",
-                        "embedding_status": item.get("embedding_status") or "active",
-                        "embedding_job_id": item.get("embedding_job_id"),
-                        "provenance_status": "attributed",
-                        "created_at": now,
-                        "updated_at": now,
-                    }
-                )
-
-            stmt = pg_insert(DocumentChunk).values(rows)
-            stmt = stmt.on_conflict_do_update(
-                index_elements=[
-                    DocumentChunk.admin_id,
-                    DocumentChunk.embedding_model_id,
-                    DocumentChunk.rag_chunk_id,
-                    DocumentChunk.collection_name,
-                ],
-                index_where=DocumentChunk.rag_chunk_id.isnot(None),
-                set_={
-                    "vector": stmt.excluded.vector,
-                    "text": stmt.excluded.text,
-                    "vmetadata": stmt.excluded.vmetadata,
-                    "collection_name": stmt.excluded.collection_name,
-                    "file_id": stmt.excluded.file_id,
-                    "knowledge_id": stmt.excluded.knowledge_id,
-                    "modality": stmt.excluded.modality,
-                    "embedding_status": stmt.excluded.embedding_status,
-                    "embedding_job_id": stmt.excluded.embedding_job_id,
-                    "provenance_status": stmt.excluded.provenance_status,
-                    "updated_at": stmt.excluded.updated_at,
-                },
+            stale_deleted = self._reconcile_model_aware_projection(
+                collection_name, items
             )
-            self.session.execute(stmt)
-
-            # 2. Delete stale target rows scoped to this projection only:
-            #    same (admin_id, embedding_model_id, file_id, collection_name),
-            #    model-aware rows whose rag_chunk_id is no longer current. Rows
-            #    for other models/files/collections and shared rag_chunks rows
-            #    are never touched.
-            first = items[0]
-            stale_query = (
-                self.session.query(DocumentChunk)
-                .filter(DocumentChunk.collection_name == collection_name)
-                .filter(DocumentChunk.admin_id == first["admin_id"])
-                .filter(DocumentChunk.embedding_model_id == first["embedding_model_id"])
-            )
-            if first.get("file_id"):
-                stale_query = stale_query.filter(
-                    DocumentChunk.file_id == first["file_id"]
-                )
-            stale_query = stale_query.filter(DocumentChunk.rag_chunk_id.isnot(None))
-            stale_query = stale_query.filter(
-                DocumentChunk.rag_chunk_id.notin_(list(current_ids))
-            )
-            stale_deleted = stale_query.delete(synchronize_session=False)
-
             self.session.commit()
             log.info(
                 "[PGVECTOR] reconcile_model_aware SUCCESS | collection=%s | "
@@ -370,13 +312,146 @@ class PgvectorClient:
                 len(items),
                 stale_deleted,
             )
-        except Exception as e:
+        except Exception as error:
             try:
                 self.session.rollback()
             except Exception:
                 pass
-            log.exception(f"Error during model-aware reconcile: {e}")
+            log.error(
+                "Model-aware reconcile failed | type=%s",
+                type(error).__name__,
+            )
             raise
+
+    def reconcile_model_aware_many(
+        self,
+        projections: List[tuple[str, List[VectorItem]]],
+        session=None,
+    ) -> None:
+        """Atomically reconcile every collection projection for one file."""
+        non_empty = [projection for projection in projections if projection[1]]
+        if not non_empty:
+            return
+        db = session if session is not None else self.session
+        try:
+            for collection_name, items in non_empty:
+                self._reconcile_model_aware_projection(
+                    collection_name,
+                    items,
+                    session=db,
+                )
+            if session is None:
+                db.commit()
+            else:
+                db.flush()
+        except Exception as error:
+            if session is None:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+            log.error(
+                "Multi-projection model-aware reconcile failed | type=%s",
+                type(error).__name__,
+            )
+            raise
+
+    def _reconcile_model_aware_projection(
+        self,
+        collection_name: str,
+        items: List[VectorItem],
+        session=None,
+    ) -> int:
+        """Reconcile one projection without committing the current session."""
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        db = session if session is not None else self.session
+        now = int(time.time())
+        current_ids: set[str] = set()
+        rows = []
+        for item in items:
+            if not self._is_model_aware(item) or not item.get("rag_chunk_id"):
+                raise ValueError(
+                    "reconcile_model_aware requires provenance "
+                    "(admin_id, embedding_model_id, rag_chunk_id)"
+                )
+            current_ids.add(item["rag_chunk_id"])
+            rows.append(
+                {
+                    "id": str(uuid.uuid4()),
+                    "vector": item["vector"],
+                    "collection_name": collection_name,
+                    "text": item["text"],
+                    "vmetadata": item["metadata"],
+                    "admin_id": item["admin_id"],
+                    "embedding_model_id": item["embedding_model_id"],
+                    "file_id": item.get("file_id"),
+                    "knowledge_id": item.get("knowledge_id"),
+                    "rag_chunk_id": item["rag_chunk_id"],
+                    "modality": item.get("modality") or "text",
+                    "embedding_status": item.get("embedding_status") or "active",
+                    "embedding_job_id": item.get("embedding_job_id"),
+                    "provenance_status": "attributed",
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            )
+
+        first = items[0]
+        for item in items[1:]:
+            if any(
+                item.get(key) != first.get(key)
+                for key in (
+                    "admin_id",
+                    "embedding_model_id",
+                    "file_id",
+                    "knowledge_id",
+                    "embedding_status",
+                    "embedding_job_id",
+                )
+            ):
+                raise ValueError(
+                    "reconcile_model_aware requires one provenance scope"
+                )
+
+        stmt = pg_insert(DocumentChunk).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[
+                DocumentChunk.admin_id,
+                DocumentChunk.embedding_model_id,
+                DocumentChunk.rag_chunk_id,
+                DocumentChunk.collection_name,
+            ],
+            index_where=DocumentChunk.rag_chunk_id.isnot(None),
+            set_={
+                "vector": stmt.excluded.vector,
+                "text": stmt.excluded.text,
+                "vmetadata": stmt.excluded.vmetadata,
+                "collection_name": stmt.excluded.collection_name,
+                "file_id": stmt.excluded.file_id,
+                "knowledge_id": stmt.excluded.knowledge_id,
+                "modality": stmt.excluded.modality,
+                "embedding_status": stmt.excluded.embedding_status,
+                "embedding_job_id": stmt.excluded.embedding_job_id,
+                "provenance_status": stmt.excluded.provenance_status,
+                "updated_at": stmt.excluded.updated_at,
+            },
+        )
+        db.execute(stmt)
+
+        stale_query = (
+            db.query(DocumentChunk)
+            .filter(DocumentChunk.collection_name == collection_name)
+            .filter(DocumentChunk.admin_id == first["admin_id"])
+            .filter(DocumentChunk.embedding_model_id == first["embedding_model_id"])
+        )
+        if first.get("file_id"):
+            stale_query = stale_query.filter(DocumentChunk.file_id == first["file_id"])
+        stale_query = stale_query.filter(DocumentChunk.rag_chunk_id.isnot(None))
+        stale_query = stale_query.filter(
+            DocumentChunk.rag_chunk_id.notin_(list(current_ids))
+        )
+        return stale_query.delete(synchronize_session=False)
 
     def search(
         self,
@@ -534,6 +609,10 @@ class PgvectorClient:
                     DocumentChunk.id,
                     DocumentChunk.text,
                     DocumentChunk.vmetadata,
+                    DocumentChunk.rag_chunk_id,
+                    DocumentChunk.modality,
+                    DocumentChunk.file_id,
+                    DocumentChunk.knowledge_id,
                     distance.label("distance"),
                 )
                 .where(DocumentChunk.collection_name == collection_name)
@@ -564,6 +643,10 @@ class PgvectorClient:
                     subq.c.id,
                     subq.c.text,
                     subq.c.vmetadata,
+                    subq.c.rag_chunk_id,
+                    subq.c.modality,
+                    subq.c.file_id,
+                    subq.c.knowledge_id,
                     subq.c.distance,
                 )
                 .select_from(query_vectors)
@@ -595,7 +678,7 @@ class PgvectorClient:
                 ids[qid].append(row.id)
                 distances[qid].append(row.distance)
                 documents[qid].append(row.text)
-                metadatas[qid].append(row.vmetadata)
+                metadatas[qid].append(self._result_metadata(row))
 
             total_hits = sum(len(d) for d in documents)
             log.info(
@@ -690,6 +773,8 @@ class PgvectorClient:
         admin_id: str,
         embedding_model_id: str,
         limit: Optional[int] = None,
+        knowledge_ids: Optional[List[str]] = None,
+        file_ids: Optional[List[str]] = None,
     ) -> Optional[GetResult]:
         """Model-aware variant of ``get``: returns only active rows for one
         admin/model provenance space.  Used by hybrid search to ensure BM25
@@ -707,6 +792,13 @@ class PgvectorClient:
                 DocumentChunk.embedding_model_id == embedding_model_id,
                 DocumentChunk.embedding_status == "active",
             )
+            scope_clauses = []
+            if knowledge_ids:
+                scope_clauses.append(DocumentChunk.knowledge_id.in_(knowledge_ids))
+            if file_ids:
+                scope_clauses.append(DocumentChunk.file_id.in_(file_ids))
+            if scope_clauses:
+                query = query.filter(or_(*scope_clauses))
             if limit is not None:
                 query = query.limit(limit)
 
@@ -720,7 +812,7 @@ class PgvectorClient:
 
             ids = [[result.id for result in results]]
             documents = [[result.text for result in results]]
-            metadatas = [[result.vmetadata for result in results]]
+            metadatas = [[self._result_metadata(result) for result in results]]
 
             log.info(
                 "[PGVECTOR] get_model_aware SUCCESS | collection=%s | results_count=%s",
@@ -760,6 +852,83 @@ class PgvectorClient:
         except Exception as e:
             self.session.rollback()
             log.exception(f"Error during delete: {e}")
+            raise
+
+    def delete_file_projection(
+        self,
+        *,
+        collection_name: str,
+        file_id: str,
+        session=None,
+    ) -> int:
+        """Delete every vector row for one file/collection projection.
+
+        A caller-provided session keeps Knowledge membership mutation and vector
+        deletion in the same primary-database transaction. This is the removal
+        side of the row-lock protocol used by multimodal ingestion.
+        """
+
+        db = session if session is not None else self.session
+        try:
+            deleted = (
+                db.query(DocumentChunk)
+                .filter(
+                    DocumentChunk.collection_name == collection_name,
+                    DocumentChunk.file_id == file_id,
+                )
+                .delete(synchronize_session=False)
+            )
+            if session is None:
+                db.commit()
+            else:
+                db.flush()
+            log.info(
+                "[PGVECTOR] delete_file_projection SUCCESS | collection=%s | deleted=%s",
+                collection_name,
+                deleted,
+            )
+            return deleted
+        except Exception:
+            if session is None:
+                db.rollback()
+            log.exception(
+                "[PGVECTOR] delete_file_projection failed | collection=%s",
+                collection_name,
+            )
+            raise
+
+    def delete_collection_rows(
+        self,
+        *,
+        collection_name: str,
+        session=None,
+    ) -> int:
+        """Delete one complete collection, optionally in a caller transaction."""
+
+        db = session if session is not None else self.session
+        try:
+            deleted = (
+                db.query(DocumentChunk)
+                .filter(DocumentChunk.collection_name == collection_name)
+                .delete(synchronize_session=False)
+            )
+            if session is None:
+                db.commit()
+            else:
+                db.flush()
+            log.info(
+                "[PGVECTOR] delete_collection_rows SUCCESS | collection=%s | deleted=%s",
+                collection_name,
+                deleted,
+            )
+            return deleted
+        except Exception:
+            if session is None:
+                db.rollback()
+            log.exception(
+                "[PGVECTOR] delete_collection_rows failed | collection=%s",
+                collection_name,
+            )
             raise
 
     def reset(self) -> None:
@@ -812,6 +981,43 @@ class PgvectorClient:
         )
         db.flush()
         return updated
+
+    def get_job_vector_manifest(
+        self,
+        *,
+        admin_id: str,
+        embedding_model_id: str,
+        job_id: str,
+        session=None,
+    ) -> dict[tuple[str, str], tuple[str, ...]]:
+        """Return exact building chunk identities for promotion validation."""
+        db = session if session is not None else self.session
+        rows = (
+            db.query(
+                DocumentChunk.file_id,
+                DocumentChunk.collection_name,
+                DocumentChunk.rag_chunk_id,
+            )
+            .filter(
+                DocumentChunk.admin_id == admin_id,
+                DocumentChunk.embedding_model_id == embedding_model_id,
+                DocumentChunk.embedding_status == "building",
+                DocumentChunk.embedding_job_id == job_id,
+            )
+            .all()
+        )
+        manifests: dict[tuple[str, str], list[str]] = {}
+        for file_id, collection_name, rag_chunk_id in rows:
+            if not file_id or not collection_name or not rag_chunk_id:
+                raise ValueError("building vector provenance is incomplete")
+            key = (str(file_id), str(collection_name))
+            manifests.setdefault(key, []).append(str(rag_chunk_id))
+        result: dict[tuple[str, str], tuple[str, ...]] = {}
+        for key, chunk_ids in manifests.items():
+            if len(chunk_ids) != len(set(chunk_ids)):
+                raise ValueError("building vector provenance is duplicated")
+            result[key] = tuple(sorted(chunk_ids))
+        return result
 
     def close(self) -> None:
         pass

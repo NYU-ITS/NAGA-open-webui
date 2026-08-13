@@ -48,11 +48,22 @@ from open_webui.retrieval.embedding.errors import (
     EMBEDDING_FILE_NOT_FOUND,
     EMBEDDING_FILE_WRONG_STATUS,
     EMBEDDING_MODEL_STATE_CONFLICT,
+    EMBEDDING_REINDEX_SOURCE_CHANGED,
+    EMBEDDING_RETRY_ACTIVE_EXISTS,
+)
+from open_webui.retrieval.embedding.file_processing import (
+    CONTENT_ORIGIN_STORED_SOURCE,
+    read_stored_content_provenance,
 )
 from open_webui.retrieval.embedding.inventory import (
     ReindexFile,
     SOURCE_KNOWLEDGE,
     SOURCE_CHAT_UPLOAD,
+    source_sha256_for_file,
+)
+from open_webui.retrieval.embedding.preparation import (
+    PreparationRecipe,
+    preparation_recipe_from_snapshot,
 )
 
 log = logging.getLogger(__name__)
@@ -99,7 +110,8 @@ def is_job_retry_eligible(
         return False
 
     is_enqueue_only_failure = job.status == JOB_STATUS_FAILED and all_files_pending
-    return has_failed_files or is_enqueue_only_failure
+    is_operation_failure = job.status == JOB_STATUS_FAILED and not has_failed_files
+    return has_failed_files or is_enqueue_only_failure or is_operation_failure
 
 
 @dataclass(frozen=True)
@@ -383,6 +395,7 @@ def _create_retry_job(
     db,
     source_job_id: str,
     admin_id: str,
+    preparation_recipe: PreparationRecipe,
 ) -> CreateJobResult:
     """Create a retry_failed job from a source job's failed files (Spec 11).
 
@@ -392,7 +405,8 @@ def _create_retry_job(
     3. No active (queued/processing) job exists (rechecked after state lock).
     4. Source job's target matches admin's current target; missing state or
        cleared target fails closed.
-    5. ALL source job files (not just failed) have unchanged content hashes.
+    5. ALL source job files (not just failed) have unchanged content and their
+       frozen preparation recipe matches the admin's current recipe.
     6. At least one failed file exists, or all files are pending (enqueue-only
        failure re-enqueue path).
 
@@ -532,16 +546,48 @@ def _create_retry_job(
     all_lineage_rows = (
         db.query(EmbeddingJobFile)
         .filter(EmbeddingJobFile.job_id.in_(lineage_job_ids))
-        .order_by(EmbeddingJobFile.job_id, EmbeddingJobFile.file_id)
+        .order_by(EmbeddingJobFile.file_id)
         .all()
     )
 
-    # Deduplicate by file_id, keeping the most recent snapshot (last in chain).
-    seen_files: dict[str, object] = {}
+    # Deduplicate by file_id using explicit lineage order (current source job
+    # first, then ancestors). UUID lexical order is unrelated to recency.
+    rows_by_job: dict[str, list[EmbeddingJobFile]] = {}
     for frow in all_lineage_rows:
-        seen_files[frow.file_id] = frow
+        rows_by_job.setdefault(frow.job_id, []).append(frow)
+    seen_files: dict[str, EmbeddingJobFile] = {}
+    for lineage_job_id in lineage_job_ids:
+        for frow in rows_by_job.get(lineage_job_id, []):
+            seen_files.setdefault(frow.file_id, frow)
 
     all_source_rows = list(seen_files.values())
+
+    # A retry is a new execution, not permission to silently reinterpret an
+    # old inventory with changed extraction or chunking settings. Validate
+    # every lineage snapshot and require a fresh model-change when its frozen
+    # recipe differs from the admin's current resolved recipe.
+    for frow in all_source_rows:
+        snapshot = (
+            frow.file_snapshot if isinstance(frow.file_snapshot, dict) else {}
+        )
+        try:
+            frozen_recipe = preparation_recipe_from_snapshot(snapshot)
+        except (TypeError, ValueError):
+            raise EmbeddingError(
+                EMBEDDING_REINDEX_SOURCE_CHANGED,
+                detail=(
+                    f"File {frow.file_id} has no valid preparation recipe. "
+                    "A fresh model-change operation is required."
+                ),
+            ) from None
+        if frozen_recipe.sha256 != preparation_recipe.sha256:
+            raise EmbeddingError(
+                EMBEDDING_REINDEX_SOURCE_CHANGED,
+                detail=(
+                    f"File {frow.file_id} preparation settings changed since "
+                    "the original job. A fresh model-change operation is required."
+                ),
+            )
 
     failed_rows = []
     has_processing_or_completed = False
@@ -555,16 +601,6 @@ def _create_retry_job(
     # vectors from previously successful files are never silently promoted.
     for frow in all_source_rows:
         snapshot = frow.file_snapshot if isinstance(frow.file_snapshot, dict) else {}
-        original_hash = snapshot.get("content_hash")
-        if not original_hash:
-            # Missing hash: cannot verify — fail closed.
-            raise EmbeddingError(
-                EMBEDDING_REINDEX_SOURCE_CHANGED,
-                detail=(
-                    f"File {frow.file_id} has no content hash in snapshot; "
-                    f"cannot verify staleness. A fresh model-change is required."
-                ),
-            )
         current_file = db.query(File).filter(File.id == frow.file_id).first()
         if current_file is None:
             raise EmbeddingError(
@@ -574,21 +610,66 @@ def _create_retry_job(
                     f"A fresh model-change is required."
                 ),
             )
-        if not current_file.hash:
+        original_source_sha256 = snapshot.get("source_sha256")
+        current_source_sha256 = source_sha256_for_file(current_file)
+        if current_source_sha256 != original_source_sha256:
             raise EmbeddingError(
                 EMBEDDING_REINDEX_SOURCE_CHANGED,
                 detail=(
-                    f"File {frow.file_id} has no current content hash; "
-                    f"cannot verify staleness. A fresh model-change is required."
+                    f"File {frow.file_id} source changed since the original job. "
+                    "A fresh model-change operation is required."
                 ),
             )
-        if current_file.hash != original_hash:
+        original_hash = snapshot.get("content_hash")
+        if original_hash != current_file.hash:
             raise EmbeddingError(
                 EMBEDDING_REINDEX_SOURCE_CHANGED,
                 detail=(
-                    f"File {frow.file_id} content has changed since the original job "
-                    f"(original={original_hash}, current={current_file.hash}). "
-                    f"A fresh model-change operation is required."
+                    f"File {frow.file_id} extracted content changed since the "
+                    "original job. A fresh model-change is required."
+                ),
+            )
+        try:
+            current_content_provenance = read_stored_content_provenance(
+                current_file
+            )
+        except ValueError:
+            raise EmbeddingError(
+                EMBEDDING_REINDEX_SOURCE_CHANGED,
+                detail=(
+                    f"File {frow.file_id} content provenance is invalid. "
+                    "A fresh model-change is required."
+                ),
+            ) from None
+        original_content_origin = snapshot.get(
+            "content_origin",
+            CONTENT_ORIGIN_STORED_SOURCE,
+        )
+        original_content_override_sha256 = snapshot.get(
+            "content_override_sha256"
+        )
+        if (
+            current_content_provenance.origin != original_content_origin
+            or current_content_provenance.content_override_sha256
+            != original_content_override_sha256
+        ):
+            raise EmbeddingError(
+                EMBEDDING_REINDEX_SOURCE_CHANGED,
+                detail=(
+                    f"File {frow.file_id} content origin changed since the "
+                    "original job. A fresh model-change is required."
+                ),
+            )
+        original_updated_at = snapshot.get("updated_at")
+        if (
+            original_updated_at is not None
+            and current_file.updated_at != original_updated_at
+        ):
+            raise EmbeddingError(
+                EMBEDDING_REINDEX_SOURCE_CHANGED,
+                detail=(
+                    f"File {frow.file_id} changed since the original job. "
+                    "A fresh model-change operation is required."
                 ),
             )
 
@@ -621,13 +702,19 @@ def _create_retry_job(
         )
 
     if not failed_rows:
-        raise EmbeddingError(
-            EMBEDDING_JOB_WRONG_STATUS,
-            detail=f"Source job {source_job_id} has no failed files to retry.",
-        )
+        if source_row.error_code is None:
+            raise EmbeddingError(
+                EMBEDDING_JOB_WRONG_STATUS,
+                detail=f"Source job {source_job_id} has no failed files to retry.",
+            )
 
-    # 7. Create new retry_failed job with fresh pending file rows.
-    retry_files = [ReindexFile.from_dict(fr.file_snapshot) for fr in failed_rows]
+    # 7. Rebuild the complete lineage inventory. Reusing successful ancestor
+    # vectors would allow stale extraction/chunk settings or removed knowledge
+    # memberships to be promoted by a later retry.
+    retry_files = [
+        ReindexFile.from_dict(file_row.file_snapshot)
+        for file_row in all_source_rows
+    ]
 
     new_job_id = str(uuid.uuid4())
     job_row = EmbeddingJob(
@@ -665,7 +752,7 @@ def _create_retry_job(
     db.flush()
 
     log.info(
-        "[JOB] created retry job %s from source %s for admin %s: %d failed files",
+        "[JOB] created retry job %s from source %s for admin %s: %d files",
         new_job_id,
         source_job_id,
         admin_id,
@@ -1263,18 +1350,94 @@ def _finalize_job_success(
             ),
         )
 
-    # 5. Activate target vectors (building → active) for this admin/model,
-    #    scoped to the job lineage (current job + source chain).  This ensures
-    #    a retry publishes both its own repaired rows and the prior successful
-    #    rows from the source job, while leaving vectors from unrelated
-    #    abandoned operations in building status.
-    lineage = _collect_job_lineage(db, job_id)
+    expected_vectors: dict[tuple[str, str], tuple[str, ...]] = {}
+    completed_rows = (
+        db.query(EmbeddingJobFile)
+        .filter(
+            EmbeddingJobFile.job_id == job_id,
+            EmbeddingJobFile.status == FILE_STATUS_COMPLETED,
+        )
+        .all()
+    )
+    completed_file_ids = {row.file_id for row in completed_rows}
+    current_knowledge_ids: dict[str, set[str]] = {
+        file_id: set() for file_id in completed_file_ids
+    }
+    if completed_file_ids:
+        from open_webui.models.knowledge import Knowledge
+
+        for knowledge_id, knowledge_data in db.query(
+            Knowledge.id, Knowledge.data
+        ).all():
+            data = knowledge_data if isinstance(knowledge_data, dict) else {}
+            file_ids = data.get("file_ids", [])
+            if not isinstance(file_ids, list):
+                # An unrelated malformed knowledge record must not block this
+                # admin's promotion. If it was part of the frozen projection
+                # set, omitting it here still produces the mismatch below.
+                continue
+            for file_id in completed_file_ids.intersection(file_ids):
+                current_knowledge_ids[file_id].add(str(knowledge_id))
+
+    for file_row in completed_rows:
+        snapshot = (
+            file_row.file_snapshot
+            if isinstance(file_row.file_snapshot, dict)
+            else {}
+        )
+        summary = snapshot.get("prepared_processing_summary")
+        if not isinstance(summary, dict):
+            raise EmbeddingError(EMBEDDING_JOB_LEDGER_MISMATCH)
+        chunk_count = summary.get("chunk_count")
+        rag_chunk_ids = summary.get("rag_chunk_ids")
+        projection_ids = summary.get("projection_ids")
+        if (
+            not isinstance(chunk_count, int)
+            or chunk_count <= 0
+            or not isinstance(rag_chunk_ids, list)
+            or len(rag_chunk_ids) != chunk_count
+            or len(rag_chunk_ids) != len(set(rag_chunk_ids))
+            or not all(isinstance(value, str) and value for value in rag_chunk_ids)
+            or not isinstance(projection_ids, list)
+            or not projection_ids
+            or len(projection_ids) != len(set(projection_ids))
+        ):
+            raise EmbeddingError(EMBEDDING_JOB_LEDGER_MISMATCH)
+        current_projection_ids = {
+            f"file-{file_row.file_id}",
+            *current_knowledge_ids[file_row.file_id],
+        }
+        if set(projection_ids) != current_projection_ids:
+            # Membership changed after the worker froze its projection set.
+            # Refuse to activate an orphaned or incomplete knowledge view.
+            raise EmbeddingError(EMBEDDING_JOB_LEDGER_MISMATCH)
+        for collection_id in projection_ids:
+            if not isinstance(collection_id, str) or not collection_id:
+                raise EmbeddingError(EMBEDDING_JOB_LEDGER_MISMATCH)
+            expected_vectors[(file_row.file_id, collection_id)] = tuple(
+                sorted(rag_chunk_ids)
+            )
+
+    actual_vectors = vector_repo.get_job_vector_manifest(
+        admin_id=admin_id,
+        model=target_model_spec,
+        job_id=job_id,
+        session=db,
+    )
+    if actual_vectors != expected_vectors:
+        raise EmbeddingError(EMBEDDING_JOB_LEDGER_MISMATCH)
+
+    # 5. Activate only vectors written by this complete job. Retry jobs rebuild
+    #    every file in their lineage, so no ancestor vector can carry stale
+    #    extraction settings or a removed knowledge membership into promotion.
     activated = vector_repo.activate_target_vectors(
         admin_id=admin_id,
         model=target_model_spec,
         session=db,
-        job_ids=lineage,
+        job_ids=[job_id],
     )
+    if activated != sum(len(chunk_ids) for chunk_ids in expected_vectors.values()):
+        raise EmbeddingError(EMBEDDING_JOB_LEDGER_MISMATCH)
     log.info(
         "[JOB] activated %d target vectors for admin %s model %s",
         activated,
@@ -1800,13 +1963,14 @@ class EmbeddingJobRepository:
     def create_retry_job(
         source_job_id: str,
         admin_id: str,
+        preparation_recipe: PreparationRecipe,
         db=None,
     ) -> CreateJobResult:
         """Create a retry_failed job from a source job's failed files.
 
         Validates source job status, no active jobs, target consistency, and
-        content staleness.  Creates a new ``retry_failed`` job with fresh
-        pending file rows.  The source job is never modified.
+        source/recipe staleness. Creates a new ``retry_failed`` job with fresh
+        pending file rows. The source job is never modified.
 
         Raises:
             EmbeddingError: on validation failure (wrong status, active job,
@@ -1814,10 +1978,20 @@ class EmbeddingJobRepository:
         """
         if db is None:
             with get_db() as session:
-                result = _create_retry_job(session, source_job_id, admin_id)
+                result = _create_retry_job(
+                    session,
+                    source_job_id,
+                    admin_id,
+                    preparation_recipe,
+                )
                 session.commit()
                 return result
-        return _create_retry_job(db, source_job_id, admin_id)
+        return _create_retry_job(
+            db,
+            source_job_id,
+            admin_id,
+            preparation_recipe,
+        )
 
     @staticmethod
     def list_failed_files(job_id: str, db=None) -> list[EmbeddingJobFileView]:

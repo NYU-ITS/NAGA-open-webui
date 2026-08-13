@@ -35,6 +35,7 @@ from open_webui.retrieval.embedding.jobs import (
     FILE_STATUS_PENDING,
     is_job_retry_eligible,
 )
+from open_webui.retrieval.embedding.preparation import build_preparation_recipe
 from open_webui.retrieval.embedding.enqueue import enqueue_embedding_job
 from open_webui.retrieval.embedding.state import AdminEmbeddingModelStateRepository
 from open_webui.utils.auth import get_verified_user
@@ -194,7 +195,7 @@ def _build_status_response(
             FailedFileInfo(
                 file_id=f.file_id,
                 error_code=f.error_code,
-                error_message=f.error_message,
+                error_message=_safe_job_error_message(f.error_code),
                 attempt_count=f.attempt_count,
                 created_at=f.created_at,
                 updated_at=f.updated_at,
@@ -204,13 +205,25 @@ def _build_status_response(
             for f in failed_files
         ],
         error_code=job_view.error_code,
-        error_message=job_view.error_message,
+        error_message=_safe_job_error_message(job_view.error_code),
         retry_eligible=retry_eligible,
         created_at=job_view.created_at,
         updated_at=job_view.updated_at,
         started_at=job_view.started_at,
         completed_at=job_view.completed_at,
     )
+
+
+def _safe_job_error_message(error_code: str | None) -> str | None:
+    if error_code is None:
+        return None
+    if error_code == "enqueue_failed":
+        return "The indexing job could not be queued. Try again later."
+    if error_code == "embedding_reindex_source_changed":
+        return "Source content changed during indexing. Start a new reindex operation."
+    if error_code == "embedding_job_stale_operation":
+        return "This indexing job was superseded by a newer operation."
+    return "The embedding indexing operation could not be completed."
 
 
 def _get_job_for_admin(job_id: str, admin_id: str) -> EmbeddingJobView:
@@ -300,13 +313,19 @@ def retry_failed_job(
             result = EmbeddingJobRepository.create_retry_job(
                 source_job_id=job_id,
                 admin_id=admin_id,
+                preparation_recipe=build_preparation_recipe(
+                    request.app.state.config,
+                    user.email,
+                ),
                 db=db,
             )
             db.commit()
     except EmbeddingError as e:
         if e.code in (EMBEDDING_JOB_ACTIVE_EXISTS, EMBEDDING_RETRY_ACTIVE_EXISTS):
-            detail = e.detail if isinstance(e.detail, dict) else {"message": str(e.detail)}
-            detail["error_code"] = e.code
+            detail = {
+                "error_code": e.code,
+                "message": "Another embedding indexing operation is already active.",
+            }
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=detail,
@@ -314,21 +333,27 @@ def retry_failed_job(
         if e.code == EMBEDDING_REINDEX_SOURCE_CHANGED:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail={"error_code": e.code, "message": str(e.detail)},
+                detail={
+                    "error_code": e.code,
+                    "message": "Source content or preparation settings changed. Start a fresh model-change operation.",
+                },
             )
         if e.code == EMBEDDING_JOB_NOT_FOUND:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=str(e.detail),
+                detail="Embedding job not found.",
             )
         if e.code in (EMBEDDING_JOB_WRONG_STATUS, EMBEDDING_MODEL_STATE_CONFLICT):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail={"error_code": e.code, "message": str(e.detail)},
+                detail={
+                    "error_code": e.code,
+                    "message": "The embedding indexing operation cannot be retried in its current state.",
+                },
             )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e.detail),
+            detail="The embedding indexing operation could not be retried.",
         )
 
     # Enqueue the job.  On failure, mark the job as failed so it does not
@@ -337,10 +362,9 @@ def retry_failed_job(
         enqueue_embedding_job(result.job.id)
     except Exception as e:
         log.error(
-            "[RETRY] Failed to enqueue job %s: %s",
+            "[RETRY] Failed to enqueue job %s | type=%s",
             result.job.id,
-            e,
-            exc_info=True,
+            type(e).__name__,
         )
         try:
             EmbeddingJobRepository.mark_job_failed(
@@ -350,10 +374,9 @@ def retry_failed_job(
             )
         except Exception as persist_err:
             log.error(
-                "[RETRY] Failed to mark job %s as failed after enqueue error: %s",
+                "[RETRY] Failed to mark job %s after enqueue error | type=%s",
                 result.job.id,
-                persist_err,
-                exc_info=True,
+                type(persist_err).__name__,
             )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

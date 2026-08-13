@@ -14,11 +14,11 @@ Transaction flow:
 2.  Lock admin embedding-state row; resolve admin email
 3.  Resolve target model by ID or name (within transaction)
 4.  Validate enabled status and dimension support
-5.  Pending-target guard: reject active jobs, require retry for same failed
-    target, allow atomic replacement for a different failed target
+5.  Pending-target guard: reject active jobs and replace a terminal failed
+    operation only when a different target needs a fresh inventory
 6.  Reject if active job exists (when no pending target)
-7.  Reject if target equals active model (unless retry needed); repair stale
-    compatibility config on no-op
+7.  Treat target-equals-active as a no-op and repair stale compatibility
+    config without rebuilding rows in the active vector space
 8.  Build deterministic inventory before mutation
 9.  Create job + file rows atomically
 10. Set target model and latest job ID (replace_existing if replacing)
@@ -43,6 +43,7 @@ from open_webui.models.users import Users
 from open_webui.retrieval.embedding.errors import (
     EmbeddingError,
     EMBEDDING_JOB_ACTIVE_EXISTS,
+    EMBEDDING_JOB_NOT_FOUND,
     EMBEDDING_MODEL_STATE_CONFLICT,
     EMBEDDING_MODEL_DISABLED,
     EMBEDDING_STORAGE_DIMENSION_UNSUPPORTED,
@@ -54,11 +55,12 @@ from open_webui.retrieval.embedding.state import (
 )
 from open_webui.retrieval.embedding.jobs import (
     EmbeddingJobRepository,
-    JOB_STATUS_QUEUED,
-    JOB_STATUS_PROCESSING,
 )
 from open_webui.retrieval.embedding.inventory import (
     build_reindex_inventory,
+)
+from open_webui.retrieval.embedding.preparation import (
+    build_preparation_recipe,
 )
 from open_webui.retrieval.embedding.registry import (
     get_model_spec_by_id,
@@ -153,8 +155,9 @@ def request_model_change(
 
         # Step 3-4: Resolve and validate target model (within transaction)
         target_spec = _resolve_target_model(target_model_id)
+        preparation_recipe = build_preparation_recipe(config, admin_email)
 
-        # Step 5: Pending-target guard with failed-target replacement.
+        # Step 5: Pending-target guard with failed-operation replacement.
         replace_existing = False
         if state_view.target_embedding_model_id is not None:
             # An active (queued/processing) job always blocks — no replacement.
@@ -190,19 +193,7 @@ def request_model_change(
                     ),
                 )
 
-            # Latest job is terminal-failed.
-            if target_spec.id == state_view.target_embedding_model_id:
-                # Same failed target — retry only, no new job.
-                raise EmbeddingError(
-                    EMBEDDING_MODEL_STATE_CONFLICT,
-                    detail=(
-                        f"Target model {target_spec.id} matches pending failed "
-                        f"target. Use retry endpoint instead."
-                    ),
-                )
-
-            # Different target — allow atomic replacement.
-            replace_existing = True
+            replace_existing = target_spec.id != state_view.active_embedding_model_id
 
         # Step 6: Check for active job (only when no pending target)
         if not replace_existing:
@@ -213,39 +204,37 @@ def request_model_change(
                     detail=f"Admin {admin_id} has active job {active_job.id} in status {active_job.status}.",
                 )
 
-        # Step 7: Check if target equals active (no-change case)
+        # Step 7: Never rebuild the currently active model through the target
+        # pipeline. Its vector uniqueness key intentionally identifies the same
+        # model/chunk/collection row, so writing a second "building" generation
+        # would hide active rows before the operation succeeds. A failed pending
+        # operation may therefore be abandoned by selecting the active model.
         if target_spec.id == state_view.active_embedding_model_id:
-            # Check if latest job failed and needs retry
-            latest_job_id = state_view.latest_embedding_job_id
-            if latest_job_id is not None:
-                latest_job = EmbeddingJobRepository.get_job(latest_job_id, db=db)
-                if latest_job is not None:
-                    # If latest job failed/partially_failed to same target, require retry
-                    if latest_job.embedding_model_id == target_spec.id:
-                        if latest_job.status in ("failed", "partially_failed"):
-                            raise EmbeddingError(
-                                EMBEDDING_MODEL_STATE_CONFLICT,
-                                detail=(
-                                    f"Target model {target_spec.id} equals active model and "
-                                    f"latest job {latest_job.id} failed. Use retry endpoint instead."
-                                ),
-                            )
-            # No failed job to same target.  Repair stale compatibility
-            # config if it doesn't match the active model, then return no-op.
+            if state_view.target_embedding_model_id is not None:
+                state_view = AdminEmbeddingModelStateRepository.clear_failed_target(
+                    admin_id=admin_id,
+                    expected_job_id=state_view.latest_embedding_job_id,
+                    db=db,
+                )
             if config is not None:
                 current_cfg = config.RAG_EMBEDDING_MODEL_USER.get(admin_email) or ""
                 if current_cfg != target_spec.model_name:
                     config.RAG_EMBEDDING_MODEL_USER.set(
                         admin_email, target_spec.model_name, db=db
                     )
+            db.commit()
             return ModelChangeNoOp(
                 active_model_id=state_view.active_embedding_model_id,
                 target_model_id=target_spec.id,
-                reason="Target equals active model; no reindex needed.",
+                reason="Target equals active model; pending failed operation cleared.",
             ), admin_email
 
         # Step 8: Build inventory before mutation (failures abort transaction)
-        inventory = build_reindex_inventory(admin_id, db=db)
+        inventory = build_reindex_inventory(
+            admin_id,
+            db=db,
+            preparation_recipe=preparation_recipe,
+        )
 
         # Step 9: Create job atomically
         job_result = EmbeddingJobRepository.create_job(

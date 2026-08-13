@@ -1,10 +1,11 @@
 import logging
 import time
-from typing import Optional
+from collections.abc import Mapping
+from typing import Any, Optional
 
 from open_webui.internal.db import Base, JSONField, get_db
 from open_webui.env import SRC_LOG_LEVELS
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import BigInteger, Column, String, Text, JSON
 
 log = logging.getLogger(__name__)
@@ -52,6 +53,100 @@ class FileModel(BaseModel):
     updated_at: Optional[int]  # timestamp in epoch
 
 
+# These fields are needed internally to validate/reconstruct image chunks, but
+# must never cross the browser-facing file/knowledge API boundary. Keep this
+# sanitizer in the model layer so every response model gets the same policy.
+_PRIVATE_FILE_METADATA_KEYS = frozenset(
+    {
+        "alpha",
+        "bbox",
+        "cache",
+        "chunk_manifest_id",
+        "content_origin",
+        "content_override",
+        "content_override_sha256",
+        "content_sha256",
+        "coordinate_space",
+        "image_sha256",
+        "manifest_id",
+        "object_key",
+        "output_format",
+        "padding_points",
+        "page_local_sequence",
+        "path",
+        "source_sequence",
+        "source_sha256",
+        "storage_key",
+        "storage_path",
+    }
+)
+_PRIVATE_FILE_METADATA_PREFIXES = ("cache_", "extraction_", "render_")
+_VISUAL_SUMMARY_KEYS = (
+    "figure_count",
+    "table_image_count",
+    "image_chunk_count",
+    "text_chunk_count",
+)
+
+
+def sanitize_public_visual_summary(value: Any) -> dict[str, int]:
+    """Normalize the four public non-negative visual/chunk counters."""
+    source = value if isinstance(value, Mapping) else {}
+    result = {}
+    for key in _VISUAL_SUMMARY_KEYS:
+        try:
+            count = int(source.get(key, 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            count = 0
+        result[key] = max(0, count)
+    return result
+
+
+def sanitize_public_file_metadata(value: Any) -> Any:
+    """Return a copy of file metadata with private processing fields removed."""
+
+    if isinstance(value, Mapping):
+        from open_webui.retrieval.embedding.errors import (
+            safe_file_processing_error_code,
+            safe_file_processing_error_message,
+            safe_file_processing_warnings,
+        )
+
+        raw_code = value.get("processing_error_code")
+        public_code = safe_file_processing_error_code(raw_code)
+        if public_code is None and (
+            value.get("processing_status") == "error"
+            or value.get("processing_error") is not None
+        ):
+            public_code = safe_file_processing_error_code("file_processing_failed")
+        result = {}
+        for key, item in value.items():
+            if (
+                not isinstance(key, str)
+                or key in _PRIVATE_FILE_METADATA_KEYS
+                or key.startswith(_PRIVATE_FILE_METADATA_PREFIXES)
+            ):
+                continue
+            if key == "processing_error_code":
+                result[key] = public_code
+            elif key == "processing_error":
+                result[key] = (
+                    safe_file_processing_error_message(public_code)
+                    if item is not None
+                    else None
+                )
+            elif key == "processing_warnings":
+                result[key] = safe_file_processing_warnings(item)
+            elif key == "visual_summary":
+                result[key] = sanitize_public_visual_summary(item)
+            else:
+                result[key] = sanitize_public_file_metadata(item)
+        return result
+    if isinstance(value, (list, tuple)):
+        return [sanitize_public_file_metadata(item) for item in value]
+    return value
+
+
 ####################
 # Forms
 ####################
@@ -64,6 +159,25 @@ class FileMeta(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
+    @model_validator(mode="before")
+    @classmethod
+    def remove_private_processing_metadata(cls, value: Any) -> Any:
+        if isinstance(value, BaseModel):
+            value = value.model_dump()
+        return sanitize_public_file_metadata(value or {})
+
+
+class FileMetadataResponse(BaseModel):
+    id: str
+    meta: dict = Field(default_factory=dict)
+    created_at: int  # timestamp in epoch
+    updated_at: int  # timestamp in epoch
+
+    @field_validator("meta", mode="before")
+    @classmethod
+    def remove_private_processing_metadata(cls, value: Any) -> Any:
+        return sanitize_public_file_metadata(value or {})
+
 
 class FileModelResponse(BaseModel):
     id: str
@@ -72,20 +186,17 @@ class FileModelResponse(BaseModel):
 
     filename: str
     data: Optional[dict] = None
-    meta: FileMeta
+    meta: FileMeta = Field(default_factory=FileMeta)
 
     created_at: int  # timestamp in epoch
     updated_at: int  # timestamp in epoch
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(from_attributes=True, extra="ignore")
 
-
-class FileMetadataResponse(BaseModel):
-    id: str
-    meta: dict
-    created_at: int  # timestamp in epoch
-    updated_at: int  # timestamp in epoch
-
+    @field_validator("data", mode="before")
+    @classmethod
+    def remove_private_processing_data(cls, value: Any) -> Any:
+        return sanitize_public_file_metadata(value)
 
 class FileForm(BaseModel):
     id: str

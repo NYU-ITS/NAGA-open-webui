@@ -1,28 +1,88 @@
-"""
-Centralized file cleanup utility for complete file deletion.
-
-This module provides functions to cleanly delete files from:
-- All knowledge collections (vector DB and metadata)
-- File-specific collections in vector DB
-- SQL database (works with both SQLite and PostgreSQL)
-- Physical file storage
-
-Database Compatibility:
-- SQL Database: Works with both SQLite and PostgreSQL via SQLAlchemy ORM
-- Vector Database: Works with Chroma (SQLite-based), pgvector (PostgreSQL),
-  Milvus, Qdrant, and OpenSearch via VECTOR_DB_CLIENT abstraction
-- When using pgvector, it can use the same PostgreSQL database as the main SQL database
-"""
+"""Coordinated file, Knowledge-membership, vector, and storage cleanup."""
 
 import logging
-from typing import Optional, Tuple, Dict
+import time
+from typing import Dict, Optional, Tuple
 
-from open_webui.models.files import Files
-from open_webui.models.knowledge import Knowledges
+from open_webui.internal.db import get_db
+from open_webui.models.files import File, Files
+from open_webui.models.knowledge import Knowledge, Knowledges
 from open_webui.retrieval.vector.connector import VECTOR_DB_CLIENT
 from open_webui.storage.provider import Storage
 
+
 log = logging.getLogger(__name__)
+
+
+def _transactional_vector_delete(name: str):
+    operation = getattr(VECTOR_DB_CLIENT, name, None)
+    return operation if callable(operation) else None
+
+
+def _file_ids(data) -> list[str]:
+    values = data.get("file_ids", []) if isinstance(data, dict) else []
+    return list(values) if isinstance(values, list) else []
+
+
+def cleanup_knowledge_collection(
+    knowledge_id: str,
+    *,
+    delete_knowledge: bool = False,
+) -> bool:
+    """Clear a Knowledge collection, atomically when pgvector is primary-backed."""
+
+    delete_collection_rows = _transactional_vector_delete("delete_collection_rows")
+    if delete_collection_rows is None:
+        # Legacy vector stores cannot join the primary transaction. Preserve the
+        # safer ordering: vector cleanup must succeed before membership is hidden.
+        try:
+            VECTOR_DB_CLIENT.delete_collection(collection_name=knowledge_id)
+            if delete_knowledge:
+                return Knowledges.delete_knowledge_by_id(id=knowledge_id)
+            knowledge = Knowledges.get_knowledge_by_id(id=knowledge_id)
+            if knowledge is None:
+                return False
+            data = dict(knowledge.data or {})
+            data["file_ids"] = []
+            return bool(
+                Knowledges.update_knowledge_data_by_id(
+                    id=knowledge_id,
+                    data=data,
+                )
+            )
+        except Exception:
+            log.exception(
+                "Knowledge collection cleanup failed | knowledge=%s",
+                knowledge_id,
+            )
+            return False
+
+    try:
+        with get_db() as db:
+            knowledge = (
+                db.query(Knowledge)
+                .filter(Knowledge.id == knowledge_id)
+                .with_for_update()
+                .first()
+            )
+            if knowledge is None:
+                return False
+            delete_collection_rows(collection_name=knowledge_id, session=db)
+            if delete_knowledge:
+                db.delete(knowledge)
+            else:
+                data = dict(knowledge.data or {})
+                data["file_ids"] = []
+                knowledge.data = data
+                knowledge.updated_at = int(time.time())
+            db.commit()
+        return True
+    except Exception:
+        log.exception(
+            "Atomic knowledge collection cleanup failed | knowledge=%s",
+            knowledge_id,
+        )
+        return False
 
 
 def cleanup_file_completely(
@@ -30,31 +90,8 @@ def cleanup_file_completely(
     exclude_knowledge_id: Optional[str] = None,
     delete_physical_file: bool = True,
 ) -> Tuple[bool, Dict]:
-    """
-    Completely clean up a file from all systems.
-    
-    This function performs a complete cleanup of a file:
-    1. Removes file from all knowledge collections (vector DB and metadata)
-    2. Deletes file-specific collection from vector DB
-    3. Deletes file from SQL database
-    4. Deletes physical file from storage
-    
-    Args:
-        file_id: The ID of the file to clean up
-        exclude_knowledge_id: Optional knowledge base ID to exclude from cleanup
-                             (used when removing from a specific knowledge base only)
-        delete_physical_file: Whether to delete the physical file (default: True)
-        
-    Returns:
-        Tuple of (success: bool, details: dict)
-        details contains:
-            - knowledge_bases_updated: list of knowledge base IDs updated
-            - vector_db_cleaned: bool
-            - file_collection_deleted: bool
-            - sql_deleted: bool
-            - physical_file_deleted: bool
-            - errors: list of error messages
-    """
+    """Remove one file and all non-excluded memberships and projections."""
+
     details = {
         "knowledge_bases_updated": [],
         "vector_db_cleaned": False,
@@ -63,235 +100,240 @@ def cleanup_file_completely(
         "physical_file_deleted": False,
         "errors": [],
     }
-    
-    # Get file info first (needed for physical file deletion)
-    file = Files.get_file_by_id(file_id)
-    if not file:
-        details["errors"].append(f"File {file_id} not found in database")
-        log.warning(f"File {file_id} not found, cannot perform cleanup")
-        return False, details
-    
-    log.info(f"Starting complete cleanup for file {file_id} (filename: {file.filename})")
-    
-    # Step 1: Find all knowledge bases using this file
-    knowledge_bases = Knowledges.get_knowledge_bases_by_file_id(file_id)
-    
-    if exclude_knowledge_id:
-        # Filter out the excluded knowledge base
-        knowledge_bases = [
-            kb for kb in knowledge_bases if kb.id != exclude_knowledge_id
-        ]
-        log.info(
-            f"Found {len(knowledge_bases)} knowledge bases using file {file_id} "
-            f"(excluding {exclude_knowledge_id})"
-        )
-    else:
-        log.info(f"Found {len(knowledge_bases)} knowledge bases using file {file_id}")
-    
-    # Step 2: Remove from all knowledge collections in vector DB
-    vector_db_success = True
-    for knowledge in knowledge_bases:
+
+    delete_file_projection = _transactional_vector_delete(
+        "delete_file_projection"
+    )
+    if delete_file_projection is not None:
         try:
-            log.info(
-                f"Removing file {file_id} from vector DB collection: {knowledge.id}"
-            )
-            VECTOR_DB_CLIENT.delete(
-                collection_name=knowledge.id, filter={"file_id": file_id}
-            )
-            details["knowledge_bases_updated"].append(knowledge.id)
-        except Exception as e:
-            error_msg = f"Error deleting from vector DB collection {knowledge.id}: {e}"
-            log.exception(error_msg)
-            details["errors"].append(error_msg)
-            vector_db_success = False
-    
-    details["vector_db_cleaned"] = vector_db_success
-    
-    # Step 3: Remove from all knowledge bases' file_ids lists
-    if knowledge_bases:
-        try:
-            log.info(f"Removing file {file_id} from {len(knowledge_bases)} knowledge base metadata")
-            for knowledge in knowledge_bases:
-                if knowledge.data and isinstance(knowledge.data, dict):
-                    file_ids = knowledge.data.get("file_ids", [])
-                    if isinstance(file_ids, list) and file_id in file_ids:
-                        file_ids.remove(file_id)
-                        knowledge.data["file_ids"] = file_ids
-                        
-                        # Update the knowledge base
-                        updated = Knowledges.update_knowledge_data_by_id(
-                            knowledge.id, knowledge.data
-                        )
-                        if not updated:
-                            error_msg = (
-                                f"Failed to remove file {file_id} from "
-                                f"knowledge base {knowledge.id} metadata"
-                            )
-                            log.error(error_msg)
-                            details["errors"].append(error_msg)
-        except Exception as e:
-            error_msg = f"Error removing file from knowledge base metadata: {e}"
-            log.exception(error_msg)
-            details["errors"].append(error_msg)
-    
-    # Step 4: Delete file-specific collection from vector DB
-    file_collection = f"file-{file_id}"
-    try:
-        if VECTOR_DB_CLIENT.has_collection(collection_name=file_collection):
-            log.info(f"Deleting file collection: {file_collection}")
-            VECTOR_DB_CLIENT.delete_collection(collection_name=file_collection)
+            with get_db() as db:
+                # File-first is the common lock order for deletion and ingestion.
+                file = (
+                    db.query(File)
+                    .filter(File.id == file_id)
+                    .with_for_update()
+                    .first()
+                )
+                if file is None:
+                    details["errors"].append("File not found")
+                    return False, details
+
+                storage_path = file.path
+                candidate_ids = {
+                    str(row.id)
+                    for row in db.query(Knowledge).all()
+                    if file_id in _file_ids(row.data)
+                }
+                # Adds use the same File-first lock order. Locking the current
+                # candidates is therefore sufficient and avoids a table-wide
+                # Knowledge lock during deletion.
+                knowledge_rows = (
+                    db.query(Knowledge)
+                    .filter(Knowledge.id.in_(sorted(candidate_ids)))
+                    .order_by(Knowledge.id)
+                    .with_for_update()
+                    .all()
+                    if candidate_ids
+                    else []
+                )
+                affected_rows = [
+                    row
+                    for row in knowledge_rows
+                    if row.id != exclude_knowledge_id
+                    and file_id in _file_ids(row.data)
+                ]
+                for knowledge in affected_rows:
+                    data = dict(knowledge.data or {})
+                    data["file_ids"] = [
+                        candidate
+                        for candidate in _file_ids(data)
+                        if candidate != file_id
+                    ]
+                    knowledge.data = data
+                    knowledge.updated_at = int(time.time())
+                    delete_file_projection(
+                        collection_name=knowledge.id,
+                        file_id=file_id,
+                        session=db,
+                    )
+                    details["knowledge_bases_updated"].append(knowledge.id)
+
+                delete_file_projection(
+                    collection_name=f"file-{file_id}",
+                    file_id=file_id,
+                    session=db,
+                )
+                db.delete(file)
+                db.commit()
+
+            details["vector_db_cleaned"] = True
             details["file_collection_deleted"] = True
-        else:
-            log.debug(f"File collection {file_collection} does not exist, skipping")
-            details["file_collection_deleted"] = True  # Consider it success if it doesn't exist
-    except Exception as e:
-        error_msg = f"Error deleting file collection {file_collection}: {e}"
-        log.exception(error_msg)
-        details["errors"].append(error_msg)
-    
-    # Step 5: Delete from SQL database
-    try:
-        log.info(f"Deleting file {file_id} from SQL database")
-        sql_result = Files.delete_file_by_id(file_id)
-        if sql_result:
             details["sql_deleted"] = True
-        else:
-            error_msg = f"Failed to delete file {file_id} from SQL database"
-            log.error(error_msg)
-            details["errors"].append(error_msg)
-    except Exception as e:
-        error_msg = f"Error deleting file {file_id} from SQL database: {e}"
-        log.exception(error_msg)
-        details["errors"].append(error_msg)
-    
-    # Step 6: Delete physical file (only if delete_physical_file is True)
+            if delete_physical_file and storage_path:
+                try:
+                    Storage.delete_file(storage_path)
+                    details["physical_file_deleted"] = True
+                except Exception:
+                    log.exception(
+                        "Physical file cleanup failed after database deletion | file=%s",
+                        file_id,
+                    )
+                    details["errors"].append("Physical file cleanup failed")
+            elif not delete_physical_file:
+                details["physical_file_deleted"] = None
+            else:
+                details["errors"].append("Physical file path is missing")
+            return True, details
+        except Exception:
+            log.exception("Atomic file cleanup failed | file=%s", file_id)
+            details["errors"].append("Database file cleanup failed")
+            return False, details
+
+    # Non-pgvector stores cannot participate in the primary transaction. Do not
+    # hide memberships or delete the File row unless every vector deletion wins.
+    file = Files.get_file_by_id(file_id)
+    if file is None:
+        details["errors"].append("File not found")
+        return False, details
+    knowledge_bases = [
+        knowledge
+        for knowledge in Knowledges.get_knowledge_bases_by_file_id(file_id)
+        if knowledge.id != exclude_knowledge_id
+    ]
+    try:
+        for knowledge in knowledge_bases:
+            VECTOR_DB_CLIENT.delete(
+                collection_name=knowledge.id,
+                filter={"file_id": file_id},
+            )
+        VECTOR_DB_CLIENT.delete_collection(collection_name=f"file-{file_id}")
+    except Exception:
+        log.exception("Legacy vector cleanup failed | file=%s", file_id)
+        details["errors"].append("Vector database cleanup failed")
+        return False, details
+
+    details["vector_db_cleaned"] = True
+    details["file_collection_deleted"] = True
+    for knowledge in knowledge_bases:
+        data = dict(knowledge.data or {})
+        data["file_ids"] = [
+            candidate for candidate in _file_ids(data) if candidate != file_id
+        ]
+        if not Knowledges.update_knowledge_data_by_id(knowledge.id, data):
+            details["errors"].append("Knowledge membership cleanup failed")
+            return False, details
+        details["knowledge_bases_updated"].append(knowledge.id)
+
+    if not Files.delete_file_by_id(file_id):
+        details["errors"].append("Database file cleanup failed")
+        return False, details
+    details["sql_deleted"] = True
     if delete_physical_file and file.path:
         try:
-            log.info(f"Deleting physical file: {file.path}")
             Storage.delete_file(file.path)
             details["physical_file_deleted"] = True
-        except Exception as e:
-            error_msg = f"Error deleting physical file {file.path}: {e}"
-            log.exception(error_msg)
-            details["errors"].append(error_msg)
+        except Exception:
+            log.exception("Physical file cleanup failed | file=%s", file_id)
+            details["errors"].append("Physical file cleanup failed")
     elif not delete_physical_file:
-        log.info(f"Skipping physical file deletion for {file_id} (delete_physical_file=False)")
-        details["physical_file_deleted"] = None  # Indicate it was skipped
-    elif not file.path:
-        log.warning(f"File {file_id} has no path, cannot delete physical file")
-        details["errors"].append(f"File {file_id} has no path stored")
-    
-    # Determine overall success
-    # Consider it successful if critical operations succeeded
-    # (vector DB cleanup and SQL deletion are critical)
-    success = (
-        details["sql_deleted"]
-        and details["vector_db_cleaned"]
-        and (details["file_collection_deleted"] is not False)
-    )
-    
-    if success:
-        log.info(
-            f"Successfully completed cleanup for file {file_id}. "
-            f"Updated {len(details['knowledge_bases_updated'])} knowledge bases"
-        )
-    else:
-        log.warning(
-            f"Cleanup for file {file_id} completed with errors: {details['errors']}"
-        )
-    
-    return success, details
+        details["physical_file_deleted"] = None
+    return True, details
 
 
 def cleanup_file_from_knowledge_only(
-    file_id: str, knowledge_id: str
+    file_id: str,
+    knowledge_id: str,
 ) -> Tuple[bool, Dict]:
-    """
-    Remove a file from a specific knowledge collection only.
-    
-    This function removes a file from a single knowledge collection without
-    deleting the file itself. Used when a file is in multiple knowledge collections.
-    
-    Args:
-        file_id: The ID of the file to remove
-        knowledge_id: The knowledge base ID to remove the file from
-        
-    Returns:
-        Tuple of (success: bool, details: dict)
-    """
+    """Remove one current membership and its projection."""
+
     details = {
         "vector_db_cleaned": False,
         "knowledge_base_updated": False,
         "errors": [],
     }
-    
-    log.info(
-        f"Removing file {file_id} from knowledge collection {knowledge_id} only"
+    delete_file_projection = _transactional_vector_delete(
+        "delete_file_projection"
     )
-    
-    # Step 1: Remove from vector DB collection
+    if delete_file_projection is not None:
+        try:
+            with get_db() as db:
+                file = (
+                    db.query(File)
+                    .filter(File.id == file_id)
+                    .with_for_update()
+                    .first()
+                )
+                candidate_ids = {
+                    str(row.id)
+                    for row in db.query(Knowledge).all()
+                    if file_id in _file_ids(row.data)
+                }
+                candidate_ids.add(str(knowledge_id))
+                knowledge_rows = (
+                    db.query(Knowledge)
+                    .filter(Knowledge.id.in_(sorted(candidate_ids)))
+                    .order_by(Knowledge.id)
+                    .with_for_update()
+                    .all()
+                )
+                knowledge = next(
+                    (row for row in knowledge_rows if row.id == knowledge_id),
+                    None,
+                )
+                if file is None or knowledge is None:
+                    details["errors"].append("File or knowledge base not found")
+                    return False, details
+                data = dict(knowledge.data or {})
+                data["file_ids"] = [
+                    candidate
+                    for candidate in _file_ids(data)
+                    if candidate != file_id
+                ]
+                knowledge.data = data
+                knowledge.updated_at = int(time.time())
+                delete_file_projection(
+                    collection_name=knowledge_id,
+                    file_id=file_id,
+                    session=db,
+                )
+                db.commit()
+            details["vector_db_cleaned"] = True
+            details["knowledge_base_updated"] = True
+            return True, details
+        except Exception:
+            log.exception(
+                "Atomic membership cleanup failed | file=%s | knowledge=%s",
+                file_id,
+                knowledge_id,
+            )
+            details["errors"].append("Knowledge membership cleanup failed")
+            return False, details
+
     try:
-        log.info(
-            f"Removing file {file_id} from vector DB collection: {knowledge_id}"
-        )
         VECTOR_DB_CLIENT.delete(
-            collection_name=knowledge_id, filter={"file_id": file_id}
+            collection_name=knowledge_id,
+            filter={"file_id": file_id},
         )
         details["vector_db_cleaned"] = True
-    except Exception as e:
-        error_msg = f"Error deleting from vector DB collection {knowledge_id}: {e}"
-        log.exception(error_msg)
-        details["errors"].append(error_msg)
-    
-    # Step 2: Remove from knowledge base's file_ids list
-    try:
-        knowledge = Knowledges.get_knowledge_by_id(knowledge_id)
-        if knowledge and knowledge.data and isinstance(knowledge.data, dict):
-            file_ids = knowledge.data.get("file_ids", [])
-            if isinstance(file_ids, list) and file_id in file_ids:
-                file_ids.remove(file_id)
-                knowledge.data["file_ids"] = file_ids
-                
-                updated = Knowledges.update_knowledge_data_by_id(
-                    knowledge_id, knowledge.data
-                )
-                if updated:
-                    details["knowledge_base_updated"] = True
-                    log.info(
-                        f"Removed file {file_id} from knowledge base {knowledge_id} metadata"
-                    )
-                else:
-                    error_msg = (
-                        f"Failed to remove file {file_id} from "
-                        f"knowledge base {knowledge_id} metadata"
-                    )
-                    log.error(error_msg)
-                    details["errors"].append(error_msg)
-            else:
-                log.warning(
-                    f"File {file_id} not found in knowledge base {knowledge_id} file_ids list"
-                )
-                details["knowledge_base_updated"] = True  # Already removed
-        else:
-            error_msg = f"Knowledge base {knowledge_id} not found"
-            log.error(error_msg)
-            details["errors"].append(error_msg)
-    except Exception as e:
-        error_msg = f"Error removing file from knowledge base metadata: {e}"
-        log.exception(error_msg)
-        details["errors"].append(error_msg)
-    
-    success = details["vector_db_cleaned"] and details["knowledge_base_updated"]
-    
-    if success:
-        log.info(
-            f"Successfully removed file {file_id} from knowledge collection {knowledge_id}"
-        )
-    else:
-        log.warning(
-            f"Removal of file {file_id} from knowledge collection {knowledge_id} "
-            f"completed with errors: {details['errors']}"
-        )
-    
-    return success, details
+    except Exception:
+        log.exception("Legacy membership vector cleanup failed")
+        details["errors"].append("Vector database cleanup failed")
+        return False, details
 
+    knowledge = Knowledges.get_knowledge_by_id(knowledge_id)
+    if knowledge is None:
+        details["errors"].append("Knowledge base not found")
+        return False, details
+    data = dict(knowledge.data or {})
+    data["file_ids"] = [
+        candidate for candidate in _file_ids(data) if candidate != file_id
+    ]
+    details["knowledge_base_updated"] = bool(
+        Knowledges.update_knowledge_data_by_id(knowledge_id, data)
+    )
+    if not details["knowledge_base_updated"]:
+        details["errors"].append("Knowledge membership cleanup failed")
+    return (
+        details["vector_db_cleaned"] and details["knowledge_base_updated"],
+        details,
+    )
