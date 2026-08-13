@@ -71,7 +71,7 @@
 	let documentIntelligenceKey = '';
 	let showDocumentIntelligenceConfig = false;
 
-	let textSplitter = '';
+	let textSplitter = 'character';
 	let chunkSize = 1000;
 	let chunkOverlap = 200;
 	let pdfExtractImages = false;  // CRITICAL: Default to false - image extraction causes 2+ minute slowdowns/hangs
@@ -518,7 +518,7 @@
 								class="dark:bg-gray-900 w-fit pr-8 rounded-sm px-2 text-xs bg-transparent outline-hidden text-right"
 								bind:value={textSplitter}
 							>
-								<option value="">{$i18n.t('Default')} ({$i18n.t('Character')})</option>
+								<option value="character">{$i18n.t('Character')}</option>
 								<option value="token">{$i18n.t('Token')} ({$i18n.t('Tiktoken')})</option>
 							</select>
 						</div>

@@ -1064,10 +1064,12 @@ def _chunk_settings(config, admin_email: str) -> tuple[int, int, str, str]:
         chunk_overlap = 0
     if chunk_overlap >= chunk_size:
         chunk_overlap = chunk_size // 4
+    # ``TEXT_SPLITTER`` is the canonical application-state key. Older
+    # installations may persist an empty value to mean the character splitter;
+    # normalize that legacy representation without consulting an alias that the
+    # application does not register.
     splitter_name = str(
-        _config_value(config, "TEXT_SPLITTER", "")
-        or _config_value(config, "RAG_TEXT_SPLITTER", "")
-        or "character"
+        _config_value(config, "TEXT_SPLITTER", "character") or "character"
     ).strip().lower()
     if splitter_name in {"", "character", "recursive"}:
         splitter_name = "recursive"

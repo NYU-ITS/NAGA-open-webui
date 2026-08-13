@@ -646,7 +646,12 @@ class AppConfig:
                 raise TypeError("Use .set(email, value) to update UserScopedConfig.")
             
     def __getattr__(self, key):
-        config_obj = self._state[key]
+        try:
+            config_obj = self._state[key]
+        except KeyError:
+            # Follow Python's attribute protocol so callers using
+            # ``getattr(config, name, default)`` receive their fallback.
+            raise AttributeError(key) from None
         if isinstance(config_obj, PersistentConfig):
             return config_obj.value
         return config_obj
@@ -2255,7 +2260,7 @@ RAG_RERANKING_MODEL_TRUST_REMOTE_CODE = (
 RAG_TEXT_SPLITTER = PersistentConfig(
     "RAG_TEXT_SPLITTER",
     "rag.text_splitter",
-    os.environ.get("RAG_TEXT_SPLITTER", ""),
+    os.environ.get("RAG_TEXT_SPLITTER", "character"),
 )
 
 

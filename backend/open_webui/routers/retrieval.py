@@ -609,7 +609,7 @@ async def get_rag_config(request: Request, user=Depends(get_verified_user)):
             },
         },
         "chunk": {
-            "text_splitter": request.app.state.config.TEXT_SPLITTER,
+            "text_splitter": request.app.state.config.TEXT_SPLITTER or "character",
             "chunk_size": (lambda v: v if v and v > 0 else 1000)(request.app.state.config.CHUNK_SIZE.get(user.email)),
             "chunk_overlap": (lambda v: v if v is not None and v > 0 else 200)(request.app.state.config.CHUNK_OVERLAP.get(user.email)),
         },
@@ -795,7 +795,17 @@ async def update_rag_config(
             )
 
     if form_data.chunk is not None:
-        request.app.state.config.TEXT_SPLITTER = form_data.chunk.text_splitter
+        requested_splitter = (form_data.chunk.text_splitter or "character").strip().lower()
+        if requested_splitter in {"", "character", "recursive"}:
+            requested_splitter = "character"
+        elif requested_splitter in {"token", "tiktoken"}:
+            requested_splitter = "token"
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Text splitter must be character or token.",
+            )
+        request.app.state.config.TEXT_SPLITTER = requested_splitter
         # Validate and set chunk_size (must be > 0, default 1000)
         log.info(f"[CHUNK_UPDATE] Received chunk_size={form_data.chunk.chunk_size}, chunk_overlap={form_data.chunk.chunk_overlap} from user={user.email}")
         chunk_size = form_data.chunk.chunk_size if form_data.chunk.chunk_size and form_data.chunk.chunk_size > 0 else 1000
@@ -915,7 +925,7 @@ async def update_rag_config(
             },
         },
         "chunk": {
-            "text_splitter": request.app.state.config.TEXT_SPLITTER,
+            "text_splitter": request.app.state.config.TEXT_SPLITTER or "character",
             "chunk_size": (lambda v: v if v and v > 0 else 1000)(request.app.state.config.CHUNK_SIZE.get(user.email)),
             "chunk_overlap": (lambda v: v if v is not None and v > 0 else 200)(request.app.state.config.CHUNK_OVERLAP.get(user.email)),
         },
