@@ -37,6 +37,7 @@
 		id: string;
 		name: string;
 		failedDocumentCount: number;
+		incompatibleDocumentCount: number;
 		currentFileCount: number;
 	};
 
@@ -174,6 +175,7 @@
 				id: item.id,
 				name: item.name,
 				failedDocumentCount: status.failed_document_count,
+				incompatibleDocumentCount: status.incompatible_document_count,
 				currentFileCount: status.current_file_count
 			};
 			const existingGroup = groups.get(status.job_id);

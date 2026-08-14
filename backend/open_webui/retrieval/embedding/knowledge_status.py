@@ -18,6 +18,7 @@ from open_webui.retrieval.embedding.inventory import build_reindex_admin_resolve
 from open_webui.retrieval.embedding.jobs import (
     FILE_STATUS_COMPLETED,
     FILE_STATUS_FAILED,
+    FILE_STATUS_INCOMPATIBLE,
     FILE_STATUS_PENDING,
     JOB_STATUS_COMPLETED,
     JOB_STATUS_FAILED,
@@ -45,6 +46,7 @@ class KnowledgeIndexingProgress(BaseModel):
     total: int = 0
     processed: int = 0
     failed: int = 0
+    incompatible: int = 0
     pending_or_processing: int = 0
 
 
@@ -54,6 +56,17 @@ class EmbeddingModelSummary(BaseModel):
     display_name: str
     modalities: list[str] = Field(default_factory=list)
     status: str
+
+
+class KnowledgeIndexingIncompatible(BaseModel):
+    file_id: str
+    error_code: str | None = None
+    error_message: str | None = None
+    attempt_count: int = 0
+    created_at: int | None = None
+    updated_at: int | None = None
+    started_at: int | None = None
+    completed_at: int | None = None
 
 
 class KnowledgeIndexingFailure(BaseModel):
@@ -89,6 +102,8 @@ class KnowledgeIndexingStatusSummary(BaseModel):
     )
     failed_document_count: int = 0
     job_failed_document_count: int = 0
+    incompatible_document_count: int = 0
+    job_incompatible_document_count: int = 0
 
     error_code: str | None = None
     error_message: str | None = None
@@ -104,6 +119,9 @@ class KnowledgeIndexingStatusSummary(BaseModel):
 
 class KnowledgeIndexingStatusResponse(KnowledgeIndexingStatusSummary):
     failed_documents: list[KnowledgeIndexingFailure] = Field(default_factory=list)
+    incompatible_documents: list[KnowledgeIndexingIncompatible] = Field(
+        default_factory=list
+    )
 
 
 def _model_summary(row: EmbeddingModel | None) -> EmbeddingModelSummary | None:
@@ -122,12 +140,14 @@ def _model_summary(row: EmbeddingModel | None) -> EmbeddingModelSummary | None:
 def _progress_from_rows(rows: list[EmbeddingJobFile]) -> KnowledgeIndexingProgress:
     processed = sum(row.status == FILE_STATUS_COMPLETED for row in rows)
     failed = sum(row.status == FILE_STATUS_FAILED for row in rows)
+    incompatible = sum(row.status == FILE_STATUS_INCOMPATIBLE for row in rows)
     total = len(rows)
     return KnowledgeIndexingProgress(
         total=total,
         processed=processed,
         failed=failed,
-        pending_or_processing=max(0, total - processed - failed),
+        incompatible=incompatible,
+        pending_or_processing=max(0, total - processed - failed - incompatible),
     )
 
 
@@ -138,9 +158,13 @@ def _job_progress(job: EmbeddingJob | None) -> KnowledgeIndexingProgress:
         total=job.total_files,
         processed=job.processed_files,
         failed=job.failed_files,
+        incompatible=job.incompatible_files,
         pending_or_processing=max(
             0,
-            job.total_files - job.processed_files - job.failed_files,
+            job.total_files
+            - job.processed_files
+            - job.failed_files
+            - job.incompatible_files,
         ),
     )
 
@@ -392,10 +416,23 @@ def build_knowledge_indexing_statuses(
         rows = files_by_job.get(job.id, []) if job is not None else []
         collection_rows = _knowledge_rows_for_job(knowledge.id, rows)
         collection_rows = [row for row in collection_rows if row.file_id in current_file_ids]
-        if current_file_count and len({row.file_id for row in collection_rows}) < current_file_count:
+        # Coverage is scoped to files the latest job was responsible for.
+        # Files added after the job are indexed by the direct upload path
+        # (no durable job) and must not flip the KB to unavailable.
+        job_expected_file_ids = {row.file_id for row in rows} & current_file_ids
+        if (
+            job is not None
+            and job_expected_file_ids
+            and len({row.file_id for row in collection_rows}) < len(job_expected_file_ids)
+        ):
             display_state, retrieval_available = "unavailable", False
         failed_rows = [
             row for row in collection_rows if row.status == FILE_STATUS_FAILED
+        ]
+        incompatible_rows = [
+            row
+            for row in collection_rows
+            if row.status == FILE_STATUS_INCOMPATIBLE
         ]
 
         # An empty collection is locally ready even when another governed
@@ -444,6 +481,10 @@ def build_knowledge_indexing_statuses(
                 job_progress=_job_progress(job),
                 failed_document_count=len(failed_rows),
                 job_failed_document_count=(job.failed_files if job is not None else 0),
+                incompatible_document_count=len(incompatible_rows),
+                job_incompatible_document_count=(
+                    job.incompatible_files if job is not None else 0
+                ),
                 error_code=error_code,
                 error_message=error_message,
                 retry_eligible=retry_eligible,
@@ -474,6 +515,23 @@ def build_knowledge_indexing_statuses(
                             completed_at=row.completed_at,
                         )
                         for row in failed_rows
+                    ]
+                    if include_failure_details
+                    else []
+                ),
+                incompatible_documents=(
+                    [
+                        KnowledgeIndexingIncompatible(
+                            file_id=row.file_id,
+                            error_code=row.error_code,
+                            error_message=_stored_message(row.error_message),
+                            attempt_count=row.attempt_count,
+                            created_at=row.created_at,
+                            updated_at=row.updated_at,
+                            started_at=row.started_at,
+                            completed_at=row.completed_at,
+                        )
+                        for row in incompatible_rows
                     ]
                     if include_failure_details
                     else []

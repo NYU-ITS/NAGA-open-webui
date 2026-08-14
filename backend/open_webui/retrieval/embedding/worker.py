@@ -57,6 +57,7 @@ from open_webui.retrieval.embedding.errors import (
     EMBEDDING_IMAGE_INVALID,
     PDF_VISUAL_EXTRACTION_FAILED,
     PDF_VISUAL_LIMIT_EXCEEDED,
+    PDF_VISUALS_REQUIRE_MULTIMODAL_MODEL,
     EMBEDDING_INVENTORY_AMBIGUOUS_SOURCE,
     EMBEDDING_INVENTORY_AMBIGUOUS_ADMIN,
     EMBEDDING_INVENTORY_UNRESOLVED_SOURCE,
@@ -86,6 +87,7 @@ from open_webui.retrieval.embedding.jobs import (
     JOB_STATUS_PARTIALLY_FAILED,
     FILE_STATUS_COMPLETED,
     FILE_STATUS_FAILED,
+    FILE_STATUS_INCOMPATIBLE,
     FILE_STATUS_PENDING,
     FILE_STATUS_PROCESSING,
 )
@@ -346,8 +348,10 @@ def process_embedding_job(embedding_job_id: str) -> dict:
                 file_view = replace(file_view, status=fresh_file.status)
                 
                 # Skip if now completed by another worker
-                if file_view.status == FILE_STATUS_COMPLETED:
-                    log.debug(f"[EMBEDDING_WORKER] File {file_view.file_id} completed by another worker")
+                if file_view.status in (FILE_STATUS_COMPLETED, FILE_STATUS_INCOMPATIBLE):
+                    log.debug(
+                        f"[EMBEDDING_WORKER] File {file_view.file_id} already terminal ({file_view.status})"
+                    )
                     continue
             
             try:
@@ -364,9 +368,20 @@ def process_embedding_job(embedding_job_id: str) -> dict:
                 if completed:
                     processed_count += 1
             except Exception as file_error:
-                # File-local error: mark file failed and continue (Spec 08).
-                # Record a stable stage code and a safe operation+cause message
-                # that identifies the file without exposing credentials.
+                if _is_incompatible_outcome(file_error):
+                    error_code = file_error.code
+                    log.info(
+                        "[EMBEDDING_WORKER] File %s skipped as incompatible | code=%s",
+                        file_view.file_id,
+                        error_code,
+                    )
+                    _mark_file_incompatible_safe(
+                        embedding_job_id, file_view.file_id, error_code
+                    )
+                    continue
+
+                # File-local error: mark file failed and continue. Record a
+                # stable stage code and safe operation+cause message.
                 error_code = _get_stable_error_code(file_error)
                 display_name = _get_file_display_name(file_view.file_id)
                 error_msg = _build_file_error_message(error_code, display_name, file_error)
@@ -663,6 +678,12 @@ def _process_file(
             detail=f"File {file_id} contains no extractable content",
         )
 
+    incompatible_code = (
+        PDF_VISUALS_REQUIRE_MULTIMODAL_MODEL
+        if PDF_VISUALS_REQUIRE_MULTIMODAL_MODEL in prepared.warnings
+        else None
+    )
+
     if expected_source_sha256 != prepared.source_sha256:
         raise EmbeddingError(EMBEDDING_REINDEX_SOURCE_CHANGED)
 
@@ -711,10 +732,17 @@ def _process_file(
         rag_chunk_ids,
     )
 
-    # Step 14: Mark file completed
-    _mark_file_completed_safe(job_id, file_id)
-    
-    log.debug(f"[EMBEDDING_WORKER] Completed file {file_id}")
+    # Visual content skipped under a text-only model is a successful terminal
+    # incompatibility; text chunks remain staged for promotion.
+    if incompatible_code is not None:
+        _mark_file_incompatible_safe(job_id, file_id, incompatible_code)
+        log.info(
+            "[EMBEDDING_WORKER] File %s completed with incompatible visual content",
+            file_id,
+        )
+    else:
+        _mark_file_completed_safe(job_id, file_id)
+        log.debug(f"[EMBEDDING_WORKER] Completed file {file_id}")
     return True
 
 
@@ -1037,6 +1065,24 @@ def _mark_file_failed_safe(job_id: str, file_id: str, error_code: str, error_mes
         db.commit()
 
 
+def _mark_file_incompatible_safe(
+    job_id: str, file_id: str, error_code: str
+):
+    """Mark file as an allowlisted incompatibility without retry semantics."""
+    with get_db() as db:
+        EmbeddingJobRepository.mark_file_incompatible(
+            job_id=job_id,
+            file_id=file_id,
+            error_code=error_code,
+            db=db,
+        )
+        db.commit()
+
+
+def _is_incompatible_outcome(error: Exception) -> bool:
+    return isinstance(error, EmbeddingError) and error.code == EMBEDDING_MODALITY_UNSUPPORTED
+
+
 def _fail_job_files_safe(job_id: str, error: EmbeddingError) -> None:
     """Persist a safe failure for every nonterminal file after job validation fails."""
     error_code = _get_stable_error_code(error)
@@ -1060,32 +1106,16 @@ def _fail_job_files_safe(job_id: str, error: EmbeddingError) -> None:
         db.commit()
 
 
-def _invalidate_embedding_model_config(admin_id: str) -> None:
-    """Invalidate compatibility-config caches after an atomic rollback commits."""
-    with get_db() as db:
-        admin = db.query(User).filter(User.id == admin_id).first()
-    if admin is None:
-        return
-
-    from open_webui.config import invalidate_user_scoped_config_cache
-
-    invalidate_user_scoped_config_cache(admin.email, "rag.embedding_model_user")
-
-
 def _mark_job_failed_safe(job_id: str, error_code: str, error_message: str):
-    """Mark job failed and atomically restore compatibility config (Fix #7)."""
+    """Mark job failed without restoring the previous embedding model."""
     with get_db() as db:
-        job_view = EmbeddingJobRepository.mark_job_failed(
+        EmbeddingJobRepository.mark_job_failed(
             job_id=job_id,
             error_code=error_code,
             error_message=error_message,
             db=db,
-            restore_previous_config=True,
         )
         db.commit()
-
-    if job_view is not None and job_view.status == JOB_STATUS_FAILED:
-        _invalidate_embedding_model_config(job_view.admin_id)
 
 
 def _finalize_job_safe(job_id: str):
@@ -1128,9 +1158,12 @@ def _finalize_job_safe(job_id: str):
                 return
 
             all_success = (
-                refreshed.total_files == refreshed.processed_files
+                refreshed.total_files
+                == refreshed.processed_files
+                + refreshed.incompatible_files
                 and refreshed.total_files >= 0
                 and refreshed.failed_files == 0
+                and refreshed.error_message is None
             )
 
             if all_success:
@@ -1163,7 +1196,11 @@ def _finalize_job_safe(job_id: str):
             JOB_STATUS_FAILED,
             JOB_STATUS_PARTIALLY_FAILED,
         ):
-            _invalidate_embedding_model_config(admin_id)
+            log.info(
+                "[EMBEDDING_WORKER] Finalized without promotion | job_id=%s | status=%s",
+                job_id,
+                finalized.status,
+            )
 
         log.info(f"[EMBEDDING_WORKER] Finalized job {job_id}")
 
@@ -1207,7 +1244,10 @@ def _apply_staged_processing_summaries(*, job_id: str, db) -> None:
         db.query(EmbeddingJobFile)
         .filter(
             EmbeddingJobFile.job_id == job_id,
-            EmbeddingJobFile.status == FILE_STATUS_COMPLETED,
+            EmbeddingJobFile.status.in_((
+                FILE_STATUS_COMPLETED,
+                FILE_STATUS_INCOMPATIBLE,
+            )),
         )
         .all()
     )
@@ -1219,6 +1259,8 @@ def _apply_staged_processing_summaries(*, job_id: str, db) -> None:
         )
         summary = snapshot.get("prepared_processing_summary")
         if not isinstance(summary, dict):
+            if job_file.status == FILE_STATUS_INCOMPATIBLE:
+                continue
             raise EmbeddingError(FILE_ERROR_PROCESSING_FAILED)
         file_row = (
             db.query(File)

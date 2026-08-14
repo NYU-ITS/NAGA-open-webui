@@ -47,6 +47,8 @@ DIMENSION_TABLE = {
 # retrievable.
 VECTOR_STATUS_ACTIVE = "active"
 VECTOR_STATUS_BUILDING = "building"
+VECTOR_STATUS_INACTIVE = "inactive"
+VECTOR_STATUS_STALE = "stale"
 
 
 def supported_dimensions() -> list[int]:
@@ -229,6 +231,67 @@ class ModelAwareVectorRepository:
             [(name, list(items)) for name, items in projections],
             session=session,
         )
+
+    def invalidate_model_projections(
+        self,
+        *,
+        admin_id: str,
+        models: Sequence[EmbeddingModelSpec],
+        session=None,
+    ) -> int:
+        """Mark existing rows for the supplied admin/model projections stale."""
+        invalidated = 0
+        seen: set[tuple[int, str]] = set()
+        for model in models:
+            key = (model.dimension, model.id)
+            if key in seen:
+                continue
+            seen.add(key)
+            client = self._client_for(model.dimension)
+            if not hasattr(client, "invalidate_model_projection"):
+                raise EmbeddingError(EMBEDDING_STORAGE_DIMENSION_UNSUPPORTED)
+            invalidated += client.invalidate_model_projection(
+                admin_id=admin_id,
+                embedding_model_id=model.id,
+                session=session,
+            )
+        return invalidated
+
+    def cleanup_after_promotion(
+        self,
+        *,
+        admin_id: str,
+        active_model: EmbeddingModelSpec,
+        job_id: str,
+        previous_model_id: Optional[str],
+        previous_model: Optional[EmbeddingModelSpec] = None,
+        session=None,
+    ) -> int:
+        """Remove stale target remnants and all obsolete prior-model rows."""
+        deleted = 0
+        client = self._client_for(active_model.dimension)
+        if not hasattr(client, "delete_obsolete_model_rows"):
+            raise EmbeddingError(EMBEDDING_STORAGE_DIMENSION_UNSUPPORTED)
+        deleted += client.delete_obsolete_model_rows(
+            admin_id=admin_id,
+            embedding_model_id=active_model.id,
+            preserve_job_id=job_id,
+            session=session,
+        )
+        if previous_model_id and previous_model_id != active_model.id:
+            previous = previous_model
+            if previous is None:
+                from open_webui.retrieval.embedding.registry import get_model_spec_by_id
+
+                previous = get_model_spec_by_id(previous_model_id)
+            previous_client = self._client_for(previous.dimension)
+            deleted += previous_client.delete_obsolete_model_rows(
+                admin_id=admin_id,
+                embedding_model_id=previous.id,
+                preserve_job_id=None,
+                session=session,
+            )
+        return deleted
 
     def activate_target_vectors(
         self,

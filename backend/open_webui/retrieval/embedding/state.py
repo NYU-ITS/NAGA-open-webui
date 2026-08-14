@@ -179,6 +179,9 @@ def _request_target(
             ),
         )
 
+    # The requested model becomes the durable selected model immediately. The
+    # target and latest-job pointer keep retrieval blocked until promotion.
+    row.active_embedding_model_id = target_model_id
     row.target_embedding_model_id = target_model_id
     row.latest_embedding_job_id = job_id
     row.updated_at = now

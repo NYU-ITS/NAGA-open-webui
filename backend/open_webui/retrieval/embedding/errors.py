@@ -82,6 +82,9 @@ _SAFE_FILE_PROCESSING_ERROR_MESSAGES = {
     EMBEDDING_MODALITY_UNSUPPORTED: (
         "The selected embedding model does not support this file's content type."
     ),
+    PDF_VISUALS_REQUIRE_MULTIMODAL_MODEL: (
+        "This file contains visual content incompatible with the current embedding model."
+    ),
     EMBEDDING_PROVIDER_FAILED: "The embedding provider could not process this file.",
     EMBEDDING_OUTPUT_COUNT_MISMATCH: (
         "The embedding provider returned an invalid number of results."
@@ -105,6 +108,7 @@ _PUBLIC_FILE_PROCESSING_ERROR_CODES = frozenset(
         EMBEDDING_CREDENTIALS_MISSING,
         EMBEDDING_PROVIDER_UNSUPPORTED,
         EMBEDDING_MODALITY_UNSUPPORTED,
+        PDF_VISUALS_REQUIRE_MULTIMODAL_MODEL,
         EMBEDDING_OUTPUT_COUNT_MISMATCH,
         EMBEDDING_VECTOR_NOT_SEQUENCE,
         EMBEDDING_VECTOR_VALUE_INVALID,

@@ -36,11 +36,11 @@ from open_webui.models.embeddings import (
     AdminEmbeddingModelState,
     EmbeddingJob,
     EmbeddingJobFile,
-    EmbeddingModel,
 )
-from open_webui.models.users import User
 from open_webui.retrieval.embedding.errors import (
     EmbeddingError,
+    PDF_VISUALS_REQUIRE_MULTIMODAL_MODEL,
+    EMBEDDING_MODALITY_UNSUPPORTED,
     EMBEDDING_JOB_ACTIVE_EXISTS,
     EMBEDDING_JOB_LEDGER_MISMATCH,
     EMBEDDING_JOB_NOT_FOUND,
@@ -82,6 +82,19 @@ FILE_STATUS_PENDING = "pending"
 FILE_STATUS_PROCESSING = "processing"
 FILE_STATUS_COMPLETED = "completed"
 FILE_STATUS_FAILED = "failed"
+FILE_STATUS_INCOMPATIBLE = "incompatible"
+
+_INCOMPATIBLE_FILE_CODES = frozenset(
+    {EMBEDDING_MODALITY_UNSUPPORTED, PDF_VISUALS_REQUIRE_MULTIMODAL_MODEL}
+)
+_INCOMPATIBLE_FILE_MESSAGES = {
+    EMBEDDING_MODALITY_UNSUPPORTED: (
+        "This file is incompatible with the current embedding model."
+    ),
+    PDF_VISUALS_REQUIRE_MULTIMODAL_MODEL: (
+        "This file contains visual content incompatible with the current embedding model."
+    ),
+}
 
 _TERMINAL_JOB_STATUSES = frozenset({JOB_STATUS_COMPLETED, JOB_STATUS_FAILED, JOB_STATUS_PARTIALLY_FAILED})
 _ACTIVE_JOB_STATUSES = frozenset({JOB_STATUS_QUEUED, JOB_STATUS_PROCESSING})
@@ -153,6 +166,7 @@ class EmbeddingJobView:
     total_files: int
     processed_files: int
     failed_files: int
+    incompatible_files: int
     rq_job_id: Optional[str]
     created_by_user_id: Optional[str]
     source_job_id: Optional[str]
@@ -193,10 +207,11 @@ class SourceContextCounts:
     total: int = 0
     processed: int = 0
     failed: int = 0
+    incompatible: int = 0
 
     @property
     def pending_or_processing(self) -> int:
-        return self.total - self.processed - self.failed
+        return self.total - self.processed - self.failed - self.incompatible
 
 
 @dataclass(frozen=True)
@@ -250,6 +265,7 @@ def _job_to_view(row: EmbeddingJob) -> EmbeddingJobView:
         total_files=row.total_files,
         processed_files=row.processed_files,
         failed_files=row.failed_files,
+        incompatible_files=row.incompatible_files,
         rq_job_id=row.rq_job_id,
         created_by_user_id=row.created_by_user_id,
         source_job_id=getattr(row, "source_job_id", None),
@@ -929,6 +945,51 @@ def _mark_file_failed(
     return _file_to_view(row)
 
 
+def _mark_file_incompatible(
+    db,
+    job_id: str,
+    file_id: str,
+    error_code: str,
+    error_message: Optional[str] = None,
+) -> Optional[EmbeddingJobFileView]:
+    """Mark a processing file as an intentional, terminal compatibility skip."""
+    if error_code not in _INCOMPATIBLE_FILE_CODES:
+        raise ValueError("incompatible file error code is not allowlisted")
+    safe_message = _INCOMPATIBLE_FILE_MESSAGES[error_code]
+    if error_message is not None and error_message != safe_message:
+        raise ValueError("incompatible file error message is not allowlisted")
+
+    now = _now()
+    row = (
+        db.query(EmbeddingJobFile)
+        .filter(
+            EmbeddingJobFile.job_id == job_id,
+            EmbeddingJobFile.file_id == file_id,
+        )
+        .with_for_update()
+        .first()
+    )
+    if row is None:
+        return None
+    if row.status == FILE_STATUS_INCOMPATIBLE:
+        return _file_to_view(row)
+    if row.status != FILE_STATUS_PROCESSING:
+        raise EmbeddingError(
+            EMBEDDING_FILE_WRONG_STATUS,
+            detail=f"File {file_id} in job {job_id} is {row.status}; expected processing.",
+        )
+
+    row.status = FILE_STATUS_INCOMPATIBLE
+    row.error_code = error_code
+    row.error_message = safe_message
+    if row.completed_at is None:
+        row.completed_at = now
+    row.updated_at = now
+    _recompute_counters(db, job_id)
+    db.flush()
+    return _file_to_view(row)
+
+
 def _fail_nonterminal_files(
     db,
     job_id: str,
@@ -999,8 +1060,9 @@ def _reclaim_file(
     if row is None:
         return None
 
-    # Already completed: no-op
-    if row.status == FILE_STATUS_COMPLETED:
+    # Already terminal: no-op. Incompatible rows are successful skips and only
+    # real failures can be retried through a new retry job.
+    if row.status in (FILE_STATUS_COMPLETED, FILE_STATUS_INCOMPATIBLE):
         return None
 
     # Processing: only reclaim if stale
@@ -1025,7 +1087,7 @@ def _reclaim_file(
     return _file_to_view(row)
 
 
-def _get_file_counts(db, job_id: str) -> tuple[int, int, int]:
+def _get_file_counts(db, job_id: str) -> tuple[int, int, int, int]:
     """Return persisted ledger totals for a job."""
     # Sessions disable autoflush globally; persist any in-transaction ledger
     # transition before deriving counters from SQL.
@@ -1051,7 +1113,15 @@ def _get_file_counts(db, job_id: str) -> tuple[int, int, int]:
         )
         .count()
     )
-    return total, processed, failed
+    incompatible = (
+        db.query(EmbeddingJobFile)
+        .filter(
+            EmbeddingJobFile.job_id == job_id,
+            EmbeddingJobFile.status == FILE_STATUS_INCOMPATIBLE,
+        )
+        .count()
+    )
+    return total, processed, failed, incompatible
 
 
 def _fail_ledger_mismatch(
@@ -1059,14 +1129,19 @@ def _fail_ledger_mismatch(
     ledger_total: int,
     processed: int,
     failed: int,
+    incompatible: int,
     now: int,
 ) -> EmbeddingJobView:
     """Fail closed when the durable inventory has lost or gained rows."""
     expected_total = job_row.total_files
     bounded_processed = min(max(processed, 0), expected_total)
     bounded_failed = min(max(failed, 0), expected_total - bounded_processed)
+    bounded_incompatible = min(
+        max(incompatible, 0), expected_total - bounded_processed - bounded_failed
+    )
     job_row.processed_files = bounded_processed
     job_row.failed_files = bounded_failed
+    job_row.incompatible_files = bounded_incompatible
     job_row.status = JOB_STATUS_FAILED
     job_row.error_code = EMBEDDING_JOB_LEDGER_MISMATCH
     job_row.error_message = (
@@ -1105,14 +1180,17 @@ def _recompute_counters(db, job_id: str) -> Optional[EmbeddingJobView]:
     if job_row is None:
         return None
 
-    total, processed, failed = _get_file_counts(db, job_id)
+    total, processed, failed, incompatible = _get_file_counts(db, job_id)
     if total != job_row.total_files:
-        view = _fail_ledger_mismatch(job_row, total, processed, failed, now)
+        view = _fail_ledger_mismatch(
+            job_row, total, processed, failed, incompatible, now
+        )
         db.flush()
         return view
 
     job_row.processed_files = processed
     job_row.failed_files = failed
+    job_row.incompatible_files = incompatible
     job_row.updated_at = now
     db.flush()
     return _job_to_view(job_row)
@@ -1138,31 +1216,6 @@ def _collect_job_lineage(db, job_id: str) -> list[str]:
         )
     return lineage
 
-
-def _restore_previous_model_config(db, job_row: EmbeddingJob) -> None:
-    """Restore compatibility config to the model that remains active on failure."""
-    previous_model_id = job_row.previous_embedding_model_id
-    if previous_model_id is None:
-        return
-
-    previous_model = (
-        db.query(EmbeddingModel)
-        .filter(EmbeddingModel.id == previous_model_id)
-        .first()
-    )
-    admin = db.query(User).filter(User.id == job_row.admin_id).first()
-    if previous_model is None or admin is None:
-        raise EmbeddingError(
-            EMBEDDING_MODEL_STATE_CONFLICT,
-            detail=(
-                f"Cannot restore embedding config for failed job {job_row.id}: "
-                f"previous model or admin is missing."
-            ),
-        )
-
-    from open_webui.config import RAG_EMBEDDING_MODEL_USER
-
-    RAG_EMBEDDING_MODEL_USER.set(admin.email, previous_model.model_name, db=db)
 
 
 def _finalize_job(db, job_id: str) -> Optional[EmbeddingJobView]:
@@ -1190,18 +1243,21 @@ def _finalize_job(db, job_id: str) -> Optional[EmbeddingJobView]:
 
     # Recompute counters first (same transaction) — always, even for terminal jobs
     # per Spec 03 "counters must be recomputed in the same transaction as finalization"
-    total, processed, failed = _get_file_counts(db, job_id)
+    total, processed, failed, incompatible = _get_file_counts(db, job_id)
     if total != job_row.total_files:
-        view = _fail_ledger_mismatch(job_row, total, processed, failed, now)
+        view = _fail_ledger_mismatch(
+            job_row, total, processed, failed, incompatible, now
+        )
         db.flush()
         return view
 
     job_row.processed_files = processed
     job_row.failed_files = failed
+    job_row.incompatible_files = incompatible
 
     # Reject finalization if any files are still unfinished (pending/processing)
     # per Spec 09: finalization requires no pending/processing rows
-    unfinished = total - processed - failed
+    unfinished = total - processed - failed - incompatible
     if unfinished > 0:
         log.warning(
             "[JOB] finalize rejected for job %s: %d files still unfinished",
@@ -1222,14 +1278,14 @@ def _finalize_job(db, job_id: str) -> Optional[EmbeddingJobView]:
     if job_row.error_message:
         # Operation-level fatal error takes precedence
         job_row.status = JOB_STATUS_FAILED
-    elif total == processed:
-        # All files completed (includes zero-file jobs)
+    elif failed == 0 and total == processed + incompatible:
+        # Every file completed or was safely skipped as incompatible.
         job_row.status = JOB_STATUS_COMPLETED
-    elif processed > 0 and failed > 0:
-        # At least one completed and at least one failed
+    elif failed > 0 and (processed + incompatible) > 0:
+        # At least one successful/skipped file and at least one failed file.
         job_row.status = JOB_STATUS_PARTIALLY_FAILED
-    elif failed > 0 and processed == 0:
-        # No file completed and at least one failed
+    elif failed > 0:
+        # No file completed or was safely skipped.
         job_row.status = JOB_STATUS_FAILED
     else:
         # Defensive: should not happen if finalize is called after all files done
@@ -1247,17 +1303,15 @@ def _finalize_job(db, job_id: str) -> Optional[EmbeddingJobView]:
         job_row.completed_at = now
     job_row.updated_at = now
 
-    if job_row.status in (JOB_STATUS_FAILED, JOB_STATUS_PARTIALLY_FAILED):
-        _restore_previous_model_config(db, job_row)
-
     db.flush()
     log.info(
-        "[JOB] finalized job %s: status=%s, total=%d, processed=%d, failed=%d",
+        "[JOB] finalized job %s: status=%s, total=%d, processed=%d, failed=%d, incompatible=%d",
         job_id,
         job_row.status,
         total,
         processed,
         failed,
+        incompatible,
     )
     return _job_to_view(job_row)
 
@@ -1312,13 +1366,15 @@ def _finalize_job_success(
         return _job_to_view(job_row)
 
     # 2. Recompute and verify no files are unfinished
-    total, processed, failed = _get_file_counts(db, job_id)
+    total, processed, failed, incompatible = _get_file_counts(db, job_id)
     if total != job_row.total_files:
-        view = _fail_ledger_mismatch(job_row, total, processed, failed, now)
+        view = _fail_ledger_mismatch(
+            job_row, total, processed, failed, incompatible, now
+        )
         db.flush()
         return view
 
-    unfinished = total - processed - failed
+    unfinished = total - processed - failed - incompatible
     if unfinished > 0:
         log.warning(
             "[JOB] finalize_job_success rejected for job %s: %d files still unfinished",
@@ -1327,6 +1383,7 @@ def _finalize_job_success(
         )
         job_row.processed_files = processed
         job_row.failed_files = failed
+        job_row.incompatible_files = incompatible
         job_row.updated_at = now
         db.flush()
         return _job_to_view(job_row)
@@ -1334,9 +1391,10 @@ def _finalize_job_success(
     # Update counters
     job_row.processed_files = processed
     job_row.failed_files = failed
+    job_row.incompatible_files = incompatible
 
-    # All files must be completed for a successful finalization
-    if total != processed:
+    # All files must be terminal, with incompatible files treated as skips.
+    if failed > 0 or total != processed + incompatible:
         log.warning(
             "[JOB] finalize_job_success called on job %s with %d/%d completed; "
             "caller should use _finalize_job for partial/failure outcomes",
@@ -1345,7 +1403,11 @@ def _finalize_job_success(
             total,
         )
         # Fall through to _finalize_job behavior for non-all-success cases
-        job_row.status = JOB_STATUS_PARTIALLY_FAILED if processed > 0 and failed > 0 else JOB_STATUS_FAILED
+        job_row.status = (
+            JOB_STATUS_PARTIALLY_FAILED
+            if (processed + incompatible) > 0 and failed > 0
+            else JOB_STATUS_FAILED
+        )
         if job_row.completed_at is None:
             job_row.completed_at = now
         job_row.updated_at = now
@@ -1392,7 +1454,10 @@ def _finalize_job_success(
         db.query(EmbeddingJobFile)
         .filter(
             EmbeddingJobFile.job_id == job_id,
-            EmbeddingJobFile.status == FILE_STATUS_COMPLETED,
+            EmbeddingJobFile.status.in_((
+                FILE_STATUS_COMPLETED,
+                FILE_STATUS_INCOMPATIBLE,
+            )),
         )
         .all()
     )
@@ -1424,6 +1489,9 @@ def _finalize_job_success(
         )
         summary = snapshot.get("prepared_processing_summary")
         if not isinstance(summary, dict):
+            # A standalone incompatible file has no vectors or staged manifest.
+            if file_row.status == FILE_STATUS_INCOMPATIBLE:
+                continue
             raise EmbeddingError(EMBEDDING_JOB_LEDGER_MISMATCH)
         chunk_count = summary.get("chunk_count")
         rag_chunk_ids = summary.get("rag_chunk_ids")
@@ -1484,6 +1552,7 @@ def _finalize_job_success(
 
     # 6. Deactivate previous-model vectors (active → inactive).
     #    Uses caller's db session; failure aborts finalization.
+    prev_spec = None
     if previous_model_id:
         from open_webui.retrieval.embedding.registry import get_model_spec_by_id
 
@@ -1499,6 +1568,21 @@ def _finalize_job_success(
             admin_id,
             previous_model_id,
         )
+
+    cleaned = vector_repo.cleanup_after_promotion(
+        admin_id=admin_id,
+        active_model=target_model_spec,
+        job_id=job_id,
+        previous_model_id=previous_model_id,
+        previous_model=prev_spec,
+        session=db,
+    )
+    log.info(
+        "[JOB] cleaned obsolete vectors | admin=%s | target_model=%s | count=%d",
+        admin_id,
+        target_model_id,
+        cleaned,
+    )
 
     # 7. Promote target model → active, clear target
     state_row.active_embedding_model_id = state_row.target_embedding_model_id
@@ -1526,6 +1610,20 @@ def _list_failed_files(db, job_id: str) -> list[EmbeddingJobFileView]:
     rows = (
         db.query(EmbeddingJobFile)
         .filter(EmbeddingJobFile.job_id == job_id, EmbeddingJobFile.status == FILE_STATUS_FAILED)
+        .order_by(EmbeddingJobFile.file_id)
+        .all()
+    )
+    return [_file_to_view(row) for row in rows]
+
+
+def _list_incompatible_files(db, job_id: str) -> list[EmbeddingJobFileView]:
+    """Internal: list terminal incompatible file rows for a job."""
+    rows = (
+        db.query(EmbeddingJobFile)
+        .filter(
+            EmbeddingJobFile.job_id == job_id,
+            EmbeddingJobFile.status == FILE_STATUS_INCOMPATIBLE,
+        )
         .order_by(EmbeddingJobFile.file_id)
         .all()
     )
@@ -1570,6 +1668,7 @@ def _get_job_status(db, job_id: str) -> Optional[EmbeddingJobStatusView]:
     }
     bucket_processed = dict(bucket_totals)
     bucket_failed = dict(bucket_totals)
+    bucket_incompatible = dict(bucket_totals)
     for row in file_rows:
         snapshot = row.file_snapshot if isinstance(row.file_snapshot, dict) else {}
         bucket = _source_bucket(snapshot.get("source_contexts"))
@@ -1580,12 +1679,15 @@ def _get_job_status(db, job_id: str) -> Optional[EmbeddingJobStatusView]:
             bucket_processed[bucket] += 1
         elif row.status == FILE_STATUS_FAILED:
             bucket_failed[bucket] += 1
+        elif row.status == FILE_STATUS_INCOMPATIBLE:
+            bucket_incompatible[bucket] += 1
 
     source_contexts = {
         bucket: SourceContextCounts(
             total=bucket_totals[bucket],
             processed=bucket_processed[bucket],
             failed=bucket_failed[bucket],
+            incompatible=bucket_incompatible[bucket],
         )
         for bucket in (
             SOURCE_CONTEXT_KNOWLEDGE,
@@ -1595,7 +1697,10 @@ def _get_job_status(db, job_id: str) -> Optional[EmbeddingJobStatusView]:
     }
 
     pending_or_processing = (
-        job_view.total_files - job_view.processed_files - job_view.failed_files
+        job_view.total_files
+        - job_view.processed_files
+        - job_view.failed_files
+        - job_view.incompatible_files
     )
     return EmbeddingJobStatusView(
         job=job_view,
@@ -1609,8 +1714,6 @@ def _mark_job_failed(
     job_id: str,
     error_code: str,
     error_message: str,
-    *,
-    restore_previous_config: bool = False,
 ) -> Optional[EmbeddingJobView]:
     """Internal: mark job as failed with error details (flush only).
 
@@ -1642,9 +1745,8 @@ def _mark_job_failed(
         job_row.completed_at = now
     job_row.updated_at = now
 
-    if restore_previous_config:
-        _restore_previous_model_config(db, job_row)
-
+    # Failed operations never restore the previous compatibility model. The
+    # requested model remains authoritative while retrieval stays fail-closed.
     db.flush()
     log.info(
         "[JOB] marked job %s as failed: error_code=%s, message=%s",
@@ -1896,6 +1998,26 @@ class EmbeddingJobRepository:
         return _mark_file_completed(db, job_id, file_id)
 
     @staticmethod
+    def mark_file_incompatible(
+        job_id: str,
+        file_id: str,
+        error_code: str,
+        error_message: Optional[str] = None,
+        db=None,
+    ) -> Optional[EmbeddingJobFileView]:
+        """Mark one processing file as an allowlisted compatibility skip."""
+        if db is None:
+            with get_db() as session:
+                view = _mark_file_incompatible(
+                    session, job_id, file_id, error_code, error_message
+                )
+                session.commit()
+                return view
+        return _mark_file_incompatible(
+            db, job_id, file_id, error_code, error_message
+        )
+
+    @staticmethod
     def mark_file_failed(
         job_id: str,
         file_id: str,
@@ -2047,6 +2169,14 @@ class EmbeddingJobRepository:
         return _list_failed_files(db, job_id)
 
     @staticmethod
+    def list_incompatible_files(job_id: str, db=None) -> list[EmbeddingJobFileView]:
+        """List incompatible terminal file rows for a job."""
+        if db is None:
+            with get_db() as session:
+                return _list_incompatible_files(session, job_id)
+        return _list_incompatible_files(db, job_id)
+
+    @staticmethod
     def list_files(job_id: str, db=None) -> list[EmbeddingJobFileView]:
         """List every file row for a job, sorted by file ID."""
         if db is None:
@@ -2076,8 +2206,6 @@ class EmbeddingJobRepository:
         error_code: str,
         error_message: str,
         db=None,
-        *,
-        restore_previous_config: bool = False,
     ) -> Optional[EmbeddingJobView]:
         """Mark job as failed with error details.
 
@@ -2097,7 +2225,6 @@ class EmbeddingJobRepository:
                     job_id,
                     error_code,
                     error_message,
-                    restore_previous_config=restore_previous_config,
                 )
                 session.commit()
                 return view
@@ -2106,5 +2233,4 @@ class EmbeddingJobRepository:
             job_id,
             error_code,
             error_message,
-            restore_previous_config=restore_previous_config,
         )

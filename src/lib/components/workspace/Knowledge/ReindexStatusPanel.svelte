@@ -13,6 +13,7 @@
 		id: string;
 		name: string;
 		failedDocumentCount: number;
+		incompatibleDocumentCount: number;
 		currentFileCount: number;
 	};
 
@@ -62,7 +63,7 @@
 	};
 
 	const progressValue = (progress: KnowledgeIndexingProgress) =>
-		progress.processed + progress.failed;
+		progress.processed + progress.failed + progress.incompatible;
 
 	const progressPercent = (progress: KnowledgeIndexingProgress) =>
 		progress.total > 0 ? Math.min(100, (progressValue(progress) / progress.total) * 100) : 0;
@@ -91,7 +92,7 @@
 >
 	<div class="flex flex-wrap items-center justify-between gap-2">
 		<div>
-			<h2 class="text-sm font-semibold">{$i18n.t('Embedding reindex')}</h2>
+			<h2 class="text-sm font-semibold">{$i18n.t('Embedding Reindex')}</h2>
 			<p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
 				{status.job_type === 'retry_failed'
 					? $i18n.t(
@@ -101,9 +102,13 @@
 							'This model-change reindex applies to all knowledge bases and chat uploads governed by the administrator.'
 						)}
 			</p>
-			<p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+			<p
+				class={status.retrieval_available
+					? 'mt-1 text-sm font-medium text-gray-700 dark:text-gray-200'
+					: 'mt-0.5 text-xs text-gray-500 dark:text-gray-400'}
+			>
 				{status.retrieval_available
-					? $i18n.t('Available for retrieval')
+					? $i18n.t('Available for Retrieval')
 					: status.display_state === 'unavailable'
 						? $i18n.t('Unavailable for retrieval')
 						: $i18n.t('Unavailable for retrieval while reindexing is incomplete')}
@@ -152,7 +157,7 @@
 		</div>
 		<div>
 			<div class="font-medium text-gray-700 dark:text-gray-200">
-				{$i18n.t('Last successful reindex')}
+				{$i18n.t('Last Successful Reindex')}
 			</div>
 			<div class="mt-0.5 text-gray-500 dark:text-gray-400">
 				{formatTime(status.last_successful_indexed_at)}
@@ -160,7 +165,7 @@
 		</div>
 		<div>
 			<div class="font-medium text-gray-700 dark:text-gray-200">
-				{$i18n.t('Status updated')}
+				{$i18n.t('Status Updated')}
 			</div>
 			<div class="mt-0.5 text-gray-500 dark:text-gray-400">
 				{formatTime(status.updated_at)}
@@ -170,7 +175,7 @@
 
 	<div class="mt-3 rounded-xl bg-gray-50 p-3 dark:bg-gray-850">
 		<div class="flex items-center justify-between gap-2 text-xs">
-			<span class="font-medium">{$i18n.t('Reindex progress')}</span>
+			<span class="text-sm font-semibold text-gray-900 dark:text-gray-100">{$i18n.t('Reindex Progress')}</span>
 			<span class="text-gray-500 dark:text-gray-400">
 				{progressValue(status.job_progress)}/{status.job_progress.total}
 			</span>
@@ -179,7 +184,7 @@
 			<div
 				class="mt-2 h-1.5 overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700"
 				role="progressbar"
-				aria-label={$i18n.t('Reindex progress')}
+				aria-label={$i18n.t('Reindex Progress')}
 				aria-valuemin="0"
 				aria-valuemax={status.job_progress.total}
 				aria-valuenow={progressValue(status.job_progress)}
@@ -191,14 +196,28 @@
 			</div>
 		{/if}
 		<p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
-			{$i18n.t('Completed')}: {status.job_progress.processed} · {$i18n.t('Failed')}: {status
-				.job_progress.failed} · {$i18n.t('Remaining')}: {status.job_progress
-				.pending_or_processing}
+			{$i18n.t('Completed')}: {status.job_progress.processed} · {$i18n.t('Incompatible')}: {status
+				.job_progress.incompatible} · {$i18n.t('Failed')}: {status.job_progress.failed} · {$i18n.t(
+				'Remaining'
+			)}: {status.job_progress.pending_or_processing}
 		</p>
 	</div>
 
 	{#if status.error_message}
 		<p class="mt-3 text-xs text-gray-600 dark:text-gray-300">{status.error_message}</p>
+	{/if}
+
+	{#if status.job_incompatible_document_count > 0}
+		<div class="mt-3 rounded-xl bg-gray-50 px-3 py-2 text-xs dark:bg-gray-850">
+			<p class="font-medium">
+				{$i18n.t('{{count}} documents are incompatible with the current embedding model', {
+					count: status.job_incompatible_document_count
+				})}
+			</p>
+			<p class="mt-1 text-gray-500 dark:text-gray-400">
+				{$i18n.t('These documents were skipped successfully and do not count as failures.')}
+			</p>
+		</div>
 	{/if}
 
 	{#if status.job_failed_document_count > 0}

@@ -24,7 +24,10 @@
 		!hiddenByAuthorization &&
 		!loading &&
 		((status === null && temporarilyUnavailable) ||
-			(status !== null && (!status.retrieval_available || status.failed_document_count > 0)));
+			(status !== null &&
+			(!status.retrieval_available ||
+				status.failed_document_count > 0 ||
+				status.incompatible_document_count > 0)));
 
 	const stopPolling = () => {
 		if (pollTimer) {
@@ -94,15 +97,20 @@
 	};
 
 	const progressValue = (progress: KnowledgeIndexingProgress) =>
-		progress.processed + progress.failed;
+		progress.processed + progress.failed + progress.incompatible;
 
 	const progressPercent = (progress: KnowledgeIndexingProgress) =>
 		progress.total > 0 ? Math.min(100, (progressValue(progress) / progress.total) * 100) : 0;
 
 	const impactMessage = (indexingStatus: KnowledgeIndexingStatus) => {
-		if (indexingStatus.retrieval_available) {
+		if (indexingStatus.retrieval_available && indexingStatus.failed_document_count > 0) {
 			return $i18n.t(
 				'The latest administrator-wide reindex has failures for documents in this knowledge base.'
+			);
+		}
+		if (indexingStatus.retrieval_available && indexingStatus.incompatible_document_count > 0) {
+			return $i18n.t(
+				'Some documents contain content incompatible with the current embedding model.'
 			);
 		}
 		if (indexingStatus.display_state === 'failed' || indexingStatus.display_state === 'partial') {
@@ -135,12 +143,12 @@
 {#if showImpact}
 	<section
 		class="mx-1 my-3 rounded-xl border border-gray-50 p-3 dark:border-gray-850"
-		aria-label={$i18n.t('Embedding impact')}
+		aria-label={$i18n.t('Embedding Impact')}
 	>
 		{#if status}
 			<div class="flex flex-wrap items-center justify-between gap-2">
 				<div>
-					<h2 class="text-sm font-semibold">{$i18n.t('Embedding impact')}</h2>
+					<h2 class="text-sm font-semibold">{$i18n.t('Embedding Impact')}</h2>
 					<p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
 						{impactMessage(status)}
 					</p>
@@ -182,8 +190,9 @@
 						</div>
 						<p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
 							{$i18n.t('Completed')}: {status.collection_progress.processed} · {$i18n.t(
-								'Failed'
-							)}: {status.collection_progress.failed} · {$i18n.t('Remaining')}: {status
+								'Incompatible'
+							)}: {status.collection_progress.incompatible} · {$i18n.t('Failed')}: {status
+								.collection_progress.failed} · {$i18n.t('Remaining')}: {status
 								.collection_progress.pending_or_processing}
 						</p>
 					{:else}
@@ -222,6 +231,28 @@
 				</details>
 			{/if}
 
+			{#if status.incompatible_document_count > 0}
+				<details class="mt-3 rounded-xl bg-gray-50 px-3 py-2 text-xs dark:bg-gray-850">
+					<summary class="cursor-pointer font-medium">
+						{$i18n.t('{{count}} documents are incompatible with the current embedding model', {
+							count: status.incompatible_document_count
+						})}
+					</summary>
+					{#if status.incompatible_documents?.length}
+						<ul class="mt-2 max-h-40 space-y-2 overflow-y-auto">
+							{#each status.incompatible_documents as incompatible}
+								<li class="rounded-lg border border-gray-100 p-2 dark:border-gray-700">
+									<div class="break-all font-medium">{incompatible.file_id}</div>
+									<div class="mt-1 text-gray-500 dark:text-gray-400">
+										{$i18n.t('This document is incompatible with the current embedding model.')}
+									</div>
+								</li>
+							{/each}
+						</ul>
+					{/if}
+				</details>
+			{/if}
+
 			{#if status.job_id}
 				<div class="mt-3 text-xs text-gray-500 dark:text-gray-400">
 					<p>
@@ -238,7 +269,7 @@
 				</div>
 			{/if}
 		{:else if temporarilyUnavailable}
-			<h2 class="text-sm font-semibold">{$i18n.t('Embedding impact')}</h2>
+			<h2 class="text-sm font-semibold">{$i18n.t('Embedding Impact')}</h2>
 			<p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
 				{$i18n.t('Indexing status is temporarily unavailable.')}
 			</p>

@@ -377,6 +377,7 @@ class EmbeddingJob(Base):
     total_files = Column(Integer, nullable=False, default=0)
     processed_files = Column(Integer, nullable=False, default=0)
     failed_files = Column(Integer, nullable=False, default=0)
+    incompatible_files = Column(Integer, nullable=False, default=0)
     rq_job_id = Column(String, unique=True)
     created_by_user_id = Column(String, ForeignKey("user.id", ondelete="SET NULL"))
     source_job_id = Column(String, ForeignKey("embedding_jobs.id", ondelete="SET NULL"))

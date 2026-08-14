@@ -83,6 +83,7 @@ from .jobs import (
     FILE_STATUS_PROCESSING,
     FILE_STATUS_COMPLETED,
     FILE_STATUS_FAILED,
+    FILE_STATUS_INCOMPATIBLE,
 )
 from .model_change import (
     ModelChangeResult,
@@ -177,6 +178,7 @@ __all__ = [
     "FILE_STATUS_PROCESSING",
     "FILE_STATUS_COMPLETED",
     "FILE_STATUS_FAILED",
+    "FILE_STATUS_INCOMPATIBLE",
     # Model Change
     "ModelChangeResult",
     "ModelChangeNoOp",

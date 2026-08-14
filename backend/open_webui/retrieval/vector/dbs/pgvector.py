@@ -942,6 +942,75 @@ class PgvectorClient:
             log.exception(f"Error during reset: {e}")
             raise
 
+    def invalidate_model_projection(
+        self,
+        *,
+        admin_id: str,
+        embedding_model_id: str,
+        session=None,
+    ) -> int:
+        """Make every existing projection for one admin/model non-retrievable."""
+        db = session if session is not None else self.session
+        updated = (
+            db.query(DocumentChunk)
+            .filter(
+                DocumentChunk.admin_id == admin_id,
+                DocumentChunk.embedding_model_id == embedding_model_id,
+                DocumentChunk.embedding_status.in_((
+                    "active",
+                    "building",
+                    "inactive",
+                )),
+            )
+            .update(
+                {
+                    DocumentChunk.embedding_status: "stale",
+                    DocumentChunk.updated_at: int(time.time()),
+                },
+                synchronize_session=False,
+            )
+        )
+        if session is None:
+            db.commit()
+        else:
+            db.flush()
+        return updated
+
+    def delete_obsolete_model_rows(
+        self,
+        *,
+        admin_id: str,
+        embedding_model_id: str,
+        preserve_job_id: str | None,
+        session=None,
+    ) -> int:
+        """Delete stale rows, preserving only active rows from one job."""
+        db = session if session is not None else self.session
+        query = db.query(DocumentChunk).filter(
+            DocumentChunk.admin_id == admin_id,
+            DocumentChunk.embedding_model_id == embedding_model_id,
+        )
+        if preserve_job_id is not None:
+            query = query.filter(
+                or_(
+                    DocumentChunk.embedding_status != "active",
+                    DocumentChunk.embedding_job_id != preserve_job_id,
+                    DocumentChunk.embedding_job_id.is_(None),
+                )
+            )
+        deleted = query.delete(synchronize_session=False)
+        if session is None:
+            db.commit()
+        else:
+            db.flush()
+        log.info(
+            "[PGVECTOR] obsolete model rows deleted | admin=%s | model=%s | count=%d",
+            admin_id,
+            embedding_model_id,
+            deleted,
+        )
+        return deleted
+
     def bulk_update_embedding_status(
         self,
         admin_id: str,

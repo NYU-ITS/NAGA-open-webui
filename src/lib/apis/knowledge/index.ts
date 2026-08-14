@@ -19,6 +19,7 @@ export type KnowledgeIndexingProgress = {
 	total: number;
 	processed: number;
 	failed: number;
+	incompatible: number;
 	pending_or_processing: number;
 };
 
@@ -28,6 +29,17 @@ export type EmbeddingModelSummary = {
 	display_name: string;
 	modalities: string[];
 	status: string;
+};
+
+export type KnowledgeIndexingIncompatible = {
+	file_id: string;
+	error_code: string | null;
+	error_message: string | null;
+	attempt_count: number;
+	created_at: number | null;
+	updated_at: number | null;
+	started_at: number | null;
+	completed_at: number | null;
 };
 
 export type KnowledgeIndexingFailure = {
@@ -57,6 +69,8 @@ export type KnowledgeIndexingStatus = {
 	job_progress: KnowledgeIndexingProgress;
 	failed_document_count: number;
 	job_failed_document_count: number;
+	incompatible_document_count: number;
+	job_incompatible_document_count: number;
 	error_code: string | null;
 	error_message: string | null;
 	retry_eligible: boolean;
@@ -67,6 +81,7 @@ export type KnowledgeIndexingStatus = {
 	completed_at: number | null;
 	last_successful_indexed_at: number | null;
 	failed_documents?: KnowledgeIndexingFailure[];
+	incompatible_documents?: KnowledgeIndexingIncompatible[];
 };
 
 export class KnowledgeIndexingApiError extends Error {

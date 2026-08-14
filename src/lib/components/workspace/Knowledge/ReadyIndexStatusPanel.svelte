@@ -35,9 +35,9 @@
 >
 	<div class="flex flex-wrap items-center justify-between gap-2">
 		<div>
-			<h2 class="text-sm font-semibold">{$i18n.t('Embedding index')}</h2>
-			<p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
-				{$i18n.t('Available for retrieval')}
+			<h2 class="text-sm font-semibold">{$i18n.t('Embedding Index')}</h2>
+			<p class="mt-1 text-sm font-medium text-gray-700 dark:text-gray-200">
+				{$i18n.t('Available for Retrieval')}
 			</p>
 		</div>
 		<IndexingStatusBadge state="ready" />
@@ -68,7 +68,7 @@
 		</div>
 		<div>
 			<div class="font-medium text-gray-700 dark:text-gray-200">
-				{$i18n.t('Last recorded model-change reindex')}
+				{$i18n.t('Last Recorded Model-Change Reindex')}
 			</div>
 			<div class="mt-0.5 text-gray-500 dark:text-gray-400">
 				{formatLastReindex(lastSuccessfulIndexedAt)}

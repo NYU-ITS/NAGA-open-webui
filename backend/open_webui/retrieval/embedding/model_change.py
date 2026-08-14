@@ -194,7 +194,10 @@ def request_model_change(
                     ),
                 )
 
-            replace_existing = target_spec.id != state_view.active_embedding_model_id
+            # A terminal failed target may be replaced even when the requested
+            # model is already the selected active model. Selection advanced at
+            # trigger, so this is a fresh attempt, not a no-op.
+            replace_existing = True
 
         # Step 6: Check for active job (only when no pending target)
         if not replace_existing:
@@ -210,13 +213,10 @@ def request_model_change(
         # model/chunk/collection row, so writing a second "building" generation
         # would hide active rows before the operation succeeds. A failed pending
         # operation may therefore be abandoned by selecting the active model.
-        if target_spec.id == state_view.active_embedding_model_id:
-            if state_view.target_embedding_model_id is not None:
-                state_view = AdminEmbeddingModelStateRepository.clear_failed_target(
-                    admin_id=admin_id,
-                    expected_job_id=state_view.latest_embedding_job_id,
-                    db=db,
-                )
+        if (
+            target_spec.id == state_view.active_embedding_model_id
+            and state_view.target_embedding_model_id is None
+        ):
             if config is not None:
                 current_cfg = config.RAG_EMBEDDING_MODEL_USER.get(admin_email) or ""
                 if current_cfg != target_spec.model_name:
@@ -227,7 +227,7 @@ def request_model_change(
             return ModelChangeNoOp(
                 active_model_id=state_view.active_embedding_model_id,
                 target_model_id=target_spec.id,
-                reason="Target equals active model; pending failed operation cleared.",
+                reason="Target equals active model; no reindex is required.",
             ), admin_email
 
         # Step 8: Build inventory before mutation (failures abort transaction)
@@ -258,8 +258,28 @@ def request_model_change(
             replace_existing=replace_existing,
         )
 
-        # Step 11: Write compatibility config inside the transaction so a
-        # failure rolls config back together with durable state.
+        # Step 11: Invalidate every old projection before commit. The selected
+        # model advances now; target/latest keep retrieval fail-closed until a
+        # complete manifest is promoted.
+        previous_model_id = job_result.job.previous_embedding_model_id
+        previous_spec = (
+            get_model_spec_by_id(previous_model_id)
+            if previous_model_id
+            else target_spec
+        )
+        invalidated = ModelAwareVectorRepository().invalidate_model_projections(
+            admin_id=admin_id,
+            models=[previous_spec, target_spec],
+            session=db,
+        )
+        log.info(
+            "[MODEL_CHANGE] invalidated projections | admin=%s | requested_model=%s | count=%d",
+            admin_id,
+            target_spec.id,
+            invalidated,
+        )
+
+        # Compatibility config remains on the requested model on every outcome.
         if config is not None:
             config.RAG_EMBEDDING_MODEL_USER.set(
                 admin_email, target_spec.model_name, db=db

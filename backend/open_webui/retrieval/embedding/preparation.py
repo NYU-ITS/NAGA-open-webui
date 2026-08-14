@@ -757,7 +757,7 @@ def prepare_file_for_embedding(
         )
 
     if source_kind == "pdf":
-        if recipe.complex_pdf_parser_enabled and "image" in model.modalities:
+        if recipe.complex_pdf_parser_enabled:
             return _prepare_complex_pdf(
                 source_bytes=source_bytes,
                 source_path=source_path,
@@ -919,7 +919,7 @@ def _prepare_complex_pdf(
         warning_codes.append(PDF_VISUALS_REQUIRE_MULTIMODAL_MODEL)
     warning_codes = list(dict.fromkeys(warning_codes))
 
-    if not chunks and visual_count and not visual_supported:
+    if not legacy_chunks and visual_count and not visual_supported:
         raise EmbeddingError(EMBEDDING_MODALITY_UNSUPPORTED)
 
     def page_index(chunk: PreparedChunk) -> int:

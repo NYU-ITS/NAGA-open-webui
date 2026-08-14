@@ -40,6 +40,7 @@ from open_webui.retrieval.embedding.jobs import (
 from open_webui.retrieval.embedding.resolution import (
     assert_single_model_space,
 )
+from open_webui.retrieval.embedding.registry import get_model_spec_by_id
 from open_webui.retrieval.embedding.state import (
     AdminEmbeddingModelStateRepository,
 )
@@ -189,6 +190,15 @@ def assert_embedding_retrieval_ready(
                 ),
             )
 
+        if latest_job.status == JOB_STATUS_COMPLETED:
+            if latest_job.admin_id != admin_id or latest_job.embedding_model_id != state.active_embedding_model_id:
+                _raise_blocked(
+                    job_id=latest_job_id,
+                    job_status=latest_job.status,
+                    retryable=False,
+                    message="Retrieval blocked: completed embedding job does not match active model state.",
+                )
+
     # 5. Target present without a matching completed promotion: blocked.
     if state.target_embedding_model_id is not None:
         _raise_blocked(
@@ -209,6 +219,22 @@ def assert_embedding_retrieval_ready(
             job_status=None,
             retryable=False,
             message=f"Admin {admin_id} has no active embedding model.",
+        )
+    try:
+        active_model = get_model_spec_by_id(active_model_id)
+    except EmbeddingError:
+        _raise_blocked(
+            job_id=latest_job_id,
+            job_status=None,
+            retryable=False,
+            message="Retrieval blocked: active embedding model is unavailable.",
+        )
+    if active_model.status != "enabled":
+        _raise_blocked(
+            job_id=latest_job_id,
+            job_status=None,
+            retryable=False,
+            message="Retrieval blocked: active embedding model is disabled.",
         )
 
     return RetrievalModelSpace(

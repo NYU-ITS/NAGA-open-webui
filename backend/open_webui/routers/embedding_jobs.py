@@ -64,6 +64,10 @@ class FailedFileInfo(BaseModel):
     completed_at: int | None = None
 
 
+class IncompatibleFileInfo(FailedFileInfo):
+    """Per-file modality incompatibility detail."""
+
+
 class EmbeddingJobStatusResponse(BaseModel):
     """Full status response for an embedding job."""
 
@@ -84,6 +88,7 @@ class EmbeddingJobStatusResponse(BaseModel):
     total_files: int = 0
     processed_files: int = 0
     failed_files: int = 0
+    incompatible_files: int = 0
     pending_or_processing: int = 0
 
     # Source-context breakdown
@@ -91,6 +96,7 @@ class EmbeddingJobStatusResponse(BaseModel):
 
     # Failed file details
     failed_files_detail: list[FailedFileInfo] = []
+    incompatible_files_detail: list[IncompatibleFileInfo] = []
 
     # Operation-level error
     error_code: str | None = None
@@ -159,6 +165,7 @@ def _compute_retry_eligible(
 def _build_status_response(
     job_view: EmbeddingJobView,
     failed_files: list[EmbeddingJobFileView],
+    incompatible_files: list[EmbeddingJobFileView],
     admin_id: str,
     state_view=None,
     status_view: EmbeddingJobStatusView | None = None,
@@ -167,13 +174,19 @@ def _build_status_response(
 
     # Source-context breakdown
     source_contexts = None
-    pending_or_processing = job_view.total_files - job_view.processed_files - job_view.failed_files
+    pending_or_processing = (
+        job_view.total_files
+        - job_view.processed_files
+        - job_view.failed_files
+        - job_view.incompatible_files
+    )
     if status_view is not None:
         source_contexts = {
             bucket: {
                 "total": counts.total,
                 "processed": counts.processed,
                 "failed": counts.failed,
+                "incompatible": counts.incompatible,
                 "pending_or_processing": counts.pending_or_processing,
             }
             for bucket, counts in status_view.source_contexts.items()
@@ -194,6 +207,7 @@ def _build_status_response(
         total_files=job_view.total_files,
         processed_files=job_view.processed_files,
         failed_files=job_view.failed_files,
+        incompatible_files=job_view.incompatible_files,
         pending_or_processing=pending_or_processing,
         source_contexts=source_contexts,
         failed_files_detail=[
@@ -208,6 +222,19 @@ def _build_status_response(
                 completed_at=f.completed_at,
             )
             for f in failed_files
+        ],
+        incompatible_files_detail=[
+            IncompatibleFileInfo(
+                file_id=f.file_id,
+                error_code=f.error_code,
+                error_message=_safe_job_error_message(f.error_code),
+                attempt_count=f.attempt_count,
+                created_at=f.created_at,
+                updated_at=f.updated_at,
+                started_at=f.started_at,
+                completed_at=f.completed_at,
+            )
+            for f in incompatible_files
         ],
         error_code=job_view.error_code,
         error_message=_safe_job_error_message(job_view.error_code),
@@ -228,6 +255,11 @@ def _safe_job_error_message(error_code: str | None) -> str | None:
         return "Source content changed during indexing. Start a new reindex operation."
     if error_code == "embedding_job_stale_operation":
         return "This indexing job was superseded by a newer operation."
+    if error_code in {
+        "embedding_modality_unsupported",
+        "pdf_visuals_require_multimodal_model",
+    }:
+        return "This file is incompatible with the current embedding model."
     return "The embedding indexing operation could not be completed."
 
 
@@ -298,12 +330,14 @@ def get_latest_job_status(
         )
 
     failed_files = EmbeddingJobRepository.list_failed_files(job_view.id)
+    incompatible_files = EmbeddingJobRepository.list_incompatible_files(job_view.id)
     state_data = AdminEmbeddingModelStateRepository.get_state(admin_id)
     status_view = EmbeddingJobRepository.get_job_status(job_view.id)
 
     return _build_status_response(
         job_view=job_view,
         failed_files=failed_files,
+        incompatible_files=incompatible_files,
         admin_id=admin_id,
         state_view=state_data,
         status_view=status_view,
@@ -321,12 +355,14 @@ def get_job_status(
     job_view = _get_job_for_admin(job_id, admin_id)
 
     failed_files = EmbeddingJobRepository.list_failed_files(job_id)
+    incompatible_files = EmbeddingJobRepository.list_incompatible_files(job_id)
     state_data = AdminEmbeddingModelStateRepository.get_state(admin_id)
     status_view = EmbeddingJobRepository.get_job_status(job_id)
 
     return _build_status_response(
         job_view=job_view,
         failed_files=failed_files,
+        incompatible_files=incompatible_files,
         admin_id=admin_id,
         state_view=state_data,
         status_view=status_view,
