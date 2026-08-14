@@ -3,6 +3,7 @@ import logging
 import time
 import uuid
 from sqlalchemy import (
+    and_,
     BigInteger,
     cast,
     column,
@@ -562,6 +563,9 @@ class PgvectorClient:
         limit: Optional[int] = None,
         knowledge_ids: Optional[List[str]] = None,
         file_ids: Optional[List[str]] = None,
+        staged_job_ids: Optional[List[str]] = None,
+        staged_file_ids: Optional[List[str]] = None,
+        staged_collection_files: Optional[List[tuple[str, str]]] = None,
     ) -> Optional[SearchResult]:
         """Cosine search restricted to one admin/model provenance space.
 
@@ -604,6 +608,25 @@ class PgvectorClient:
 
             distance = DocumentChunk.vector.cosine_distance(query_vectors.c.q_vector)
 
+            visibility_clause = DocumentChunk.embedding_status == "active"
+            if staged_job_ids and staged_file_ids and staged_collection_files:
+                staged_projection_clauses = [
+                    and_(
+                        DocumentChunk.collection_name == staged_collection,
+                        DocumentChunk.file_id == staged_file,
+                    )
+                    for staged_collection, staged_file in staged_collection_files
+                ]
+                visibility_clause = or_(
+                    visibility_clause,
+                    and_(
+                        DocumentChunk.embedding_status == "building",
+                        DocumentChunk.embedding_job_id.in_(staged_job_ids),
+                        DocumentChunk.file_id.in_(staged_file_ids),
+                        or_(*staged_projection_clauses),
+                    ),
+                )
+
             subq = (
                 select(
                     DocumentChunk.id,
@@ -618,10 +641,9 @@ class PgvectorClient:
                 .where(DocumentChunk.collection_name == collection_name)
                 .where(DocumentChunk.admin_id == admin_id)
                 .where(DocumentChunk.embedding_model_id == embedding_model_id)
-                # Spec 07: only active rows are retrievable. Rows stamped with a
-                # non-retrievable build status (e.g. "building") are excluded so
-                # a partially built target space can never become searchable.
-                .where(DocumentChunk.embedding_status == "active")
+                # Building rows are visible only when the readiness gate
+                # approved both their exact terminal-partial job and file IDs.
+                .where(visibility_clause)
             )
 
             scope_clauses = []
@@ -775,10 +797,11 @@ class PgvectorClient:
         limit: Optional[int] = None,
         knowledge_ids: Optional[List[str]] = None,
         file_ids: Optional[List[str]] = None,
+        staged_job_ids: Optional[List[str]] = None,
+        staged_file_ids: Optional[List[str]] = None,
+        staged_collection_files: Optional[List[tuple[str, str]]] = None,
     ) -> Optional[GetResult]:
-        """Model-aware variant of ``get``: returns only active rows for one
-        admin/model provenance space.  Used by hybrid search to ensure BM25
-        retrievers never see building, inactive, or cross-admin rows."""
+        """Return active rows plus explicitly gate-approved staged rows."""
         log.info(
             "[PGVECTOR] get_model_aware START | collection=%s | admin=%s | model=%s",
             collection_name,
@@ -786,11 +809,30 @@ class PgvectorClient:
             embedding_model_id,
         )
         try:
+            visibility_clause = DocumentChunk.embedding_status == "active"
+            if staged_job_ids and staged_file_ids and staged_collection_files:
+                staged_projection_clauses = [
+                    and_(
+                        DocumentChunk.collection_name == staged_collection,
+                        DocumentChunk.file_id == staged_file,
+                    )
+                    for staged_collection, staged_file in staged_collection_files
+                ]
+                visibility_clause = or_(
+                    visibility_clause,
+                    and_(
+                        DocumentChunk.embedding_status == "building",
+                        DocumentChunk.embedding_job_id.in_(staged_job_ids),
+                        DocumentChunk.file_id.in_(staged_file_ids),
+                        or_(*staged_projection_clauses),
+                    ),
+                )
+
             query = self.session.query(DocumentChunk).filter(
                 DocumentChunk.collection_name == collection_name,
                 DocumentChunk.admin_id == admin_id,
                 DocumentChunk.embedding_model_id == embedding_model_id,
-                DocumentChunk.embedding_status == "active",
+                visibility_clause,
             )
             scope_clauses = []
             if knowledge_ids:

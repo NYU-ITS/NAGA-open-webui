@@ -414,6 +414,8 @@ def search_knowledge_base(query: str, user_id: str, request: Request, model, k: 
             )
 
             admin_id, embedding_model_id = None, None
+            staged_job_ids, staged_file_ids = None, None
+            staged_collection_files = None
             try:
                 result = assert_embedding_retrieval_ready(
                     requesting_user_id=user_id,
@@ -421,6 +423,11 @@ def search_knowledge_base(query: str, user_id: str, request: Request, model, k: 
                 )
                 if isinstance(result, RetrievalModelSpace):
                     admin_id, embedding_model_id = result.admin_id, result.active_model_id
+                    staged_job_ids = list(result.staged_job_ids) or None
+                    staged_file_ids = list(result.staged_file_ids) or None
+                    staged_collection_files = (
+                        list(result.staged_collection_files) or None
+                    )
                 else:
                     # RetrievalReadyNoState: legacy admin.
                     from open_webui.retrieval.embedding.resolution import resolve_for_user
@@ -464,6 +471,9 @@ def search_knowledge_base(query: str, user_id: str, request: Request, model, k: 
                         admin_id=admin_id,
                         embedding_model_id=embedding_model_id,
                         limit=k * 3,
+                        staged_job_ids=staged_job_ids,
+                        staged_file_ids=staged_file_ids,
+                        staged_collection_files=staged_collection_files,
                     )
                 else:
                     search_results = VECTOR_DB_CLIENT.search(

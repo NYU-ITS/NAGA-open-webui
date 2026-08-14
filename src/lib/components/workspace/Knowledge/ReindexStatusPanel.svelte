@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { getContext } from 'svelte';
+	import { getContext, tick } from 'svelte';
 	import { toast } from 'svelte-sonner';
 
 	import { retryEmbeddingJob } from '$lib/apis/embedding';
@@ -34,16 +34,39 @@
 		return Number((error as { status?: number }).status) || null;
 	};
 
+	const getErrorCode = (error: unknown) => {
+		if (typeof error !== 'object' || error === null || !('errorCode' in error)) return null;
+		const errorCode = (error as { errorCode?: unknown }).errorCode;
+		return typeof errorCode === 'string' ? errorCode : null;
+	};
+
 	const retryHandler = async () => {
 		if (!status.job_id || !status.can_retry || retrying) return;
+		const requestedJobId = status.job_id;
 		retrying = true;
 		try {
-			await retryEmbeddingJob(localStorage.token, status.job_id);
+			await onRefresh();
+			await tick();
+			if (status.job_id !== requestedJobId || !status.can_retry) {
+				toast.info($i18n.t('Indexing status changed. Review the updated status before retrying.'));
+				return;
+			}
+			await retryEmbeddingJob(localStorage.token, requestedJobId);
 			toast.success($i18n.t('Embedding reindex retry queued.'));
 		} catch (error) {
-			if (getHttpStatus(error) === 409) {
+			const errorCode = getErrorCode(error);
+			if (
+				errorCode === 'embedding_job_active_exists' ||
+				errorCode === 'embedding_retry_active_exists'
+			) {
+				toast.info($i18n.t('Indexing is already queued or in progress.'));
+			} else if (errorCode === 'embedding_reindex_source_changed') {
 				toast.warning(
-					$i18n.t('The indexing job changed before retry. The latest status has been loaded.')
+					$i18n.t('The indexed files changed. Start a fresh reindex by selecting the model again.')
+				);
+			} else if (getHttpStatus(error) === 409) {
+				toast.warning(
+					$i18n.t('This retry is no longer available. Review the updated indexing status.')
 				);
 			} else {
 				toast.error(`${error}`);
@@ -103,11 +126,13 @@
 						)}
 			</p>
 			<p
-				class={status.retrieval_available
+				class={status.job_display_state === 'partial' || status.retrieval_available
 					? 'mt-1 text-sm font-medium text-gray-700 dark:text-gray-200'
 					: 'mt-0.5 text-xs text-gray-500 dark:text-gray-400'}
 			>
-				{status.retrieval_available
+				{status.job_display_state === 'partial'
+					? $i18n.t('Completed sources are available; failed sources remain unavailable')
+					: status.retrieval_available
 					? $i18n.t('Available for Retrieval')
 					: status.display_state === 'unavailable'
 						? $i18n.t('Unavailable for retrieval')
@@ -128,23 +153,26 @@
 	<div class="mt-3 grid grid-cols-1 gap-3 text-xs sm:grid-cols-2 lg:grid-cols-3">
 		<div>
 			<div class="font-medium text-gray-700 dark:text-gray-200">
-				{status.target_model ? $i18n.t('Target model') : $i18n.t('Model')}
+				{status.target_model ? $i18n.t('Selected model') : $i18n.t('Model')}
 			</div>
 			{#if status.target_model}
 				<div class="mt-0.5 text-gray-500 dark:text-gray-400">
-					{status.target_model.display_name} · {status.target_model.provider}
+					{status.target_model.display_name}
 				</div>
 				<div class="text-gray-500 dark:text-gray-400">
 					{$i18n.t('Modalities')}: {status.target_model.modalities.join(', ') || $i18n.t('None')}
 				</div>
-				{#if status.active_model}
+				{#if status.active_model && status.active_model.id !== status.target_model.id}
 					<div class="mt-1 text-gray-500 dark:text-gray-400">
-						{$i18n.t('Active model')}: {status.active_model.display_name}
+						{$i18n.t('Previous successful model')}: {status.active_model.display_name}
 					</div>
 				{/if}
+				<p class="mt-1 text-gray-500 dark:text-gray-400">
+					{$i18n.t('The selected model becomes active after every required file indexes successfully.')}
+				</p>
 			{:else if status.active_model}
 				<div class="mt-0.5 text-gray-500 dark:text-gray-400">
-					{status.active_model.display_name} · {status.active_model.provider}
+					{status.active_model.display_name}
 				</div>
 				<div class="text-gray-500 dark:text-gray-400">
 					{$i18n.t('Modalities')}: {status.active_model.modalities.join(', ') || $i18n.t('None')}
@@ -227,7 +255,42 @@
 					count: status.job_failed_document_count
 				})}
 			</p>
-			{#if affectedKnowledgeBases.length > 0}
+			{#if status.job_failed_documents?.length > 0}
+				<ul class="mt-2 space-y-2">
+					{#each status.job_failed_documents as failure}
+						<li class="rounded-lg border border-gray-200 bg-white p-2 dark:border-gray-700 dark:bg-gray-900">
+							<div class="font-medium">
+								{failure.filename ?? failure.file_id}
+							</div>
+							<div class="mt-1 space-y-0.5 text-gray-500 dark:text-gray-400">
+								{#if failure.knowledge_bases.length > 0}
+									<div>
+										{$i18n.t('Knowledge base')}:
+										{#each failure.knowledge_bases as knowledgeBase, index}
+											{#if index > 0}, {/if}<a
+												class="font-medium underline underline-offset-2"
+												href={`/workspace/knowledge/${knowledgeBase.id}`}
+											>
+												{knowledgeBase.name}
+											</a>
+										{/each}
+									</div>
+								{/if}
+								{#if failure.source_contexts.includes('chat_upload')}
+									<div>
+										{$i18n.t('Source')}: {$i18n.t(
+											'Direct upload in a chat (not a knowledge base)'
+										)}
+									</div>
+								{/if}
+								<div>
+									{failure.error_message ?? $i18n.t('Indexing failed for this file.')}
+								</div>
+							</div>
+						</li>
+					{/each}
+				</ul>
+			{:else if affectedKnowledgeBases.length > 0}
 				<p class="mt-1 text-gray-500 dark:text-gray-400">
 					{$i18n.t('Open an affected knowledge base to view its scoped failure details.')}
 				</p>
@@ -241,6 +304,12 @@
 						</a>
 					{/each}
 				</div>
+			{:else}
+				<p class="mt-1 text-gray-500 dark:text-gray-400">
+					{$i18n.t(
+						'The failed file is outside the knowledge bases shown here. The governing administrator can view its details.'
+					)}
+				</p>
 			{/if}
 		</div>
 	{/if}

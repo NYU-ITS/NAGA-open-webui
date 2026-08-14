@@ -113,6 +113,15 @@
 				'Some documents contain content incompatible with the current embedding model.'
 			);
 		}
+		if (
+			!indexingStatus.retrieval_available &&
+			indexingStatus.failed_document_count === 0 &&
+			(indexingStatus.job_status === 'failed' || indexingStatus.job_status === 'partially_failed')
+		) {
+			return $i18n.t(
+				'A file outside this knowledge base failed the administrator-wide reindex. Files in this knowledge base did not fail, but retrieval remains unavailable.'
+			);
+		}
 		if (indexingStatus.display_state === 'failed' || indexingStatus.display_state === 'partial') {
 			return $i18n.t(
 				'The administrator-wide reindex did not complete, so retrieval remains unavailable for this knowledge base.'
@@ -216,7 +225,9 @@
 						<ul class="mt-2 max-h-40 space-y-2 overflow-y-auto">
 							{#each status.failed_documents as failure}
 								<li class="rounded-lg border border-gray-100 p-2 dark:border-gray-700">
-									<div class="break-all font-medium">{failure.file_id}</div>
+									<div class="break-all font-medium">
+										{failure.filename ?? failure.file_id}
+									</div>
 									<div class="mt-1 text-gray-500 dark:text-gray-400">
 										{failure.error_message ??
 											$i18n.t('Indexing failed for this document.')}
@@ -242,7 +253,9 @@
 						<ul class="mt-2 max-h-40 space-y-2 overflow-y-auto">
 							{#each status.incompatible_documents as incompatible}
 								<li class="rounded-lg border border-gray-100 p-2 dark:border-gray-700">
-									<div class="break-all font-medium">{incompatible.file_id}</div>
+									<div class="break-all font-medium">
+										{incompatible.filename ?? incompatible.file_id}
+									</div>
 									<div class="mt-1 text-gray-500 dark:text-gray-400">
 										{$i18n.t('This document is incompatible with the current embedding model.')}
 									</div>

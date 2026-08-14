@@ -42,9 +42,9 @@ DIMENSION_TABLE = {
 
 # Non-retrievable vs retrievable build status carried on every model-aware row.
 # Ordinary ingestion writes ``active`` immediately. Reindex target builds write
-# ``building`` and only become ``active`` when Spec 09 promotes the job; search
-# filters to ``active`` only, so a partially built target space is never
-# retrievable.
+# ``building`` and become ``active`` when Spec 09 promotes the job. A terminal
+# partial job may expose completed building rows only through a gate-approved
+# job-and-file scope.
 VECTOR_STATUS_ACTIVE = "active"
 VECTOR_STATUS_BUILDING = "building"
 VECTOR_STATUS_INACTIVE = "inactive"
@@ -122,8 +122,8 @@ class ModelAwareVectorRepository:
 
         ``embedding_status`` defaults to :data:`VECTOR_STATUS_ACTIVE` (ordinary
         ingestion). A reindex worker passes :data:`VECTOR_STATUS_BUILDING` plus
-        its durable ``embedding_job_id`` so the partially built target space is
-        non-retrievable (Spec 07 Build Visibility).
+        its durable ``embedding_job_id``. Building rows remain hidden unless a
+        terminal-partial gate result approves their exact job and file IDs.
 
         Raises:
             EmbeddingError: if the model dimension is unsupported or the inputs
@@ -386,6 +386,9 @@ class ModelAwareVectorRepository:
         limit: Optional[int] = None,
         knowledge_ids: Optional[Sequence[str]] = None,
         file_ids: Optional[Sequence[str]] = None,
+        staged_job_ids: Optional[Sequence[str]] = None,
+        staged_file_ids: Optional[Sequence[str]] = None,
+        staged_collection_files: Optional[Sequence[tuple[str, str]]] = None,
     ) -> Optional[SearchResult]:
         """Cosine search restricted to one admin/model provenance space.
 
@@ -402,6 +405,11 @@ class ModelAwareVectorRepository:
             limit=limit,
             knowledge_ids=list(knowledge_ids) if knowledge_ids else None,
             file_ids=list(file_ids) if file_ids else None,
+            staged_job_ids=list(staged_job_ids) if staged_job_ids else None,
+            staged_file_ids=list(staged_file_ids) if staged_file_ids else None,
+            staged_collection_files=(
+                list(staged_collection_files) if staged_collection_files else None
+            ),
         )
 
 

@@ -274,6 +274,31 @@ def _get_job_for_admin(job_id: str, admin_id: str) -> EmbeddingJobView:
     return job
 
 
+def _active_retry_for_source(
+    admin_id: str, source_job_id: str
+) -> EmbeddingJobView | None:
+    """Return an already-running retry descended from the requested job."""
+    active_job = EmbeddingJobRepository.get_active_job(admin_id)
+    if active_job is None or active_job.job_type != "retry_failed":
+        return None
+
+    cursor = active_job
+    visited = set()
+    for _ in range(16):
+        if cursor.id in visited:
+            return None
+        visited.add(cursor.id)
+        if cursor.source_job_id == source_job_id:
+            return active_job
+        if not cursor.source_job_id:
+            return None
+        parent = EmbeddingJobRepository.get_job(cursor.source_job_id)
+        if parent is None:
+            return None
+        cursor = parent
+    return None
+
+
 def _retry_http_error(error: EmbeddingError) -> HTTPException:
     """Map retry/model-change errors to the stable public API envelope."""
     if error.code in (EMBEDDING_JOB_ACTIVE_EXISTS, EMBEDDING_RETRY_ACTIVE_EXISTS):
@@ -393,6 +418,7 @@ def retry_failed_job(
     )
 
     result_job = None
+    retry_already_active = False
 
     try:
         with get_db() as db:
@@ -408,53 +434,62 @@ def retry_failed_job(
             db.commit()
             result_job = result.job
     except EmbeddingError as error:
-        if error.code != EMBEDDING_REINDEX_SOURCE_CHANGED or not enqueue_only_failure:
+        if error.code in (EMBEDDING_JOB_ACTIVE_EXISTS, EMBEDDING_RETRY_ACTIVE_EXISTS):
+            result_job = _active_retry_for_source(admin_id, job_id)
+            if result_job is None:
+                raise _retry_http_error(error)
+            retry_already_active = True
+        elif error.code != EMBEDDING_REINDEX_SOURCE_CHANGED or not enqueue_only_failure:
             raise _retry_http_error(error)
+        else:
+            # No file was ever claimed, so no v1/v2 or old/new source projection can
+            # be mixed. Replace the untouched operation with a fresh current inventory.
+            try:
+                replacement, _ = request_model_change(
+                    admin_id=admin_id,
+                    target_model_id=source_job.embedding_model_id,
+                    authenticated_user_id=admin_id,
+                    config=request.app.state.config,
+                )
+            except EmbeddingError as replacement_error:
+                raise _retry_http_error(replacement_error)
+            if not isinstance(replacement, ModelChangeResult):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "error_code": EMBEDDING_MODEL_STATE_CONFLICT,
+                        "message": "The indexing operation no longer requires a retry.",
+                    },
+                )
+            result_job = EmbeddingJobRepository.get_job(replacement.job_id)
+            if result_job is None:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="The replacement indexing job could not be loaded.",
+                )
+            from open_webui.config import invalidate_user_scoped_config_cache
 
-        # No file was ever claimed, so no v1/v2 or old/new source projection can
-        # be mixed. Replace the untouched operation with a fresh current inventory.
-        try:
-            replacement, _ = request_model_change(
-                admin_id=admin_id,
-                target_model_id=source_job.embedding_model_id,
-                authenticated_user_id=admin_id,
-                config=request.app.state.config,
+            invalidate_user_scoped_config_cache(
+                user.email,
+                "rag.embedding_model_user",
             )
-        except EmbeddingError as replacement_error:
-            raise _retry_http_error(replacement_error)
-        if not isinstance(replacement, ModelChangeResult):
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={
-                    "error_code": EMBEDDING_MODEL_STATE_CONFLICT,
-                    "message": "The indexing operation no longer requires a retry.",
-                },
+            log.info(
+                "[RETRY] Replaced untouched stale job %s with fresh job %s",
+                job_id,
+                result_job.id,
             )
-        result_job = EmbeddingJobRepository.get_job(replacement.job_id)
-        if result_job is None:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="The replacement indexing job could not be loaded.",
-            )
-        from open_webui.config import invalidate_user_scoped_config_cache
-
-        invalidate_user_scoped_config_cache(
-            user.email,
-            "rag.embedding_model_user",
-        )
-        log.info(
-            "[RETRY] Replaced untouched stale job %s with fresh job %s",
-            job_id,
-            result_job.id,
-        )
 
     # Enqueue the job.  On failure, mark the job as failed so it does not
     # remain stuck as queued.
     try:
         dispatch_mode = (
-            dispatch_embedding_job(result_job.id, background_tasks)
-            if result_job.status in ("queued", "processing")
-            else "background"
+            "already_queued"
+            if retry_already_active
+            else (
+                dispatch_embedding_job(result_job.id, background_tasks)
+                if result_job.status in ("queued", "processing")
+                else "background"
+            )
         )
     except Exception as e:
         log.error(

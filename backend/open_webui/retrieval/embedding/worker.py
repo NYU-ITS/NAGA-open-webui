@@ -5,7 +5,7 @@ Implements the full worker orchestration with all 17 critical fixes:
 2. Check RQ job status to prevent duplicate delivery corruption
 3. Use reclaim_file() for processing rows with stale threshold
 4. Use ModelAwareVectorRepository.make_items() + reconcile_model_aware()
-   - Build items with full provenance and a non-retrievable "building" status
+   - Build items with full provenance and a gate-controlled "building" status
    - Idempotent upsert keyed by (admin, model, rag_chunk_id, collection)
    - Transactional per-projection reconcile: stale target rows for the same
      (admin, model, file, collection) are deleted in the same transaction;
@@ -945,9 +945,10 @@ def _write_vectors(
 ):
     """Reconcile every required vector projection (Fix #4, #5, Spec 07).
 
-    Vectors are stamped with the non-retrievable ``building`` status and the
-    durable ``embedding_job_id`` so a partially built target space is never
-    searchable (Spec 07 Build Visibility). Each file/knowledge collection
+    Vectors are stamped with ``building`` status and the durable
+    ``embedding_job_id``. They stay hidden during active jobs; after a terminal
+    partial outcome, only completed files may be exposed through the
+    source-scoped retrieval gate. Each file/knowledge collection
     projection is reconciled transactionally: current target rows are upserted
     by ``(admin_id, embedding_model_id, rag_chunk_id, collection_name)`` and
     stale target rows for the same projection are deleted in the same

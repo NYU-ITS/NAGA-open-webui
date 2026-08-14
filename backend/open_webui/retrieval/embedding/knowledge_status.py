@@ -12,6 +12,7 @@ from open_webui.models.embeddings import (
     EmbeddingJobFile,
     EmbeddingModel,
 )
+from open_webui.models.files import File
 from open_webui.models.knowledge import Knowledge
 from open_webui.retrieval.embedding.errors import EmbeddingError
 from open_webui.retrieval.embedding.inventory import build_reindex_admin_resolver
@@ -58,8 +59,18 @@ class EmbeddingModelSummary(BaseModel):
     status: str
 
 
-class KnowledgeIndexingIncompatible(BaseModel):
+class KnowledgeIndexingKnowledgeReference(BaseModel):
+    id: str
+    name: str
+
+
+class KnowledgeIndexingFileIssue(BaseModel):
     file_id: str
+    filename: str | None = None
+    source_contexts: list[str] = Field(default_factory=list)
+    knowledge_bases: list[KnowledgeIndexingKnowledgeReference] = Field(
+        default_factory=list
+    )
     error_code: str | None = None
     error_message: str | None = None
     attempt_count: int = 0
@@ -69,15 +80,12 @@ class KnowledgeIndexingIncompatible(BaseModel):
     completed_at: int | None = None
 
 
-class KnowledgeIndexingFailure(BaseModel):
-    file_id: str
-    error_code: str | None = None
-    error_message: str | None = None
-    attempt_count: int = 0
-    created_at: int | None = None
-    updated_at: int | None = None
-    started_at: int | None = None
-    completed_at: int | None = None
+class KnowledgeIndexingIncompatible(KnowledgeIndexingFileIssue):
+    pass
+
+
+class KnowledgeIndexingFailure(KnowledgeIndexingFileIssue):
+    pass
 
 
 class KnowledgeIndexingStatusSummary(BaseModel):
@@ -102,8 +110,14 @@ class KnowledgeIndexingStatusSummary(BaseModel):
     )
     failed_document_count: int = 0
     job_failed_document_count: int = 0
+    job_failed_documents: list[KnowledgeIndexingFailure] = Field(
+        default_factory=list
+    )
     incompatible_document_count: int = 0
     job_incompatible_document_count: int = 0
+    job_incompatible_documents: list[KnowledgeIndexingIncompatible] = Field(
+        default_factory=list
+    )
 
     error_code: str | None = None
     error_message: str | None = None
@@ -234,6 +248,97 @@ def _knowledge_rows_for_job(
     return matches
 
 
+def _file_issue_context(
+    row: EmbeddingJobFile,
+    *,
+    filenames_by_id: dict[str, str],
+    knowledge_names_by_id: dict[str, str],
+) -> dict:
+    """Build safe, user-facing source context for one job file."""
+    snapshot = row.file_snapshot if isinstance(row.file_snapshot, dict) else {}
+    source_contexts = snapshot.get("source_contexts", [])
+    if not isinstance(source_contexts, list):
+        source_contexts = []
+    knowledge_ids = snapshot.get("knowledge_collection_ids", [])
+    if not isinstance(knowledge_ids, list):
+        knowledge_ids = []
+
+    return {
+        "file_id": row.file_id,
+        "filename": filenames_by_id.get(row.file_id),
+        "source_contexts": sorted(
+            {str(context) for context in source_contexts if context}
+        ),
+        "knowledge_bases": [
+            KnowledgeIndexingKnowledgeReference(
+                id=str(knowledge_id),
+                name=knowledge_names_by_id.get(
+                    str(knowledge_id), "Deleted knowledge base"
+                ),
+            )
+            for knowledge_id in knowledge_ids
+            if knowledge_id
+        ],
+    }
+
+
+def _failure_detail(
+    row: EmbeddingJobFile,
+    *,
+    filenames_by_id: dict[str, str],
+    knowledge_names_by_id: dict[str, str],
+) -> KnowledgeIndexingFailure:
+    return KnowledgeIndexingFailure(
+        **_file_issue_context(
+            row,
+            filenames_by_id=filenames_by_id,
+            knowledge_names_by_id=knowledge_names_by_id,
+        ),
+        error_code=row.error_code,
+        error_message=_stored_message(row.error_message),
+        attempt_count=row.attempt_count,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        started_at=row.started_at,
+        completed_at=row.completed_at,
+    )
+
+
+def _incompatible_detail(
+    row: EmbeddingJobFile,
+    *,
+    filenames_by_id: dict[str, str],
+    knowledge_names_by_id: dict[str, str],
+) -> KnowledgeIndexingIncompatible:
+    return KnowledgeIndexingIncompatible(
+        **_file_issue_context(
+            row,
+            filenames_by_id=filenames_by_id,
+            knowledge_names_by_id=knowledge_names_by_id,
+        ),
+        error_code=row.error_code,
+        error_message=_stored_message(row.error_message),
+        attempt_count=row.attempt_count,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        started_at=row.started_at,
+        completed_at=row.completed_at,
+    )
+
+
+def _snapshot_knowledge_ids(rows: list[EmbeddingJobFile]) -> list[str]:
+    knowledge_ids = set()
+    for row in rows:
+        snapshot = row.file_snapshot if isinstance(row.file_snapshot, dict) else {}
+        snapshot_ids = snapshot.get("knowledge_collection_ids", [])
+        if not isinstance(snapshot_ids, list):
+            continue
+        knowledge_ids.update(
+            str(knowledge_id) for knowledge_id in snapshot_ids if knowledge_id
+        )
+    return sorted(knowledge_ids)
+
+
 def build_knowledge_indexing_statuses(
     db,
     knowledge_rows: list[Knowledge],
@@ -317,6 +422,31 @@ def build_knowledge_indexing_statuses(
     files_by_job: dict[str, list[EmbeddingJobFile]] = {}
     for row in job_file_rows:
         files_by_job.setdefault(row.job_id, []).append(row)
+
+    job_file_ids = sorted({row.file_id for row in job_file_rows})
+    file_name_rows = (
+        db.query(File.id, File.filename).filter(File.id.in_(job_file_ids)).all()
+        if job_file_ids
+        else []
+    )
+    filenames_by_id = {
+        str(file_id): str(filename)
+        for file_id, filename in file_name_rows
+        if filename
+    }
+    snapshot_knowledge_ids = _snapshot_knowledge_ids(job_file_rows)
+    knowledge_name_rows = (
+        db.query(Knowledge.id, Knowledge.name)
+        .filter(Knowledge.id.in_(snapshot_knowledge_ids))
+        .all()
+        if snapshot_knowledge_ids
+        else []
+    )
+    knowledge_names_by_id = {
+        str(knowledge_id): str(name)
+        for knowledge_id, name in knowledge_name_rows
+        if name
+    }
 
     model_ids = {
         model_id
@@ -434,6 +564,22 @@ def build_knowledge_indexing_statuses(
             for row in collection_rows
             if row.status == FILE_STATUS_INCOMPATIBLE
         ]
+        job_failed_rows = [
+            row for row in rows if row.status == FILE_STATUS_FAILED
+        ]
+        job_incompatible_rows = [
+            row for row in rows if row.status == FILE_STATUS_INCOMPATIBLE
+        ]
+
+        # A terminal partial job is source-scoped for retrieval. Knowledge
+        # bases whose own frozen files did not fail remain ready; the overview
+        # keeps the administrator-wide partial badge and failed-file details.
+        if (
+            display_state == "partial"
+            and current_file_count > 0
+            and not failed_rows
+        ):
+            display_state, retrieval_available = "ready", True
 
         # An empty collection is locally ready even when another governed
         # source has a failed administrator-wide operation.
@@ -459,9 +605,13 @@ def build_knowledge_indexing_statuses(
         error_message = _job_error_message(error_code)
         if current_file_count == 0:
             error_code = error_message = None
-        if display_state in ("failed", "partial") and error_message is None:
+        if job_display_state in ("failed", "partial") and error_message is None:
             error_message = "The embedding indexing job did not finish successfully."
-        if display_state == "unavailable" and error_message is None:
+        if (
+            display_state == "unavailable"
+            and job_display_state not in ("failed", "partial")
+            and error_message is None
+        ):
             error_code = error_code or "embedding_status_unavailable"
             error_message = "Indexing status is temporarily unavailable."
 
@@ -481,9 +631,33 @@ def build_knowledge_indexing_statuses(
                 job_progress=_job_progress(job),
                 failed_document_count=len(failed_rows),
                 job_failed_document_count=(job.failed_files if job is not None else 0),
+                job_failed_documents=(
+                    [
+                        _failure_detail(
+                            row,
+                            filenames_by_id=filenames_by_id,
+                            knowledge_names_by_id=knowledge_names_by_id,
+                        )
+                        for row in job_failed_rows
+                    ]
+                    if viewer_role == "admin" and viewer_id == admin_id
+                    else []
+                ),
                 incompatible_document_count=len(incompatible_rows),
                 job_incompatible_document_count=(
                     job.incompatible_files if job is not None else 0
+                ),
+                job_incompatible_documents=(
+                    [
+                        _incompatible_detail(
+                            row,
+                            filenames_by_id=filenames_by_id,
+                            knowledge_names_by_id=knowledge_names_by_id,
+                        )
+                        for row in job_incompatible_rows
+                    ]
+                    if viewer_role == "admin" and viewer_id == admin_id
+                    else []
                 ),
                 error_code=error_code,
                 error_message=error_message,
@@ -494,8 +668,14 @@ def build_knowledge_indexing_statuses(
                     and viewer_id == admin_id
                 ),
                 retry_kind=(
-                    "failed_documents" if failed_rows else
-                    ("indexing_operation" if display_state in ("failed", "partial", "unavailable") and current_file_count else None)
+                    "failed_documents"
+                    if job_failed_rows
+                    else (
+                        "indexing_operation"
+                        if display_state in ("failed", "partial", "unavailable")
+                        and current_file_count
+                        else None
+                    )
                 ),
                 created_at=job.created_at if job is not None else None,
                 updated_at=job.updated_at if job is not None else None,
@@ -504,15 +684,10 @@ def build_knowledge_indexing_statuses(
                 last_successful_indexed_at=last_success_by_admin.get(admin_id),
                 failed_documents=(
                     [
-                        KnowledgeIndexingFailure(
-                            file_id=row.file_id,
-                            error_code=row.error_code,
-                            error_message=_stored_message(row.error_message),
-                            attempt_count=row.attempt_count,
-                            created_at=row.created_at,
-                            updated_at=row.updated_at,
-                            started_at=row.started_at,
-                            completed_at=row.completed_at,
+                        _failure_detail(
+                            row,
+                            filenames_by_id=filenames_by_id,
+                            knowledge_names_by_id=knowledge_names_by_id,
                         )
                         for row in failed_rows
                     ]
@@ -521,15 +696,10 @@ def build_knowledge_indexing_statuses(
                 ),
                 incompatible_documents=(
                     [
-                        KnowledgeIndexingIncompatible(
-                            file_id=row.file_id,
-                            error_code=row.error_code,
-                            error_message=_stored_message(row.error_message),
-                            attempt_count=row.attempt_count,
-                            created_at=row.created_at,
-                            updated_at=row.updated_at,
-                            started_at=row.started_at,
-                            completed_at=row.completed_at,
+                        _incompatible_detail(
+                            row,
+                            filenames_by_id=filenames_by_id,
+                            knowledge_names_by_id=knowledge_names_by_id,
                         )
                         for row in incompatible_rows
                     ]

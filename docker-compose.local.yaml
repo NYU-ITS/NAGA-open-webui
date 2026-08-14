@@ -19,12 +19,12 @@ services:
       - 'ENABLE_JOB_QUEUE=false'
       - 'ENABLE_OLLAMA_API=false'
       - 'RAG_PDF_COMPLEX_PARSER_ENABLED=true'
-      - 'RAG_PDF_MAX_VISUALS_PER_PAGE=6'
-      - 'RAG_PDF_MAX_VISUALS_PER_DOCUMENT=80'
+      - 'RAG_PDF_MAX_VISUALS_PER_PAGE=10'
+      - 'RAG_PDF_MAX_VISUALS_PER_DOCUMENT=100'
       # Backend logging (open_webui/env.py). GLOBAL_LOG_LEVEL is the default; MAIN_ / RAG_ override per subsystem.
       - 'GLOBAL_LOG_LEVEL=WARNING'
-      # - 'MAIN_LOG_LEVEL=DEBUG'
-      # - 'RAG_LOG_LEVEL=DEBUG'
+      - 'MAIN_LOG_LEVEL=DEBUG'
+      - 'RAG_LOG_LEVEL=DEBUG'
     extra_hosts:
       - host.docker.internal:host-gateway
     restart: unless-stopped

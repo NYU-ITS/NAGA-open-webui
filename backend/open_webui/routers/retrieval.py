@@ -3245,7 +3245,7 @@ def _resolve_model_aware_query_context(
     knowledge_ids: Optional[list[str]] = None,
     file_ids: Optional[list[str]] = None,
 ):
-    """Spec 10: resolve (admin_id, embedding_model_id) via readiness gate.
+    """Resolve the model space and any source-scoped staged-vector allowance.
 
     Admins without durable state use their config-resolved model. All readiness
     and resolution failures propagate so callers fail closed instead of running
@@ -3264,10 +3264,16 @@ def _resolve_model_aware_query_context(
             file_ids=file_ids,
         )
         if isinstance(result, RetrievalModelSpace):
-            return result.admin_id, result.active_model_id
+            return (
+                result.admin_id,
+                result.active_model_id,
+                list(result.staged_job_ids) or None,
+                list(result.staged_file_ids) or None,
+                list(result.staged_collection_files) or None,
+            )
         # RetrievalReadyNoState: legacy admin, use config-resolved model.
         ctx = resolve_for_user(user.id, request.app.state.config)
-        return ctx.admin_id, ctx.model.id
+        return ctx.admin_id, ctx.model.id, None, None, None
     except EmbeddingError:
         # All embedding errors (MIXED, NOT_READY, resolution failures) propagate.
         raise
@@ -3327,7 +3333,13 @@ def query_doc_handler(
         knowledge_ids, file_ids = _resolve_authorized_query_collections(
             [form_data.collection_name]
         )
-        admin_id, embedding_model_id = _resolve_model_aware_query_context(
+        (
+            admin_id,
+            embedding_model_id,
+            staged_job_ids,
+            staged_file_ids,
+            staged_collection_files,
+        ) = _resolve_model_aware_query_context(
             request,
             user,
             knowledge_ids=knowledge_ids,
@@ -3361,6 +3373,9 @@ def query_doc_handler(
                 embedding_model_id=embedding_model_id,
                 knowledge_ids=knowledge_ids or None,
                 file_ids=file_ids or None,
+                staged_job_ids=staged_job_ids,
+                staged_file_ids=staged_file_ids,
+                staged_collection_files=staged_collection_files,
             )
         else:
             return query_doc(
@@ -3372,6 +3387,9 @@ def query_doc_handler(
                 embedding_model_id=embedding_model_id,
                 knowledge_ids=knowledge_ids or None,
                 file_ids=file_ids or None,
+                staged_job_ids=staged_job_ids,
+                staged_file_ids=staged_file_ids,
+                staged_collection_files=staged_collection_files,
             )
     except EmbeddingError as e:
         if e.code == EMBEDDING_REINDEX_NOT_READY:
@@ -3412,7 +3430,13 @@ def query_collection_handler(
         knowledge_ids, file_ids = _resolve_authorized_query_collections(
             form_data.collection_names
         )
-        admin_id, embedding_model_id = _resolve_model_aware_query_context(
+        (
+            admin_id,
+            embedding_model_id,
+            staged_job_ids,
+            staged_file_ids,
+            staged_collection_files,
+        ) = _resolve_model_aware_query_context(
             request,
             user,
             knowledge_ids=knowledge_ids,
@@ -3446,6 +3470,9 @@ def query_collection_handler(
                 embedding_model_id=embedding_model_id,
                 knowledge_ids=knowledge_ids or None,
                 file_ids=file_ids or None,
+                staged_job_ids=staged_job_ids,
+                staged_file_ids=staged_file_ids,
+                staged_collection_files=staged_collection_files,
             )
         else:
             return query_collection(
@@ -3457,6 +3484,9 @@ def query_collection_handler(
                 embedding_model_id=embedding_model_id,
                 knowledge_ids=knowledge_ids or None,
                 file_ids=file_ids or None,
+                staged_job_ids=staged_job_ids,
+                staged_file_ids=staged_file_ids,
+                staged_collection_files=staged_collection_files,
             )
 
     except EmbeddingError as e:

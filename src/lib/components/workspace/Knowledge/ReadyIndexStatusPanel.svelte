@@ -54,7 +54,7 @@
 			<div class="font-medium text-gray-700 dark:text-gray-200">{$i18n.t('Model')}</div>
 			{#if modelPresentation.kind === 'single'}
 				<div class="mt-0.5 text-gray-500 dark:text-gray-400">
-					{modelPresentation.model.display_name} · {modelPresentation.model.provider}
+					{modelPresentation.model.display_name}
 				</div>
 			{:else if modelPresentation.kind === 'mixed'}
 				<div class="mt-0.5 text-gray-500 dark:text-gray-400">

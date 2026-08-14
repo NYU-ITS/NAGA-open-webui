@@ -69,6 +69,9 @@ class VectorSearchRetriever(BaseRetriever):
     embedding_model_id: Any = None
     knowledge_ids: Optional[list[str]] = None
     file_ids: Optional[list[str]] = None
+    staged_job_ids: Optional[list[str]] = None
+    staged_file_ids: Optional[list[str]] = None
+    staged_collection_files: Optional[list[tuple[str, str]]] = None
     allow_unscoped_legacy: bool = False
 
     def _get_relevant_documents(
@@ -88,6 +91,9 @@ class VectorSearchRetriever(BaseRetriever):
                 limit=self.top_k,
                 knowledge_ids=self.knowledge_ids,
                 file_ids=self.file_ids,
+                staged_job_ids=self.staged_job_ids,
+                staged_file_ids=self.staged_file_ids,
+                staged_collection_files=self.staged_collection_files,
             )
         else:
             result = VECTOR_DB_CLIENT.search(
@@ -139,6 +145,9 @@ def query_doc(
     embedding_model_id: Optional[str] = None,
     knowledge_ids: Optional[list[str]] = None,
     file_ids: Optional[list[str]] = None,
+    staged_job_ids: Optional[list[str]] = None,
+    staged_file_ids: Optional[list[str]] = None,
+    staged_collection_files: Optional[list[tuple[str, str]]] = None,
     allow_unscoped_legacy: bool = False,
 ):
     log.info(
@@ -160,6 +169,9 @@ def query_doc(
                 limit=k,
                 knowledge_ids=knowledge_ids,
                 file_ids=file_ids,
+                staged_job_ids=staged_job_ids,
+                staged_file_ids=staged_file_ids,
+                staged_collection_files=staged_collection_files,
             )
         else:
             result = VECTOR_DB_CLIENT.search(
@@ -223,6 +235,9 @@ def query_doc_with_hybrid_search(
     embedding_model_id: Optional[str] = None,
     knowledge_ids: Optional[list[str]] = None,
     file_ids: Optional[list[str]] = None,
+    staged_job_ids: Optional[list[str]] = None,
+    staged_file_ids: Optional[list[str]] = None,
+    staged_collection_files: Optional[list[tuple[str, str]]] = None,
     allow_unscoped_legacy: bool = False,
 ) -> dict:
     if _is_multimodal_model_space(admin_id, embedding_model_id):
@@ -234,6 +249,9 @@ def query_doc_with_hybrid_search(
             embedding_model_id=embedding_model_id,
             knowledge_ids=knowledge_ids,
             file_ids=file_ids,
+            staged_job_ids=staged_job_ids,
+            staged_file_ids=staged_file_ids,
+            staged_collection_files=staged_collection_files,
             allow_unscoped_legacy=allow_unscoped_legacy,
         )
         if result is None:
@@ -245,7 +263,7 @@ def query_doc_with_hybrid_search(
         return result.model_dump()
 
     try:
-        # Model-aware get: only active rows for the resolved admin/model space.
+        # Include only active rows plus any exact staged scope approved by the gate.
         if admin_id and embedding_model_id and hasattr(
             VECTOR_DB_CLIENT, "get_model_aware"
         ):
@@ -253,6 +271,9 @@ def query_doc_with_hybrid_search(
                 collection_name=collection_name,
                 admin_id=admin_id,
                 embedding_model_id=embedding_model_id,
+                staged_job_ids=staged_job_ids,
+                staged_file_ids=staged_file_ids,
+                staged_collection_files=staged_collection_files,
             )
         else:
             result = VECTOR_DB_CLIENT.get(collection_name=collection_name)
@@ -301,6 +322,9 @@ def query_doc_with_hybrid_search(
             embedding_model_id=embedding_model_id,
             knowledge_ids=knowledge_ids,
             file_ids=file_ids,
+            staged_job_ids=staged_job_ids,
+            staged_file_ids=staged_file_ids,
+            staged_collection_files=staged_collection_files,
             allow_unscoped_legacy=allow_unscoped_legacy,
         )
 
@@ -576,6 +600,9 @@ def get_all_items_from_collections(
     embedding_model_id: Optional[str] = None,
     knowledge_ids: Optional[list[str]] = None,
     file_ids: Optional[list[str]] = None,
+    staged_job_ids: Optional[list[str]] = None,
+    staged_file_ids: Optional[list[str]] = None,
+    staged_collection_files: Optional[list[tuple[str, str]]] = None,
     allow_unscoped_legacy: bool = False,
 ) -> dict:
     results = []
@@ -594,6 +621,9 @@ def get_all_items_from_collections(
                         embedding_model_id=embedding_model_id,
                         knowledge_ids=knowledge_ids,
                         file_ids=file_ids,
+                        staged_job_ids=staged_job_ids,
+                        staged_file_ids=staged_file_ids,
+                        staged_collection_files=staged_collection_files,
                     )
                     result = _filter_get_result_to_scope(
                         result,
@@ -692,6 +722,9 @@ def query_collection(
     embedding_model_id: Optional[str] = None,
     knowledge_ids: Optional[list[str]] = None,
     file_ids: Optional[list[str]] = None,
+    staged_job_ids: Optional[list[str]] = None,
+    staged_file_ids: Optional[list[str]] = None,
+    staged_collection_files: Optional[list[tuple[str, str]]] = None,
     allow_unscoped_legacy: bool = False,
 ) -> dict:
     log.info(
@@ -823,6 +856,9 @@ def query_collection(
                     embedding_model_id=embedding_model_id,
                     knowledge_ids=knowledge_ids,
                     file_ids=file_ids,
+                    staged_job_ids=staged_job_ids,
+                    staged_file_ids=staged_file_ids,
+                    staged_collection_files=staged_collection_files,
                     allow_unscoped_legacy=allow_unscoped_legacy,
                 )
                 if result is not None:
@@ -909,6 +945,9 @@ def query_collection_with_hybrid_search(
     embedding_model_id: Optional[str] = None,
     knowledge_ids: Optional[list[str]] = None,
     file_ids: Optional[list[str]] = None,
+    staged_job_ids: Optional[list[str]] = None,
+    staged_file_ids: Optional[list[str]] = None,
+    staged_collection_files: Optional[list[tuple[str, str]]] = None,
     allow_unscoped_legacy: bool = False,
 ) -> dict:
     if _is_multimodal_model_space(admin_id, embedding_model_id):
@@ -922,6 +961,9 @@ def query_collection_with_hybrid_search(
             embedding_model_id=embedding_model_id,
             knowledge_ids=knowledge_ids,
             file_ids=file_ids,
+            staged_job_ids=staged_job_ids,
+            staged_file_ids=staged_file_ids,
+            staged_collection_files=staged_collection_files,
             allow_unscoped_legacy=allow_unscoped_legacy,
         )
 
@@ -966,6 +1008,9 @@ def query_collection_with_hybrid_search(
                 embedding_model_id=embedding_model_id,
                 knowledge_ids=knowledge_ids,
                 file_ids=file_ids,
+                staged_job_ids=staged_job_ids,
+                staged_file_ids=staged_file_ids,
+                staged_collection_files=staged_collection_files,
                 allow_unscoped_legacy=allow_unscoped_legacy,
             )
             return {"result": result, "error": None, "collection": collection_name}
@@ -1245,6 +1290,9 @@ def get_sources_from_files(
     # requests are rejected before any vector search runs.
     admin_id = None
     embedding_model_id = None
+    staged_job_ids = None
+    staged_file_ids = None
+    staged_collection_files = None
     multimodal_model_space = False
     if canonical_files or pending_file_attachments or pending_knowledge_attachments:
         try:
@@ -1265,6 +1313,9 @@ def get_sources_from_files(
             if isinstance(result, RetrievalModelSpace):
                 admin_id = result.admin_id
                 embedding_model_id = result.active_model_id
+                staged_job_ids = list(result.staged_job_ids) or None
+                staged_file_ids = list(result.staged_file_ids) or None
+                staged_collection_files = list(result.staged_collection_files) or None
                 # Bind the query callable to the exact active model space approved
                 # by this gate result; mutable compatibility config cannot switch it.
                 embedding_function = make_embedding_function(
@@ -1449,6 +1500,9 @@ def get_sources_from_files(
                         embedding_model_id=embedding_model_id,
                         knowledge_ids=item_knowledge_ids,
                         file_ids=item_file_ids,
+                        staged_job_ids=staged_job_ids,
+                        staged_file_ids=staged_file_ids,
+                        staged_collection_files=staged_collection_files,
                         allow_unscoped_legacy=bool(file.get("legacy")),
                     )
                 except Exception as error:
@@ -1479,6 +1533,9 @@ def get_sources_from_files(
                                     embedding_model_id=embedding_model_id,
                                     knowledge_ids=item_knowledge_ids,
                                     file_ids=item_file_ids,
+                                    staged_job_ids=staged_job_ids,
+                                    staged_file_ids=staged_file_ids,
+                                    staged_collection_files=staged_collection_files,
                                     allow_unscoped_legacy=allow_unscoped_legacy,
                                 )
                             except Exception as e:
@@ -1497,6 +1554,9 @@ def get_sources_from_files(
                                 embedding_model_id=embedding_model_id,
                                 knowledge_ids=item_knowledge_ids,
                                 file_ids=item_file_ids,
+                                staged_job_ids=staged_job_ids,
+                                staged_file_ids=staged_file_ids,
+                                staged_collection_files=staged_collection_files,
                                 allow_unscoped_legacy=allow_unscoped_legacy,
                             )
                             

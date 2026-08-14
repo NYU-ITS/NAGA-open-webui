@@ -33,6 +33,9 @@ export type EmbeddingModelSummary = {
 
 export type KnowledgeIndexingIncompatible = {
 	file_id: string;
+	filename: string | null;
+	source_contexts: string[];
+	knowledge_bases: KnowledgeIndexingKnowledgeReference[];
 	error_code: string | null;
 	error_message: string | null;
 	attempt_count: number;
@@ -44,6 +47,9 @@ export type KnowledgeIndexingIncompatible = {
 
 export type KnowledgeIndexingFailure = {
 	file_id: string;
+	filename: string | null;
+	source_contexts: string[];
+	knowledge_bases: KnowledgeIndexingKnowledgeReference[];
 	error_code: string | null;
 	error_message: string | null;
 	attempt_count: number;
@@ -51,6 +57,11 @@ export type KnowledgeIndexingFailure = {
 	updated_at: number | null;
 	started_at: number | null;
 	completed_at: number | null;
+};
+
+export type KnowledgeIndexingKnowledgeReference = {
+	id: string;
+	name: string;
 };
 
 export type KnowledgeIndexingStatus = {
@@ -69,8 +80,10 @@ export type KnowledgeIndexingStatus = {
 	job_progress: KnowledgeIndexingProgress;
 	failed_document_count: number;
 	job_failed_document_count: number;
+	job_failed_documents: KnowledgeIndexingFailure[];
 	incompatible_document_count: number;
 	job_incompatible_document_count: number;
+	job_incompatible_documents: KnowledgeIndexingIncompatible[];
 	error_code: string | null;
 	error_message: string | null;
 	retry_eligible: boolean;
