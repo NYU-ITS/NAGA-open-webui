@@ -153,7 +153,7 @@
 	<div class="mt-3 grid grid-cols-1 gap-3 text-xs sm:grid-cols-2 lg:grid-cols-3">
 		<div>
 			<div class="font-medium text-gray-700 dark:text-gray-200">
-				{status.target_model ? $i18n.t('Selected model') : $i18n.t('Model')}
+				{status.target_model ? $i18n.t('Selected Model') : $i18n.t('Model')}
 			</div>
 			{#if status.target_model}
 				<div class="mt-0.5 text-gray-500 dark:text-gray-400">

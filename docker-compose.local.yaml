@@ -17,13 +17,16 @@ services:
       # - 'PGVECTOR_INITIALIZE_MAX_VECTOR_LENGTH=1536' # for embedding model text-embedding-d47871
       - 'VECTOR_DB=pgvector'
       - 'ENABLE_JOB_QUEUE=false'
+      - 'REDIS_URL='
       - 'ENABLE_OLLAMA_API=false'
+      - 'PYTHONUNBUFFERED=1'
       - 'RAG_PDF_COMPLEX_PARSER_ENABLED=true'
       - 'RAG_PDF_MAX_VISUALS_PER_PAGE=10'
       - 'RAG_PDF_MAX_VISUALS_PER_DOCUMENT=100'
       # Backend logging (open_webui/env.py). GLOBAL_LOG_LEVEL is the default; MAIN_ / RAG_ override per subsystem.
       - 'GLOBAL_LOG_LEVEL=WARNING'
       - 'MAIN_LOG_LEVEL=DEBUG'
+      - 'OPENAI_LOG_LEVEL=DEBUG'
       - 'RAG_LOG_LEVEL=DEBUG'
     extra_hosts:
       - host.docker.internal:host-gateway
