@@ -729,10 +729,16 @@ def _create_retry_job(
     # 7. Rebuild the complete lineage inventory. Reusing successful ancestor
     # vectors would allow stale extraction/chunk settings or removed knowledge
     # memberships to be promoted by a later retry.
-    retry_files = [
-        ReindexFile.from_dict(file_row.file_snapshot)
-        for file_row in all_source_rows
-    ]
+    try:
+        retry_files = [
+            ReindexFile.from_dict(file_row.file_snapshot)
+            for file_row in all_source_rows
+        ]
+    except (KeyError, TypeError, ValueError):
+        raise EmbeddingError(
+            EMBEDDING_REINDEX_SOURCE_CHANGED,
+            detail="File snapshots are from an older recipe version. A fresh model-change operation is required.",
+        ) from None
 
     new_job_id = str(uuid.uuid4())
     job_row = EmbeddingJob(

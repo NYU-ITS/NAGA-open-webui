@@ -56,7 +56,7 @@ from open_webui.retrieval.loaders.pdf_complex import (
 PreparedModality = Literal["text", "image", "video"]
 STANDALONE_IMAGE_EXTRACTION_VERSION = "standalone_image_v1"
 VIDEO_EXTRACTION_VERSION = "video_temporal_v1"
-PREPARATION_RECIPE_VERSION = "multimodal_preparation_v1"
+PREPARATION_RECIPE_VERSION = "multimodal_preparation_v2"
 PDF_COORDINATE_SPACE = "rotated_cropbox_top_left_points"
 
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
@@ -305,7 +305,12 @@ class PreparationRecipe:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "PreparationRecipe":
-        """Validate and rebuild a recipe persisted in a job snapshot."""
+        """Validate and rebuild a recipe persisted in a job snapshot.
+
+        All fields are required — v2 recipes always include video settings.
+        Old snapshots without video fields are rejected; a fresh model-change
+        job rebuilds them.
+        """
         if not isinstance(data, Mapping):
             raise ValueError("preparation recipe must be an object")
         try:
@@ -316,6 +321,7 @@ class PreparationRecipe:
                 "recipe_version",
                 "complex_pdf_extraction_version",
                 "standalone_image_extraction_version",
+                "video_extraction_version",
                 "pdf_render_format",
                 "pdf_coordinate_space",
                 "text_splitter",
@@ -326,6 +332,9 @@ class PreparationRecipe:
                 "max_visuals_per_document",
                 "chunk_size",
                 "chunk_overlap",
+                "video_chunk_duration",
+                "video_min_chunk_duration",
+                "video_max_duration",
             )
             number_fields = (
                 "pdf_figure_min_width",
@@ -334,14 +343,6 @@ class PreparationRecipe:
                 "pdf_render_scale",
                 "pdf_table_padding_points",
             )
-            # Video fields are optional for backward compatibility with
-            # snapshots created before video support was added.
-            video_optional_fields = {
-                "video_extraction_version",
-                "video_chunk_duration",
-                "video_min_chunk_duration",
-                "video_max_duration",
-            }
             expected_fields = {
                 *string_fields,
                 *integer_fields,
@@ -350,13 +351,7 @@ class PreparationRecipe:
                 "pdf_render_alpha",
                 "content_extraction_engine",
             }
-            present_keys = set(data)
-            # Accept snapshots that have the video fields or lack them entirely.
-            extra_keys = present_keys - expected_fields - video_optional_fields
-            if extra_keys:
-                raise ValueError("preparation recipe fields are not canonical")
-            missing_required = expected_fields - present_keys
-            if missing_required:
+            if set(data) != expected_fields:
                 raise ValueError("preparation recipe fields are not canonical")
             if not isinstance(parser_enabled, bool):
                 raise ValueError("parser flag must be boolean")
@@ -388,6 +383,7 @@ class PreparationRecipe:
                 standalone_image_extraction_version=data[
                     "standalone_image_extraction_version"
                 ],
+                video_extraction_version=data["video_extraction_version"],
                 pdf_figure_min_width=data["pdf_figure_min_width"],
                 pdf_figure_min_height=data["pdf_figure_min_height"],
                 pdf_figure_min_area=data["pdf_figure_min_area"],
@@ -401,12 +397,9 @@ class PreparationRecipe:
                 chunk_size=data["chunk_size"],
                 chunk_overlap=data["chunk_overlap"],
                 content_extraction_engine=extraction_engine,
-                video_chunk_duration=data.get("video_chunk_duration", 16),
-                video_min_chunk_duration=data.get("video_min_chunk_duration", 4),
-                video_max_duration=data.get("video_max_duration", 120),
-                video_extraction_version=data.get(
-                    "video_extraction_version", VIDEO_EXTRACTION_VERSION
-                ),
+                video_chunk_duration=data["video_chunk_duration"],
+                video_min_chunk_duration=data["video_min_chunk_duration"],
+                video_max_duration=data["video_max_duration"],
             )
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError("invalid preparation recipe") from error
@@ -447,7 +440,12 @@ def build_preparation_recipe(config, admin_email: str) -> PreparationRecipe:
 
 
 def preparation_recipe_from_snapshot(snapshot: Mapping[str, Any]) -> PreparationRecipe:
-    """Return an integrity-checked recipe from one persisted file snapshot."""
+    """Return an integrity-checked recipe from one persisted file snapshot.
+
+    v2 recipes are strict: all video fields are required and covered by the
+    digest. Old snapshots without video fields fail validation — a fresh
+    model-change job rebuilds them.
+    """
     if not isinstance(snapshot, Mapping):
         raise ValueError("file snapshot must be an object")
     recipe = PreparationRecipe.from_dict(snapshot.get("preparation_recipe"))
