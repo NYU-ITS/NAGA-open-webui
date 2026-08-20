@@ -2194,6 +2194,25 @@ RAG_PDF_MAX_VISUALS_PER_DOCUMENT = PersistentConfig(
     int(os.environ.get("RAG_PDF_MAX_VISUALS_PER_DOCUMENT", "80")),
 )
 
+# Video embedding chunking
+RAG_VIDEO_CHUNK_DURATION = PersistentConfig(
+    "RAG_VIDEO_CHUNK_DURATION",
+    "rag.video_chunk_duration",
+    int(os.environ.get("RAG_VIDEO_CHUNK_DURATION", "16")),
+)
+
+RAG_VIDEO_MIN_CHUNK_DURATION = PersistentConfig(
+    "RAG_VIDEO_MIN_CHUNK_DURATION",
+    "rag.video_min_chunk_duration",
+    int(os.environ.get("RAG_VIDEO_MIN_CHUNK_DURATION", "4")),
+)
+
+RAG_VIDEO_MAX_DURATION = PersistentConfig(
+    "RAG_VIDEO_MAX_DURATION",
+    "rag.video_max_duration",
+    int(os.environ.get("RAG_VIDEO_MAX_DURATION", "120")),
+)
+
 # DEPRECATED: Legacy global embedding model - NOT USED for RAG operations
 # We only use Portkey for embeddings, and each admin has their own model name (see RAG_EMBEDDING_MODEL_USER below)
 RAG_EMBEDDING_MODEL = PersistentConfig(

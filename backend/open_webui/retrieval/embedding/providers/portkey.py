@@ -10,6 +10,7 @@ from ..inputs import (
     EmbeddingInput,
     TextEmbeddingInput,
     ImageEmbeddingInput,
+    VideoEmbeddingInput,
     EmbeddingModelSpec,
 )
 from ..errors import (
@@ -120,13 +121,13 @@ class PortkeyEmbeddingProvider:
         inputs: Sequence[EmbeddingInput],
         model: EmbeddingModelSpec,
     ) -> Sequence[Sequence[float]]:
-        """Embed mixed text/image inputs while preserving their logical order.
+        """Embed mixed text/image/video inputs while preserving their logical order.
 
         The approved Vertex multimodal gateway contract returns one embedding
         per request, even when ``input`` contains multiple text entries. Send
-        every logical text or image input separately and restore the caller's
-        original order. One HTTP session retains connection reuse without
-        persisting credentials or provider responses.
+        every logical text, image, or video input separately and restore the
+        caller's original order. One HTTP session retains connection reuse
+        without persisting credentials or provider responses.
 
         Base64 encoding is confined to this adapter and never leaves it in an
         exception or durable record.
@@ -141,7 +142,15 @@ class PortkeyEmbeddingProvider:
             for index, item in enumerate(inputs)
             if isinstance(item, ImageEmbeddingInput)
         ]
-        if len(indexed_texts) + len(indexed_images) != len(inputs):
+        indexed_videos = [
+            (index, item)
+            for index, item in enumerate(inputs)
+            if isinstance(item, VideoEmbeddingInput)
+        ]
+        if (
+            len(indexed_texts) + len(indexed_images) + len(indexed_videos)
+            != len(inputs)
+        ):
             raise EmbeddingError(
                 EMBEDDING_MODALITY_UNSUPPORTED,
                 detail="The Portkey provider received an unsupported embedding input.",
@@ -182,6 +191,30 @@ class PortkeyEmbeddingProvider:
                             "encoding_format": "float",
                         },
                         expected_modality="image",
+                    )
+
+                for index, item in indexed_videos:
+                    ordered[index] = self._post_single_embedding(
+                        session,
+                        {
+                            "model": model.model_name,
+                            "input": [
+                                {
+                                    "text": "",
+                                    "video": {
+                                        "base64": base64.b64encode(
+                                            item.video
+                                        ).decode("ascii"),
+                                        "start_offset": item.start_offset_seconds,
+                                        "end_offset": item.end_offset_seconds,
+                                        "interval": item.interval_seconds,
+                                    },
+                                }
+                            ],
+                            "dimensions": model.dimension,
+                            "encoding_format": "float",
+                        },
+                        expected_modality="video",
                     )
 
             if any(vector is None for vector in ordered):
@@ -254,16 +287,34 @@ class PortkeyEmbeddingProvider:
 
         predictions = response.get("predictions")
         if isinstance(predictions, list):
-            field = (
-                "imageEmbedding" if expected_modality == "image" else "textEmbedding"
-            )
-            vectors = [
-                item.get(field)
-                for item in predictions
-                if isinstance(item, dict) and item.get(field) is not None
-            ]
-            if vectors:
-                return vectors
+            if expected_modality == "video":
+                # Video responses use predictions[].videoEmbeddings[].embedding.
+                # Require exactly one vector per prediction.
+                all_vectors: list[Sequence[float]] = []
+                for item in predictions:
+                    if not isinstance(item, dict):
+                        continue
+                    video_embeddings = item.get("videoEmbeddings")
+                    if not isinstance(video_embeddings, list):
+                        continue
+                    for ve in video_embeddings:
+                        if isinstance(ve, dict) and ve.get("embedding") is not None:
+                            all_vectors.append(ve["embedding"])
+                if all_vectors:
+                    return all_vectors
+            else:
+                field = (
+                    "imageEmbedding"
+                    if expected_modality == "image"
+                    else "textEmbedding"
+                )
+                vectors = [
+                    item.get(field)
+                    for item in predictions
+                    if isinstance(item, dict) and item.get(field) is not None
+                ]
+                if vectors:
+                    return vectors
 
         raise EmbeddingError(
             EMBEDDING_PROVIDER_FAILED,

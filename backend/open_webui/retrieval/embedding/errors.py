@@ -41,6 +41,8 @@ EMBEDDING_DIMENSION_MISMATCH = "embedding_dimension_mismatch"
 EMBEDDING_PROVIDER_FAILED = "embedding_provider_failed"
 EMBEDDING_IMAGE_FORMAT_UNSUPPORTED = "embedding_image_format_unsupported"
 EMBEDDING_IMAGE_INVALID = "embedding_image_invalid"
+VIDEO_VALIDATION_FAILED = "video_validation_failed"
+VIDEO_DURATION_EXCEEDED = "video_duration_exceeded"
 PDF_VISUAL_EXTRACTION_FAILED = "pdf_visual_extraction_failed"
 PDF_VISUAL_LIMIT_EXCEEDED = "pdf_visual_limit_exceeded"
 PDF_VISUALS_REQUIRE_MULTIMODAL_MODEL = "pdf_visuals_require_multimodal_model"
@@ -74,6 +76,10 @@ _SAFE_FILE_PROCESSING_ERROR_MESSAGES = {
         "Only PNG and JPEG images can be processed."
     ),
     EMBEDDING_IMAGE_INVALID: "The image file is invalid or could not be decoded.",
+    VIDEO_VALIDATION_FAILED: "The video file is invalid or could not be validated.",
+    VIDEO_DURATION_EXCEEDED: (
+        "The video exceeds the maximum allowed duration."
+    ),
     PDF_VISUAL_EXTRACTION_FAILED: "The PDF visual content could not be processed.",
     PDF_VISUAL_LIMIT_EXCEEDED: (
         "The PDF contains more visual content than the configured processing limit."
@@ -117,6 +123,8 @@ _PUBLIC_FILE_PROCESSING_ERROR_CODES = frozenset(
         EMBEDDING_PROVIDER_FAILED,
         EMBEDDING_IMAGE_FORMAT_UNSUPPORTED,
         EMBEDDING_IMAGE_INVALID,
+        VIDEO_VALIDATION_FAILED,
+        VIDEO_DURATION_EXCEEDED,
         PDF_VISUAL_EXTRACTION_FAILED,
         PDF_VISUAL_LIMIT_EXCEEDED,
         FILE_PROCESSING_FAILED,

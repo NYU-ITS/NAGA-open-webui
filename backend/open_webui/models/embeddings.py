@@ -271,10 +271,10 @@ class RagChunk(Base):
             if not isinstance(content, str):
                 raise ValueError("chunk content must be a string")
             content_type = chunk.get("content_type") or "text"
-            if content_type not in {"text", "image"}:
-                raise ValueError("content_type must be text or image")
-            if content_type == "image" and content:
-                raise ValueError("image chunk content must be empty")
+            if content_type not in {"text", "image", "video"}:
+                raise ValueError("content_type must be text, image, or video")
+            if content_type in {"image", "video"} and content:
+                raise ValueError(f"{content_type} chunk content must be empty")
 
             chunk_metadata = chunk.get("chunk_metadata") or {}
             if not isinstance(chunk_metadata, dict):
@@ -299,8 +299,8 @@ class RagChunk(Base):
                 if content_type == "text" and provided_digest != text_digest:
                     raise ValueError("text content_sha256 does not match content")
                 digest = provided_digest
-            elif content_type == "image":
-                raise ValueError("image chunks require content_sha256")
+            elif content_type in {"image", "video"}:
+                raise ValueError(f"{content_type} chunks require content_sha256")
             else:
                 digest = text_digest
             records.append(

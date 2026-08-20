@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -22,6 +23,8 @@ from open_webui.retrieval.embedding.errors import (
     PDF_VISUAL_EXTRACTION_FAILED,
     PDF_VISUAL_LIMIT_EXCEEDED,
     PDF_VISUALS_REQUIRE_MULTIMODAL_MODEL,
+    VIDEO_DURATION_EXCEEDED,
+    VIDEO_VALIDATION_FAILED,
     EmbeddingError,
 )
 from open_webui.retrieval.embedding.inputs import (
@@ -29,6 +32,7 @@ from open_webui.retrieval.embedding.inputs import (
     EmbeddingModelSpec,
     ImageEmbeddingInput,
     TextEmbeddingInput,
+    VideoEmbeddingInput,
 )
 from open_webui.retrieval.loaders.main import Loader
 from open_webui.retrieval.loaders.pdf_complex import (
@@ -48,8 +52,9 @@ from open_webui.retrieval.loaders.pdf_complex import (
 )
 
 
-PreparedModality = Literal["text", "image"]
+PreparedModality = Literal["text", "image", "video"]
 STANDALONE_IMAGE_EXTRACTION_VERSION = "standalone_image_v1"
+VIDEO_EXTRACTION_VERSION = "video_temporal_v1"
 PREPARATION_RECIPE_VERSION = "multimodal_preparation_v1"
 PDF_COORDINATE_SPACE = "rotated_cropbox_top_left_points"
 
@@ -154,6 +159,10 @@ class PreparationRecipe:
     pdf_render_format: str = PDF_RENDER_FORMAT
     pdf_render_alpha: bool = PDF_RENDER_ALPHA
     pdf_coordinate_space: str = PDF_COORDINATE_SPACE
+    video_chunk_duration: int = 16
+    video_min_chunk_duration: int = 4
+    video_max_duration: int = 120
+    video_extraction_version: str = VIDEO_EXTRACTION_VERSION
 
     def __post_init__(self) -> None:
         integer_values = (
@@ -161,6 +170,9 @@ class PreparationRecipe:
             self.max_visuals_per_document,
             self.chunk_size,
             self.chunk_overlap,
+            self.video_chunk_duration,
+            self.video_min_chunk_duration,
+            self.video_max_duration,
         )
         numeric_values = (
             self.pdf_figure_min_width,
@@ -173,6 +185,7 @@ class PreparationRecipe:
             self.recipe_version,
             self.complex_pdf_extraction_version,
             self.standalone_image_extraction_version,
+            self.video_extraction_version,
             self.pdf_render_format,
             self.pdf_coordinate_space,
             self.text_splitter,
@@ -204,6 +217,16 @@ class PreparationRecipe:
             != STANDALONE_IMAGE_EXTRACTION_VERSION
         ):
             raise ValueError("unsupported standalone image extraction version")
+        if self.video_extraction_version != VIDEO_EXTRACTION_VERSION:
+            raise ValueError("unsupported video extraction version")
+        if self.video_chunk_duration <= 0:
+            raise ValueError("video chunk duration must be positive")
+        if self.video_min_chunk_duration <= 0:
+            raise ValueError("video minimum chunk duration must be positive")
+        if self.video_min_chunk_duration >= self.video_chunk_duration:
+            raise ValueError("video minimum chunk duration must be less than chunk duration")
+        if self.video_max_duration <= 0:
+            raise ValueError("video max duration must be positive")
         if self.text_splitter not in {"recursive", "token"}:
             raise ValueError("unsupported text splitter")
         if not self.tiktoken_encoding_name:
@@ -260,6 +283,7 @@ class PreparationRecipe:
             "standalone_image_extraction_version": (
                 self.standalone_image_extraction_version
             ),
+            "video_extraction_version": self.video_extraction_version,
             "pdf_figure_min_width": self.pdf_figure_min_width,
             "pdf_figure_min_height": self.pdf_figure_min_height,
             "pdf_figure_min_area": self.pdf_figure_min_area,
@@ -273,6 +297,9 @@ class PreparationRecipe:
             "chunk_size": self.chunk_size,
             "chunk_overlap": self.chunk_overlap,
             "content_extraction_engine": self.content_extraction_engine,
+            "video_chunk_duration": self.video_chunk_duration,
+            "video_min_chunk_duration": self.video_min_chunk_duration,
+            "video_max_duration": self.video_max_duration,
         }
 
     @classmethod
@@ -306,6 +333,14 @@ class PreparationRecipe:
                 "pdf_render_scale",
                 "pdf_table_padding_points",
             )
+            # Video fields are optional for backward compatibility with
+            # snapshots created before video support was added.
+            video_optional_fields = {
+                "video_extraction_version",
+                "video_chunk_duration",
+                "video_min_chunk_duration",
+                "video_max_duration",
+            }
             expected_fields = {
                 *string_fields,
                 *integer_fields,
@@ -314,7 +349,13 @@ class PreparationRecipe:
                 "pdf_render_alpha",
                 "content_extraction_engine",
             }
-            if set(data) != expected_fields:
+            present_keys = set(data)
+            # Accept snapshots that have the video fields or lack them entirely.
+            extra_keys = present_keys - expected_fields - video_optional_fields
+            if extra_keys:
+                raise ValueError("preparation recipe fields are not canonical")
+            missing_required = expected_fields - present_keys
+            if missing_required:
                 raise ValueError("preparation recipe fields are not canonical")
             if not isinstance(parser_enabled, bool):
                 raise ValueError("parser flag must be boolean")
@@ -359,6 +400,12 @@ class PreparationRecipe:
                 chunk_size=data["chunk_size"],
                 chunk_overlap=data["chunk_overlap"],
                 content_extraction_engine=extraction_engine,
+                video_chunk_duration=data.get("video_chunk_duration", 16),
+                video_min_chunk_duration=data.get("video_min_chunk_duration", 4),
+                video_max_duration=data.get("video_max_duration", 120),
+                video_extraction_version=data.get(
+                    "video_extraction_version", VIDEO_EXTRACTION_VERSION
+                ),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError("invalid preparation recipe") from error
@@ -386,6 +433,15 @@ def build_preparation_recipe(config, admin_email: str) -> PreparationRecipe:
         content_extraction_engine=str(
             _config_value(config, "CONTENT_EXTRACTION_ENGINE", "") or ""
         ),
+        video_chunk_duration=_positive_int_config(
+            config, "RAG_VIDEO_CHUNK_DURATION", 16
+        ),
+        video_min_chunk_duration=_positive_int_config(
+            config, "RAG_VIDEO_MIN_CHUNK_DURATION", 4
+        ),
+        video_max_duration=_positive_int_config(
+            config, "RAG_VIDEO_MAX_DURATION", 120
+        ),
     )
 
 
@@ -398,6 +454,213 @@ def preparation_recipe_from_snapshot(snapshot: Mapping[str, Any]) -> Preparation
     if not isinstance(digest, str) or digest != recipe.sha256:
         raise ValueError("preparation recipe digest mismatch")
     return recipe
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Video temporal chunking planner
+# ──────────────────────────────────────────────────────────────────────
+
+_MP4_SIGNATURE = b"\x00\x00\x00"
+_MPEG_SIGNATURES = (b"\x00\x00\x01\xb3", b"\x00\x00\x01\xba")
+_VIDEO_MIME_EXTENSIONS = {
+    ".mp4": "video/mp4",
+    ".mpeg": "video/mpeg",
+    ".mpg": "video/mpeg",
+}
+
+
+@dataclass(frozen=True)
+class VideoChunk:
+    """One temporal range within a video, ready for provider dispatch."""
+
+    chunk_index: int
+    start_offset_seconds: float
+    end_offset_seconds: float
+    interval_seconds: float
+
+
+def plan_video_chunks(
+    duration_seconds: float,
+    *,
+    chunk_duration_seconds: int = 16,
+    minimum_chunk_duration_seconds: int = 4,
+) -> tuple[VideoChunk, ...]:
+    """Create sequential non-overlapping temporal ranges for a video.
+
+    Pure planner: no I/O, no provider calls, independently unit-testable.
+    Boundaries are rounded to three decimal places for deterministic manifests.
+    """
+    if not isinstance(duration_seconds, (int, float)):
+        raise ValueError("duration_seconds must be numeric")
+    if duration_seconds <= 0:
+        raise ValueError("duration_seconds must be positive")
+    if not isinstance(chunk_duration_seconds, int) or chunk_duration_seconds <= 0:
+        raise ValueError("chunk_duration_seconds must be a positive integer")
+    if (
+        not isinstance(minimum_chunk_duration_seconds, int)
+        or minimum_chunk_duration_seconds <= 0
+    ):
+        raise ValueError("minimum_chunk_duration_seconds must be a positive integer")
+    if minimum_chunk_duration_seconds >= chunk_duration_seconds:
+        raise ValueError(
+            "minimum_chunk_duration_seconds must be less than chunk_duration_seconds"
+        )
+
+    ranges: list[tuple[float, float]] = []
+    start = 0.0
+    while start < duration_seconds:
+        end = min(start + chunk_duration_seconds, duration_seconds)
+        ranges.append((start, end))
+        start = end
+
+    # Merge trailing chunk if shorter than minimum into the previous chunk.
+    if len(ranges) >= 2:
+        last_start, last_end = ranges[-1]
+        last_duration = last_end - last_start
+        if last_duration < minimum_chunk_duration_seconds:
+            prev_start, _prev_end = ranges[-2]
+            ranges[-2] = (prev_start, last_end)
+            ranges.pop()
+
+    chunks: list[VideoChunk] = []
+    for index, (range_start, range_end) in enumerate(ranges):
+        chunks.append(
+            VideoChunk(
+                chunk_index=index,
+                start_offset_seconds=round(range_start, 3),
+                end_offset_seconds=round(range_end, 3),
+                interval_seconds=round(range_end - range_start, 3),
+            )
+        )
+    return tuple(chunks)
+
+
+def validate_video(
+    source_bytes: bytes,
+    *,
+    max_duration_seconds: int = 120,
+) -> tuple[str, float]:
+    """Validate video bytes with ffprobe and return (canonical_mime, duration).
+
+    Writes bytes to a temporary file, invokes Docker-provided ffprobe, verifies
+    a video stream exists, reads duration, and enforces the maximum.
+
+    Raises EmbeddingError with VIDEO_VALIDATION_FAILED or VIDEO_DURATION_EXCEEDED.
+    """
+    if not isinstance(source_bytes, bytes) or not source_bytes:
+        raise EmbeddingError(VIDEO_VALIDATION_FAILED)
+
+    # Infer MIME from magic bytes for the canonical type.
+    canonical_mime = _infer_video_mime(source_bytes)
+    if canonical_mime is None:
+        raise EmbeddingError(VIDEO_VALIDATION_FAILED)
+
+    import tempfile
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=_video_suffix(canonical_mime)) as tmp:
+            tmp.write(source_bytes)
+            tmp.flush()
+            tmp_path = tmp.name
+            result = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v", "quiet",
+                    "-print_format", "json",
+                    "-show_format",
+                    "-show_streams",
+                    tmp_path,
+                ],
+                capture_output=True,
+                timeout=30,
+            )
+            if result.returncode != 0:
+                raise EmbeddingError(VIDEO_VALIDATION_FAILED)
+
+            probe = json.loads(result.stdout)
+            streams = probe.get("streams", [])
+            has_video = any(
+                stream.get("codec_type") == "video" for stream in streams
+            )
+            if not has_video:
+                raise EmbeddingError(VIDEO_VALIDATION_FAILED)
+
+            format_info = probe.get("format", {})
+            duration_raw = format_info.get("duration")
+            if duration_raw is None:
+                raise EmbeddingError(VIDEO_VALIDATION_FAILED)
+            try:
+                duration = float(duration_raw)
+            except (TypeError, ValueError):
+                raise EmbeddingError(VIDEO_VALIDATION_FAILED) from None
+
+            if duration <= 0:
+                raise EmbeddingError(VIDEO_VALIDATION_FAILED)
+            if duration > max_duration_seconds:
+                raise EmbeddingError(VIDEO_DURATION_EXCEEDED)
+
+            return canonical_mime, duration
+    except EmbeddingError:
+        raise
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        raise EmbeddingError(VIDEO_VALIDATION_FAILED) from None
+    except Exception:
+        raise EmbeddingError(VIDEO_VALIDATION_FAILED) from None
+
+
+def _infer_video_mime(source_bytes: bytes) -> Optional[str]:
+    """Infer video MIME type from file magic. Returns None if not video."""
+    if len(source_bytes) < 12:
+        return None
+    # MP4/ISO BMFF: ftyp box at offset 4
+    if source_bytes[4:8] == b"ftyp":
+        return "video/mp4"
+    # MPEG-PS start code
+    if source_bytes[:4] in _MPEG_SIGNATURES:
+        return "video/mpeg"
+    return None
+
+
+def _video_suffix(mime_type: str) -> str:
+    if mime_type == "video/mp4":
+        return ".mp4"
+    if mime_type == "video/mpeg":
+        return ".mpeg"
+    return ".mp4"
+
+
+def is_video_upload(
+    source_bytes: bytes,
+    filename: str,
+    declared_mime_type: Optional[str],
+) -> bool:
+    """Return True if the upload should be treated as a video."""
+    if _infer_video_mime(source_bytes) is not None:
+        return True
+    normalized_mime = (declared_mime_type or "").split(";", 1)[0].strip().lower()
+    if normalized_mime in {"video/mp4", "video/mpeg"}:
+        return True
+    extension = Path(filename).suffix.lower()
+    if extension in _VIDEO_MIME_EXTENSIONS:
+        return True
+    return False
+
+
+def canonical_video_content_type(
+    source_bytes: bytes,
+    filename: str,
+    declared_mime_type: Optional[str],
+) -> Optional[str]:
+    """Return a magic-authoritative video MIME, or None if not a video."""
+    inferred = _infer_video_mime(source_bytes)
+    if inferred is not None:
+        return inferred
+    normalized_mime = (declared_mime_type or "").split(";", 1)[0].strip().lower()
+    if normalized_mime in {"video/mp4", "video/mpeg"}:
+        return normalized_mime
+    extension = Path(filename).suffix.lower()
+    return _VIDEO_MIME_EXTENSIONS.get(extension)
 
 
 @dataclass(frozen=True)
@@ -424,6 +687,12 @@ class PreparedChunk:
             if self.embedding_input.text != self.content:
                 raise ValueError("text chunk content and provider input must match")
             expected_hash = hashlib.sha256(self.content.encode("utf-8")).hexdigest()
+        elif self.modality == "video":
+            if not isinstance(self.embedding_input, VideoEmbeddingInput):
+                raise TypeError("video chunks require VideoEmbeddingInput")
+            if self.content:
+                raise ValueError("video chunk content must be empty")
+            expected_hash = hashlib.sha256(self.embedding_input.video).hexdigest()
         else:
             if not isinstance(self.embedding_input, ImageEmbeddingInput):
                 raise TypeError("image chunks require ImageEmbeddingInput")
@@ -656,6 +925,9 @@ def canonical_upload_content_type(
     )
     if image is not None:
         return image.mime_type
+    video_mime = canonical_video_content_type(source_bytes, filename, declared_mime_type)
+    if video_mime is not None:
+        return video_mime
     return declared_mime_type
 
 
@@ -754,6 +1026,18 @@ def prepare_file_for_embedding(
                 image_chunk_count=1,
                 text_chunk_count=0,
             ),
+        )
+
+    if source_kind == "video":
+        return _prepare_video(
+            source_bytes=source_bytes,
+            normalized_content_type=normalized_content_type,
+            filename=filename,
+            file_id=file_id,
+            source_sha256=source_sha256,
+            model=model,
+            recipe=recipe,
+            base_metadata=base_metadata,
         )
 
     if source_kind == "pdf":
@@ -954,6 +1238,85 @@ def _prepare_complex_pdf(
     )
 
 
+def _prepare_video(
+    *,
+    source_bytes: bytes,
+    normalized_content_type: str,
+    filename: str,
+    file_id: str,
+    source_sha256: str,
+    model: EmbeddingModelSpec,
+    recipe: PreparationRecipe,
+    base_metadata: dict,
+) -> PreparedFile:
+    """Prepare a video file for temporal embedding.
+
+    Validates with ffprobe (defense in depth), plans temporal chunks, and
+    creates one PreparedChunk per range. Original bytes are sent to the
+    provider; no frames are extracted or transcoded.
+    """
+    if "video" not in model.modalities:
+        raise EmbeddingError(EMBEDDING_MODALITY_UNSUPPORTED)
+
+    canonical_mime, duration = validate_video(
+        source_bytes,
+        max_duration_seconds=recipe.video_max_duration,
+    )
+
+    video_chunks = plan_video_chunks(
+        duration,
+        chunk_duration_seconds=recipe.video_chunk_duration,
+        minimum_chunk_duration_seconds=recipe.video_min_chunk_duration,
+    )
+
+    content_sha256 = hashlib.sha256(source_bytes).hexdigest()
+    chunks: list[PreparedChunk] = []
+    for vc in video_chunks:
+        metadata = {
+            **base_metadata,
+            "modality": "video",
+            "content_kind": "video_temporal",
+            "startTimeSeconds": vc.start_offset_seconds,
+            "endTimeSeconds": vc.end_offset_seconds,
+            "chunkIndex": vc.chunk_index,
+            "fileId": file_id,
+            "extraction_version": recipe.video_extraction_version,
+            "mime_type": canonical_mime,
+            "duration_seconds": duration,
+        }
+        chunks.append(
+            PreparedChunk(
+                content="",
+                content_type="video",
+                embedding_input=VideoEmbeddingInput(
+                    video=source_bytes,
+                    mime_type=canonical_mime,
+                    start_offset_seconds=vc.start_offset_seconds,
+                    end_offset_seconds=vc.end_offset_seconds,
+                    interval_seconds=vc.interval_seconds,
+                ),
+                content_sha256=content_sha256,
+                modality="video",
+                chunk_metadata=metadata,
+            )
+        )
+
+    return PreparedFile(
+        chunks=tuple(chunks),
+        text_content="",
+        source_sha256=source_sha256,
+        extraction_version=recipe.video_extraction_version,
+        warnings=(),
+        visual_summary=_visual_summary(
+            figure_count=0,
+            table_image_count=0,
+            image_chunk_count=0,
+            text_chunk_count=0,
+            video_chunk_count=len(chunks),
+        ),
+    )
+
+
 def _prepare_text_documents(
     documents: list[Document], chunk_settings: tuple[int, int, str, str]
 ) -> list[PreparedChunk]:
@@ -1144,7 +1507,7 @@ def _classify_source(
     source_bytes: bytes,
     content_type: str,
     filename: str,
-) -> Literal["pdf", "image", "other"]:
+) -> Literal["pdf", "image", "video", "other"]:
     """Classify supported direct formats with byte magic taking precedence."""
     if source_bytes.startswith(b"%PDF-"):
         return "pdf"
@@ -1154,6 +1517,8 @@ def _classify_source(
         return "image"
     if _is_standalone_image_candidate(source_bytes, filename, content_type):
         return "image"
+    if is_video_upload(source_bytes, filename, content_type):
+        return "video"
     if _is_pdf(source_bytes, content_type, filename):
         return "pdf"
     return "other"
@@ -1208,12 +1573,14 @@ def _visual_summary(
     table_image_count: int,
     image_chunk_count: int,
     text_chunk_count: int,
+    video_chunk_count: int = 0,
 ) -> dict:
     return {
         "figure_count": int(figure_count),
         "table_image_count": int(table_image_count),
         "image_chunk_count": int(image_chunk_count),
         "text_chunk_count": int(text_chunk_count),
+        "video_chunk_count": int(video_chunk_count),
     }
 
 
@@ -1229,6 +1596,10 @@ _PUBLIC_CHUNK_METADATA_KEYS = {
     "mime_type",
     "pixel_width",
     "pixel_height",
+    "startTimeSeconds",
+    "endTimeSeconds",
+    "chunkIndex",
+    "duration_seconds",
 }
 
 
@@ -1256,15 +1627,21 @@ __all__ = [
     "PreparedChunk",
     "PreparedFile",
     "STANDALONE_IMAGE_EXTRACTION_VERSION",
+    "VIDEO_EXTRACTION_VERSION",
     "UploadByteLimitExceededError",
     "ValidatedStandaloneImage",
+    "VideoChunk",
     "build_persisted_chunks",
     "build_preparation_recipe",
     "canonical_upload_content_type",
+    "canonical_video_content_type",
+    "is_video_upload",
+    "plan_video_chunks",
     "preparation_recipe_from_snapshot",
     "prepare_file_for_embedding",
     "read_upload_bytes",
     "safe_chunk_metadata",
     "validate_standalone_image",
     "validate_uploaded_standalone_image",
+    "validate_video",
 ]

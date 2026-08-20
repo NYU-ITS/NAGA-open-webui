@@ -3,6 +3,7 @@
 from .inputs import (
     TextEmbeddingInput,
     ImageEmbeddingInput,
+    VideoEmbeddingInput,
     EmbeddingInput,
     EmbeddingModelSpec,
     EmbeddingBatch,
@@ -24,6 +25,8 @@ from .errors import (
     EMBEDDING_PROVIDER_FAILED,
     EMBEDDING_IMAGE_FORMAT_UNSUPPORTED,
     EMBEDDING_IMAGE_INVALID,
+    VIDEO_VALIDATION_FAILED,
+    VIDEO_DURATION_EXCEEDED,
     PDF_VISUAL_EXTRACTION_FAILED,
     PDF_VISUAL_LIMIT_EXCEEDED,
     PDF_VISUALS_REQUIRE_MULTIMODAL_MODEL,
@@ -101,6 +104,7 @@ __all__ = [
     # Inputs
     "TextEmbeddingInput",
     "ImageEmbeddingInput",
+    "VideoEmbeddingInput",
     "EmbeddingInput",
     "EmbeddingModelSpec",
     "EmbeddingBatch",
@@ -121,6 +125,8 @@ __all__ = [
     "EMBEDDING_PROVIDER_FAILED",
     "EMBEDDING_IMAGE_FORMAT_UNSUPPORTED",
     "EMBEDDING_IMAGE_INVALID",
+    "VIDEO_VALIDATION_FAILED",
+    "VIDEO_DURATION_EXCEEDED",
     "PDF_VISUAL_EXTRACTION_FAILED",
     "PDF_VISUAL_LIMIT_EXCEEDED",
     "PDF_VISUALS_REQUIRE_MULTIMODAL_MODEL",

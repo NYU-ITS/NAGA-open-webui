@@ -151,7 +151,7 @@ class ModelAwareVectorRepository:
         for text, vector, meta, rag_chunk_id, item_modality in zip(
             texts, vectors, metadata, rag_chunk_ids, modalities
         ):
-            if item_modality not in {"text", "image"}:
+            if item_modality not in {"text", "image", "video"}:
                 raise EmbeddingError(EMBEDDING_MODALITY_UNSUPPORTED)
             items.append(
                 {

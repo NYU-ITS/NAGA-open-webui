@@ -53,6 +53,7 @@ class FileProcessingResult:
     chunk_count: int
     text_chunk_count: int
     image_chunk_count: int
+    video_chunk_count: int
     source_sha256: str
     extraction_version: str | None
     processing_warnings: tuple[str, ...]
@@ -391,6 +392,9 @@ def process_stored_file_for_embedding(
             ),
             image_chunk_count=sum(
                 chunk.modality == "image" for chunk in prepared.chunks
+            ),
+            video_chunk_count=sum(
+                chunk.modality == "video" for chunk in prepared.chunks
             ),
             source_sha256=prepared.source_sha256,
             extraction_version=prepared.extraction_version,

@@ -624,7 +624,34 @@ async def add_file_to_knowledge_by_id(
                 "message": safe_file_processing_error_message(error.code),
             },
         )
-    
+
+    # Video preflight: validate with ffprobe before storage
+    if upload_content_type in {"video/mp4", "video/mpeg"}:
+        from open_webui.retrieval.embedding.preparation import validate_video
+        from open_webui.retrieval.embedding.errors import (
+            VIDEO_DURATION_EXCEEDED,
+            VIDEO_VALIDATION_FAILED,
+        )
+
+        try:
+            max_video_duration = getattr(
+                request.app.state.config, "RAG_VIDEO_MAX_DURATION", 120
+            )
+            if hasattr(max_video_duration, "value"):
+                max_video_duration = max_video_duration.value
+            validate_video(
+                upload_bytes,
+                max_duration_seconds=int(max_video_duration),
+            )
+        except EmbeddingError as error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": error.code,
+                    "message": safe_file_processing_error_message(error.code),
+                },
+            ) from None
+
     # Create OTEL span for file upload
     # CRITICAL: Use safe_trace_span_async to ensure OTEL failures never prevent file uploads
     async with safe_trace_span_async(
@@ -669,6 +696,7 @@ async def add_file_to_knowledge_by_id(
                                 "table_image_count": 0,
                                 "image_chunk_count": 0,
                                 "text_chunk_count": 0,
+                                "video_chunk_count": 0,
                             },
                         },
                     }

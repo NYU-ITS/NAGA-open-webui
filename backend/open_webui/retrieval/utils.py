@@ -123,7 +123,7 @@ class VectorSearchRetriever(BaseRetriever):
                 if has_scope
                 else self.allow_unscoped_legacy
             )
-            if metadata.get("modality") == "image" or not page_content.strip():
+            if metadata.get("modality") in {"image", "video"} or not page_content.strip():
                 continue
             if not authorized:
                 continue
@@ -366,7 +366,8 @@ def _is_multimodal_model_space(
         return False
     from open_webui.retrieval.embedding.registry import get_model_spec_by_id
 
-    return "image" in get_model_spec_by_id(embedding_model_id).modalities
+    modalities = get_model_spec_by_id(embedding_model_id).modalities
+    return "image" in modalities or "video" in modalities
 
 
 def merge_get_results(get_results: list[dict]) -> dict:
@@ -705,7 +706,7 @@ def _full_context_sort_key(row: tuple) -> tuple:
         _sortable_number(metadata.get("chunk_index")),
         _sortable_number(metadata.get("page_index")),
         top_norm if top_norm is not None else math.inf,
-        1 if metadata.get("modality") == "image" else 0,
+        1 if metadata.get("modality") in {"image", "video"} else 0,
         _sortable_number(metadata.get("source_sequence")),
         hashlib.sha256(
             (document if isinstance(document, str) else "").encode("utf-8")
@@ -1328,9 +1329,12 @@ def get_sources_from_files(
                 )
 
                 model_spec = get_model_spec_by_id(embedding_model_id)
-                multimodal_model_space = "image" in model_spec.modalities
+                multimodal_model_space = (
+                    "image" in model_spec.modalities
+                    or "video" in model_spec.modalities
+                )
                 if multimodal_model_space:
-                    # Empty image chunks must never enter BM25 or reranking.
+                    # Empty image/video chunks must never enter BM25 or reranking.
                     hybrid_search = False
             else:
                 # RetrievalReadyNoState: legacy admin, no model-aware search.

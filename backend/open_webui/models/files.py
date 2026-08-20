@@ -86,6 +86,7 @@ _VISUAL_SUMMARY_KEYS = (
     "table_image_count",
     "image_chunk_count",
     "text_chunk_count",
+    "video_chunk_count",
 )
 
 
