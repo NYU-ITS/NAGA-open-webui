@@ -5,7 +5,7 @@ reverted). Conditional on the column existing, so it's a no-op anywhere
 the feature never ran.
 
 Revision ID: a393f00ea5c7
-Revises: b2c3d4e5f6a7
+Revises: 817da597db81
 Create Date: 2026-08-18
 
 """
@@ -16,7 +16,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "a393f00ea5c7"
-down_revision = "b2c3d4e5f6a7"
+down_revision = "817da597db81"
 branch_labels = None
 depends_on = None
 
