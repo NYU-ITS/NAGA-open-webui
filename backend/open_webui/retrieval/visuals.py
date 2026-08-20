@@ -34,6 +34,10 @@ _PUBLIC_VISUAL_METADATA = {
     "mime_type",
     "pixel_width",
     "pixel_height",
+    "startTimeSeconds",
+    "endTimeSeconds",
+    "chunkIndex",
+    "duration_seconds",
 }
 _PUBLIC_FILE_TEXT_METADATA = {
     "file_id",
@@ -184,10 +188,20 @@ def _sanitize_sources(
         for row_index, metadata in enumerate(metadatas):
             metadata = metadata if isinstance(metadata, dict) else {}
             document = documents[row_index] if row_index < len(documents) else ""
-            is_image = metadata.get("modality") == "image"
+            modality = metadata.get("modality")
+            is_image = modality == "image"
+            is_video = modality == "video"
             if is_image:
                 if (source_index, row_index) not in selected_visual_positions:
                     continue
+                if not _metadata_is_authorized(
+                    metadata, direct_file_ids, knowledge_ids
+                ):
+                    continue
+                safe_document = ""
+                safe_metadata = _sanitize_visual_metadata(metadata)
+                kept_file_backed_row = True
+            elif is_video:
                 if not _metadata_is_authorized(
                     metadata, direct_file_ids, knowledge_ids
                 ):

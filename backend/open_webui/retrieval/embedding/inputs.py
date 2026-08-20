@@ -1,5 +1,6 @@
 """Immutable typed inputs, registry model view, and non-secret result types."""
 
+import math
 from dataclasses import dataclass
 from typing import Literal, Union
 
@@ -43,12 +44,12 @@ class VideoEmbeddingInput:
             raise TypeError("video must be bytes")
         if self.mime_type not in ("video/mp4", "video/mpeg"):
             raise ValueError("mime_type must be video/mp4 or video/mpeg")
-        if self.start_offset_seconds < 0:
-            raise ValueError("start_offset_seconds must be non-negative")
-        if self.end_offset_seconds <= self.start_offset_seconds:
-            raise ValueError("end_offset_seconds must be greater than start_offset_seconds")
-        if self.interval_seconds <= 0:
-            raise ValueError("interval_seconds must be positive")
+        if not math.isfinite(self.start_offset_seconds) or self.start_offset_seconds < 0:
+            raise ValueError("start_offset_seconds must be a finite non-negative number")
+        if not math.isfinite(self.end_offset_seconds) or self.end_offset_seconds <= self.start_offset_seconds:
+            raise ValueError("end_offset_seconds must be a finite number greater than start_offset_seconds")
+        if not math.isfinite(self.interval_seconds) or self.interval_seconds <= 0:
+            raise ValueError("interval_seconds must be a finite positive number")
 
 
 # Union type for all embedding inputs

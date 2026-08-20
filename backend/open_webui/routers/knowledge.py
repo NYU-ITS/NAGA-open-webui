@@ -628,10 +628,6 @@ async def add_file_to_knowledge_by_id(
     # Video preflight: validate with ffprobe before storage
     if upload_content_type in {"video/mp4", "video/mpeg"}:
         from open_webui.retrieval.embedding.preparation import validate_video
-        from open_webui.retrieval.embedding.errors import (
-            VIDEO_DURATION_EXCEEDED,
-            VIDEO_VALIDATION_FAILED,
-        )
 
         try:
             max_video_duration = getattr(
@@ -642,6 +638,8 @@ async def add_file_to_knowledge_by_id(
             validate_video(
                 upload_bytes,
                 max_duration_seconds=int(max_video_duration),
+                declared_mime_type=file.content_type,
+                filename=filename,
             )
         except EmbeddingError as error:
             raise HTTPException(

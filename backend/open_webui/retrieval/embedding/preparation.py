@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import subprocess
 from dataclasses import dataclass
@@ -460,7 +461,6 @@ def preparation_recipe_from_snapshot(snapshot: Mapping[str, Any]) -> Preparation
 # Video temporal chunking planner
 # ──────────────────────────────────────────────────────────────────────
 
-_MP4_SIGNATURE = b"\x00\x00\x00"
 _MPEG_SIGNATURES = (b"\x00\x00\x01\xb3", b"\x00\x00\x01\xba")
 _VIDEO_MIME_EXTENSIONS = {
     ".mp4": "video/mp4",
@@ -492,8 +492,8 @@ def plan_video_chunks(
     """
     if not isinstance(duration_seconds, (int, float)):
         raise ValueError("duration_seconds must be numeric")
-    if duration_seconds <= 0:
-        raise ValueError("duration_seconds must be positive")
+    if not math.isfinite(duration_seconds) or duration_seconds <= 0:
+        raise ValueError("duration_seconds must be a finite positive number")
     if not isinstance(chunk_duration_seconds, int) or chunk_duration_seconds <= 0:
         raise ValueError("chunk_duration_seconds must be a positive integer")
     if (
@@ -539,19 +539,28 @@ def validate_video(
     source_bytes: bytes,
     *,
     max_duration_seconds: int = 120,
+    declared_mime_type: Optional[str] = None,
+    filename: str = "",
 ) -> tuple[str, float]:
     """Validate video bytes with ffprobe and return (canonical_mime, duration).
 
     Writes bytes to a temporary file, invokes Docker-provided ffprobe, verifies
     a video stream exists, reads duration, and enforces the maximum.
 
+    When magic bytes are inconclusive, declared MIME type or file extension is
+    used to select the candidate type; ffprobe remains the final authority.
+
     Raises EmbeddingError with VIDEO_VALIDATION_FAILED or VIDEO_DURATION_EXCEEDED.
     """
     if not isinstance(source_bytes, bytes) or not source_bytes:
         raise EmbeddingError(VIDEO_VALIDATION_FAILED)
 
-    # Infer MIME from magic bytes for the canonical type.
+    # Infer MIME from magic bytes; fall back to declared MIME / extension.
     canonical_mime = _infer_video_mime(source_bytes)
+    if canonical_mime is None:
+        canonical_mime = canonical_video_content_type(
+            source_bytes, filename, declared_mime_type
+        )
     if canonical_mime is None:
         raise EmbeddingError(VIDEO_VALIDATION_FAILED)
 
@@ -595,10 +604,13 @@ def validate_video(
             except (TypeError, ValueError):
                 raise EmbeddingError(VIDEO_VALIDATION_FAILED) from None
 
-            if duration <= 0:
+            if not math.isfinite(duration) or duration <= 0:
                 raise EmbeddingError(VIDEO_VALIDATION_FAILED)
             if duration > max_duration_seconds:
-                raise EmbeddingError(VIDEO_DURATION_EXCEEDED)
+                raise EmbeddingError(
+                    VIDEO_DURATION_EXCEEDED,
+                    detail=f"Video duration {duration:.1f}s exceeds maximum {max_duration_seconds}s.",
+                )
 
             return canonical_mime, duration
     except EmbeddingError:
@@ -1261,6 +1273,8 @@ def _prepare_video(
     canonical_mime, duration = validate_video(
         source_bytes,
         max_duration_seconds=recipe.video_max_duration,
+        declared_mime_type=normalized_content_type,
+        filename=filename,
     )
 
     video_chunks = plan_video_chunks(
