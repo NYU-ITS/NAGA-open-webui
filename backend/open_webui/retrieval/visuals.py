@@ -1,4 +1,4 @@
-"""Authorized, deterministic reconstruction of retrieved image chunks."""
+"""Authorized reconstruction of retrieved image and temporal video chunks."""
 
 from __future__ import annotations
 
@@ -7,8 +7,11 @@ import hashlib
 import logging
 import math
 import os
+import shutil
+import subprocess
 from contextlib import ExitStack
 from dataclasses import dataclass
+
 import fitz
 
 from open_webui.models.files import Files
@@ -19,6 +22,11 @@ from open_webui.storage.provider import Storage
 log = logging.getLogger(__name__)
 
 MAX_RECONSTRUCTED_VISUALS = 4
+MAX_RECONSTRUCTED_VIDEO_SEGMENTS = 4
+VIDEO_FRAMES_PER_SEGMENT = 2
+VIDEO_FRAME_MAX_DIMENSION = 1024
+VIDEO_FRAME_MAX_BYTES = 2 * 1024 * 1024
+VIDEO_FRAME_EXTRACTION_TIMEOUT_SECONDS = 15
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _JPEG_SIGNATURE = b"\xff\xd8\xff"
 
@@ -68,6 +76,59 @@ class ReconstructedVisual:
 
 
 @dataclass(frozen=True)
+class ReconstructedVideoFrame:
+    frame_id: str
+    file_id: str
+    timestamp_seconds: float
+    mime_type: str
+    data: bytes
+
+    def image_url_part(self) -> dict:
+        encoded = base64.b64encode(self.data).decode("ascii")
+        return {
+            "type": "image_url",
+            "image_url": {"url": f"data:{self.mime_type};base64,{encoded}"},
+        }
+
+
+@dataclass(frozen=True)
+class ReconstructedVideoSegment:
+    segment_id: tuple[str, str, str, str]
+    file_id: str
+    source_name: str
+    start_seconds: float
+    end_seconds: float
+    frames: tuple[ReconstructedVideoFrame, ...]
+
+    def message_parts(self) -> list[dict]:
+        parts = [
+            {
+                "type": "text",
+                "text": (
+                    f'Retrieved video evidence from "{self.source_name}", '
+                    f"segment {_format_timestamp(self.start_seconds)}–"
+                    f"{_format_timestamp(self.end_seconds)}. "
+                    "The following frames are ordered chronologically."
+                ),
+            }
+        ]
+        for frame in self.frames:
+            parts.extend(
+                [
+                    {
+                        "type": "text",
+                        "text": (
+                            "Video frame at "
+                            f"{_format_timestamp(frame.timestamp_seconds)}:"
+                        ),
+                    },
+                    frame.image_url_part(),
+                ]
+            )
+        return parts
+
+
+@dataclass(frozen=True)
 class _VisualCandidate:
     metadata: dict
     distance: float | None
@@ -82,16 +143,18 @@ def reconstruct_and_sanitize_sources(
     vision_enabled: bool,
     limit: int = MAX_RECONSTRUCTED_VISUALS,
 ) -> tuple[list[dict], list[dict]]:
-    """Reconstruct authorized image hits and return frontend-safe sources.
+    """Reconstruct authorized visual hits and return frontend-safe sources.
 
     Authorization is inherited only from the canonical server-validated scope:
     a hit must belong to an attached file or attached knowledge collection.
-    Storage paths, crop geometry, hashes, recipes, and Base64 are never returned
-    in the sanitized citation metadata.
+    Images and selected video frames are attached transiently to the answer-model
+    request. Storage paths, crop geometry, hashes, recipes, and Base64 are never
+    returned in the sanitized citation metadata.
     """
     direct_file_ids = set(authorized_scope.file_ids)
     knowledge_ids = set(authorized_scope.knowledge_ids)
-    candidates_by_id: dict[str, _VisualCandidate] = {}
+    image_candidates_by_id: dict[str, _VisualCandidate] = {}
+    video_candidates_by_id: dict[tuple[str, str, str, str], _VisualCandidate] = {}
     if vision_enabled:
         for source_index, source in enumerate(sources or []):
             if not isinstance(source, dict):
@@ -101,17 +164,11 @@ def reconstruct_and_sanitize_sources(
             if not isinstance(metadatas, list):
                 continue
             for row_index, metadata in enumerate(metadatas):
-                if (
-                    not isinstance(metadata, dict)
-                    or metadata.get("modality") != "image"
-                ):
+                if not isinstance(metadata, dict):
                     continue
                 if not _metadata_is_authorized(
                     metadata, direct_file_ids, knowledge_ids
                 ):
-                    continue
-                visual_id = str(metadata.get("visual_asset_id") or "")
-                if not visual_id:
                     continue
                 distance = _dense_distance(
                     distances[row_index]
@@ -124,30 +181,68 @@ def reconstruct_and_sanitize_sources(
                     source_index=source_index,
                     row_index=row_index,
                 )
-                current = candidates_by_id.get(visual_id)
-                if current is None or _candidate_rank_key(
-                    candidate
-                ) < _candidate_rank_key(current):
-                    candidates_by_id[visual_id] = candidate
+                modality = metadata.get("modality")
+                if modality == "image":
+                    visual_id = str(metadata.get("visual_asset_id") or "")
+                    if not visual_id:
+                        continue
+                    current = image_candidates_by_id.get(visual_id)
+                    if current is None or _candidate_rank_key(
+                        candidate
+                    ) < _candidate_rank_key(current):
+                        image_candidates_by_id[visual_id] = candidate
+                elif modality == "video":
+                    segment_id = _video_segment_id(metadata)
+                    if segment_id is None:
+                        continue
+                    current = video_candidates_by_id.get(segment_id)
+                    if current is None or _candidate_rank_key(
+                        candidate
+                    ) < _candidate_rank_key(current):
+                        video_candidates_by_id[segment_id] = candidate
 
-    ranked_candidates = sorted(candidates_by_id.values(), key=_candidate_rank_key)
-    selected_candidates = ranked_candidates[: max(0, int(limit))]
-    reconstructed = _reconstruct_candidates(
-        [candidate.metadata for candidate in selected_candidates]
+    selection_limit = max(0, int(limit))
+    selected_image_candidates = sorted(
+        image_candidates_by_id.values(), key=_candidate_rank_key
+    )[:selection_limit]
+    selected_video_candidates = sorted(
+        video_candidates_by_id.values(), key=_candidate_rank_key
+    )[: min(selection_limit, MAX_RECONSTRUCTED_VIDEO_SEGMENTS)]
+
+    reconstructed_images = _reconstruct_candidates(
+        [candidate.metadata for candidate in selected_image_candidates]
     )
-    reconstructed_ids = {visual.visual_asset_id for visual in reconstructed}
-    selected_positions = {
+    reconstructed_video_segments = _reconstruct_video_candidates(
+        [candidate.metadata for candidate in selected_video_candidates]
+    )
+    reconstructed_image_ids = {
+        visual.visual_asset_id for visual in reconstructed_images
+    }
+    reconstructed_video_ids = {
+        segment.segment_id for segment in reconstructed_video_segments
+    }
+    selected_image_positions = {
         (candidate.source_index, candidate.row_index)
-        for candidate in selected_candidates
-        if str(candidate.metadata.get("visual_asset_id") or "") in reconstructed_ids
+        for candidate in selected_image_candidates
+        if str(candidate.metadata.get("visual_asset_id") or "")
+        in reconstructed_image_ids
+    }
+    selected_video_positions = {
+        (candidate.source_index, candidate.row_index)
+        for candidate in selected_video_candidates
+        if _video_segment_id(candidate.metadata) in reconstructed_video_ids
     }
     sanitized_sources = _sanitize_sources(
         sources,
         direct_file_ids=direct_file_ids,
         knowledge_ids=knowledge_ids,
-        selected_visual_positions=selected_positions,
+        selected_visual_positions=selected_image_positions,
+        selected_video_positions=selected_video_positions,
     )
-    return [visual.image_url_part() for visual in reconstructed], sanitized_sources
+    content_parts = [visual.image_url_part() for visual in reconstructed_images]
+    for segment in reconstructed_video_segments:
+        content_parts.extend(segment.message_parts())
+    return content_parts, sanitized_sources
 
 
 def sanitize_text_sources(
@@ -161,6 +256,7 @@ def sanitize_text_sources(
         direct_file_ids=direct_file_ids,
         knowledge_ids=knowledge_ids,
         selected_visual_positions=set(),
+        selected_video_positions=set(),
     )
 
 
@@ -170,6 +266,7 @@ def _sanitize_sources(
     direct_file_ids: set[str],
     knowledge_ids: set[str],
     selected_visual_positions: set[tuple[int, int]],
+    selected_video_positions: set[tuple[int, int]],
 ) -> list[dict]:
     sanitized_sources: list[dict] = []
     for source_index, source in enumerate(sources or []):
@@ -206,7 +303,11 @@ def _sanitize_sources(
                     metadata, direct_file_ids, knowledge_ids
                 ):
                     continue
-                safe_document = ""
+                safe_document = (
+                    _video_context_text(metadata)
+                    if (source_index, row_index) in selected_video_positions
+                    else ""
+                )
                 safe_metadata = _sanitize_visual_metadata(metadata)
                 kept_file_backed_row = True
             else:
@@ -280,6 +381,8 @@ def _candidate_rank_key(candidate: _VisualCandidate) -> tuple:
         _sortable_int(metadata.get("page_index")),
         _sortable_int(metadata.get("page_local_sequence")),
         _sortable_int(metadata.get("source_sequence")),
+        _sortable_float(metadata.get("startTimeSeconds")),
+        _sortable_float(metadata.get("endTimeSeconds")),
         str(metadata.get("visual_asset_id") or ""),
         candidate.source_index,
         candidate.row_index,
@@ -296,6 +399,14 @@ def _sortable_int(value) -> tuple[int, int | str]:
         return (0, int(value))
     except (TypeError, ValueError):
         return (1, str(value or ""))
+
+
+def _sortable_float(value) -> tuple[int, float | str]:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return (1, str(value or ""))
+    return (0, number) if math.isfinite(number) else (1, str(value or ""))
 
 
 def _metadata_is_authorized(
@@ -317,26 +428,10 @@ def _reconstruct_candidates(candidates: list[dict]) -> list[ReconstructedVisual]
     output: dict[str, ReconstructedVisual] = {}
     with ExitStack() as stack:
         for file_id, group in grouped.items():
-            try:
-                file = Files.get_file_by_id(file_id)
-            except Exception:
-                log.warning("Visual source lookup failed")
+            stored_source = _load_stored_source(file_id)
+            if stored_source is None:
                 continue
-            if file is None or not file.path:
-                continue
-            try:
-                path = Storage.get_file(file.path)
-            except Exception:
-                log.warning("Visual source storage read failed")
-                continue
-            if not path or not os.path.isfile(path):
-                continue
-
-            try:
-                with open(path, "rb") as source_handle:
-                    source_bytes = source_handle.read()
-            except OSError:
-                continue
+            _path, source_bytes = stored_source
 
             source_hashes = {
                 str(item.get("source_sha256") or "") for item in group
@@ -372,6 +467,254 @@ def _reconstruct_candidates(candidates: list[dict]) -> list[ReconstructedVisual]
         for visual_id in (str(item.get("visual_asset_id")) for item in candidates)
         if visual_id in output
     ]
+
+
+def _reconstruct_video_candidates(
+    candidates: list[dict],
+) -> list[ReconstructedVideoSegment]:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        if candidates:
+            log.warning(
+                "Video frame reconstruction skipped because FFmpeg is unavailable"
+            )
+        return []
+
+    grouped: dict[str, list[dict]] = {}
+    for metadata in candidates:
+        grouped.setdefault(str(metadata.get("file_id") or ""), []).append(metadata)
+
+    output: dict[tuple[str, str, str, str], ReconstructedVideoSegment] = {}
+    for file_id, group in grouped.items():
+        stored_source = _load_stored_source(file_id)
+        if stored_source is None:
+            continue
+        path, source_bytes = stored_source
+
+        source_hashes = {str(item.get("source_sha256") or "") for item in group}
+        source_hash = next(iter(source_hashes), "")
+        if (
+            len(source_hashes) != 1
+            or not _is_sha256(source_hash)
+            or not _hash_matches(source_bytes, source_hash)
+        ):
+            continue
+
+        for metadata in group:
+            segment = _reconstruct_video_segment(
+                ffmpeg=ffmpeg,
+                path=path,
+                file_id=file_id,
+                source_hash=source_hash,
+                metadata=metadata,
+            )
+            if segment is not None:
+                output[segment.segment_id] = segment
+
+    return [
+        output[segment_id]
+        for segment_id in (_video_segment_id(item) for item in candidates)
+        if segment_id in output
+    ]
+
+
+def _load_stored_source(file_id: str) -> tuple[str, bytes] | None:
+    if not file_id:
+        return None
+    try:
+        file = Files.get_file_by_id(file_id)
+    except Exception:
+        log.warning("Visual source lookup failed")
+        return None
+    if file is None or not file.path:
+        return None
+    try:
+        path = Storage.get_file(file.path)
+    except Exception:
+        log.warning("Visual source storage read failed")
+        return None
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "rb") as source_handle:
+            return path, source_handle.read()
+    except OSError:
+        return None
+
+
+def _reconstruct_video_segment(
+    *,
+    ffmpeg: str,
+    path: str,
+    file_id: str,
+    source_hash: str,
+    metadata: dict,
+) -> ReconstructedVideoSegment | None:
+    segment_id = _video_segment_id(metadata)
+    timing = _video_segment_timing(metadata)
+    if (
+        segment_id is None
+        or timing is None
+        or metadata.get("content_kind") != "video_temporal"
+        or metadata.get("mime_type") not in {"video/mp4", "video/mpeg"}
+    ):
+        return None
+
+    start_seconds, end_seconds = timing
+    frames = []
+    for frame_index, timestamp in enumerate(
+        _sample_video_timestamps(start_seconds, end_seconds)
+    ):
+        frame_data = _extract_video_frame(ffmpeg, path, timestamp)
+        if frame_data is None:
+            continue
+        frame_id = hashlib.sha256(
+            (
+                f"video_frame_v1\0{source_hash}\0{segment_id}\0"
+                f"{frame_index}\0{timestamp:.6f}"
+            ).encode("utf-8")
+        ).hexdigest()
+        frames.append(
+            ReconstructedVideoFrame(
+                frame_id=frame_id,
+                file_id=file_id,
+                timestamp_seconds=timestamp,
+                mime_type="image/jpeg",
+                data=frame_data,
+            )
+        )
+    if not frames:
+        return None
+    return ReconstructedVideoSegment(
+        segment_id=segment_id,
+        file_id=file_id,
+        source_name=_safe_source_name(metadata),
+        start_seconds=start_seconds,
+        end_seconds=end_seconds,
+        frames=tuple(frames),
+    )
+
+
+def _video_segment_id(metadata: dict) -> tuple[str, str, str, str] | None:
+    timing = _video_segment_timing(metadata)
+    file_id = str(metadata.get("file_id") or "")
+    if not file_id or timing is None:
+        return None
+    start_seconds, end_seconds = timing
+    chunk_index = metadata.get("chunk_index", metadata.get("chunkIndex", ""))
+    return (
+        file_id,
+        str(chunk_index),
+        f"{start_seconds:.6f}",
+        f"{end_seconds:.6f}",
+    )
+
+
+def _video_segment_timing(metadata: dict) -> tuple[float, float] | None:
+    try:
+        start_seconds = float(metadata["startTimeSeconds"])
+        end_seconds = float(metadata["endTimeSeconds"])
+        duration_seconds = float(metadata["duration_seconds"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if (
+        not all(
+            math.isfinite(value)
+            for value in (start_seconds, end_seconds, duration_seconds)
+        )
+        or start_seconds < 0
+        or end_seconds <= start_seconds
+        or duration_seconds <= 0
+        or end_seconds > duration_seconds + 0.01
+    ):
+        return None
+    return start_seconds, min(end_seconds, duration_seconds)
+
+
+def _sample_video_timestamps(
+    start_seconds: float, end_seconds: float
+) -> tuple[float, ...]:
+    interval = end_seconds - start_seconds
+    return tuple(
+        round(start_seconds + interval * index / (VIDEO_FRAMES_PER_SEGMENT + 1), 3)
+        for index in range(1, VIDEO_FRAMES_PER_SEGMENT + 1)
+    )
+
+
+def _extract_video_frame(
+    ffmpeg: str, path: str, timestamp_seconds: float
+) -> bytes | None:
+    try:
+        result = subprocess.run(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-ss",
+                f"{timestamp_seconds:.3f}",
+                "-i",
+                path,
+                "-map",
+                "0:v:0",
+                "-frames:v",
+                "1",
+                "-vf",
+                (
+                    f"scale={VIDEO_FRAME_MAX_DIMENSION}:"
+                    f"{VIDEO_FRAME_MAX_DIMENSION}:"
+                    "force_original_aspect_ratio=decrease"
+                ),
+                "-q:v",
+                "4",
+                "-f",
+                "image2pipe",
+                "-vcodec",
+                "mjpeg",
+                "pipe:1",
+            ],
+            capture_output=True,
+            timeout=VIDEO_FRAME_EXTRACTION_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    frame_data = result.stdout
+    if (
+        result.returncode != 0
+        or not frame_data.startswith(_JPEG_SIGNATURE)
+        or len(frame_data) > VIDEO_FRAME_MAX_BYTES
+    ):
+        return None
+    return frame_data
+
+
+def _video_context_text(metadata: dict) -> str:
+    timing = _video_segment_timing(metadata)
+    if timing is None:
+        return ""
+    start_seconds, end_seconds = timing
+    return (
+        f'Retrieved chronological frames from video "{_safe_source_name(metadata)}" '
+        f"for segment {_format_timestamp(start_seconds)}–"
+        f"{_format_timestamp(end_seconds)} are attached to the latest user message."
+    )
+
+
+def _safe_source_name(metadata: dict) -> str:
+    raw_name = str(metadata.get("name") or metadata.get("source") or "attached video")
+    name = " ".join(raw_name.split())[:200]
+    return name or "attached video"
+
+
+def _format_timestamp(seconds: float) -> str:
+    total_milliseconds = max(0, int(round(seconds * 1000)))
+    hours, remainder = divmod(total_milliseconds, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    whole_seconds, milliseconds = divmod(remainder, 1000)
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{whole_seconds:02d}.{milliseconds:03d}"
+    return f"{minutes:02d}:{whole_seconds:02d}.{milliseconds:03d}"
 
 
 def _reconstruct_standalone(
@@ -590,7 +933,10 @@ def _sanitize_source_descriptor(source) -> dict:
 
 __all__ = [
     "MAX_RECONSTRUCTED_VISUALS",
+    "MAX_RECONSTRUCTED_VIDEO_SEGMENTS",
     "ReconstructedVisual",
+    "ReconstructedVideoFrame",
+    "ReconstructedVideoSegment",
     "reconstruct_and_sanitize_sources",
     "sanitize_text_sources",
 ]

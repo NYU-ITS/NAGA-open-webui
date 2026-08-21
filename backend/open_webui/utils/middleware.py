@@ -944,6 +944,7 @@ async def process_chat_payload(request, form_data, metadata, user, model):
     else:
         log.info("Using Custom RAG")
 
+    retrieved_sources = sources
     vision_enabled = model_supports_vision(model)
     if not vision_enabled and any(
         isinstance(item, dict) and item.get("type") == "image"
@@ -958,9 +959,27 @@ async def process_chat_payload(request, form_data, metadata, user, model):
                 },
             }
         )
-    retrieved_sources = sources
+    retrieved_video = any(
+        isinstance(metadata, dict) and metadata.get("modality") == "video"
+        for source in retrieved_sources
+        if isinstance(source, dict)
+        for metadata in (source.get("metadata") or [])
+    )
+    if not vision_enabled and retrieved_video:
+        await event_emitter(
+            {
+                "type": "status",
+                "data": {
+                    "description": (
+                        "The selected answer model cannot view retrieved video "
+                        "frames; choose a vision-capable model to analyze video content."
+                    ),
+                    "done": True,
+                },
+            }
+        )
     try:
-        image_parts, sources = reconstruct_and_sanitize_sources(
+        reconstructed_parts, sources = reconstruct_and_sanitize_sources(
             retrieved_sources,
             authorized_scope=authorized_scope,
             vision_enabled=vision_enabled,
@@ -971,14 +990,14 @@ async def process_chat_payload(request, form_data, metadata, user, model):
             "Retrieved visual reconstruction failed (%s)",
             type(reconstruction_error).__name__,
         )
-        image_parts = []
+        reconstructed_parts = []
         sources = sanitize_text_sources(
             retrieved_sources,
             authorized_scope=authorized_scope,
         )
-    if image_parts:
-        _append_image_parts_to_latest_user_message(
-            form_data["messages"], image_parts
+    if reconstructed_parts:
+        _append_reconstructed_parts_to_latest_user_message(
+            form_data["messages"], reconstructed_parts
         )
 
     # If context is not empty, insert it into the messages
@@ -1044,14 +1063,14 @@ async def process_chat_payload(request, form_data, metadata, user, model):
     return form_data, metadata, events
 
 
-def _append_image_parts_to_latest_user_message(
-    messages: list[dict], image_parts: list[dict]
+def _append_reconstructed_parts_to_latest_user_message(
+    messages: list[dict], reconstructed_parts: list[dict]
 ) -> None:
-    """Attach only transient, server-reconstructed images to the latest user turn.
+    """Attach only transient, server-reconstructed evidence to the latest user turn.
 
-    Browser/API callers are not an authority for answer-model image bytes. Drop
-    any pre-existing non-text content parts before adding the crops that were
-    reconstructed from the server-authorized retrieval scope.
+    Browser/API callers are not an authority for answer-model visual bytes. Drop
+    any pre-existing non-text content parts before adding images and timestamped
+    video frames reconstructed from the server-authorized retrieval scope.
     """
     message = get_last_user_message_item(messages)
     if message is None:
@@ -1069,7 +1088,7 @@ def _append_image_parts_to_latest_user_message(
         ]
     else:
         return
-    parts.extend(image_parts)
+    parts.extend(reconstructed_parts)
     message["content"] = parts
 
 
