@@ -352,17 +352,17 @@ export const addFileToKnowledgeById = async (token: string, knowledgeId: string,
 			if (!res.ok) throw await res.json();
 			return res.json();
 		})
-		.catch((err) => {
-			const detail = err.detail;
-			// Normalize structured {code, message} errors to a human-readable string
-			if (detail && typeof detail === 'object' && detail.message) {
-				error = detail.message;
-			} else {
-				error = detail;
-			}
-			console.log(err);
-			return null;
-		});
+	.catch((err) => {
+		const detail = err.detail;
+		// Preserve structured {code, message} errors; normalize for display
+		if (detail && typeof detail === 'object' && detail.message) {
+			error = detail;
+		} else {
+			error = detail;
+		}
+		console.log(err);
+		return null;
+	});
 
 	if (error) {
 		throw error;
@@ -371,7 +371,7 @@ export const addFileToKnowledgeById = async (token: string, knowledgeId: string,
 	return res;
 };
 
-export const updateFileFromKnowledgeById = async (token: string, id: string, fileId: string) => {
+export const updateFileFromKnowledgeById
 	let error = null;
 
 	const res = await fetch(`${WEBUI_API_BASE_URL}/knowledge/${id}/file/update`, {

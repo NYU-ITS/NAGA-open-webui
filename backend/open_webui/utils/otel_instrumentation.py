@@ -525,6 +525,30 @@ def add_span_event(name: str, attributes: Optional[Dict[str, Any]] = None):
         log.debug(f"Failed to add span event '{name}': {e}")
 
 
+_METRIC_COUNTERS: Dict[str, Any] = {}
+
+
+def add_metric_counter(name: str, attributes: Optional[Dict[str, Any]] = None) -> None:
+    """Increment an OpenTelemetry counter without affecting application flow."""
+    try:
+        from opentelemetry import metrics
+
+        counter = _METRIC_COUNTERS.get(name)
+        if counter is None:
+            counter = metrics.get_meter("open_webui").create_counter(
+                name,
+                unit="1",
+                description="Open WebUI application event count",
+            )
+            _METRIC_COUNTERS[name] = counter
+        filtered_attrs = {
+            key: value for key, value in (attributes or {}).items() if value is not None
+        }
+        counter.add(1, attributes=filtered_attrs)
+    except Exception as e:
+        log.debug(f"Failed to increment metric '{name}': {e}")
+
+
 def set_span_status(status: Any, description: Optional[str] = None):
     """
     Set status on the current active span.

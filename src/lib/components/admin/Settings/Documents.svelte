@@ -252,12 +252,16 @@
 				max_size: fileMaxSize === '' || fileMaxSize === null ? 5 : fileMaxSize,
 				max_count: fileMaxCount === '' || fileMaxCount === null ? 2 : fileMaxCount
 			},
-			video: {
-				max_file_size_mb: videoMaxFileSizeMb,
-				chunk_duration_seconds: videoChunkDurationSeconds,
-				min_chunk_duration_seconds: videoMinChunkDurationSeconds,
-				max_duration_seconds: videoMaxDurationSeconds
-			},
+			...(canViewFileSettings
+				? {
+					video: {
+						max_file_size_mb: videoMaxFileSizeMb,
+						chunk_duration_seconds: videoChunkDurationSeconds,
+						min_chunk_duration_seconds: videoMinChunkDurationSeconds,
+						max_duration_seconds: videoMaxDurationSeconds
+					}
+				}
+				: {}),
 			RAG_FULL_CONTEXT: RAG_FULL_CONTEXT,
 			BYPASS_EMBEDDING_AND_RETRIEVAL: BYPASS_EMBEDDING_AND_RETRIEVAL,
 			chunk: {

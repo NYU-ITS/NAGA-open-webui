@@ -590,17 +590,55 @@ async def add_file_to_knowledge_by_id(
         safe_file_processing_error_message,
     )
     from open_webui.retrieval.embedding.preparation import (
+        ServiceUnavailableError,
         UploadByteLimitExceededError,
+        VideoSizeLimitExceededError,
         canonical_upload_content_type,
         read_upload_bytes,
+        resolve_effective_upload_limit_mb,
+        video_limit_for_probe,
     )
 
+    video_probe_limit_mb = video_limit_for_probe(request.app.state.config)
     try:
-        max_size_mb = request.app.state.config.FILE_MAX_SIZE
-    except (AttributeError, KeyError):
-        max_size_mb = None
+        max_size_mb = resolve_effective_upload_limit_mb(
+            request.app.state.config, filename, file.content_type
+        )
+    except ServiceUnavailableError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Video size policy could not be read.",
+        ) from None
     try:
-        upload_bytes = read_upload_bytes(file, max_size_mb)
+        upload_bytes = read_upload_bytes(
+            file,
+            max_size_mb,
+            video_max_size_mb=video_probe_limit_mb,
+            filename=filename,
+            content_type=file.content_type,
+        )
+    except VideoSizeLimitExceededError as error:
+        log.warning(
+            "video_upload_rejected",
+            extra={
+                "reason": "video_file_too_large",
+                "effective_limit_mb": error.effective_limit_mb,
+                "actual_size_bytes": getattr(file, "size", None),
+                "route": "knowledge",
+            },
+        )
+        from open_webui.utils.otel_instrumentation import add_metric_counter
+        add_metric_counter(
+            "webui.video_upload_rejections",
+            {"rejection.reason": "video_file_too_large", "upload.route": "knowledge"},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail={
+                "code": "video_file_too_large",
+                "message": f"The video file exceeds the configured {error.effective_limit_mb} MB limit.",
+            },
+        ) from None
     except UploadByteLimitExceededError as error:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
@@ -644,6 +682,23 @@ async def add_file_to_knowledge_by_id(
                     "effective_limit_mb": error.effective_limit_mb,
                     "actual_size_bytes": len(upload_bytes),
                     "route": "knowledge",
+                },
+            )
+            from open_webui.utils.otel_instrumentation import add_metric_counter
+            add_metric_counter(
+                "webui.video_upload_rejections",
+                {
+                    "rejection.reason": "video_file_too_large",
+                    "upload.route": "knowledge",
+                    "video.media_type": upload_content_type,
+                },
+            )
+            safe_add_span_event(
+                "video.upload.rejected",
+                {
+                    "rejection.reason": "video_file_too_large",
+                    "upload.route": "knowledge",
+                    "video.media_type": upload_content_type,
                 },
             )
             raise HTTPException(

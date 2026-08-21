@@ -115,30 +115,91 @@ class VideoSizeLimitExceededError(ValueError):
         )
 
 
+class ServiceUnavailableError(RuntimeError):
+    """Raised when video policy config cannot be read."""
+
+    def __init__(self, message: str = "service unavailable"):
+        super().__init__(message)
+
+
+_VIDEO_MIME_TYPES = {"video/mp4", "video/mpeg"}
+_VIDEO_EXTENSIONS = {".mp4", ".mpeg", ".mpg"}
+
+
+def _is_declared_video(filename: str, content_type: Optional[str]) -> bool:
+    """Return True if the upload is declared as a supported video by MIME or extension."""
+    if content_type and content_type.lower() in _VIDEO_MIME_TYPES:
+        return True
+    if filename:
+        ext = os.path.splitext(filename)[1].lower()
+        if ext in _VIDEO_EXTENSIONS:
+            return True
+    return False
+
+
+def _configured_video_limit_mb(config: Any) -> int:
+    value = getattr(config, "RAG_VIDEO_MAX_FILE_SIZE_MB", None)
+    if hasattr(value, "value"):
+        value = value.value
+    if isinstance(value, bool):
+        raise ServiceUnavailableError("video size policy is invalid")
+    try:
+        value = int(value if value is not None else 20)
+    except (TypeError, ValueError):
+        raise ServiceUnavailableError("video size policy is invalid") from None
+    if not 1 <= value <= 1024:
+        raise ServiceUnavailableError("video size policy is invalid")
+    return value
+
+
+def video_limit_for_probe(config: Any) -> int:
+    """Return a safe probe limit without affecting non-video uploads."""
+    try:
+        return _configured_video_limit_mb(config)
+    except ServiceUnavailableError:
+        return 20
+
+
+def resolve_effective_upload_limit_mb(
+    config: Any,
+    filename: str = "",
+    content_type: Optional[str] = None,
+) -> Optional[int]:
+    """Return the effective upload byte limit in MB for this upload.
+
+    For uploads declared as supported video (MP4/MPEG by MIME or extension),
+    returns min(RAG_VIDEO_MAX_FILE_SIZE_MB, RAG_FILE_MAX_SIZE).
+    For other uploads, returns RAG_FILE_MAX_SIZE (or None if unlimited).
+
+    Raises ServiceUnavailableError if the video policy cannot be read
+    when the upload is a declared video.
+    """
+    global_limit = getattr(config, "FILE_MAX_SIZE", None)
+    if hasattr(global_limit, "value"):
+        global_limit = global_limit.value
+
+    if not _is_declared_video(filename, content_type):
+        return int(global_limit) if global_limit else None
+
+    # Video upload — apply the smaller video limit
+    video_limit = _configured_video_limit_mb(config)
+
+    if global_limit is not None and int(global_limit) > 0:
+        return min(video_limit, int(global_limit))
+    return video_limit
+
+
 def check_video_size_limit(
     upload_bytes: bytes,
     config: Any,
 ) -> None:
     """Check video bytes against the effective video file size limit.
 
-    The effective limit is min(RAG_VIDEO_MAX_FILE_SIZE_MB, RAG_FILE_MAX_SIZE)
-    when the global file limit is configured.  Raises
-    ``VideoSizeLimitExceededError`` when the limit is exceeded.
-
-    If the video policy config cannot be read, raises ``ServiceUnavailableError``
-    (HTTP 503) rather than treating the limit as unlimited.
+    This is a post-read check for cases where the video type was determined
+    after reading (e.g., via magic bytes).  Raises VideoSizeLimitExceededError
+    when the limit is exceeded.
     """
-    try:
-        video_limit = getattr(config, "RAG_VIDEO_MAX_FILE_SIZE_MB", None)
-        if hasattr(video_limit, "value"):
-            video_limit = video_limit.value
-        if video_limit is None:
-            video_limit = 20
-        video_limit = int(video_limit)
-    except Exception:
-        raise ServiceUnavailableError(
-            "video size policy could not be read"
-        )
+    video_limit = _configured_video_limit_mb(config)
 
     global_limit = getattr(config, "FILE_MAX_SIZE", None)
     if hasattr(global_limit, "value"):
@@ -153,35 +214,88 @@ def check_video_size_limit(
         raise VideoSizeLimitExceededError(effective_limit_mb)
 
 
-class ServiceUnavailableError(RuntimeError):
-    """Raised when video policy config cannot be read."""
+def read_upload_bytes(
+    upload_file: Any,
+    max_size_mb: Optional[int],
+    *,
+    video_max_size_mb: Optional[int] = None,
+    filename: str = "",
+    content_type: Optional[str] = None,
+) -> bytes:
+    """Read an upload with global and early supported-video bounds.
 
-    def __init__(self, message: str = "service unavailable"):
-        super().__init__(message)
-
-
-def read_upload_bytes(upload_file: Any, max_size_mb: Optional[int]) -> bytes:
-    """Read an upload once, bounding the read when an upload limit is configured."""
-    byte_limit: Optional[int] = None
+    Declared videos use the already-resolved effective limit. For ambiguous
+    uploads, read only the small format prefix first; if it identifies MP4 or
+    MPEG, apply the video limit before reading the rest of the stream.
+    """
     if max_size_mb is not None:
         if isinstance(max_size_mb, bool) or not isinstance(max_size_mb, int):
             raise ValueError("upload byte limit must be an integer or null")
         if max_size_mb < 0:
             raise ValueError("upload byte limit must not be negative")
-        byte_limit = max_size_mb * _BYTES_PER_MEBIBYTE
-        declared_size = getattr(upload_file, "size", None)
-        if isinstance(declared_size, int) and declared_size > byte_limit:
-            raise UploadByteLimitExceededError(max_size_mb)
+
+    if video_max_size_mb is not None:
+        if isinstance(video_max_size_mb, bool) or not isinstance(video_max_size_mb, int):
+            raise ValueError("video upload byte limit must be an integer or null")
+        if video_max_size_mb <= 0:
+            raise ValueError("video upload byte limit must be positive")
 
     stream = getattr(upload_file, "file", None)
     if stream is None or not callable(getattr(stream, "read", None)):
         raise TypeError("upload_file must expose a readable binary stream")
-    contents = stream.read() if byte_limit is None else stream.read(byte_limit + 1)
-    if not isinstance(contents, (bytes, bytearray)):
+
+    declared_video = _is_declared_video(filename, content_type)
+    video_limit_applied = False
+    byte_limit_mb = max_size_mb
+    if declared_video and video_max_size_mb is not None:
+        video_limit_applied = True
+        byte_limit_mb = (
+            video_max_size_mb
+            if byte_limit_mb is None
+            else min(byte_limit_mb, video_max_size_mb)
+        )
+
+    byte_limit = (
+        byte_limit_mb * _BYTES_PER_MEBIBYTE
+        if byte_limit_mb is not None
+        else None
+    )
+    declared_size = getattr(upload_file, "size", None)
+    if isinstance(declared_size, int) and byte_limit is not None and declared_size > byte_limit:
+        if video_limit_applied:
+            raise VideoSizeLimitExceededError(byte_limit_mb)
+        raise UploadByteLimitExceededError(byte_limit_mb)
+
+    prefix = b""
+    if not declared_video and video_max_size_mb is not None:
+        prefix = stream.read(12)
+        if not isinstance(prefix, (bytes, bytearray)):
+            raise TypeError("upload stream must return bytes")
+        if byte_limit is not None and len(prefix) > byte_limit:
+            raise UploadByteLimitExceededError(byte_limit_mb)
+        if _infer_video_mime(bytes(prefix)) is not None:
+            byte_limit_mb = (
+                video_max_size_mb
+                if max_size_mb is None
+                else min(max_size_mb, video_max_size_mb)
+            )
+            video_limit_applied = True
+            byte_limit = byte_limit_mb * _BYTES_PER_MEBIBYTE
+            if isinstance(declared_size, int) and declared_size > byte_limit:
+                raise VideoSizeLimitExceededError(byte_limit_mb)
+
+    remaining = None if byte_limit is None else byte_limit + 1 - len(prefix)
+    if remaining is not None and remaining < 0:
+        raise UploadByteLimitExceededError(byte_limit_mb)
+    tail = stream.read() if remaining is None else stream.read(remaining)
+    if not isinstance(tail, (bytes, bytearray)):
         raise TypeError("upload stream must return bytes")
+    contents = bytes(prefix) + bytes(tail)
     if byte_limit is not None and len(contents) > byte_limit:
-        raise UploadByteLimitExceededError(max_size_mb)
-    return bytes(contents)
+        if video_limit_applied:
+            raise VideoSizeLimitExceededError(byte_limit_mb)
+        raise UploadByteLimitExceededError(byte_limit_mb)
+    return contents
 
 
 @dataclass(frozen=True)

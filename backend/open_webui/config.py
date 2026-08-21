@@ -334,6 +334,35 @@ class PersistentConfig(Generic[T]):
         save_to_db(CONFIG_DATA)
         self.config_value = self.value
 
+def save_persistent_config_values(
+    updates: dict[str, tuple[PersistentConfig, Any]],
+) -> None:
+    """Persist multiple global settings in one database transaction.
+
+    Update in-memory PersistentConfig values only after the global config row
+    commits successfully. Existing callers that update one setting can keep
+    using PersistentConfig.save().
+    """
+    global CONFIG_DATA
+
+    previous_config = copy.deepcopy(CONFIG_DATA)
+    try:
+        for config_path, (_config_item, value) in updates.items():
+            target = CONFIG_DATA
+            path_parts = config_path.split(".")
+            for key in path_parts[:-1]:
+                target = target.setdefault(key, {})
+            target[path_parts[-1]] = value
+        save_to_db(CONFIG_DATA)
+    except Exception:
+        CONFIG_DATA = previous_config
+        raise
+
+    for config_item, value in updates.values():
+        config_item.value = value
+        config_item.config_value = value
+
+
 class UserScopedConfig:
     def __init__(self, config_path: str, default: Any):
         self.config_path = config_path
@@ -2204,19 +2233,19 @@ RAG_VIDEO_MAX_FILE_SIZE_MB = PersistentConfig(
 # Video embedding chunking
 RAG_VIDEO_CHUNK_DURATION = PersistentConfig(
     "RAG_VIDEO_CHUNK_DURATION",
-    "rag.video.chunk_duration",
+    "rag.video_chunk_duration",
     int(os.environ.get("RAG_VIDEO_CHUNK_DURATION", "16")),
 )
 
 RAG_VIDEO_MIN_CHUNK_DURATION = PersistentConfig(
     "RAG_VIDEO_MIN_CHUNK_DURATION",
-    "rag.video.min_chunk_duration",
+    "rag.video_min_chunk_duration",
     int(os.environ.get("RAG_VIDEO_MIN_CHUNK_DURATION", "4")),
 )
 
 RAG_VIDEO_MAX_DURATION = PersistentConfig(
     "RAG_VIDEO_MAX_DURATION",
-    "rag.video.max_duration",
+    "rag.video_max_duration",
     int(os.environ.get("RAG_VIDEO_MAX_DURATION", "120")),
 )
 

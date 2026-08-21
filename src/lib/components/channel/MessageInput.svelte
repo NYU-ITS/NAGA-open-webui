@@ -103,6 +103,23 @@
 				return;
 			}
 
+			// Video-size preflight (UX only; backend enforcement is authoritative)
+			const videoMaxSizeMb = $config?.file?.max_video_size_mb ?? null;
+			if (videoMaxSizeMb !== null) {
+				const videoMimes = ['video/mp4', 'video/mpeg'];
+				const videoExts = ['.mp4', '.mpeg', '.mpg'];
+				const ext = file.name ? '.' + file.name.split('.').pop()?.toLowerCase() : '';
+				const isVideo = videoMimes.includes(file.type) || videoExts.includes(ext);
+				if (isVideo && file.size > videoMaxSizeMb * 1024 * 1024) {
+					toast.error(
+						$i18n.t('The video file exceeds the configured {{limit}} MB limit.', {
+							limit: videoMaxSizeMb
+						})
+					);
+					return;
+				}
+			}
+
 			if (
 				['image/gif', 'image/webp', 'image/jpeg', 'image/png', 'image/avif'].includes(file['type'])
 			) {
@@ -186,7 +203,9 @@
 				files = files.filter((item) => item?.itemId !== tempItemId);
 			}
 		} catch (e) {
-			toast.error(`${e}`);
+			// Handle structured {code, message} errors from backend
+			const errorMsg = e && typeof e === 'object' && e.message ? e.message : `${e}`;
+			toast.error(errorMsg);
 			files = files.filter((item) => item?.itemId !== tempItemId);
 		}
 	};

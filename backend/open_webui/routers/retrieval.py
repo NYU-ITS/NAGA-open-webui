@@ -774,20 +774,155 @@ class ConfigUpdateForm(BaseModel):
     web: Optional[WebConfig] = None
 
 
+def _update_video_settings(request, video_config, user):
+    """Atomically validate, persist, and audit video settings.
+
+    Authorizes the caller, resolves omitted fields from current persisted values,
+    validates the complete configuration, persists all changes, updates active
+    PersistentConfig objects, and emits an audit log entry.
+
+    Raises HTTPException on authorization failure or validation errors.
+    Returns the complete configured and effective video configuration dict.
+    """
+    from open_webui.utils.super_admin import is_super_admin
+
+    if not is_super_admin(user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only super administrators can update video settings.",
+        )
+
+    config = request.app.state.config
+    v = video_config
+
+    # Resolve omitted fields from current persisted values
+    def _current(attr, default):
+        val = getattr(config, attr, default)
+        return val.value if hasattr(val, "value") else val
+
+    resolved_max_size = v.max_file_size_mb if v.max_file_size_mb is not None else int(_current("RAG_VIDEO_MAX_FILE_SIZE_MB", 20))
+    resolved_chunk = v.chunk_duration_seconds if v.chunk_duration_seconds is not None else int(_current("RAG_VIDEO_CHUNK_DURATION", 16))
+    resolved_min = v.min_chunk_duration_seconds if v.min_chunk_duration_seconds is not None else int(_current("RAG_VIDEO_MIN_CHUNK_DURATION", 4))
+    resolved_max_dur = v.max_duration_seconds if v.max_duration_seconds is not None else int(_current("RAG_VIDEO_MAX_DURATION", 120))
+
+    # Strict type validation — reject booleans, decimals, non-integer values
+    errors = {}
+    for name, val in [
+        ("max_file_size_mb", resolved_max_size),
+        ("chunk_duration_seconds", resolved_chunk),
+        ("min_chunk_duration_seconds", resolved_min),
+        ("max_duration_seconds", resolved_max_dur),
+    ]:
+        if isinstance(val, bool):
+            errors[name] = "Must be an integer, not a boolean."
+        elif isinstance(val, float) and not val.is_integer():
+            errors[name] = "Must be an integer, not a decimal."
+
+    if errors:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=errors)
+
+    # Range validation
+    resolved_max_size = int(resolved_max_size)
+    resolved_chunk = int(resolved_chunk)
+    resolved_min = int(resolved_min)
+    resolved_max_dur = int(resolved_max_dur)
+
+    errors = {}
+    if not (1 <= resolved_max_size <= 1024):
+        errors["max_file_size_mb"] = "Must be between 1 and 1024 MB."
+    if not (1 <= resolved_chunk <= 120):
+        errors["chunk_duration_seconds"] = "Must be between 1 and 120 seconds."
+    if resolved_min < 1:
+        errors["min_chunk_duration_seconds"] = "Must be at least 1 second."
+    if not (1 <= resolved_max_dur <= 3600):
+        errors["max_duration_seconds"] = "Must be between 1 and 3600 seconds."
+    if resolved_min >= resolved_chunk:
+        errors["min_chunk_duration_seconds"] = "Must be less than chunk duration."
+
+    if errors:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=errors)
+
+    # Capture old values for audit
+    old_values = {
+        "max_file_size_mb": int(_current("RAG_VIDEO_MAX_FILE_SIZE_MB", 20)),
+        "chunk_duration": int(_current("RAG_VIDEO_CHUNK_DURATION", 16)),
+        "min_chunk_duration": int(_current("RAG_VIDEO_MIN_CHUNK_DURATION", 4)),
+        "max_duration": int(_current("RAG_VIDEO_MAX_DURATION", 120)),
+    }
+
+    from open_webui.config import (
+        RAG_VIDEO_CHUNK_DURATION,
+        RAG_VIDEO_MAX_DURATION,
+        RAG_VIDEO_MAX_FILE_SIZE_MB,
+        RAG_VIDEO_MIN_CHUNK_DURATION,
+        save_persistent_config_values,
+    )
+
+    save_persistent_config_values(
+        {
+            "rag.video.max_file_size_mb": (
+                RAG_VIDEO_MAX_FILE_SIZE_MB,
+                resolved_max_size,
+            ),
+            "rag.video_chunk_duration": (
+                RAG_VIDEO_CHUNK_DURATION,
+                resolved_chunk,
+            ),
+            "rag.video_min_chunk_duration": (
+                RAG_VIDEO_MIN_CHUNK_DURATION,
+                resolved_min,
+            ),
+            "rag.video_max_duration": (
+                RAG_VIDEO_MAX_DURATION,
+                resolved_max_dur,
+            ),
+        }
+    )
+
+    new_values = {
+        "max_file_size_mb": resolved_max_size,
+        "chunk_duration": resolved_chunk,
+        "min_chunk_duration": resolved_min,
+        "max_duration": resolved_max_dur,
+    }
+
+    # Audit event
+    log.info(
+        "video_settings_updated",
+        extra={
+            "audit": True,
+            "actor": user.email,
+            "old_values": old_values,
+            "new_values": new_values,
+            "result": "success",
+        },
+    )
+
+    return {
+        "max_file_size_mb": resolved_max_size,
+        "effective_max_file_size_mb": _effective_video_max_size_mb(request),
+        "chunk_duration_seconds": resolved_chunk,
+        "min_chunk_duration_seconds": resolved_min,
+        "max_duration_seconds": resolved_max_dur,
+    }
+
+
 @router.post("/config/update")
 async def update_rag_config(
     request: Request, form_data: ConfigUpdateForm, user=Depends(get_admin_user)
 ):
+    # Authorize and validate the video block before mutating any other settings.
+    if form_data.video is not None:
+        _update_video_settings(request, form_data.video, user)
+
     request.app.state.config.PDF_EXTRACT_IMAGES = (
         form_data.pdf_extract_images
         if form_data.pdf_extract_images is not None
         else request.app.state.config.PDF_EXTRACT_IMAGES
     )
 
-    
     if form_data.RAG_FULL_CONTEXT is not None:
-        request.app.state.config.RAG_FULL_CONTEXT.set(user.email,form_data.RAG_FULL_CONTEXT)
-    
+        request.app.state.config.RAG_FULL_CONTEXT.set(user.email, form_data.RAG_FULL_CONTEXT)
 
     request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL = (
         form_data.BYPASS_EMBEDDING_AND_RETRIEVAL
@@ -810,61 +945,6 @@ async def update_rag_config(
     if form_data.file is not None:
         request.app.state.config.FILE_MAX_SIZE = form_data.file.max_size
         request.app.state.config.FILE_MAX_COUNT = form_data.file.max_count
-
-    if form_data.video is not None:
-        from open_webui.utils.super_admin import is_super_admin
-
-        if not is_super_admin(user):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Only super administrators can update video settings.",
-            )
-
-        # Validate all video fields before persisting any
-        errors = {}
-        v = form_data.video
-
-        if v.max_file_size_mb is not None:
-            if not (1 <= v.max_file_size_mb <= 1024):
-                errors["max_file_size_mb"] = "Must be between 1 and 1024 MB."
-
-        if v.chunk_duration_seconds is not None:
-            if not (1 <= v.chunk_duration_seconds <= 120):
-                errors["chunk_duration_seconds"] = "Must be between 1 and 120 seconds."
-
-        if v.min_chunk_duration_seconds is not None:
-            if v.min_chunk_duration_seconds < 1:
-                errors["min_chunk_duration_seconds"] = "Must be at least 1 second."
-
-        if v.max_duration_seconds is not None:
-            if not (1 <= v.max_duration_seconds <= 3600):
-                errors["max_duration_seconds"] = "Must be between 1 and 3600 seconds."
-
-        # Cross-field invariant: min_chunk_duration < chunk_duration
-        effective_chunk = v.chunk_duration_seconds if v.chunk_duration_seconds is not None else getattr(request.app.state.config, "RAG_VIDEO_CHUNK_DURATION", 16)
-        if hasattr(effective_chunk, "value"):
-            effective_chunk = effective_chunk.value
-        effective_min = v.min_chunk_duration_seconds if v.min_chunk_duration_seconds is not None else getattr(request.app.state.config, "RAG_VIDEO_MIN_CHUNK_DURATION", 4)
-        if hasattr(effective_min, "value"):
-            effective_min = effective_min.value
-        if int(effective_min) >= int(effective_chunk):
-            errors["min_chunk_duration_seconds"] = "Must be less than chunk duration."
-
-        if errors:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=errors,
-            )
-
-        # All valid — persist
-        if v.max_file_size_mb is not None:
-            request.app.state.config.RAG_VIDEO_MAX_FILE_SIZE_MB = v.max_file_size_mb
-        if v.chunk_duration_seconds is not None:
-            request.app.state.config.RAG_VIDEO_CHUNK_DURATION = v.chunk_duration_seconds
-        if v.min_chunk_duration_seconds is not None:
-            request.app.state.config.RAG_VIDEO_MIN_CHUNK_DURATION = v.min_chunk_duration_seconds
-        if v.max_duration_seconds is not None:
-            request.app.state.config.RAG_VIDEO_MAX_DURATION = v.max_duration_seconds
 
     if form_data.content_extraction is not None:
         log.info(

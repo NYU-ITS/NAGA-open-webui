@@ -594,10 +594,12 @@
 				id, // knowledge base ID
 				file
 			).catch((e) => {
-				if (e && typeof e === 'string' && e.includes('Duplicate content')) {
-					toast.warning($i18n.t(e));
+				// Handle structured {code, message} errors from backend
+				const errorMsg = e && typeof e === 'object' && e.message ? e.message : `${e}`;
+				if (typeof errorMsg === 'string' && errorMsg.includes('Duplicate content')) {
+					toast.warning($i18n.t(errorMsg));
 				} else {
-					toast.error(`${e}`);
+					toast.error(errorMsg);
 				}
 				return null;
 			});
@@ -639,12 +641,14 @@
 				knowledge.files = knowledge.files.filter((item) => item.itemId !== tempItemId);
 			}
 		} catch (e) {
-			toast.error(`${e}`);
+			// Handle structured {code, message} errors from backend
+			const errorMsg = e && typeof e === 'object' && e.message ? e.message : `${e}`;
+			toast.error(errorMsg);
 			// Update status to error
 			knowledge.files = knowledge.files.map((item) => {
 				if (item.itemId === tempItemId) {
 					item.status = 'error';
-					item.error = `${e}`;
+					item.error = errorMsg;
 				}
 				return item;
 			});
