@@ -210,6 +210,10 @@ from open_webui.config import (
     RAG_PDF_COMPLEX_PARSER_ENABLED,
     RAG_PDF_MAX_VISUALS_PER_PAGE,
     RAG_PDF_MAX_VISUALS_PER_DOCUMENT,
+    RAG_VIDEO_MAX_FILE_SIZE_MB,
+    RAG_VIDEO_CHUNK_DURATION,
+    RAG_VIDEO_MIN_CHUNK_DURATION,
+    RAG_VIDEO_MAX_DURATION,
     YOUTUBE_LOADER_LANGUAGE,
     YOUTUBE_LOADER_PROXY_URL,
     # Retrieval (Web Search)
@@ -752,6 +756,10 @@ app.state.config.RELEVANCE_THRESHOLD = RAG_RELEVANCE_THRESHOLD
 app.state.config.FILE_MAX_SIZE = RAG_FILE_MAX_SIZE
 app.state.config.FILE_MAX_COUNT = RAG_FILE_MAX_COUNT
 
+app.state.config.RAG_VIDEO_MAX_FILE_SIZE_MB = RAG_VIDEO_MAX_FILE_SIZE_MB
+app.state.config.RAG_VIDEO_CHUNK_DURATION = RAG_VIDEO_CHUNK_DURATION
+app.state.config.RAG_VIDEO_MIN_CHUNK_DURATION = RAG_VIDEO_MIN_CHUNK_DURATION
+app.state.config.RAG_VIDEO_MAX_DURATION = RAG_VIDEO_MAX_DURATION
 
 app.state.config.RAG_FULL_CONTEXT = RAG_FULL_CONTEXT
 app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL = BYPASS_EMBEDDING_AND_RETRIEVAL
@@ -1430,6 +1438,22 @@ async def list_tasks_endpoint(user=Depends(get_verified_user)):
 ##################################
 
 
+def _effective_video_max_size_mb(app) -> int:
+    """Return the effective video file size limit in MB."""
+    video_limit = getattr(app.state.config, "RAG_VIDEO_MAX_FILE_SIZE_MB", 20)
+    if hasattr(video_limit, "value"):
+        video_limit = video_limit.value
+    video_limit = int(video_limit) if video_limit else 20
+
+    global_limit = getattr(app.state.config, "FILE_MAX_SIZE", None)
+    if hasattr(global_limit, "value"):
+        global_limit = global_limit.value
+
+    if global_limit is not None and global_limit > 0:
+        return min(video_limit, int(global_limit))
+    return video_limit
+
+
 @app.get("/api/config")
 async def get_app_config(request: Request):
     user = None
@@ -1511,6 +1535,7 @@ async def get_app_config(request: Request):
                 "file": {
                     "max_size": app.state.config.FILE_MAX_SIZE,
                     "max_count": app.state.config.FILE_MAX_COUNT,
+                    "max_video_size_mb": _effective_video_max_size_mb(app),
                 },
                 "permissions": {**app.state.config.USER_PERMISSIONS},
                 "google_drive": {

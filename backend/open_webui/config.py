@@ -2194,22 +2194,29 @@ RAG_PDF_MAX_VISUALS_PER_DOCUMENT = PersistentConfig(
     int(os.environ.get("RAG_PDF_MAX_VISUALS_PER_DOCUMENT", "80")),
 )
 
+# Video upload and processing settings
+RAG_VIDEO_MAX_FILE_SIZE_MB = PersistentConfig(
+    "RAG_VIDEO_MAX_FILE_SIZE_MB",
+    "rag.video.max_file_size_mb",
+    int(os.environ.get("RAG_VIDEO_MAX_FILE_SIZE_MB", "20")),
+)
+
 # Video embedding chunking
 RAG_VIDEO_CHUNK_DURATION = PersistentConfig(
     "RAG_VIDEO_CHUNK_DURATION",
-    "rag.video_chunk_duration",
+    "rag.video.chunk_duration",
     int(os.environ.get("RAG_VIDEO_CHUNK_DURATION", "16")),
 )
 
 RAG_VIDEO_MIN_CHUNK_DURATION = PersistentConfig(
     "RAG_VIDEO_MIN_CHUNK_DURATION",
-    "rag.video_min_chunk_duration",
+    "rag.video.min_chunk_duration",
     int(os.environ.get("RAG_VIDEO_MIN_CHUNK_DURATION", "4")),
 )
 
 RAG_VIDEO_MAX_DURATION = PersistentConfig(
     "RAG_VIDEO_MAX_DURATION",
-    "rag.video_max_duration",
+    "rag.video.max_duration",
     int(os.environ.get("RAG_VIDEO_MAX_DURATION", "120")),
 )
 

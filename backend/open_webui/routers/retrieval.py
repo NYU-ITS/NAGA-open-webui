@@ -590,6 +590,27 @@ async def update_reranking_config(
         )
 
 
+def _effective_video_max_size_mb(request: Request) -> int:
+    """Return the effective video file size limit in MB.
+
+    The effective limit is min(RAG_VIDEO_MAX_FILE_SIZE_MB, RAG_FILE_MAX_SIZE)
+    when the global file limit is configured. If no global file limit exists,
+    the video-specific limit applies.
+    """
+    video_limit = getattr(request.app.state.config, "RAG_VIDEO_MAX_FILE_SIZE_MB", 20)
+    if hasattr(video_limit, "value"):
+        video_limit = video_limit.value
+    video_limit = int(video_limit) if video_limit else 20
+
+    global_limit = getattr(request.app.state.config, "FILE_MAX_SIZE", None)
+    if hasattr(global_limit, "value"):
+        global_limit = global_limit.value
+
+    if global_limit is not None and global_limit > 0:
+        return min(video_limit, int(global_limit))
+    return video_limit
+
+
 @router.get("/config")
 async def get_rag_config(request: Request, user=Depends(get_verified_user)):
     return {
@@ -615,6 +636,13 @@ async def get_rag_config(request: Request, user=Depends(get_verified_user)):
         "file": {
             "max_size": request.app.state.config.FILE_MAX_SIZE,
             "max_count": request.app.state.config.FILE_MAX_COUNT,
+        },
+        "video": {
+            "max_file_size_mb": getattr(request.app.state.config, "RAG_VIDEO_MAX_FILE_SIZE_MB", 20),
+            "effective_max_file_size_mb": _effective_video_max_size_mb(request),
+            "chunk_duration_seconds": getattr(request.app.state.config, "RAG_VIDEO_CHUNK_DURATION", 16),
+            "min_chunk_duration_seconds": getattr(request.app.state.config, "RAG_VIDEO_MIN_CHUNK_DURATION", 4),
+            "max_duration_seconds": getattr(request.app.state.config, "RAG_VIDEO_MAX_DURATION", 120),
         },
         "youtube": {
             "language": request.app.state.config.YOUTUBE_LOADER_LANGUAGE,
@@ -725,6 +753,13 @@ class WebConfig(BaseModel):
     BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL: Optional[bool] = None
 
 
+class VideoConfig(BaseModel):
+    max_file_size_mb: Optional[int] = None
+    chunk_duration_seconds: Optional[int] = None
+    min_chunk_duration_seconds: Optional[int] = None
+    max_duration_seconds: Optional[int] = None
+
+
 class ConfigUpdateForm(BaseModel):
     RAG_FULL_CONTEXT: Optional[bool] = None
     BYPASS_EMBEDDING_AND_RETRIEVAL: Optional[bool] = None
@@ -732,6 +767,7 @@ class ConfigUpdateForm(BaseModel):
     enable_google_drive_integration: Optional[bool] = None
     enable_onedrive_integration: Optional[bool] = None
     file: Optional[FileConfig] = None
+    video: Optional[VideoConfig] = None
     content_extraction: Optional[ContentExtractionConfig] = None
     chunk: Optional[ChunkParamUpdateForm] = None
     youtube: Optional[YoutubeLoaderConfig] = None
@@ -774,6 +810,61 @@ async def update_rag_config(
     if form_data.file is not None:
         request.app.state.config.FILE_MAX_SIZE = form_data.file.max_size
         request.app.state.config.FILE_MAX_COUNT = form_data.file.max_count
+
+    if form_data.video is not None:
+        from open_webui.utils.super_admin import is_super_admin
+
+        if not is_super_admin(user):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only super administrators can update video settings.",
+            )
+
+        # Validate all video fields before persisting any
+        errors = {}
+        v = form_data.video
+
+        if v.max_file_size_mb is not None:
+            if not (1 <= v.max_file_size_mb <= 1024):
+                errors["max_file_size_mb"] = "Must be between 1 and 1024 MB."
+
+        if v.chunk_duration_seconds is not None:
+            if not (1 <= v.chunk_duration_seconds <= 120):
+                errors["chunk_duration_seconds"] = "Must be between 1 and 120 seconds."
+
+        if v.min_chunk_duration_seconds is not None:
+            if v.min_chunk_duration_seconds < 1:
+                errors["min_chunk_duration_seconds"] = "Must be at least 1 second."
+
+        if v.max_duration_seconds is not None:
+            if not (1 <= v.max_duration_seconds <= 3600):
+                errors["max_duration_seconds"] = "Must be between 1 and 3600 seconds."
+
+        # Cross-field invariant: min_chunk_duration < chunk_duration
+        effective_chunk = v.chunk_duration_seconds if v.chunk_duration_seconds is not None else getattr(request.app.state.config, "RAG_VIDEO_CHUNK_DURATION", 16)
+        if hasattr(effective_chunk, "value"):
+            effective_chunk = effective_chunk.value
+        effective_min = v.min_chunk_duration_seconds if v.min_chunk_duration_seconds is not None else getattr(request.app.state.config, "RAG_VIDEO_MIN_CHUNK_DURATION", 4)
+        if hasattr(effective_min, "value"):
+            effective_min = effective_min.value
+        if int(effective_min) >= int(effective_chunk):
+            errors["min_chunk_duration_seconds"] = "Must be less than chunk duration."
+
+        if errors:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=errors,
+            )
+
+        # All valid — persist
+        if v.max_file_size_mb is not None:
+            request.app.state.config.RAG_VIDEO_MAX_FILE_SIZE_MB = v.max_file_size_mb
+        if v.chunk_duration_seconds is not None:
+            request.app.state.config.RAG_VIDEO_CHUNK_DURATION = v.chunk_duration_seconds
+        if v.min_chunk_duration_seconds is not None:
+            request.app.state.config.RAG_VIDEO_MIN_CHUNK_DURATION = v.min_chunk_duration_seconds
+        if v.max_duration_seconds is not None:
+            request.app.state.config.RAG_VIDEO_MAX_DURATION = v.max_duration_seconds
 
     if form_data.content_extraction is not None:
         log.info(
@@ -914,6 +1005,13 @@ async def update_rag_config(
         "file": {
             "max_size": request.app.state.config.FILE_MAX_SIZE,
             "max_count": request.app.state.config.FILE_MAX_COUNT,
+        },
+        "video": {
+            "max_file_size_mb": getattr(request.app.state.config, "RAG_VIDEO_MAX_FILE_SIZE_MB", 20),
+            "effective_max_file_size_mb": _effective_video_max_size_mb(request),
+            "chunk_duration_seconds": getattr(request.app.state.config, "RAG_VIDEO_CHUNK_DURATION", 16),
+            "min_chunk_duration_seconds": getattr(request.app.state.config, "RAG_VIDEO_MIN_CHUNK_DURATION", 4),
+            "max_duration_seconds": getattr(request.app.state.config, "RAG_VIDEO_MAX_DURATION", 120),
         },
         "content_extraction": {
             "engine": request.app.state.config.CONTENT_EXTRACTION_ENGINE,

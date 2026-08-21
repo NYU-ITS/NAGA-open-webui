@@ -88,9 +88,39 @@ def upload_file(
             file.content_type,
         )
 
-        # Video preflight: validate with ffprobe before storage
+        # Video preflight: size check then ffprobe validation
         if upload_content_type in {"video/mp4", "video/mpeg"}:
-            from open_webui.retrieval.embedding.preparation import validate_video
+            from open_webui.retrieval.embedding.preparation import (
+                VideoSizeLimitExceededError,
+                ServiceUnavailableError,
+                check_video_size_limit,
+                validate_video,
+            )
+
+            try:
+                check_video_size_limit(upload_bytes, request.app.state.config)
+            except VideoSizeLimitExceededError as error:
+                log.warning(
+                    "video_upload_rejected",
+                    extra={
+                        "reason": "video_file_too_large",
+                        "effective_limit_mb": error.effective_limit_mb,
+                        "actual_size_bytes": len(upload_bytes),
+                        "route": "files",
+                    },
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail={
+                        "code": "video_file_too_large",
+                        "message": f"The video file exceeds the configured {error.effective_limit_mb} MB limit.",
+                    },
+                ) from None
+            except ServiceUnavailableError:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Video size policy could not be read.",
+                ) from None
 
             try:
                 max_video_duration = getattr(

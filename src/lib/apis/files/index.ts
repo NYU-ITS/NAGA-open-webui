@@ -18,7 +18,13 @@ export const uploadFile = async (token: string, file: File) => {
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			const detail = err.detail;
+			// Normalize structured {code, message} errors to a human-readable string
+			if (detail && typeof detail === 'object' && detail.message) {
+				error = detail.message;
+			} else {
+				error = detail;
+			}
 			console.log(err);
 			return null;
 		});

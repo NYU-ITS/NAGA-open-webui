@@ -64,6 +64,12 @@
 	let fileMaxSize = null;
 	let fileMaxCount = null;
 
+	let videoMaxFileSizeMb = 20;
+	let videoEffectiveMaxFileSizeMb = 20;
+	let videoChunkDurationSeconds = 16;
+	let videoMinChunkDurationSeconds = 4;
+	let videoMaxDurationSeconds = 120;
+
 	let contentExtractionEngine = 'default';
 	let tikaServerUrl = '';
 	let showTikaServerUrl = false;
@@ -246,6 +252,12 @@
 				max_size: fileMaxSize === '' || fileMaxSize === null ? 5 : fileMaxSize,
 				max_count: fileMaxCount === '' || fileMaxCount === null ? 2 : fileMaxCount
 			},
+			video: {
+				max_file_size_mb: videoMaxFileSizeMb,
+				chunk_duration_seconds: videoChunkDurationSeconds,
+				min_chunk_duration_seconds: videoMinChunkDurationSeconds,
+				max_duration_seconds: videoMaxDurationSeconds
+			},
 			RAG_FULL_CONTEXT: RAG_FULL_CONTEXT,
 			BYPASS_EMBEDDING_AND_RETRIEVAL: BYPASS_EMBEDDING_AND_RETRIEVAL,
 			chunk: {
@@ -284,6 +296,15 @@
 				chunkOverlap = (refreshRes.chunk.chunk_overlap && refreshRes.chunk.chunk_overlap > 0) ? refreshRes.chunk.chunk_overlap : 200;
 				textSplitter = refreshRes.chunk.text_splitter;
 			}
+		}
+
+		// Update video settings from backend response
+		if (res && res.video) {
+			videoMaxFileSizeMb = res.video.max_file_size_mb ?? 20;
+			videoEffectiveMaxFileSizeMb = res.video.effective_max_file_size_mb ?? videoMaxFileSizeMb;
+			videoChunkDurationSeconds = res.video.chunk_duration_seconds ?? 16;
+			videoMinChunkDurationSeconds = res.video.min_chunk_duration_seconds ?? 4;
+			videoMaxDurationSeconds = res.video.max_duration_seconds ?? 120;
 		}
 
 		await updateQuerySettings(localStorage.token, {email: $user.email, ...querySettings});
@@ -389,6 +410,14 @@
 
 			fileMaxSize = res?.file.max_size ?? 5;
 			fileMaxCount = res?.file.max_count ?? 2;
+
+			if (res?.video) {
+				videoMaxFileSizeMb = res.video.max_file_size_mb ?? 20;
+				videoEffectiveMaxFileSizeMb = res.video.effective_max_file_size_mb ?? videoMaxFileSizeMb;
+				videoChunkDurationSeconds = res.video.chunk_duration_seconds ?? 16;
+				videoMinChunkDurationSeconds = res.video.min_chunk_duration_seconds ?? 4;
+				videoMaxDurationSeconds = res.video.max_duration_seconds ?? 120;
+			}
 
 			enableGoogleDriveIntegration = res.enable_google_drive_integration;
 			enableOneDriveIntegration = res.enable_onedrive_integration;
@@ -958,6 +987,96 @@
 									min="0"
 								/>
 							</Tooltip>
+						</div>
+					</div>
+				</div>
+			{/if}
+
+			{#if canViewFileSettings}
+				<div class="mb-3">
+					<div class=" mb-2.5 text-base font-medium">{$i18n.t('Video Processing')}</div>
+
+					<hr class=" border-gray-100 dark:border-gray-850 my-2" />
+
+					<div class="mb-2.5 flex w-full justify-between">
+						<div class="self-center text-xs font-medium">
+							{$i18n.t('Maximum video file size (MB)')}
+						</div>
+						<div class="flex items-center relative">
+							<Tooltip
+								content={$i18n.t(
+									'The maximum video file size in MB for chat and Knowledge Base uploads. Effective limit may be lower if a global file size limit is set.'
+								)}
+								placement="top-start"
+							>
+								<input
+									class="flex-1 w-full rounded-lg text-sm bg-transparent outline-hidden"
+									type="number"
+									placeholder={$i18n.t('Enter size in MB')}
+									bind:value={videoMaxFileSizeMb}
+									autocomplete="off"
+									min="1"
+									max="1024"
+								/>
+							</Tooltip>
+						</div>
+					</div>
+
+					{#if videoEffectiveMaxFileSizeMb < videoMaxFileSizeMb}
+						<div class="mb-2.5 text-xs text-gray-500 dark:text-gray-400">
+							{$i18n.t('Effective limit: {{limit}} MB (limited by global file size setting)', {
+								limit: videoEffectiveMaxFileSizeMb
+							})}
+						</div>
+					{/if}
+
+					<div class="mb-2.5 flex w-full justify-between">
+						<div class="self-center text-xs font-medium">
+							{$i18n.t('Video chunk duration (seconds)')}
+						</div>
+						<div class="flex items-center relative">
+							<input
+								class="flex-1 w-full rounded-lg text-sm bg-transparent outline-hidden"
+								type="number"
+								placeholder={$i18n.t('Enter seconds')}
+								bind:value={videoChunkDurationSeconds}
+								autocomplete="off"
+								min="1"
+								max="120"
+							/>
+						</div>
+					</div>
+
+					<div class="mb-2.5 flex w-full justify-between">
+						<div class="self-center text-xs font-medium">
+							{$i18n.t('Minimum video chunk duration (seconds)')}
+						</div>
+						<div class="flex items-center relative">
+							<input
+								class="flex-1 w-full rounded-lg text-sm bg-transparent outline-hidden"
+								type="number"
+								placeholder={$i18n.t('Enter seconds')}
+								bind:value={videoMinChunkDurationSeconds}
+								autocomplete="off"
+								min="1"
+							/>
+						</div>
+					</div>
+
+					<div class="mb-2.5 flex w-full justify-between">
+						<div class="self-center text-xs font-medium">
+							{$i18n.t('Maximum video duration (seconds)')}
+						</div>
+						<div class="flex items-center relative">
+							<input
+								class="flex-1 w-full rounded-lg text-sm bg-transparent outline-hidden"
+								type="number"
+								placeholder={$i18n.t('Enter seconds')}
+								bind:value={videoMaxDurationSeconds}
+								autocomplete="off"
+								min="1"
+								max="3600"
+							/>
 						</div>
 					</div>
 				</div>

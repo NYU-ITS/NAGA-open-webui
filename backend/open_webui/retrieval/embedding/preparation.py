@@ -105,6 +105,61 @@ class UploadByteLimitExceededError(ValueError):
         super().__init__("upload exceeds the configured byte limit")
 
 
+class VideoSizeLimitExceededError(ValueError):
+    """Raised when a video upload exceeds the effective video file size limit."""
+
+    def __init__(self, effective_limit_mb: int):
+        self.effective_limit_mb = effective_limit_mb
+        super().__init__(
+            f"video file exceeds the configured {effective_limit_mb} MB limit"
+        )
+
+
+def check_video_size_limit(
+    upload_bytes: bytes,
+    config: Any,
+) -> None:
+    """Check video bytes against the effective video file size limit.
+
+    The effective limit is min(RAG_VIDEO_MAX_FILE_SIZE_MB, RAG_FILE_MAX_SIZE)
+    when the global file limit is configured.  Raises
+    ``VideoSizeLimitExceededError`` when the limit is exceeded.
+
+    If the video policy config cannot be read, raises ``ServiceUnavailableError``
+    (HTTP 503) rather than treating the limit as unlimited.
+    """
+    try:
+        video_limit = getattr(config, "RAG_VIDEO_MAX_FILE_SIZE_MB", None)
+        if hasattr(video_limit, "value"):
+            video_limit = video_limit.value
+        if video_limit is None:
+            video_limit = 20
+        video_limit = int(video_limit)
+    except Exception:
+        raise ServiceUnavailableError(
+            "video size policy could not be read"
+        )
+
+    global_limit = getattr(config, "FILE_MAX_SIZE", None)
+    if hasattr(global_limit, "value"):
+        global_limit = global_limit.value
+
+    effective_limit_mb = video_limit
+    if global_limit is not None and int(global_limit) > 0:
+        effective_limit_mb = min(video_limit, int(global_limit))
+
+    size_mb = len(upload_bytes) / (1024 * 1024)
+    if size_mb > effective_limit_mb:
+        raise VideoSizeLimitExceededError(effective_limit_mb)
+
+
+class ServiceUnavailableError(RuntimeError):
+    """Raised when video policy config cannot be read."""
+
+    def __init__(self, message: str = "service unavailable"):
+        super().__init__(message)
+
+
 def read_upload_bytes(upload_file: Any, max_size_mb: Optional[int]) -> bytes:
     """Read an upload once, bounding the read when an upload limit is configured."""
     byte_limit: Optional[int] = None

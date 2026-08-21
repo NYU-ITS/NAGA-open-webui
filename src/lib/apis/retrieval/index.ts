@@ -49,12 +49,20 @@ type YoutubeConfigForm = {
 	proxy_url: string;
 };
 
+type VideoConfigForm = {
+	max_file_size_mb?: number;
+	chunk_duration_seconds?: number;
+	min_chunk_duration_seconds?: number;
+	max_duration_seconds?: number;
+};
+
 type RAGConfigForm = {
 	email: string;
 	pdf_extract_images?: boolean;
 	enable_google_drive_integration?: boolean;
 	enable_onedrive_integration?: boolean;
 	chunk?: ChunkConfigForm;
+	video?: VideoConfigForm;
 	content_extraction?: ContentExtractConfigForm;
 	web_loader_ssl_verification?: boolean;
 	youtube?: YoutubeConfigForm;
