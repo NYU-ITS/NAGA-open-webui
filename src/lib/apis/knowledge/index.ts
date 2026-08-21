@@ -371,7 +371,7 @@ export const addFileToKnowledgeById = async (token: string, knowledgeId: string,
 	return res;
 };
 
-export const updateFileFromKnowledgeById
+export const updateFileFromKnowledgeById = async (token: string, id: string, fileId: string) => {
 	let error = null;
 
 	const res = await fetch(`${WEBUI_API_BASE_URL}/knowledge/${id}/file/update`, {
