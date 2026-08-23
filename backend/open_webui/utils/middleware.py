@@ -21,7 +21,10 @@ import atexit
 
 from fastapi import Request
 
-from open_webui.utils.models import get_models_for_user, model_supports_vision
+from open_webui.utils.models import (
+    get_models_for_user,
+    model_vision_capability,
+)
 
 from open_webui.env import RAG_THREAD_POOL_SIZE
 
@@ -945,8 +948,11 @@ async def process_chat_payload(request, form_data, metadata, user, model):
         log.info("Using Custom RAG")
 
     retrieved_sources = sources
-    vision_enabled = model_supports_vision(model)
-    if not vision_enabled and any(
+    vision_capability = model_vision_capability(model)
+    # Unknown capability is handled optimistically: let the selected model
+    # decide whether it can consume reconstructed visual evidence.
+    vision_enabled = vision_capability is not False
+    if vision_capability is False and any(
         isinstance(item, dict) and item.get("type") == "image"
         for item in (metadata.get("files") or [])
     ):
@@ -965,7 +971,7 @@ async def process_chat_payload(request, form_data, metadata, user, model):
         if isinstance(source, dict)
         for metadata in (source.get("metadata") or [])
     )
-    if not vision_enabled and retrieved_video:
+    if vision_capability is False and retrieved_video:
         await event_emitter(
             {
                 "type": "status",

@@ -151,26 +151,35 @@ _OPENAI_NON_VISION_VARIANTS = (
 )
 
 
-def model_supports_vision(model: dict) -> bool:
-    """Resolve answer-model vision support from metadata, then known model IDs.
+def model_vision_capability(model: dict) -> bool | None:
+    """Resolve declared answer-model vision support and known model IDs.
 
-    Explicit model metadata remains authoritative. The fallback covers raw
-    Portkey manifold entries, which carry the routed GPT-4o model ID but no
-    ``info.meta.capabilities`` record.
+    Explicit metadata is authoritative across the model shapes used by the
+    API, workspace models, and direct model requests. ``None`` means the
+    capability is unknown; callers can choose optimistic handling instead of
+    incorrectly treating an unrecognized model as non-vision.
     """
     if not isinstance(model, dict):
-        return False
+        return None
 
     info = model.get("info") if isinstance(model.get("info"), dict) else {}
-    meta = info.get("meta") if isinstance(info.get("meta"), dict) else {}
-    capabilities = (
-        meta.get("capabilities")
-        if isinstance(meta.get("capabilities"), dict)
-        else {}
-    )
-    explicit_vision = capabilities.get("vision")
-    if isinstance(explicit_vision, bool):
-        return explicit_vision
+    capability_sources = []
+    for container in (info, model):
+        if not isinstance(container, dict):
+            continue
+        meta = container.get("meta")
+        if isinstance(meta, dict):
+            capabilities = meta.get("capabilities")
+            if isinstance(capabilities, dict):
+                capability_sources.append(capabilities)
+        capabilities = container.get("capabilities")
+        if isinstance(capabilities, dict):
+            capability_sources.append(capabilities)
+
+    for capabilities in capability_sources:
+        explicit_vision = capabilities.get("vision")
+        if isinstance(explicit_vision, bool):
+            return explicit_vision
 
     identifiers = (model.get("id"), info.get("base_model_id"))
     for identifier in identifiers:
@@ -181,7 +190,12 @@ def model_supports_vision(model: dict) -> bool:
             continue
         if _OPENAI_GPT_4O_VISION_PATTERN.search(normalized):
             return True
-    return False
+    return None
+
+
+def model_supports_vision(model: dict) -> bool:
+    """Return whether vision support is explicitly known or inferred."""
+    return model_vision_capability(model) is True
 
 
 def _add_inferred_model_capabilities(model: dict) -> None:
