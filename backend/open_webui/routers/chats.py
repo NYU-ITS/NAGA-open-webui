@@ -1071,13 +1071,13 @@ async def export_chats_as_zip(
                 pdf_bytes = await run_in_threadpool(pdf_generator.generate_chat_pdf)
                 
                 # Create filename for the PDF
-                filename = f"{user_name}_{model_name}.pdf"
+                filename = f"{model_name}/{user_name}.pdf"
                 
                 # Handle duplicate filenames by adding a counter
                 original_filename = filename
                 counter = 1
                 while filename in pdf_files:
-                    name_part = original_filename.replace('.pdf', '')
+                    name_part = original_filename[:-len('.pdf')]
                     filename = f"{name_part}_{counter}.pdf"
                     counter += 1
                 
