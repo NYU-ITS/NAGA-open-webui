@@ -1828,6 +1828,12 @@ ENABLE_CODE_INTERPRETER = PersistentConfig(
     os.environ.get("ENABLE_CODE_INTERPRETER", "True").lower() == "true",
 )
 
+ENABLE_GUIDED_OVERLAY = PersistentConfig(
+    "ENABLE_GUIDED_OVERLAY",
+    "ui.guided_overlay.enable",
+    os.environ.get("ENABLE_GUIDED_OVERLAY", "True").lower() == "true",
+)
+
 CODE_INTERPRETER_ENGINE = PersistentConfig(
     "CODE_INTERPRETER_ENGINE",
     "code_interpreter.engine",

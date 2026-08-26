@@ -1,9 +1,9 @@
-import { GUIDE_VERSION, SUPER_ADMIN_GUIDE_ID } from '../config/guide.constants';
+import { SUPER_ADMIN_GUIDE_ID, SUPER_ADMIN_GUIDE_VERSION } from '../config/guide.constants';
 import type { GuideDefinition } from '../types/guide.types';
 
 export const superAdminGuide: GuideDefinition = {
 	id: SUPER_ADMIN_GUIDE_ID,
-	version: GUIDE_VERSION,
+	version: SUPER_ADMIN_GUIDE_VERSION,
 	role: 'super_admin',
 	steps: [
 		{
@@ -27,11 +27,10 @@ export const superAdminGuide: GuideDefinition = {
 		},
 		{
 			id: 'super-admin-help',
-			targetId: 'help-menu',
 			title: 'Help and Guided Tour',
-			description: 'You can reopen this guide from the Help menu at any time.',
-			placement: 'top',
-			targetPolicy: 'optional'
+			description:
+				'You can reopen this guide from the Help menu at any time. You are ready to manage the platform.',
+			summary: true
 		}
 	]
 };

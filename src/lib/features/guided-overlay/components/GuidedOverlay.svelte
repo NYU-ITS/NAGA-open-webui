@@ -28,6 +28,7 @@
 	let rectFrameId: number | null = null;
 	let rectTimeoutId: number | null = null;
 	let resizeObserver: ResizeObserver | null = null;
+	let domObserver: MutationObserver | null = null;
 	let observedTarget: HTMLElement | undefined;
 
 	$: title = typeof step.title === 'function' ? step.title(context) : step.title;
@@ -55,25 +56,31 @@
 	const uniqueElements = (elements: HTMLElement[]): HTMLElement[] =>
 		elements.filter((element, index) => elements.indexOf(element) === index);
 
+	const getActiveTarget = (): HTMLElement | undefined =>
+		(step.targetId ? resolveTarget(step.targetId) : null) ?? targetElement;
+
 	const getHighlightElements = (): HTMLElement[] => {
 		const targetIds = step.highlightTargetIds ?? [];
 
 		if (targetIds.length === 0) {
-			return targetElement ? [targetElement] : [];
+			const activeTarget = getActiveTarget();
+			return activeTarget ? [activeTarget] : [];
 		}
 
 		return uniqueElements(
 			targetIds
 				.map((targetId) =>
-					targetId === step.targetId && targetElement ? targetElement : resolveTarget(targetId)
+					targetId === step.targetId ? getActiveTarget() : resolveTarget(targetId)
 				)
 				.filter((element): element is HTMLElement => Boolean(element))
 		);
 	};
 
 	const updateRect = () => {
-		rect = targetElement ? targetElement.getBoundingClientRect() : null;
+		const activeTarget = getActiveTarget();
+		rect = activeTarget ? activeTarget.getBoundingClientRect() : null;
 		highlightRects = getHighlightElements().map((element) => element.getBoundingClientRect());
+		observeTargetResize();
 	};
 
 	const scheduleRectUpdate = () => {
@@ -106,21 +113,23 @@
 	};
 
 	const observeTargetResize = () => {
-		if (observedTarget === targetElement) {
+		const activeTarget = getActiveTarget();
+
+		if (observedTarget === activeTarget) {
 			return;
 		}
 
 		resizeObserver?.disconnect();
-		observedTarget = targetElement;
+		observedTarget = activeTarget;
 
-		if (!targetElement || typeof ResizeObserver === 'undefined') {
+		if (!activeTarget || typeof ResizeObserver === 'undefined') {
 			return;
 		}
 
 		resizeObserver = new ResizeObserver(() => {
 			scheduleRectUpdate();
 		});
-		resizeObserver.observe(targetElement);
+		resizeObserver.observe(activeTarget);
 	};
 
 	const onKeydown = (event: KeyboardEvent) => {
@@ -148,6 +157,8 @@
 		window.addEventListener('resize', scheduleRectUpdate);
 		window.addEventListener('scroll', scheduleRectUpdate, true);
 		window.addEventListener('keydown', onKeydown);
+		domObserver = new MutationObserver(scheduleRectUpdate);
+		domObserver.observe(document.body, { childList: true, subtree: true });
 	});
 
 	onDestroy(() => {
@@ -160,6 +171,7 @@
 		}
 
 		resizeObserver?.disconnect();
+		domObserver?.disconnect();
 		window.removeEventListener('resize', scheduleRectUpdate);
 		window.removeEventListener('scroll', scheduleRectUpdate, true);
 		window.removeEventListener('keydown', onKeydown);
@@ -167,9 +179,10 @@
 
 	$: {
 		targetElement;
+		step;
 		observeTargetResize();
 
-		if (targetElement) {
+		if (getActiveTarget()) {
 			updateRectAfterLayoutSettles();
 		} else {
 			rect = null;
@@ -180,8 +193,12 @@
 
 <GuideBackdrop rect={isSummaryStep ? null : rect} rects={isSummaryStep ? [] : highlightRects} />
 
-<GuideTooltip rect={isSummaryStep ? null : rect} placement={step.placement ?? 'bottom'}>
-	<div class="relative pr-6">
+<GuideTooltip
+	rect={isSummaryStep ? null : rect}
+	placement={step.placement ?? 'bottom'}
+	ariaLabel={`Guided tour: ${title}`}
+>
+	<div class="relative pr-6" aria-live="polite">
 		<button
 			type="button"
 			class="absolute right-0 top-0 flex h-7 w-7 items-center justify-center rounded-full text-xs font-semibold text-gray-500 transition hover:bg-[#F3E8FF] hover:text-[#4C007A] disabled:cursor-wait disabled:opacity-45 dark:text-gray-300 dark:hover:bg-[#3B0764] dark:hover:text-white"

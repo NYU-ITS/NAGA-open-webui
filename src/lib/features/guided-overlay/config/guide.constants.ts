@@ -2,8 +2,9 @@ export const GUIDED_OVERLAY_SETTINGS_KEY = 'guided_overlays';
 
 export const GUIDE_START_EVENT = 'guided-overlay:start';
 
-export const GUIDE_VERSION = '1.12';
-export const ADMIN_GUIDE_VERSION = '1.33';
+export const GUIDE_VERSION = '1.13';
+export const ADMIN_GUIDE_VERSION = '1.34';
+export const SUPER_ADMIN_GUIDE_VERSION = '1.1';
 
 export const STUDENT_GUIDE_ID = 'student-onboarding';
 export const ADMIN_GUIDE_ID = 'admin-onboarding';

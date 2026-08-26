@@ -38,6 +38,7 @@ export interface GuideCondition {
 	anyRequiredFeatures?: string[];
 	requiredRoles?: GuideRole[];
 	requiresCurrentGroup?: boolean;
+	requiresAssignedGroups?: boolean;
 	requiresManagedGroups?: boolean;
 }
 

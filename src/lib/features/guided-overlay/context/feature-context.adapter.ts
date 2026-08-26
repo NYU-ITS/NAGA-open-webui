@@ -42,21 +42,22 @@ export const flattenEnabledPermissions = (
 export const resolveFeatureFlags = (
 	config: Record<string, unknown> | undefined,
 	permissions: Record<string, unknown> | undefined,
-	isAdminRole: boolean
+	hasFullAdminAccess: boolean
 ): Record<string, boolean> => {
 	const configFeatures = config?.features as Record<string, unknown> | undefined;
 
 	return {
-		adminPanel: isAdminRole,
-		groupManagement: isAdminRole,
-		models: isAdminRole || getNestedBoolean(permissions, ['workspace', 'models']),
-		knowledge: isAdminRole || getNestedBoolean(permissions, ['workspace', 'knowledge']),
-		prompts: isAdminRole || getNestedBoolean(permissions, ['workspace', 'prompts']),
-		tools: isAdminRole || getNestedBoolean(permissions, ['workspace', 'tools']),
-		functions: isAdminRole,
-		modules: isAdminRole,
-		usage: isAdminRole,
-		fileUpload: isAdminRole || getNestedBoolean(permissions, ['chat', 'file_upload'], true),
+		adminPanel: hasFullAdminAccess,
+		groupManagement: hasFullAdminAccess,
+		models: hasFullAdminAccess || getNestedBoolean(permissions, ['workspace', 'models']),
+		knowledge: hasFullAdminAccess || getNestedBoolean(permissions, ['workspace', 'knowledge']),
+		prompts: hasFullAdminAccess || getNestedBoolean(permissions, ['workspace', 'prompts']),
+		tools: hasFullAdminAccess || getNestedBoolean(permissions, ['workspace', 'tools']),
+		functions: hasFullAdminAccess,
+		modules: hasFullAdminAccess,
+		usage: hasFullAdminAccess,
+		fileUpload:
+			hasFullAdminAccess || getNestedBoolean(permissions, ['chat', 'file_upload'], true),
 		webSearch:
 			getNestedBoolean(permissions, ['features', 'web_search']) ||
 			getNestedBoolean(configFeatures, ['enable_web_search']),

@@ -15,6 +15,20 @@ export const studentGuide: GuideDefinition = {
 			targetPolicy: 'required'
 		},
 		{
+			id: 'student-your-group',
+			title: 'Your Group',
+			description: (context) => {
+				const groupNames = context.groups.map((group) => group.name);
+
+				return groupNames.length === 1
+					? `You are assigned to ${groupNames[0]}. Your available models and course tools are set by this group.`
+					: `You are assigned to: ${groupNames.join(', ')}. Your available models and course tools depend on the group you select.`;
+			},
+			condition: {
+				requiresAssignedGroups: true
+			}
+		},
+		{
 			id: 'student-new-chat',
 			targetId: 'new-chat',
 			title: 'Start a new chat.',

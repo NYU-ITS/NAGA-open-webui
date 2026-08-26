@@ -102,6 +102,7 @@ export const adminGuide: GuideDefinition = {
 		{
 			id: 'admin-workspace-entry',
 			targetId: 'sidebar-workspace',
+			route: '/workspace',
 			title: 'Workspace',
 			description:
 				'Workspace is where admins manage what users can use, including Models, Knowledge, Prompts, and Tools.',

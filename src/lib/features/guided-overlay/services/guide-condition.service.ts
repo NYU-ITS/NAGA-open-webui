@@ -15,6 +15,10 @@ export const isStepAvailable = (step: GuideStep, context: GuideContext): boolean
 		return false;
 	}
 
+	if (condition.requiresAssignedGroups && context.groups.length === 0) {
+		return false;
+	}
+
 	if (condition.requiresManagedGroups && context.managedGroups.length === 0) {
 		return false;
 	}

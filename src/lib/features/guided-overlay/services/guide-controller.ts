@@ -61,6 +61,26 @@ const saveProgress = async (status: GuideStatus, currentStepId?: string): Promis
 	await guideProgressRepository.save(progress);
 };
 
+let progressSaveQueue: Promise<void> = Promise.resolve();
+
+const queueProgressSave = (status: GuideStatus, currentStepId?: string): void => {
+	progressSaveQueue = progressSaveQueue
+		.then(() => saveProgress(status, currentStepId))
+		.catch((error) => {
+			console.warn('[guided-overlay] Unable to save guide progress', error);
+		});
+};
+
+const saveTerminalProgress = async (
+	status: Extract<GuideStatus, 'completed' | 'skipped' | 'dismissed'>,
+	currentStepId?: string
+): Promise<void> => {
+	// A terminal state must be written after every queued in-progress update; otherwise a slow
+	// earlier request can finish last and make a dismissed tour launch again.
+	await progressSaveQueue;
+	await saveProgress(status, currentStepId);
+};
+
 const shouldAutoStart = (
 	progress: GuideProgress | null,
 	guideVersion: string,
@@ -130,9 +150,11 @@ const activateStep = async (stepIndex: number): Promise<void> => {
 		return;
 	}
 
-	await saveProgress('in_progress', step.id);
+	// Lock navigation immediately. Saving settings can require two API requests and must not
+	// leave the previous step clickable while that work is in progress.
 	setGuideStatus(step.route ? 'navigating' : 'waiting_for_target');
 	setCurrentGuideStep(stepIndex);
+	queueProgressSave('in_progress', step.id);
 
 	if (isVirtualStep(step)) {
 		setGuideStatus('showing_step');
@@ -149,6 +171,18 @@ const activateStep = async (stepIndex: number): Promise<void> => {
 		await prepareRouteForStep(step);
 		setGuideStatus('waiting_for_target');
 		await runBeforeTargetActions(step);
+
+		// Optional controls are often permission-dependent. If the page is already settled and
+		// the control is absent, skip it without paying the full target timeout for every item.
+		if (
+			shouldSkipMissingTarget(step) &&
+			!step.route &&
+			!step.beforeTargetActions?.length &&
+			!resolveTarget(targetId)
+		) {
+			await activateStep(stepIndex + 1);
+			return;
+		}
 
 		let targetElement = await waitForTarget(
 			targetId,
@@ -228,17 +262,17 @@ export const previousStep = async (): Promise<void> => {
 };
 
 export const completeGuide = async (): Promise<void> => {
-	await saveProgress('completed');
+	await saveTerminalProgress('completed');
 	closeGuide('completed');
 };
 
 export const skipGuide = async (): Promise<void> => {
-	await saveProgress('skipped', getGuideState().currentStep?.id);
+	await saveTerminalProgress('skipped', getGuideState().currentStep?.id);
 	closeGuide('idle');
 };
 
 export const dismissGuide = async (): Promise<void> => {
-	await saveProgress('dismissed', getGuideState().currentStep?.id);
+	await saveTerminalProgress('dismissed', getGuideState().currentStep?.id);
 	closeGuide('idle');
 };
 

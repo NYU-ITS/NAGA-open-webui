@@ -23,17 +23,19 @@ export const loadGuideContext = async (): Promise<GuideContext | null> => {
 	}
 
 	const token = localStorage.getItem('token') ?? '';
-	const rawGroups = token
-		? await getGroups(token).catch((error) => {
-				console.warn('[guided-overlay] Unable to load groups', error);
-				return [];
-			})
-		: [];
+	const [rawGroups, superAdmin] = await Promise.all([
+		token
+			? getGroups(token).catch((error) => {
+					console.warn('[guided-overlay] Unable to load groups', error);
+					return [];
+				})
+			: Promise.resolve([]),
+		isGuideSuperAdmin(currentUser)
+	]);
 	const groups = normalizeGroups(rawGroups as GuideRawGroup[]);
-	const superAdmin = await isGuideSuperAdmin(currentUser);
 	const managedGroups = resolveManagedGroups(groups, currentUser, superAdmin);
 	const role = resolveGuideRole(currentUser, managedGroups, superAdmin);
-	const isAdminRole = role === 'admin' || role === 'super_admin';
+	const hasFullAdminAccess = currentUser.role === 'admin' || superAdmin;
 	const appConfig = get(config) as Record<string, unknown> | undefined;
 
 	return {
@@ -43,6 +45,6 @@ export const loadGuideContext = async (): Promise<GuideContext | null> => {
 		currentGroup: resolveCurrentGroup(groups),
 		managedGroups,
 		permissions: flattenEnabledPermissions(currentUser.permissions),
-		features: resolveFeatureFlags(appConfig, currentUser.permissions, isAdminRole)
+		features: resolveFeatureFlags(appConfig, currentUser.permissions, hasFullAdminAccess)
 	};
 };

@@ -346,7 +346,11 @@
 
 			<Sidebar />
 			<slot />
-			{#if ['user', 'admin', 'super_admin'].includes($user.role) && localDBChats.length === 0}
+			{#if $config?.features?.enable_guided_overlay !== false &&
+				['user', 'admin', 'super_admin'].includes($user.role) &&
+				localDBChats.length === 0 &&
+				!$showChangelog &&
+				!$showSettings}
 				<GuideHost />
 			{/if}
 		{/if}
