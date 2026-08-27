@@ -91,7 +91,20 @@ export const formatPythonCode = async (token: string, code: string) => {
 	return res;
 };
 
-export const downloadChatAsPDF = async (token: string, title: string, messages: object[]) => {
+const PDF_EXPORT_POLL_INTERVAL_MS = 2000;
+const PDF_EXPORT_MAX_WAIT_MS = 900000; // 15 minutes
+
+const toExportError = (err: any, fallback: string): string => {
+	if (err?.name === 'AbortError') {
+		return 'PDF export timed out. Please try again with a shorter conversation.';
+	}
+	if (typeof err === 'string') {
+		return err;
+	}
+	return err?.detail ?? err?.message ?? fallback;
+};
+
+const downloadChatAsPDFSync = async (token: string, title: string, messages: object[]) => {
 	// Create an AbortController for timeout handling
 	const controller = new AbortController();
 	const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes timeout
@@ -122,20 +135,75 @@ export const downloadChatAsPDF = async (token: string, title: string, messages: 
 	} catch (err: any) {
 		clearTimeout(timeoutId);
 		console.log(err);
-		
-		let error: string;
-		if (err.name === 'AbortError') {
-			error = 'PDF export timed out. Please try again with a shorter conversation.';
-		} else if (err.detail) {
-			error = err.detail;
-		} else if (err.message) {
-			error = err.message;
-		} else {
-			error = 'Failed to export PDF. Please try again.';
-		}
-		
-		throw error;
+		throw toExportError(err, 'Failed to export PDF. Please try again.');
 	}
+};
+
+/**
+ * Export a chat as PDF.
+ *
+ * Submits the conversation as a background job and polls for the result, so a
+ * long export is never bounded by a single request timeout. Deployments that
+ * do not expose the job endpoint fall back to the synchronous route.
+ */
+export const downloadChatAsPDF = async (token: string, title: string, messages: object[]) => {
+	const headers = {
+		'Content-Type': 'application/json',
+		Authorization: `Bearer ${token}`
+	};
+
+	let jobId: string;
+	try {
+		const res = await fetch(`${WEBUI_API_BASE_URL}/utils/pdf/jobs`, {
+			method: 'POST',
+			headers,
+			body: JSON.stringify({ title: title, messages: messages })
+		});
+		if (!res.ok) {
+			throw await res.json();
+		}
+		jobId = (await res.json()).id;
+	} catch (err: any) {
+		console.log('PDF export job endpoint unavailable, falling back to direct export', err);
+		return downloadChatAsPDFSync(token, title, messages);
+	}
+
+	const deadline = Date.now() + PDF_EXPORT_MAX_WAIT_MS;
+
+	while (Date.now() < deadline) {
+		await new Promise((resolve) => setTimeout(resolve, PDF_EXPORT_POLL_INTERVAL_MS));
+
+		let job: { status: string; error?: string };
+		try {
+			const res = await fetch(`${WEBUI_API_BASE_URL}/utils/pdf/jobs/${jobId}`, { headers });
+			if (!res.ok) {
+				throw await res.json();
+			}
+			job = await res.json();
+		} catch (err: any) {
+			throw toExportError(err, 'Failed to export PDF. Please try again.');
+		}
+
+		if (job.status === 'error') {
+			throw toExportError(job.error, 'Failed to export PDF. Please try again.');
+		}
+
+		if (job.status === 'completed') {
+			try {
+				const res = await fetch(`${WEBUI_API_BASE_URL}/utils/pdf/jobs/${jobId}/download`, {
+					headers
+				});
+				if (!res.ok) {
+					throw await res.json();
+				}
+				return await res.blob();
+			} catch (err: any) {
+				throw toExportError(err, 'Failed to download the exported PDF.');
+			}
+		}
+	}
+
+	throw 'PDF export timed out. Please try again with a shorter conversation.';
 };
 
 export const getHTMLFromMarkdown = async (token: string, md: string) => {
