@@ -58,8 +58,6 @@ from open_webui.config import (
     RAG_RERANKING_MODEL,
     RAG_OPENAI_API_BASE_URL,
     RAG_OPENAI_API_KEY,
-    TASK_MODEL,
-    TASK_MODEL_EXTERNAL,
     RAG_OLLAMA_BASE_URL,
     RAG_OLLAMA_API_KEY,
     CONTENT_EXTRACTION_ENGINE,
@@ -191,8 +189,6 @@ def get_worker_config():
             _worker_config.RAG_RERANKING_MODEL = RAG_RERANKING_MODEL
             _worker_config.RAG_OPENAI_API_BASE_URL = RAG_OPENAI_API_BASE_URL
             _worker_config.RAG_OPENAI_API_KEY = RAG_OPENAI_API_KEY
-            _worker_config.TASK_MODEL = TASK_MODEL
-            _worker_config.TASK_MODEL_EXTERNAL = TASK_MODEL_EXTERNAL
             _worker_config.RAG_OLLAMA_BASE_URL = RAG_OLLAMA_BASE_URL
             _worker_config.RAG_OLLAMA_API_KEY = RAG_OLLAMA_API_KEY
             _worker_config.CONTENT_EXTRACTION_ENGINE = CONTENT_EXTRACTION_ENGINE

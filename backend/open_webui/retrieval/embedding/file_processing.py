@@ -2,10 +2,10 @@
 
 This module owns the normal file-ingestion transaction boundary used by both
 FastAPI background tasks and RQ workers. It resolves the frozen execution
-context, prepares every text/image chunk, embeds the complete ordered manifest,
-persists the shared chunk rows, and atomically reconciles all requested vector
-projections. No caller is allowed to rebuild parallel text, modality, hash, or
-metadata lists independently.
+context, prepares every text/image/video/audio chunk, embeds visual and text
+inputs atomically while isolating audio failures, persists the successful chunk
+rows, and atomically reconciles all requested vector projections. No caller is
+allowed to rebuild parallel text, modality, hash, or metadata lists independently.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import hashlib
 import logging
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Mapping, Sequence
 
 from open_webui.internal.db import get_db
@@ -25,10 +25,13 @@ from open_webui.models.users import User, Users
 from open_webui.retrieval.embedding.errors import (
     EMBEDDING_FILE_NOT_FOUND,
     FILE_PROCESSING_FAILED,
+    VIDEO_AUDIO_EMBEDDING_FAILED,
+    VIDEO_AUDIO_FALLBACK_VISUAL_ONLY,
     EmbeddingError,
     safe_file_processing_error_message,
 )
 from open_webui.retrieval.embedding.preparation import (
+    PreparedFile,
     build_persisted_chunks,
     prepare_file_for_embedding,
 )
@@ -39,6 +42,7 @@ from open_webui.retrieval.embedding.resolution import (
 from open_webui.retrieval.embedding.service import EmbeddingService
 from open_webui.retrieval.vector.model_aware import ModelAwareVectorRepository
 from open_webui.storage.provider import Storage
+from open_webui.utils.otel_instrumentation import add_metric_counter, add_span_event
 
 
 log = logging.getLogger(__name__)
@@ -59,6 +63,88 @@ class FileProcessingResult:
     extraction_version: str | None
     processing_warnings: tuple[str, ...]
     visual_summary: Mapping[str, int]
+
+
+def embed_prepared_file_best_effort_audio(
+    *,
+    prepared: PreparedFile,
+    embedding_service: EmbeddingService,
+    admin_id: str,
+    embedding_model_id: str,
+) -> tuple[PreparedFile, tuple[tuple[float, ...], ...]]:
+    """Embed non-audio chunks together and isolate every audio provider call."""
+
+    vectors_by_index: dict[int, tuple[float, ...]] = {}
+    non_audio = [
+        (index, chunk)
+        for index, chunk in enumerate(prepared.chunks)
+        if chunk.modality != "audio"
+    ]
+    if non_audio:
+        batch = embedding_service.embed_for_frozen_context(
+            inputs=tuple(chunk.embedding_input for _, chunk in non_audio),
+            admin_id=admin_id,
+            embedding_model_id=embedding_model_id,
+        )
+        vectors_by_index.update(
+            (index, vector)
+            for (index, _), vector in zip(non_audio, batch.vectors)
+        )
+
+    audio_indexes = [
+        index
+        for index, chunk in enumerate(prepared.chunks)
+        if chunk.modality == "audio"
+    ]
+    failed_audio_count = 0
+    for index in audio_indexes:
+        try:
+            batch = embedding_service.embed_for_frozen_context(
+                inputs=(prepared.chunks[index].embedding_input,),
+                admin_id=admin_id,
+                embedding_model_id=embedding_model_id,
+            )
+            vectors_by_index[index] = batch.vectors[0]
+        except Exception as error:
+            failed_audio_count += 1
+            add_metric_counter("retrieval.video.audio_embedding_failures")
+            add_span_event(
+                "retrieval.video.audio.embedding_failed",
+                {
+                    "error.type": type(error).__name__,
+                    "embedding.model_id": embedding_model_id,
+                },
+            )
+            log.warning(
+                "Video audio embedding failed; retaining visual chunks | "
+                "model_id=%s | error_type=%s",
+                embedding_model_id,
+                type(error).__name__,
+            )
+
+    retained_indexes = tuple(sorted(vectors_by_index))
+    retained_chunks = tuple(prepared.chunks[index] for index in retained_indexes)
+    retained_vectors = tuple(vectors_by_index[index] for index in retained_indexes)
+    if failed_audio_count:
+        warnings = [*prepared.warnings, VIDEO_AUDIO_EMBEDDING_FAILED]
+        retained_audio_count = sum(
+            chunk.modality == "audio" for chunk in retained_chunks
+        )
+        if audio_indexes and retained_audio_count == 0:
+            warnings.append(VIDEO_AUDIO_FALLBACK_VISUAL_ONLY)
+            add_metric_counter("retrieval.video.audio_fallback_visual_only")
+        visual_summary = {
+            **dict(prepared.visual_summary),
+            "audio_chunk_count": retained_audio_count,
+        }
+        prepared = replace(
+            prepared,
+            chunks=retained_chunks,
+            warnings=tuple(dict.fromkeys(warnings)),
+            visual_summary=visual_summary,
+        )
+
+    return prepared, retained_vectors
 
 
 CONTENT_ORIGIN_STORED_SOURCE = "stored_source"
@@ -261,19 +347,19 @@ def process_stored_file_for_embedding(
             config=config,
             admin_email=admin.email,
             content_override=content_provenance.content_override,
-            file_metadata=file.meta,
         )
         if not prepared.chunks:
             raise EmbeddingError(FILE_PROCESSING_FAILED)
 
-        # One ordered service operation must succeed and validate every vector
-        # before the durable chunk manifest or active projections are touched.
-        batch = EmbeddingService(config).embed_for_frozen_context(
-            inputs=tuple(chunk.embedding_input for chunk in prepared.chunks),
+        # Visual/text embeddings remain atomic. Audio siblings are embedded one
+        # at a time so a provider failure can drop only that transient input.
+        prepared, vectors = embed_prepared_file_best_effort_audio(
+            prepared=prepared,
+            embedding_service=EmbeddingService(config),
             admin_id=admin_id,
             embedding_model_id=embedding_model_id,
         )
-        if len(batch.vectors) != len(prepared.chunks):
+        if not prepared.chunks or len(vectors) != len(prepared.chunks):
             raise EmbeddingError(FILE_PROCESSING_FAILED)
 
         # Membership may change while provider calls are in flight. Re-read it
@@ -341,7 +427,7 @@ def process_stored_file_for_embedding(
             file_items = _make_vector_items(
                 vector_repo=vector_repo,
                 chunks=prepared.chunks,
-                vectors=batch.vectors,
+                vectors=vectors,
                 metadata=chunk_metadata,
                 rag_chunk_ids=rag_chunk_ids,
                 admin_id=admin_id,
@@ -360,7 +446,7 @@ def process_stored_file_for_embedding(
                 knowledge_items = _make_vector_items(
                     vector_repo=vector_repo,
                     chunks=prepared.chunks,
-                    vectors=batch.vectors,
+                    vectors=vectors,
                     metadata=knowledge_metadata,
                     rag_chunk_ids=rag_chunk_ids,
                     admin_id=admin_id,
@@ -382,7 +468,6 @@ def process_stored_file_for_embedding(
                 manifest_id=manifest_id,
                 processing_warnings=warnings,
                 visual_summary=visual_summary,
-                audio_cache=prepared.audio_cache,
                 collection_name=file_collection,
             )
             db.commit()
@@ -606,21 +691,21 @@ def _apply_completed_file_state(
     manifest_id: str,
     processing_warnings: Sequence[str],
     visual_summary: Mapping[str, int],
-    audio_cache: Mapping[str, Any],
     collection_name: str,
 ) -> None:
     now = int(time.time())
     row.data = {**(row.data or {}), "content": extracted_text}
     row.hash = hashlib.sha256(extracted_text.encode("utf-8")).hexdigest()
+    metadata = dict(row.meta or {})
+    metadata.pop("cache_video_audio_v1", None)
     row.meta = {
-        **(row.meta or {}),
+        **metadata,
         "collection_name": collection_name,
         "source_sha256": source_sha256,
         "extraction_version": extraction_version,
         "chunk_manifest_id": manifest_id,
         "processing_warnings": list(processing_warnings),
         "visual_summary": dict(visual_summary),
-        "cache_video_audio_v1": dict(audio_cache),
         "processing_status": "completed",
         "processing_completed_at": now,
         "processing_error": None,
@@ -653,6 +738,7 @@ __all__ = [
     "FILE_PROCESSING_FAILED",
     "FileProcessingResult",
     "StoredContentProvenance",
+    "embed_prepared_file_best_effort_audio",
     "load_authoritative_content_override",
     "persist_content_provenance_before_dispatch",
     "process_stored_file_for_embedding",

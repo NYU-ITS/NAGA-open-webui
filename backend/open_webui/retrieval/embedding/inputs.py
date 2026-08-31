@@ -15,10 +15,19 @@ class TextEmbeddingInput:
 
 @dataclass(frozen=True)
 class AudioEmbeddingInput:
-    """Audio-derived text input for embedding generation."""
+    """PCM WAV audio input for embedding generation."""
 
-    text: str
+    audio: bytes
+    mime_type: Literal["audio/wav"] = "audio/wav"
     modality: Literal["audio"] = "audio"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.audio, bytes):
+            raise TypeError("audio must be bytes")
+        if not self.audio:
+            raise ValueError("audio must not be empty")
+        if self.mime_type != "audio/wav":
+            raise ValueError("mime_type must be audio/wav")
 
 
 @dataclass(frozen=True)

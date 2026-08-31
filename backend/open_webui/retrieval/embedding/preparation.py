@@ -7,7 +7,7 @@ import json
 import math
 import os
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal, Mapping, Optional
@@ -38,6 +38,7 @@ from open_webui.retrieval.embedding.inputs import (
 )
 from open_webui.retrieval.video_audio import (
     AUDIO_CHUNKING_VERSION,
+    AUDIO_EXTRACTION_VERSION,
     VideoSegmentWindow,
     prepare_video_audio,
 )
@@ -61,8 +62,8 @@ from open_webui.retrieval.loaders.pdf_complex import (
 
 PreparedModality = Literal["text", "image", "video", "audio"]
 STANDALONE_IMAGE_EXTRACTION_VERSION = "standalone_image_v1"
-VIDEO_EXTRACTION_VERSION = "video_temporal_audio_v1"
-PREPARATION_RECIPE_VERSION = "multimodal_preparation_v3"
+VIDEO_EXTRACTION_VERSION = "video_temporal_audio_v2"
+PREPARATION_RECIPE_VERSION = "multimodal_preparation_v4"
 PDF_COORDINATE_SPACE = "rotated_cropbox_top_left_points"
 
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
@@ -886,11 +887,9 @@ class PreparedChunk:
         elif self.modality == "audio":
             if not isinstance(self.embedding_input, AudioEmbeddingInput):
                 raise TypeError("audio chunks require AudioEmbeddingInput")
-            if not self.content.strip():
-                raise ValueError("audio chunks require derived text content")
-            if self.embedding_input.text != self.content:
-                raise ValueError("audio chunk content and provider input must match")
-            expected_hash = hashlib.sha256(self.content.encode("utf-8")).hexdigest()
+            if self.content:
+                raise ValueError("audio chunk content must be empty")
+            expected_hash = hashlib.sha256(self.embedding_input.audio).hexdigest()
         elif self.modality == "video":
             if not isinstance(self.embedding_input, VideoEmbeddingInput):
                 raise TypeError("video chunks require VideoEmbeddingInput")
@@ -930,7 +929,6 @@ class PreparedFile:
     extraction_version: Optional[str]
     warnings: tuple[str, ...]
     visual_summary: Mapping[str, int]
-    audio_cache: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not _is_sha256(self.source_sha256):
@@ -946,11 +944,6 @@ class PreparedFile:
                     for key, value in dict(self.visual_summary).items()
                 }
             ),
-        )
-        object.__setattr__(
-            self,
-            "audio_cache",
-            MappingProxyType(dict(self.audio_cache)),
         )
 
 
@@ -1154,7 +1147,6 @@ def prepare_file_for_embedding(
     admin_email: str,
     content_override: Optional[str] = None,
     preparation_recipe: Optional[PreparationRecipe] = None,
-    file_metadata: Optional[Mapping[str, Any]] = None,
 ) -> PreparedFile:
     """Prepare a stored file for one frozen admin/model embedding context."""
     if not isinstance(source_bytes, bytes):
@@ -1249,9 +1241,6 @@ def prepare_file_for_embedding(
             model=model,
             recipe=recipe,
             base_metadata=base_metadata,
-            config=config,
-            admin_email=admin_email,
-            cached_audio=(file_metadata or {}).get("cache_video_audio_v1"),
         )
 
     if source_kind == "pdf":
@@ -1462,15 +1451,12 @@ def _prepare_video(
     model: EmbeddingModelSpec,
     recipe: PreparationRecipe,
     base_metadata: dict,
-    config: Any,
-    admin_email: str,
-    cached_audio: Any = None,
 ) -> PreparedFile:
     """Prepare a video file for temporal embedding.
 
     Validates with ffprobe (defense in depth), plans temporal chunks, and
-    creates one PreparedChunk per range. Original bytes are sent to the
-    provider; no frames are extracted or transcoded.
+    creates one visual chunk per range. When an audio track exists, it is
+    transcoded once and sliced into an aligned raw-audio sibling per range.
     """
     if "video" not in model.modalities:
         raise EmbeddingError(EMBEDDING_MODALITY_UNSUPPORTED)
@@ -1501,9 +1487,6 @@ def _prepare_video(
             )
             for chunk in video_chunks
         ),
-        config=config,
-        admin_email=admin_email,
-        cached=cached_audio if isinstance(cached_audio, Mapping) else None,
     )
     audio_by_index = {segment.segment_index: segment for segment in audio_result.segments}
     chunks: list[PreparedChunk] = []
@@ -1552,9 +1535,7 @@ def _prepare_video(
             audio_metadata = {
                 **base_metadata,
                 "modality": "audio",
-                "content_kind": audio.content_kind,
-                "source_type": audio.source_type,
-                "source_confidence": audio.source_confidence,
+                "content_kind": "audio_temporal",
                 "startTimeSeconds": vc.start_offset_seconds,
                 "endTimeSeconds": vc.end_offset_seconds,
                 "segment_start_s": vc.start_offset_seconds,
@@ -1564,17 +1545,21 @@ def _prepare_video(
                 "video_file_id": file_id,
                 "video_segment_id": video_segment_id,
                 "extraction_version": recipe.video_extraction_version,
+                "audio_extraction_version": AUDIO_EXTRACTION_VERSION,
                 "chunking_version": AUDIO_CHUNKING_VERSION,
-                "mime_type": canonical_mime,
+                "mime_type": audio.mime_type,
+                "source_mime_type": canonical_mime,
                 "duration_seconds": duration,
-                "caption_model_name": audio.caption_model_name,
             }
             chunks.append(
                 PreparedChunk(
-                    content=audio.text,
+                    content="",
                     content_type="audio",
-                    embedding_input=AudioEmbeddingInput(text=audio.text),
-                    content_sha256=hashlib.sha256(audio.text.encode("utf-8")).hexdigest(),
+                    embedding_input=AudioEmbeddingInput(
+                        audio=audio.audio,
+                        mime_type="audio/wav",
+                    ),
+                    content_sha256=hashlib.sha256(audio.audio).hexdigest(),
                     modality="audio",
                     chunk_metadata=audio_metadata,
                 )
@@ -1586,7 +1571,7 @@ def _prepare_video(
 
     return PreparedFile(
         chunks=tuple(chunks),
-        text_content="\n\n".join(chunk.content for chunk in audio_chunks),
+        text_content="",
         source_sha256=source_sha256,
         extraction_version=recipe.video_extraction_version,
         warnings=audio_result.warnings,
@@ -1598,7 +1583,6 @@ def _prepare_video(
             video_chunk_count=len(video_chunks),
             audio_chunk_count=len(audio_chunks),
         ),
-        audio_cache=audio_result.cache,
     )
 
 
@@ -1891,9 +1875,8 @@ _PUBLIC_CHUNK_METADATA_KEYS = {
     "video_segment_id",
     "segment_start_s",
     "segment_end_s",
-    "source_type",
-    "source_confidence",
-    "caption_model_name",
+    "source_mime_type",
+    "audio_extraction_version",
     "chunking_version",
 }
 

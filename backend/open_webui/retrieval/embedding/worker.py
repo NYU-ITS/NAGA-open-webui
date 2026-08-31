@@ -67,6 +67,7 @@ from open_webui.retrieval.embedding.errors import (
 )
 from open_webui.retrieval.embedding.file_processing import (
     CONTENT_ORIGIN_STORED_SOURCE,
+    embed_prepared_file_best_effort_audio,
     read_stored_content_provenance,
     resolve_authoritative_content_provenance,
 )
@@ -688,12 +689,14 @@ def _process_file(
         raise EmbeddingError(EMBEDDING_REINDEX_SOURCE_CHANGED)
 
     # Generate and fully validate all vectors before mutating chunks/projections.
-    embeddings = _generate_embeddings(
-        chunks=prepared.chunks,
-        admin_id=admin.id,
-        target_model_id=target_model.id,
+    prepared, embeddings = embed_prepared_file_best_effort_audio(
+        prepared=prepared,
         embedding_service=embedding_service,
+        admin_id=admin.id,
+        embedding_model_id=target_model.id,
     )
+    if not prepared.chunks or len(embeddings) != len(prepared.chunks):
+        raise EmbeddingError(FILE_ERROR_EMBEDDING_FAILED)
 
     persisted_chunks = build_persisted_chunks(
         prepared,
@@ -860,7 +863,6 @@ def _prepare_source_file(
             admin_email=admin_email,
             preparation_recipe=preparation_recipe,
             content_override=content_provenance.content_override,
-            file_metadata=source_file.meta,
         )
     except EmbeddingError:
         raise
@@ -905,32 +907,9 @@ def _stage_prepared_manifest(
             "projection_ids": [f"file-{file_id}", *projection_ids],
             "processing_warnings": list(dict.fromkeys(prepared.warnings)),
             "visual_summary": dict(prepared.visual_summary),
-            "audio_cache": dict(prepared.audio_cache),
         }
         job_file.file_snapshot = snapshot
         db.commit()
-
-
-def _generate_embeddings(
-    chunks: tuple[PreparedChunk, ...],
-    admin_id: str,
-    target_model_id: str,
-    embedding_service: EmbeddingService,
-) -> list:
-    """Generate embeddings using target model (Fix #1: use frozen context)."""
-    if not chunks:
-        return []
-    
-    # Fix #1: Use embed_for_frozen_context with target model ID
-    # Spec 08: preserve the original stable EmbeddingError code so the caller's
-    # error mapping can record a distinct stage (credentials_missing,
-    # provider_embedding_failed, ...) instead of collapsing every failure.
-    batch = embedding_service.embed_for_frozen_context(
-        inputs=[chunk.embedding_input for chunk in chunks],
-        admin_id=admin_id,
-        embedding_model_id=target_model_id,
-    )
-    return batch.vectors
 
 
 def _write_vectors(
@@ -1319,8 +1298,10 @@ def _apply_staged_processing_summaries(*, job_id: str, db) -> None:
 
         file_row.data = {**(file_row.data or {}), "content": text_content}
         file_row.hash = content_hash
+        metadata = dict(file_row.meta or {})
+        metadata.pop("cache_video_audio_v1", None)
         file_row.meta = {
-            **(file_row.meta or {}),
+            **metadata,
             "collection_name": f"file-{file_row.id}",
             "source_sha256": source_sha256,
             "extraction_version": summary.get("extraction_version"),
@@ -1329,7 +1310,6 @@ def _apply_staged_processing_summaries(*, job_id: str, db) -> None:
                 dict.fromkeys(summary.get("processing_warnings") or [])
             ),
             "visual_summary": dict(summary.get("visual_summary") or {}),
-            "cache_video_audio_v1": dict(summary.get("audio_cache") or {}),
             "processing_status": "completed",
             "processing_completed_at": now,
             "processing_error": None,

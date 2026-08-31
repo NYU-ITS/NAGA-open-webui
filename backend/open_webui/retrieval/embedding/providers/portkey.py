@@ -127,9 +127,9 @@ class PortkeyEmbeddingProvider:
         The approved Vertex multimodal gateway contract returns one embedding
         per request, even when ``input`` contains multiple text entries. Send
         every logical input separately and restore the caller's original order.
-        Audio-derived text uses the provider's text embedding path while
-        retaining its logical audio modality upstream. One HTTP session retains
-        connection reuse without persisting credentials or provider responses.
+        Raw audio uses the same base64 media contract as image and video input.
+        One HTTP session retains connection reuse without persisting credentials
+        or provider responses.
 
         Base64 encoding is confined to this adapter and never leaves it in an
         exception or durable record.
@@ -186,11 +186,21 @@ class PortkeyEmbeddingProvider:
                         session,
                         {
                             "model": model.model_name,
-                            "input": [item.text],
+                            "input": [
+                                {
+                                    "text": "",
+                                    "audio": {
+                                        "base64": base64.b64encode(
+                                            item.audio
+                                        ).decode("ascii"),
+                                        "mimeType": item.mime_type,
+                                    },
+                                }
+                            ],
                             "dimensions": model.dimension,
                             "encoding_format": "float",
                         },
-                        expected_modality="text",
+                        expected_modality="audio",
                     )
 
                 for index, item in indexed_images:
@@ -325,11 +335,16 @@ class PortkeyEmbeddingProvider:
                 if all_vectors:
                     return all_vectors
             else:
-                field = (
-                    "imageEmbedding"
-                    if expected_modality == "image"
-                    else "textEmbedding"
-                )
+                field = {
+                    "audio": "audioEmbedding",
+                    "image": "imageEmbedding",
+                    "text": "textEmbedding",
+                }.get(expected_modality)
+                if field is None:
+                    raise EmbeddingError(
+                        EMBEDDING_PROVIDER_FAILED,
+                        detail="The embedding provider returned an unexpected modality.",
+                    )
                 vectors = [
                     item.get(field)
                     for item in predictions

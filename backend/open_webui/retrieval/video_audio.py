@@ -1,38 +1,34 @@
-"""Best-effort, STT-free audio enrichment for video retrieval."""
+"""Best-effort extraction of raw audio aligned to temporal video chunks."""
 
 from __future__ import annotations
 
-import hashlib
-import html
+import io
 import json
-import re
+import math
 import subprocess
 import tempfile
+import wave
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Sequence
 
 from open_webui.retrieval.embedding.errors import (
     VIDEO_AUDIO_ABSENT,
-    VIDEO_AUDIO_CAPTION_FAILED,
-    VIDEO_AUDIO_CAPTION_MODEL_UNAVAILABLE,
+    VIDEO_AUDIO_EXTRACTION_FAILED,
     VIDEO_AUDIO_FALLBACK_VISUAL_ONLY,
-    VIDEO_AUDIO_SUBTITLE_EXTRACTION_FAILED,
-    VIDEO_AUDIO_SUBTITLE_PARSE_FAILED,
-)
-from open_webui.retrieval.video_audio_caption import (
-    VideoAudioCaptionError,
-    VideoAudioCaptionService,
-    VideoAudioCaptionUnavailable,
 )
 from open_webui.utils.otel_instrumentation import add_metric_counter, add_span_event
 
 
-AUDIO_CHUNKING_VERSION = "audio_v1"
-_CACHE_VERSION = "video_audio_cache_v1"
-_SUBTITLE_TIMEOUT_SECONDS = 60
-_AUDIO_TIMEOUT_SECONDS = 90
-_TAG_RE = re.compile(r"<[^>]+>|\{\\[^}]+\}")
+AUDIO_CHUNKING_VERSION = "video_audio_segments_v2"
+AUDIO_EXTRACTION_VERSION = "audio_pcm_s16le_mono_16000_v1"
+AUDIO_MIME_TYPE = "audio/wav"
+AUDIO_SAMPLE_RATE = 16_000
+AUDIO_SAMPLE_WIDTH = 2
+AUDIO_CHANNELS = 1
+
+_AUDIO_EXTRACTION_TIMEOUT_SECONDS = 90
+_AUDIO_PROBE_TIMEOUT_SECONDS = 30
 
 
 @dataclass(frozen=True)
@@ -43,29 +39,18 @@ class VideoSegmentWindow:
 
 
 @dataclass(frozen=True)
-class AudioSegmentText:
+class AudioSegment:
     segment_index: int
     start_seconds: float
     end_seconds: float
-    text: str
-    content_kind: str
-    source_type: str
-    source_confidence: float
-    caption_model_name: str | None = None
+    audio: bytes
+    mime_type: str = AUDIO_MIME_TYPE
 
 
 @dataclass(frozen=True)
 class VideoAudioResult:
-    segments: tuple[AudioSegmentText, ...]
+    segments: tuple[AudioSegment, ...]
     warnings: tuple[str, ...]
-    cache: Mapping[str, Any]
-
-
-@dataclass(frozen=True)
-class _SubtitleCue:
-    start_seconds: float
-    end_seconds: float
-    text: str
 
 
 def prepare_video_audio(
@@ -74,446 +59,225 @@ def prepare_video_audio(
     source_sha256: str,
     mime_type: str,
     windows: Sequence[VideoSegmentWindow],
-    config: Any,
-    admin_email: str,
-    cached: Mapping[str, Any] | None = None,
 ) -> VideoAudioResult:
-    """Return subtitle or semantic audio text aligned to video segments.
+    """Transcode one video audio stream and slice it on existing chunk bounds.
 
-    Every media/model failure is converted to a stable warning. The caller can
-    therefore keep the already-prepared visual chunks indexable.
+    Extraction is deliberately best effort. A missing or unreadable audio stream
+    returns stable warnings and no audio chunks so visual video ingestion can
+    continue unchanged.
     """
-    if not windows:
-        return VideoAudioResult(segments=(), warnings=(), cache={})
 
-    suffix = _video_suffix(mime_type)
+    normalized_windows = _validate_windows(windows)
+    if not normalized_windows:
+        return VideoAudioResult(segments=(), warnings=())
+
     try:
-        with tempfile.NamedTemporaryFile(suffix=suffix) as source_file:
-            source_file.write(source_bytes)
-            source_file.flush()
-            streams = _probe_streams(source_file.name)
-            return _prepare_from_file(
-                source_path=source_file.name,
+        with tempfile.TemporaryDirectory(prefix="video-audio-") as temp_dir:
+            source_path = Path(temp_dir) / f"source{_video_suffix(mime_type)}"
+            wav_path = Path(temp_dir) / "audio.wav"
+            source_path.write_bytes(source_bytes)
+
+            if not _has_audio_stream(source_path):
+                return _finish(
+                    segments=(),
+                    warnings=(VIDEO_AUDIO_ABSENT, VIDEO_AUDIO_FALLBACK_VISUAL_ONLY),
+                    source_sha256=source_sha256,
+                    extraction_outcome="absent",
+                )
+
+            wav_bytes = _transcode_audio_wav(source_path, wav_path)
+            segments = _slice_wav(wav_bytes, normalized_windows)
+            return _finish(
+                segments=segments,
+                warnings=(),
                 source_sha256=source_sha256,
-                streams=streams,
-                windows=tuple(windows),
-                config=config,
-                admin_email=admin_email,
-                cached=cached,
+                extraction_outcome="succeeded",
             )
-    except Exception:
+    except Exception as error:
+        add_span_event(
+            "retrieval.video.audio.extraction_failed",
+            {
+                "error.type": type(error).__name__,
+                "video.source_sha256_prefix": source_sha256[:12],
+            },
+        )
         return _finish(
             segments=(),
             warnings=(
-                VIDEO_AUDIO_SUBTITLE_EXTRACTION_FAILED,
+                VIDEO_AUDIO_EXTRACTION_FAILED,
                 VIDEO_AUDIO_FALLBACK_VISUAL_ONLY,
             ),
-            cache={},
             source_sha256=source_sha256,
+            extraction_outcome="failed",
         )
 
 
-def _prepare_from_file(
-    *,
-    source_path: str,
-    source_sha256: str,
-    streams: Sequence[Mapping[str, Any]],
-    windows: tuple[VideoSegmentWindow, ...],
-    config: Any,
-    admin_email: str,
-    cached: Mapping[str, Any] | None,
-) -> VideoAudioResult:
-    audio_streams = [stream for stream in streams if stream.get("codec_type") == "audio"]
-    subtitle_streams = [
-        stream for stream in streams if stream.get("codec_type") == "subtitle"
-    ]
-    captioner: VideoAudioCaptionService | None = None
-    caption_unavailable = False
-    if audio_streams:
-        try:
-            captioner = VideoAudioCaptionService(config, admin_email)
-        except VideoAudioCaptionUnavailable:
-            caption_unavailable = True
+def _validate_windows(
+    windows: Sequence[VideoSegmentWindow],
+) -> tuple[VideoSegmentWindow, ...]:
+    if isinstance(windows, (str, bytes)) or not isinstance(windows, Sequence):
+        raise TypeError("video segment windows must be a sequence")
 
-    stream_fingerprint = _stream_fingerprint((*audio_streams, *subtitle_streams))
-    cache_key = _cache_key(
-        source_sha256=source_sha256,
-        stream_fingerprint=stream_fingerprint,
-        windows=windows,
-        caption_model_name=captioner.model_name if captioner else "",
-        prompt_fingerprint=captioner.prompt_fingerprint if captioner else "",
-    )
-    cached_result = _read_cache(cached, cache_key)
-    if cached_result is not None:
-        return _finish(
-            segments=cached_result.segments,
-            warnings=cached_result.warnings,
-            cache=dict(cached or {}),
-            source_sha256=source_sha256,
-        )
-
-    warnings: list[str] = []
-    if not audio_streams:
-        warnings.append(VIDEO_AUDIO_ABSENT)
-
-    subtitle_cues: tuple[_SubtitleCue, ...] = ()
-    subtitle_source_type = "embedded_subtitle"
-    if subtitle_streams:
-        subtitle_cues, subtitle_source_type, subtitle_warning = _extract_subtitles(
-            source_path, subtitle_streams
-        )
-        if subtitle_warning:
-            warnings.append(subtitle_warning)
-
-    derived: dict[int, AudioSegmentText] = {}
-    if subtitle_cues:
-        for window in windows:
-            text = _text_for_window(subtitle_cues, window)
-            if text:
-                derived[window.index] = AudioSegmentText(
-                    segment_index=window.index,
-                    start_seconds=window.start_seconds,
-                    end_seconds=window.end_seconds,
-                    text=text,
-                    content_kind="captioned_subtitle",
-                    source_type=subtitle_source_type,
-                    source_confidence=0.95,
-                )
-
-    uncovered = tuple(window for window in windows if window.index not in derived)
-    if uncovered and audio_streams:
-        if captioner is None:
-            if caption_unavailable:
-                warnings.append(VIDEO_AUDIO_CAPTION_MODEL_UNAVAILABLE)
-        else:
-            try:
-                wav_bytes = _extract_audio_wav(source_path)
-                add_metric_counter("retrieval.video.audio_caption_calls")
-                summaries = captioner.summarize(
-                    wav_bytes,
-                    tuple(
-                        (window.index, window.start_seconds, window.end_seconds)
-                        for window in uncovered
-                    ),
-                )
-                for window in uncovered:
-                    text = _normalize_text(summaries.get(window.index, ""))
-                    if not text:
-                        continue
-                    derived[window.index] = AudioSegmentText(
-                        segment_index=window.index,
-                        start_seconds=window.start_seconds,
-                        end_seconds=window.end_seconds,
-                        text=text,
-                        content_kind="captioned_summarized_audio",
-                        source_type="transcoded_audio_summary",
-                        source_confidence=0.65,
-                        caption_model_name=captioner.model_name,
-                    )
-                if any(window.index not in derived for window in uncovered):
-                    warnings.append(VIDEO_AUDIO_CAPTION_FAILED)
-            except (VideoAudioCaptionError, OSError, subprocess.SubprocessError):
-                warnings.append(VIDEO_AUDIO_CAPTION_FAILED)
-
-    if any(window.index not in derived for window in windows):
-        warnings.append(VIDEO_AUDIO_FALLBACK_VISUAL_ONLY)
-
-    segments = tuple(derived[index] for index in sorted(derived))
-    warnings_tuple = tuple(dict.fromkeys(warnings))
-    cache_value: dict[str, Any] = {}
-    transient_failures = {
-        VIDEO_AUDIO_CAPTION_FAILED,
-        VIDEO_AUDIO_SUBTITLE_EXTRACTION_FAILED,
-        VIDEO_AUDIO_SUBTITLE_PARSE_FAILED,
-    }
-    if not transient_failures.intersection(warnings_tuple):
-        cache_value = {
-            "version": _CACHE_VERSION,
-            "cache_key": cache_key,
-            "stream_fingerprint": stream_fingerprint,
-            "caption_model_name": captioner.model_name if captioner else None,
-            "prompt_fingerprint": captioner.prompt_fingerprint if captioner else None,
-            "warnings": list(warnings_tuple),
-            "segments": [_segment_to_dict(segment) for segment in segments],
-        }
-    return _finish(
-        segments=segments,
-        warnings=warnings_tuple,
-        cache=cache_value,
-        source_sha256=source_sha256,
-    )
+    normalized: list[VideoSegmentWindow] = []
+    seen_indexes: set[int] = set()
+    for window in windows:
+        if not isinstance(window, VideoSegmentWindow):
+            raise TypeError("video segment windows must use VideoSegmentWindow")
+        if (
+            isinstance(window.index, bool)
+            or window.index < 0
+            or window.index in seen_indexes
+            or not math.isfinite(window.start_seconds)
+            or not math.isfinite(window.end_seconds)
+            or window.start_seconds < 0
+            or window.end_seconds <= window.start_seconds
+        ):
+            raise ValueError("video segment window is invalid")
+        seen_indexes.add(window.index)
+        normalized.append(window)
+    return tuple(normalized)
 
 
-def _probe_streams(source_path: str) -> tuple[Mapping[str, Any], ...]:
+def _has_audio_stream(source_path: Path) -> bool:
     result = subprocess.run(
         [
             "ffprobe",
             "-v",
-            "quiet",
-            "-print_format",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=index",
+            "-of",
             "json",
-            "-show_streams",
-            source_path,
+            str(source_path),
         ],
         capture_output=True,
         check=False,
-        timeout=30,
+        timeout=_AUDIO_PROBE_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
-        raise OSError("video stream inspection failed")
+        raise OSError("video audio stream inspection failed")
     payload = json.loads(result.stdout)
     streams = payload.get("streams")
     if not isinstance(streams, list):
-        raise OSError("video stream inspection returned no streams")
-    return tuple(stream for stream in streams if isinstance(stream, Mapping))
+        raise OSError("video audio stream inspection returned an invalid response")
+    return bool(streams)
 
 
-def _extract_subtitles(
-    source_path: str,
-    streams: Sequence[Mapping[str, Any]],
-) -> tuple[tuple[_SubtitleCue, ...], str, str | None]:
-    ordered = sorted(
-        streams,
-        key=lambda stream: (
-            not bool((stream.get("disposition") or {}).get("default")),
-            int(stream.get("index", 0)),
-        ),
-    )
-    extracted_any = False
-    for stream in ordered:
-        stream_index = stream.get("index")
-        if not isinstance(stream_index, int):
-            continue
-        result = subprocess.run(
-            [
-                "ffmpeg",
-                "-v",
-                "error",
-                "-i",
-                source_path,
-                "-map",
-                f"0:{stream_index}",
-                "-f",
-                "webvtt",
-                "pipe:1",
-            ],
-            capture_output=True,
-            check=False,
-            timeout=_SUBTITLE_TIMEOUT_SECONDS,
-        )
-        if result.returncode != 0 or not result.stdout.strip():
-            continue
-        extracted_any = True
-        cues = _parse_webvtt(result.stdout.decode("utf-8", errors="replace"))
-        if cues:
-            codec = str(stream.get("codec_name") or "").lower()
-            source_type = (
-                "embedded_closed_caption"
-                if codec in {"eia_608", "eia_708", "cea_608", "cea_708"}
-                else "embedded_subtitle"
-            )
-            return cues, source_type, None
-    warning = (
-        VIDEO_AUDIO_SUBTITLE_PARSE_FAILED
-        if extracted_any
-        else VIDEO_AUDIO_SUBTITLE_EXTRACTION_FAILED
-    )
-    return (), "embedded_subtitle", warning
-
-
-def _parse_webvtt(value: str) -> tuple[_SubtitleCue, ...]:
-    lines = value.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    cues: list[_SubtitleCue] = []
-    index = 0
-    while index < len(lines):
-        line = lines[index].strip()
-        if "-->" not in line:
-            index += 1
-            continue
-        left, right = line.split("-->", 1)
-        try:
-            start = _parse_timestamp(left.strip().split()[0])
-            end = _parse_timestamp(right.strip().split()[0])
-        except (IndexError, ValueError):
-            index += 1
-            continue
-        index += 1
-        text_lines: list[str] = []
-        while index < len(lines) and lines[index].strip():
-            text_lines.append(lines[index].strip())
-            index += 1
-        text = _normalize_text(" ".join(text_lines))
-        if text and end > start:
-            cues.append(_SubtitleCue(start, end, text))
-        index += 1
-    return tuple(cues)
-
-
-def _parse_timestamp(value: str) -> float:
-    parts = value.replace(",", ".").split(":")
-    if len(parts) == 2:
-        hours = 0
-        minutes, seconds = parts
-    elif len(parts) == 3:
-        hours, minutes, seconds = parts
-    else:
-        raise ValueError("invalid subtitle timestamp")
-    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
-
-
-def _text_for_window(
-    cues: Sequence[_SubtitleCue], window: VideoSegmentWindow
-) -> str:
-    values: list[str] = []
-    for cue in cues:
-        if cue.end_seconds <= window.start_seconds or cue.start_seconds >= window.end_seconds:
-            continue
-        if not values or values[-1] != cue.text:
-            values.append(cue.text)
-    return _normalize_text(" ".join(values))
-
-
-def _extract_audio_wav(source_path: str) -> bytes:
+def _transcode_audio_wav(source_path: Path, wav_path: Path) -> bytes:
     result = subprocess.run(
         [
             "ffmpeg",
-            "-v",
+            "-hide_banner",
+            "-loglevel",
             "error",
+            "-nostdin",
             "-i",
-            source_path,
+            str(source_path),
             "-map",
             "0:a:0",
             "-vn",
             "-ac",
-            "1",
+            str(AUDIO_CHANNELS),
             "-ar",
-            "16000",
+            str(AUDIO_SAMPLE_RATE),
+            "-c:a",
+            "pcm_s16le",
             "-f",
             "wav",
-            "pipe:1",
+            "-y",
+            str(wav_path),
         ],
         capture_output=True,
         check=False,
-        timeout=_AUDIO_TIMEOUT_SECONDS,
+        timeout=_AUDIO_EXTRACTION_TIMEOUT_SECONDS,
     )
-    if result.returncode != 0 or not result.stdout:
-        raise OSError("audio extraction failed")
-    return result.stdout
+    if result.returncode != 0 or not wav_path.is_file():
+        raise OSError("video audio extraction failed")
+    wav_bytes = wav_path.read_bytes()
+    if not wav_bytes:
+        raise OSError("video audio extraction returned no data")
+    return wav_bytes
 
 
-def _normalize_text(value: Any) -> str:
-    if not isinstance(value, str):
-        return ""
-    without_tags = _TAG_RE.sub(" ", html.unescape(value))
-    return " ".join(without_tags.split()).strip()
-
-
-def _stream_fingerprint(streams: Sequence[Mapping[str, Any]]) -> str:
-    stable = []
-    for stream in streams:
-        stable.append(
-            {
-                "index": stream.get("index"),
-                "codec_type": stream.get("codec_type"),
-                "codec_name": stream.get("codec_name"),
-                "channels": stream.get("channels"),
-                "sample_rate": stream.get("sample_rate"),
-                "language": (stream.get("tags") or {}).get("language"),
-                "default": (stream.get("disposition") or {}).get("default"),
-            }
-        )
-    payload = json.dumps(stable, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
-def _cache_key(
-    *,
-    source_sha256: str,
-    stream_fingerprint: str,
+def _slice_wav(
+    wav_bytes: bytes,
     windows: Sequence[VideoSegmentWindow],
-    caption_model_name: str,
-    prompt_fingerprint: str,
-) -> str:
-    payload = {
-        "version": _CACHE_VERSION,
-        "source_sha256": source_sha256,
-        "stream_fingerprint": stream_fingerprint,
-        "segments": [
-            [window.index, window.start_seconds, window.end_seconds]
-            for window in windows
-        ],
-        "caption_model_name": caption_model_name,
-        "prompt_fingerprint": prompt_fingerprint,
-    }
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
-        "utf-8"
-    )
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def _read_cache(
-    cached: Mapping[str, Any] | None, cache_key: str
-) -> VideoAudioResult | None:
-    if not isinstance(cached, Mapping) or cached.get("cache_key") != cache_key:
-        return None
-    raw_segments = cached.get("segments")
-    raw_warnings = cached.get("warnings")
-    if not isinstance(raw_segments, list) or not isinstance(raw_warnings, list):
-        return None
+) -> tuple[AudioSegment, ...]:
     try:
-        segments = tuple(_segment_from_dict(value) for value in raw_segments)
-    except (KeyError, TypeError, ValueError):
-        return None
-    warnings = tuple(value for value in raw_warnings if isinstance(value, str))
-    return VideoAudioResult(segments=segments, warnings=warnings, cache=dict(cached))
+        with wave.open(io.BytesIO(wav_bytes), "rb") as source_wav:
+            if (
+                source_wav.getnchannels() != AUDIO_CHANNELS
+                or source_wav.getframerate() != AUDIO_SAMPLE_RATE
+                or source_wav.getsampwidth() != AUDIO_SAMPLE_WIDTH
+                or source_wav.getcomptype() != "NONE"
+            ):
+                raise ValueError("transcoded audio does not match the PCM contract")
+            pcm_bytes = source_wav.readframes(source_wav.getnframes())
+    except (EOFError, wave.Error) as error:
+        raise ValueError("transcoded audio is not a valid WAV file") from error
+
+    frame_width = AUDIO_CHANNELS * AUDIO_SAMPLE_WIDTH
+    complete_length = len(pcm_bytes) - (len(pcm_bytes) % frame_width)
+    pcm_bytes = pcm_bytes[:complete_length]
+    if not pcm_bytes:
+        raise ValueError("transcoded audio contains no PCM frames")
+
+    frame_count = len(pcm_bytes) // frame_width
+    segments = []
+    for window in windows:
+        start_frame = max(0, int(round(window.start_seconds * AUDIO_SAMPLE_RATE)))
+        end_frame = max(
+            start_frame + 1,
+            int(round(window.end_seconds * AUDIO_SAMPLE_RATE)),
+        )
+        requested_frame_count = end_frame - start_frame
+        available_start = min(start_frame, frame_count)
+        available_end = min(end_frame, frame_count)
+        segment_pcm = pcm_bytes[
+            available_start * frame_width : available_end * frame_width
+        ]
+        missing_frames = requested_frame_count - len(segment_pcm) // frame_width
+        if missing_frames > 0:
+            segment_pcm += b"\x00" * missing_frames * frame_width
+
+        segments.append(
+            AudioSegment(
+                segment_index=window.index,
+                start_seconds=window.start_seconds,
+                end_seconds=window.end_seconds,
+                audio=_build_wav(segment_pcm),
+            )
+        )
+    return tuple(segments)
 
 
-def _segment_to_dict(segment: AudioSegmentText) -> dict[str, Any]:
-    return {
-        "segment_index": segment.segment_index,
-        "start_seconds": segment.start_seconds,
-        "end_seconds": segment.end_seconds,
-        "text": segment.text,
-        "content_kind": segment.content_kind,
-        "source_type": segment.source_type,
-        "source_confidence": segment.source_confidence,
-        "caption_model_name": segment.caption_model_name,
-    }
-
-
-def _segment_from_dict(value: Mapping[str, Any]) -> AudioSegmentText:
-    if not isinstance(value, Mapping):
-        raise TypeError("cached audio segment must be an object")
-    return AudioSegmentText(
-        segment_index=int(value["segment_index"]),
-        start_seconds=float(value["start_seconds"]),
-        end_seconds=float(value["end_seconds"]),
-        text=str(value["text"]),
-        content_kind=str(value["content_kind"]),
-        source_type=str(value["source_type"]),
-        source_confidence=float(value["source_confidence"]),
-        caption_model_name=(
-            str(value["caption_model_name"])
-            if value.get("caption_model_name")
-            else None
-        ),
-    )
+def _build_wav(pcm_bytes: bytes) -> bytes:
+    output = io.BytesIO()
+    with wave.open(output, "wb") as segment_wav:
+        segment_wav.setnchannels(AUDIO_CHANNELS)
+        segment_wav.setsampwidth(AUDIO_SAMPLE_WIDTH)
+        segment_wav.setframerate(AUDIO_SAMPLE_RATE)
+        segment_wav.writeframes(pcm_bytes)
+    return output.getvalue()
 
 
 def _finish(
     *,
-    segments: Sequence[AudioSegmentText],
+    segments: Sequence[AudioSegment],
     warnings: Sequence[str],
-    cache: Mapping[str, Any],
     source_sha256: str,
+    extraction_outcome: str,
 ) -> VideoAudioResult:
     segment_tuple = tuple(segments)
     warning_tuple = tuple(dict.fromkeys(warnings))
+    add_metric_counter(
+        "retrieval.video.audio_extractions",
+        {"outcome": extraction_outcome},
+    )
     for _ in segment_tuple:
         add_metric_counter("retrieval.video.audio_chunks_created")
-    for segment in segment_tuple:
-        if segment.content_kind == "captioned_subtitle":
-            add_metric_counter("retrieval.video.audio_subtitle_hits")
     if VIDEO_AUDIO_FALLBACK_VISUAL_ONLY in warning_tuple:
         add_metric_counter("retrieval.video.audio_fallback_visual_only")
     for warning in warning_tuple:
@@ -524,11 +288,7 @@ def _finish(
                 "video.source_sha256_prefix": source_sha256[:12],
             },
         )
-    return VideoAudioResult(
-        segments=segment_tuple,
-        warnings=warning_tuple,
-        cache=dict(cache),
-    )
+    return VideoAudioResult(segments=segment_tuple, warnings=warning_tuple)
 
 
 def _video_suffix(mime_type: str) -> str:
@@ -536,12 +296,14 @@ def _video_suffix(mime_type: str) -> str:
         return ".mov"
     if mime_type == "video/mpeg":
         return ".mpeg"
-    return Path("source.mp4").suffix
+    return ".mp4"
 
 
 __all__ = [
     "AUDIO_CHUNKING_VERSION",
-    "AudioSegmentText",
+    "AUDIO_EXTRACTION_VERSION",
+    "AUDIO_MIME_TYPE",
+    "AudioSegment",
     "VideoAudioResult",
     "VideoSegmentWindow",
     "prepare_video_audio",
