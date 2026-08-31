@@ -127,7 +127,7 @@ def upload_file(
         )
 
         # Video preflight: size check then ffprobe validation
-        if upload_content_type in {"video/mp4", "video/mpeg"}:
+        if upload_content_type in {"video/mp4", "video/mpeg", "video/quicktime"}:
             from open_webui.retrieval.embedding.preparation import (
                 VideoSizeLimitExceededError,
                 ServiceUnavailableError,
@@ -229,6 +229,7 @@ def upload_file(
                             "image_chunk_count": 0,
                             "text_chunk_count": 0,
                             "video_chunk_count": 0,
+                            "audio_chunk_count": 0,
                         },
                     },
                 }

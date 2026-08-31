@@ -87,11 +87,12 @@ _VISUAL_SUMMARY_KEYS = (
     "image_chunk_count",
     "text_chunk_count",
     "video_chunk_count",
+    "audio_chunk_count",
 )
 
 
 def sanitize_public_visual_summary(value: Any) -> dict[str, int]:
-    """Normalize the four public non-negative visual/chunk counters."""
+    """Normalize the public non-negative visual and chunk counters."""
     source = value if isinstance(value, Mapping) else {}
     result = {}
     for key in _VISUAL_SUMMARY_KEYS:

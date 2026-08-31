@@ -133,10 +133,12 @@ class RagChunk(Base):
         """Create or reuse one immutable, exact ordered chunk manifest.
 
         ``chunks`` is a list of dicts with ``content`` (str), ``content_type``
-        (``"text"``/``"image"``), optional ``chunk_metadata`` (dict), and an
-        optional caller-provided ``content_sha256``. Image chunks must provide
-        the SHA-256 of their source/rendered bytes because their persisted text
-        content is intentionally empty. The list order defines ``chunk_index``.
+        (``"text"``/``"image"``/``"video"``/``"audio"``), optional
+        ``chunk_metadata`` (dict), and an optional caller-provided
+        ``content_sha256``. Image and video chunks must provide the SHA-256 of
+        their source bytes because their persisted text content is intentionally
+        empty. Audio chunks contain non-empty derived text. The list order
+        defines ``chunk_index``.
 
         ``manifest_id`` should be built with :meth:`build_manifest_id`. For
         compatibility, callers that omit it receive a deterministic ID derived
@@ -271,10 +273,12 @@ class RagChunk(Base):
             if not isinstance(content, str):
                 raise ValueError("chunk content must be a string")
             content_type = chunk.get("content_type") or "text"
-            if content_type not in {"text", "image", "video"}:
-                raise ValueError("content_type must be text, image, or video")
+            if content_type not in {"text", "image", "video", "audio"}:
+                raise ValueError("content_type must be text, image, video, or audio")
             if content_type in {"image", "video"} and content:
                 raise ValueError(f"{content_type} chunk content must be empty")
+            if content_type == "audio" and not content.strip():
+                raise ValueError("audio chunk content must be non-empty")
 
             chunk_metadata = chunk.get("chunk_metadata") or {}
             if not isinstance(chunk_metadata, dict):
@@ -296,8 +300,10 @@ class RagChunk(Base):
             provided_digest = chunk.get("content_sha256")
             if provided_digest is not None:
                 RagChunk._validate_sha256(provided_digest, "content_sha256")
-                if content_type == "text" and provided_digest != text_digest:
-                    raise ValueError("text content_sha256 does not match content")
+                if content_type in {"text", "audio"} and provided_digest != text_digest:
+                    raise ValueError(
+                        f"{content_type} content_sha256 does not match content"
+                    )
                 digest = provided_digest
             elif content_type in {"image", "video"}:
                 raise ValueError(f"{content_type} chunks require content_sha256")

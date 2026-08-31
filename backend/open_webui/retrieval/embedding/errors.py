@@ -43,6 +43,12 @@ EMBEDDING_IMAGE_FORMAT_UNSUPPORTED = "embedding_image_format_unsupported"
 EMBEDDING_IMAGE_INVALID = "embedding_image_invalid"
 VIDEO_VALIDATION_FAILED = "video_validation_failed"
 VIDEO_DURATION_EXCEEDED = "video_duration_exceeded"
+VIDEO_AUDIO_ABSENT = "audio_absent"
+VIDEO_AUDIO_SUBTITLE_EXTRACTION_FAILED = "audio_subtitle_extraction_failed"
+VIDEO_AUDIO_SUBTITLE_PARSE_FAILED = "audio_subtitle_parse_failed"
+VIDEO_AUDIO_CAPTION_MODEL_UNAVAILABLE = "audio_caption_model_unavailable"
+VIDEO_AUDIO_CAPTION_FAILED = "audio_caption_failed"
+VIDEO_AUDIO_FALLBACK_VISUAL_ONLY = "audio_fallback_visual_only"
 PDF_VISUAL_EXTRACTION_FAILED = "pdf_visual_extraction_failed"
 PDF_VISUAL_LIMIT_EXCEEDED = "pdf_visual_limit_exceeded"
 PDF_VISUALS_REQUIRE_MULTIMODAL_MODEL = "pdf_visuals_require_multimodal_model"
@@ -141,6 +147,12 @@ _PUBLIC_FILE_PROCESSING_WARNING_CODES = frozenset(
         PDF_VISUAL_EXTRACTION_FAILED,
         PDF_VISUALS_REQUIRE_MULTIMODAL_MODEL,
         "pdf_table_outside_visible_page",
+        VIDEO_AUDIO_ABSENT,
+        VIDEO_AUDIO_SUBTITLE_EXTRACTION_FAILED,
+        VIDEO_AUDIO_SUBTITLE_PARSE_FAILED,
+        VIDEO_AUDIO_CAPTION_MODEL_UNAVAILABLE,
+        VIDEO_AUDIO_CAPTION_FAILED,
+        VIDEO_AUDIO_FALLBACK_VISUAL_ONLY,
     }
 )
 

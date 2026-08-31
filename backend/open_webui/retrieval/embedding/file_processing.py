@@ -54,6 +54,7 @@ class FileProcessingResult:
     text_chunk_count: int
     image_chunk_count: int
     video_chunk_count: int
+    audio_chunk_count: int
     source_sha256: str
     extraction_version: str | None
     processing_warnings: tuple[str, ...]
@@ -260,6 +261,7 @@ def process_stored_file_for_embedding(
             config=config,
             admin_email=admin.email,
             content_override=content_provenance.content_override,
+            file_metadata=file.meta,
         )
         if not prepared.chunks:
             raise EmbeddingError(FILE_PROCESSING_FAILED)
@@ -380,6 +382,7 @@ def process_stored_file_for_embedding(
                 manifest_id=manifest_id,
                 processing_warnings=warnings,
                 visual_summary=visual_summary,
+                audio_cache=prepared.audio_cache,
                 collection_name=file_collection,
             )
             db.commit()
@@ -395,6 +398,9 @@ def process_stored_file_for_embedding(
             ),
             video_chunk_count=sum(
                 chunk.modality == "video" for chunk in prepared.chunks
+            ),
+            audio_chunk_count=sum(
+                chunk.modality == "audio" for chunk in prepared.chunks
             ),
             source_sha256=prepared.source_sha256,
             extraction_version=prepared.extraction_version,
@@ -600,6 +606,7 @@ def _apply_completed_file_state(
     manifest_id: str,
     processing_warnings: Sequence[str],
     visual_summary: Mapping[str, int],
+    audio_cache: Mapping[str, Any],
     collection_name: str,
 ) -> None:
     now = int(time.time())
@@ -613,6 +620,7 @@ def _apply_completed_file_state(
         "chunk_manifest_id": manifest_id,
         "processing_warnings": list(processing_warnings),
         "visual_summary": dict(visual_summary),
+        "cache_video_audio_v1": dict(audio_cache),
         "processing_status": "completed",
         "processing_completed_at": now,
         "processing_error": None,

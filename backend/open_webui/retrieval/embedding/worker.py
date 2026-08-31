@@ -860,6 +860,7 @@ def _prepare_source_file(
             admin_email=admin_email,
             preparation_recipe=preparation_recipe,
             content_override=content_provenance.content_override,
+            file_metadata=source_file.meta,
         )
     except EmbeddingError:
         raise
@@ -904,6 +905,7 @@ def _stage_prepared_manifest(
             "projection_ids": [f"file-{file_id}", *projection_ids],
             "processing_warnings": list(dict.fromkeys(prepared.warnings)),
             "visual_summary": dict(prepared.visual_summary),
+            "audio_cache": dict(prepared.audio_cache),
         }
         job_file.file_snapshot = snapshot
         db.commit()
@@ -1327,6 +1329,7 @@ def _apply_staged_processing_summaries(*, job_id: str, db) -> None:
                 dict.fromkeys(summary.get("processing_warnings") or [])
             ),
             "visual_summary": dict(summary.get("visual_summary") or {}),
+            "cache_video_audio_v1": dict(summary.get("audio_cache") or {}),
             "processing_status": "completed",
             "processing_completed_at": now,
             "processing_error": None,

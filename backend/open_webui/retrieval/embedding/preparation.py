@@ -7,7 +7,7 @@ import json
 import math
 import os
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal, Mapping, Optional
@@ -29,11 +29,17 @@ from open_webui.retrieval.embedding.errors import (
     EmbeddingError,
 )
 from open_webui.retrieval.embedding.inputs import (
+    AudioEmbeddingInput,
     EmbeddingInput,
     EmbeddingModelSpec,
     ImageEmbeddingInput,
     TextEmbeddingInput,
     VideoEmbeddingInput,
+)
+from open_webui.retrieval.video_audio import (
+    AUDIO_CHUNKING_VERSION,
+    VideoSegmentWindow,
+    prepare_video_audio,
 )
 from open_webui.retrieval.loaders.main import Loader
 from open_webui.retrieval.loaders.pdf_complex import (
@@ -53,10 +59,10 @@ from open_webui.retrieval.loaders.pdf_complex import (
 )
 
 
-PreparedModality = Literal["text", "image", "video"]
+PreparedModality = Literal["text", "image", "video", "audio"]
 STANDALONE_IMAGE_EXTRACTION_VERSION = "standalone_image_v1"
-VIDEO_EXTRACTION_VERSION = "video_temporal_v1"
-PREPARATION_RECIPE_VERSION = "multimodal_preparation_v2"
+VIDEO_EXTRACTION_VERSION = "video_temporal_audio_v1"
+PREPARATION_RECIPE_VERSION = "multimodal_preparation_v3"
 PDF_COORDINATE_SPACE = "rotated_cropbox_top_left_points"
 
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
@@ -122,8 +128,8 @@ class ServiceUnavailableError(RuntimeError):
         super().__init__(message)
 
 
-_VIDEO_MIME_TYPES = {"video/mp4", "video/mpeg"}
-_VIDEO_EXTENSIONS = {".mp4", ".mpeg", ".mpg"}
+_VIDEO_MIME_TYPES = {"video/mp4", "video/mpeg", "video/quicktime"}
+_VIDEO_EXTENSIONS = {".mp4", ".mov", ".mpeg", ".mpg"}
 
 
 def _is_declared_video(filename: str, content_type: Optional[str]) -> bool:
@@ -631,6 +637,7 @@ def preparation_recipe_from_snapshot(snapshot: Mapping[str, Any]) -> Preparation
 _MPEG_SIGNATURES = (b"\x00\x00\x01\xb3", b"\x00\x00\x01\xba")
 _VIDEO_MIME_EXTENSIONS = {
     ".mp4": "video/mp4",
+    ".mov": "video/quicktime",
     ".mpeg": "video/mpeg",
     ".mpg": "video/mpeg",
 }
@@ -794,6 +801,8 @@ def _infer_video_mime(source_bytes: bytes) -> Optional[str]:
         return None
     # MP4/ISO BMFF: ftyp box at offset 4
     if source_bytes[4:8] == b"ftyp":
+        if source_bytes[8:12] == b"qt  ":
+            return "video/quicktime"
         return "video/mp4"
     # MPEG-PS start code
     if source_bytes[:4] in _MPEG_SIGNATURES:
@@ -806,6 +815,8 @@ def _video_suffix(mime_type: str) -> str:
         return ".mp4"
     if mime_type == "video/mpeg":
         return ".mpeg"
+    if mime_type == "video/quicktime":
+        return ".mov"
     return ".mp4"
 
 
@@ -818,7 +829,7 @@ def is_video_upload(
     if _infer_video_mime(source_bytes) is not None:
         return True
     normalized_mime = (declared_mime_type or "").split(";", 1)[0].strip().lower()
-    if normalized_mime in {"video/mp4", "video/mpeg"}:
+    if normalized_mime in _VIDEO_MIME_TYPES:
         return True
     extension = Path(filename).suffix.lower()
     if extension in _VIDEO_MIME_EXTENSIONS:
@@ -834,9 +845,15 @@ def canonical_video_content_type(
     """Return a magic-authoritative video MIME, or None if not a video."""
     inferred = _infer_video_mime(source_bytes)
     if inferred is not None:
+        normalized_mime = (declared_mime_type or "").split(";", 1)[0].strip().lower()
+        if inferred == "video/mp4" and (
+            normalized_mime == "video/quicktime"
+            or Path(filename).suffix.lower() == ".mov"
+        ):
+            return "video/quicktime"
         return inferred
     normalized_mime = (declared_mime_type or "").split(";", 1)[0].strip().lower()
-    if normalized_mime in {"video/mp4", "video/mpeg"}:
+    if normalized_mime in _VIDEO_MIME_TYPES:
         return normalized_mime
     extension = Path(filename).suffix.lower()
     return _VIDEO_MIME_EXTENSIONS.get(extension)
@@ -865,6 +882,14 @@ class PreparedChunk:
                 raise TypeError("text chunks require TextEmbeddingInput")
             if self.embedding_input.text != self.content:
                 raise ValueError("text chunk content and provider input must match")
+            expected_hash = hashlib.sha256(self.content.encode("utf-8")).hexdigest()
+        elif self.modality == "audio":
+            if not isinstance(self.embedding_input, AudioEmbeddingInput):
+                raise TypeError("audio chunks require AudioEmbeddingInput")
+            if not self.content.strip():
+                raise ValueError("audio chunks require derived text content")
+            if self.embedding_input.text != self.content:
+                raise ValueError("audio chunk content and provider input must match")
             expected_hash = hashlib.sha256(self.content.encode("utf-8")).hexdigest()
         elif self.modality == "video":
             if not isinstance(self.embedding_input, VideoEmbeddingInput):
@@ -905,6 +930,7 @@ class PreparedFile:
     extraction_version: Optional[str]
     warnings: tuple[str, ...]
     visual_summary: Mapping[str, int]
+    audio_cache: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not _is_sha256(self.source_sha256):
@@ -920,6 +946,11 @@ class PreparedFile:
                     for key, value in dict(self.visual_summary).items()
                 }
             ),
+        )
+        object.__setattr__(
+            self,
+            "audio_cache",
+            MappingProxyType(dict(self.audio_cache)),
         )
 
 
@@ -1123,6 +1154,7 @@ def prepare_file_for_embedding(
     admin_email: str,
     content_override: Optional[str] = None,
     preparation_recipe: Optional[PreparationRecipe] = None,
+    file_metadata: Optional[Mapping[str, Any]] = None,
 ) -> PreparedFile:
     """Prepare a stored file for one frozen admin/model embedding context."""
     if not isinstance(source_bytes, bytes):
@@ -1217,6 +1249,9 @@ def prepare_file_for_embedding(
             model=model,
             recipe=recipe,
             base_metadata=base_metadata,
+            config=config,
+            admin_email=admin_email,
+            cached_audio=(file_metadata or {}).get("cache_video_audio_v1"),
         )
 
     if source_kind == "pdf":
@@ -1427,6 +1462,9 @@ def _prepare_video(
     model: EmbeddingModelSpec,
     recipe: PreparationRecipe,
     base_metadata: dict,
+    config: Any,
+    admin_email: str,
+    cached_audio: Any = None,
 ) -> PreparedFile:
     """Prepare a video file for temporal embedding.
 
@@ -1451,8 +1489,30 @@ def _prepare_video(
     )
 
     content_sha256 = hashlib.sha256(source_bytes).hexdigest()
+    audio_result = prepare_video_audio(
+        source_bytes=source_bytes,
+        source_sha256=source_sha256,
+        mime_type=canonical_mime,
+        windows=tuple(
+            VideoSegmentWindow(
+                index=chunk.chunk_index,
+                start_seconds=chunk.start_offset_seconds,
+                end_seconds=chunk.end_offset_seconds,
+            )
+            for chunk in video_chunks
+        ),
+        config=config,
+        admin_email=admin_email,
+        cached=cached_audio if isinstance(cached_audio, Mapping) else None,
+    )
+    audio_by_index = {segment.segment_index: segment for segment in audio_result.segments}
     chunks: list[PreparedChunk] = []
     for vc in video_chunks:
+        segment_identity = (
+            f"{file_id}\0{source_sha256}\0{vc.start_offset_seconds:.3f}"
+            f"\0{vc.end_offset_seconds:.3f}"
+        ).encode("utf-8")
+        video_segment_id = f"vidseg_{hashlib.sha256(segment_identity).hexdigest()}"
         metadata = {
             **base_metadata,
             "modality": "video",
@@ -1464,6 +1524,11 @@ def _prepare_video(
             "extraction_version": recipe.video_extraction_version,
             "mime_type": canonical_mime,
             "duration_seconds": duration,
+            "video_file_id": file_id,
+            "video_segment_id": video_segment_id,
+            "segment_start_s": vc.start_offset_seconds,
+            "segment_end_s": vc.end_offset_seconds,
+            "chunking_version": "video_temporal_v1",
         }
         chunks.append(
             PreparedChunk(
@@ -1482,19 +1547,58 @@ def _prepare_video(
             )
         )
 
+        audio = audio_by_index.get(vc.chunk_index)
+        if audio is not None:
+            audio_metadata = {
+                **base_metadata,
+                "modality": "audio",
+                "content_kind": audio.content_kind,
+                "source_type": audio.source_type,
+                "source_confidence": audio.source_confidence,
+                "startTimeSeconds": vc.start_offset_seconds,
+                "endTimeSeconds": vc.end_offset_seconds,
+                "segment_start_s": vc.start_offset_seconds,
+                "segment_end_s": vc.end_offset_seconds,
+                "chunkIndex": vc.chunk_index,
+                "fileId": file_id,
+                "video_file_id": file_id,
+                "video_segment_id": video_segment_id,
+                "extraction_version": recipe.video_extraction_version,
+                "chunking_version": AUDIO_CHUNKING_VERSION,
+                "mime_type": canonical_mime,
+                "duration_seconds": duration,
+                "caption_model_name": audio.caption_model_name,
+            }
+            chunks.append(
+                PreparedChunk(
+                    content=audio.text,
+                    content_type="audio",
+                    embedding_input=AudioEmbeddingInput(text=audio.text),
+                    content_sha256=hashlib.sha256(audio.text.encode("utf-8")).hexdigest(),
+                    modality="audio",
+                    chunk_metadata=audio_metadata,
+                )
+            )
+
+    audio_chunks = tuple(
+        chunk for chunk in chunks if chunk.modality == "audio"
+    )
+
     return PreparedFile(
         chunks=tuple(chunks),
-        text_content="",
+        text_content="\n\n".join(chunk.content for chunk in audio_chunks),
         source_sha256=source_sha256,
         extraction_version=recipe.video_extraction_version,
-        warnings=(),
+        warnings=audio_result.warnings,
         visual_summary=_visual_summary(
             figure_count=0,
             table_image_count=0,
             image_chunk_count=0,
             text_chunk_count=0,
-            video_chunk_count=len(chunks),
+            video_chunk_count=len(video_chunks),
+            audio_chunk_count=len(audio_chunks),
         ),
+        audio_cache=audio_result.cache,
     )
 
 
@@ -1755,6 +1859,7 @@ def _visual_summary(
     image_chunk_count: int,
     text_chunk_count: int,
     video_chunk_count: int = 0,
+    audio_chunk_count: int = 0,
 ) -> dict:
     return {
         "figure_count": int(figure_count),
@@ -1762,6 +1867,7 @@ def _visual_summary(
         "image_chunk_count": int(image_chunk_count),
         "text_chunk_count": int(text_chunk_count),
         "video_chunk_count": int(video_chunk_count),
+        "audio_chunk_count": int(audio_chunk_count),
     }
 
 
@@ -1781,6 +1887,14 @@ _PUBLIC_CHUNK_METADATA_KEYS = {
     "endTimeSeconds",
     "chunkIndex",
     "duration_seconds",
+    "video_file_id",
+    "video_segment_id",
+    "segment_start_s",
+    "segment_end_s",
+    "source_type",
+    "source_confidence",
+    "caption_model_name",
+    "chunking_version",
 }
 
 

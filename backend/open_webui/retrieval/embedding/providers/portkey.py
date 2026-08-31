@@ -9,6 +9,7 @@ import requests
 from ..inputs import (
     EmbeddingInput,
     TextEmbeddingInput,
+    AudioEmbeddingInput,
     ImageEmbeddingInput,
     VideoEmbeddingInput,
     EmbeddingModelSpec,
@@ -121,13 +122,14 @@ class PortkeyEmbeddingProvider:
         inputs: Sequence[EmbeddingInput],
         model: EmbeddingModelSpec,
     ) -> Sequence[Sequence[float]]:
-        """Embed mixed text/image/video inputs while preserving their logical order.
+        """Embed mixed text/audio/image/video inputs in logical order.
 
         The approved Vertex multimodal gateway contract returns one embedding
         per request, even when ``input`` contains multiple text entries. Send
-        every logical text, image, or video input separately and restore the
-        caller's original order. One HTTP session retains connection reuse
-        without persisting credentials or provider responses.
+        every logical input separately and restore the caller's original order.
+        Audio-derived text uses the provider's text embedding path while
+        retaining its logical audio modality upstream. One HTTP session retains
+        connection reuse without persisting credentials or provider responses.
 
         Base64 encoding is confined to this adapter and never leaves it in an
         exception or durable record.
@@ -136,6 +138,11 @@ class PortkeyEmbeddingProvider:
             (index, item)
             for index, item in enumerate(inputs)
             if isinstance(item, TextEmbeddingInput)
+        ]
+        indexed_audio = [
+            (index, item)
+            for index, item in enumerate(inputs)
+            if isinstance(item, AudioEmbeddingInput)
         ]
         indexed_images = [
             (index, item)
@@ -148,7 +155,10 @@ class PortkeyEmbeddingProvider:
             if isinstance(item, VideoEmbeddingInput)
         ]
         if (
-            len(indexed_texts) + len(indexed_images) + len(indexed_videos)
+            len(indexed_texts)
+            + len(indexed_audio)
+            + len(indexed_images)
+            + len(indexed_videos)
             != len(inputs)
         ):
             raise EmbeddingError(
@@ -160,6 +170,18 @@ class PortkeyEmbeddingProvider:
         try:
             with requests.Session() as session:
                 for index, item in indexed_texts:
+                    ordered[index] = self._post_single_embedding(
+                        session,
+                        {
+                            "model": model.model_name,
+                            "input": [item.text],
+                            "dimensions": model.dimension,
+                            "encoding_format": "float",
+                        },
+                        expected_modality="text",
+                    )
+
+                for index, item in indexed_audio:
                     ordered[index] = self._post_single_embedding(
                         session,
                         {

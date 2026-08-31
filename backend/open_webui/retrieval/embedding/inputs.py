@@ -14,6 +14,14 @@ class TextEmbeddingInput:
 
 
 @dataclass(frozen=True)
+class AudioEmbeddingInput:
+    """Audio-derived text input for embedding generation."""
+
+    text: str
+    modality: Literal["audio"] = "audio"
+
+
+@dataclass(frozen=True)
 class ImageEmbeddingInput:
     """Image input for embedding generation."""
 
@@ -33,7 +41,7 @@ class VideoEmbeddingInput:
     """Video input for temporal embedding generation."""
 
     video: bytes
-    mime_type: Literal["video/mp4", "video/mpeg"]
+    mime_type: Literal["video/mp4", "video/mpeg", "video/quicktime"]
     start_offset_seconds: float
     end_offset_seconds: float
     interval_seconds: float
@@ -42,8 +50,10 @@ class VideoEmbeddingInput:
     def __post_init__(self) -> None:
         if not isinstance(self.video, bytes):
             raise TypeError("video must be bytes")
-        if self.mime_type not in ("video/mp4", "video/mpeg"):
-            raise ValueError("mime_type must be video/mp4 or video/mpeg")
+        if self.mime_type not in ("video/mp4", "video/mpeg", "video/quicktime"):
+            raise ValueError(
+                "mime_type must be video/mp4, video/mpeg, or video/quicktime"
+            )
         if not math.isfinite(self.start_offset_seconds) or self.start_offset_seconds < 0:
             raise ValueError("start_offset_seconds must be a finite non-negative number")
         if not math.isfinite(self.end_offset_seconds) or self.end_offset_seconds <= self.start_offset_seconds:
@@ -53,7 +63,12 @@ class VideoEmbeddingInput:
 
 
 # Union type for all embedding inputs
-EmbeddingInput = Union[TextEmbeddingInput, ImageEmbeddingInput, VideoEmbeddingInput]
+EmbeddingInput = Union[
+    TextEmbeddingInput,
+    AudioEmbeddingInput,
+    ImageEmbeddingInput,
+    VideoEmbeddingInput,
+]
 
 
 @dataclass(frozen=True)
