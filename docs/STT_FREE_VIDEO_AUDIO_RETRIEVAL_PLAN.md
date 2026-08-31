@@ -1,290 +1,309 @@
-# STT-Free Audio-from-Video Retrieval Plan (Revised)
+# Direct Video-Audio Embeddings and Retrieval-Time Understanding
 
-## Executive Summary
+## Executive summary
 
-Implement audio-aware retrieval for videos without adding STT services or env-based feature toggles.
-For every video file ingest path, create audio-derived text chunks (when available) alongside current visual chunks and include them in the same retrieval pipeline.
+Video ingestion indexes the original visual stream and its audio stream in the
+same `@vertexai/gemini-embedding-2` vector space. Each existing temporal video
+segment receives an aligned raw-audio sibling when the source contains an audio
+track. Audio is transcoded once per video to mono, 16 kHz PCM WAV and sliced in
+memory on the existing video boundaries.
 
-- No STT APIs/models/keys are introduced.
-- No new env variables for enabling/disabling video audio features.
-- No separate model/env selection for this feature; use the existing admin-config model/routing path:
-  - Embeddings resolve from existing `rag.embedding_model_user` / `rag.embedding_model` config flow.
-  - Captioning/fallback uses the already-configured admin RAG multimodal/LLM path for that tenant.
-- `mp4` and `.mov` remain first-class supported input video containers (no optional MOV gating).
-- Retrieval merges visual + audio-derived candidates and presents both sources in context while preserving current behavior.
+Audio chunks contain no text. They store only an audio-byte digest and factual
+source metadata, so ingestion does not depend on transcription, subtitle
+parsing, or generated descriptions. Audio failures are best effort and never
+invalidate successfully embedded visual chunks.
 
-Effort: ~5–8 engineer days depending on migration friction.
+At retrieval time, a text query can match an audio vector directly. For the
+highest-ranked authorized audio hits, the server reconstructs the corresponding
+WAV ranges from the original video and attaches them transiently to a compatible
+Gemini answer model. Unknown, embedding-only, or incompatible answer models
+receive timestamp and compatible frame context but no audio bytes.
 
-## Ground Rules (applied throughout plan)
+## Design principles
 
-- Audio processing is required on video ingestion and always attempted.
-- `mp4`/`.mov` parsing is mandatory where container + codecs are supported.
-- If audio extraction or captioning fails, ingestion continues with visual chunks only.
-- Keep STT dependency count at zero.
-- Keep model calls low:
-  - Prefer embedded subtitles/closed captions first.
-  - Only call captioning model when needed and capped to one per video segment batch strategy.
+- Keep video and audio in one cross-modal embedding space.
+- Preserve the current 16-second temporal video segmentation policy.
+- Store no transcript, subtitle text, generated audio description, WAV payload,
+  or Base64 payload in chunk content or citation metadata.
+- Treat audio extraction and embedding as optional siblings of required visual
+  processing.
+- Authorize retrieval from canonical server-side file and knowledge scope.
+- Reconstruct only bounded, top-ranked evidence from the original source file.
+- Send audio only when answer-model support is declared or safely inferred.
+- Keep existing image, video-vector, and video-frame behavior unchanged.
+- Add no audio feature flag or separate audio model configuration.
 
-## A) Ingest → Extraction/Attachment → Embedding → Retrieval → Answer-Context Assembly
+## End-to-end flow
 
-1. Ingest
-   - Existing upload / knowledge ingestion paths accept video and pass through existing pipeline.
-   - Add video stream inspection and optional audio extraction into temporary working files.
+### 1. Video preparation
 
-2. Extraction/Attachment
-   - If embedded subtitles exist in container, extract by segment and normalize to text for chunking.
-   - If not, generate multimodal caption summaries from short audio segments via admin-selected LLM.
-   - Attach `audio_signal` chunk metadata to a sibling chunk with shared segment IDs.
+The shared preparation path used by normal ingestion and reindex workers:
 
-3. Embedding
-   - Keep existing visual `VideoEmbeddingInput` flow untouched.
-   - Add new audio-derived `AudioEmbeddingInput` flow routed through existing EmbeddingService.
-   - Persist both chunk types in a single chunk manifest and vector write.
+1. Validates the video container and duration with the existing video policy.
+2. Plans the existing temporal visual segments.
+3. Uses `ffprobe` to determine whether the first audio stream exists.
+4. If present, invokes `ffmpeg` once to produce mono PCM signed 16-bit WAV at
+   16 kHz.
+5. Reads the PCM frames and slices them in memory using the exact visual segment
+   start and end times.
+6. Pads a short trailing audio stream with silence so each planned visual range
+   has a deterministic, aligned audio sibling.
 
-4. Retrieval
-   - Expand retrieval query pipeline to include `modality=audio` chunks in text retrieval candidates.
-   - Preserve existing video and image retrieval ranking behavior.
+MP4, MPEG, and QuickTime/MOV sources use the same supported container policy as
+temporal video embeddings. A missing stream or extraction failure returns stable
+warnings and leaves the visual chunk list intact.
 
-5. Answer-context assembly
-- Maintain existing visual reconstruction path for frame context.
-- For audio chunks, attach:
-  - text snippet,
-  - source citation metadata,
-  - timestamps,
-  - and optionally reconstructed frames from same segment for visual grounding.
+### 2. Chunk construction
 
-## B) Phased Implementation Plan
+Each temporal range keeps its visual chunk and, when audio is available, gains
+one audio sibling. Both chunks share `video_segment_id`, timestamps, source
+identity, and duration.
 
-### Phase 1 — Ingestion + extraction (3–5 days)
+The audio chunk contract is:
 
-1. Add audio metadata extraction path in a new helper module (e.g., `retrieval/video_audio.py`) without touching existing visual code.
-   - ffprobe + temp extraction of audio track (`wav` or `mp3`) per file.
-   - Parse embedded subtitle tracks (`mov_text`, `tx3g`, `srt`, `vtt`, `ass`, `ssa`, `subrip`, etc.).
-   - Return empty/noisy tracks as unsupported with explicit warning.
-
-2. Update `_prepare_video` in `retrieval/embedding/preparation.py`.
-   - Keep current visual chunking unchanged.
-   - Add audio-derived sibling chunks per segment only when text exists.
-   - Use immutable shared keys (`video_file_id`, `segment_id`, `start_ms`, `end_ms`) for dedupe and join.
-
-3. Update `retrieval/embedding/inputs.py`.
-   - Add `AudioEmbeddingInput` structure and support in input-type unions.
-
-4. Update `PreparedChunk`/manifest metadata handling (minimal scope).
-   - Add modality-specific fields:
-     - `modality: audio | video`
-     - `content_kind: captioned_subtitle | captioned_summarized_audio | speech_absent | visual_temporal`
-     - `source_type` and `source_confidence`
-   - Ensure content/content hash behavior supports text-bearing audio chunks.
-
-5. Add DB schema + model awareness.
-   - Migration: extend allowed modalities to include `audio`.
-   - If migration currently seeds supported modalities for providers, add `audio` where embedding/call path truly supports it.
-
-6. Add best-effort cache key in file metadata (private key).
-   - Cache extracted/parsed subtitle hashes + captioning outputs + offsets by source hash + segment bounds + prompt/model fingerprint.
-
-### Phase 2 — Retrieval integration (1.5–2.5 days)
-
-7. `routers/files.py` and `routers/knowledge.py`.
-   - Keep STT/transcription routes untouched/unchanged.
-   - Ensure video paths call shared preparation + background/job queue path and skip any explicit STT branch for video.
-   - Add warning telemetry for audio extraction/captioning failures.
-
-8. `retrieval/embedding/file_processing*` entrypoints (`file_processing.py`, `enqueuing`/reindex worker path).
-   - Ensure both sync and worker paths invoke unified video+audio preparation.
-   - Enforce partial success policy: audio extraction warnings do not fail full video ingest.
-
-9. Retrieval filters/rerankers.
-   - Allow `modality == audio` in text retrieval candidate flow where empty visual vectors appear.
-   - Keep BM25/lexical guardrails to not introduce empty-text vectors.
-   - Preserve dense/hybrid defaults; no separate ranking architecture now.
-
-10. `retrieval/visuals.py`.
-    - No major rewrite.
-    - Add citation merge helper path: audio chunk with timestamps can resolve frame reconstruction through its sibling video segment metadata.
-    - Keep existing frame reconstruction for visual chunks as-is.
-
-### Phase 3 — Rollout + migration (1 day)
-
-11. Migration/backfill.
-    - Existing videos remain valid with current `video` chunks.
-    - Add async reindex plan to add audio siblings for prior videos when reprocessing is acceptable.
-    - For legacy jobs, fallback remains visual-only.
-
-12. Release strategy.
-    - No additional env flags to flip.
-    - Canaries by admin/model compatibility and model capability matrix only.
-    - If captioning model for admin has insufficient multimodal support, ingestion logs warning and stores visual-only.
-
-## C) File-by-file action list with anchors
-
-- `routers/files.py`
-  - Shared video ingestion entrypoint: remove any model-specific STT route split for video files.
-  - Add upload validation warnings metadata for unsupported audio streams and caption fallback status.
-  - Preserve `preview`/`visual_summary` behavior.
-
-- `routers/knowledge.py`
-  - Same as files: no new STT branch for video.
-  - Ensure knowledge-file metadata carries new audio extraction warning fields.
-
-- `retrieval/embedding/preparation.py::_prepare_video`
-  - Keep current visual chunking behavior.
-  - Add optional audio extraction stage and attach audio-derived chunks with consistent segment IDs.
-  - Update chunk metadata schema as above.
-
-- `retrieval/embedding/inputs.py`
-  - Add `AudioEmbeddingInput`.
-  - Ensure model routing/validation accepts new input type.
-
-- `retrieval/embedding/file_processing.py`, `retrieval/embedding/worker.py`
-  - Reuse single prepare path for both immediate and async processing.
-  - Ensure warnings/errors are carried as non-fatal unless no indexable chunks are produced.
-
-- Retrieval filter/reranker modules (primarily `retrieval/utils.py`)
-  - Include `audio` in allowed retrieval modality list where text exists.
-  - Preserve `image`/`video` behavior unchanged.
-  - Keep scoring defaults; no new ranking model.
-
-- `retrieval/visuals.py`
-  - Merge audio chunk citations with reconstructed frames from matching video segment.
-  - Maintain existing ordering and citation dedupe logic.
-
-## D) Metadata and lifecycle design
-
-Chunk metadata keys:
-- `modality`: `audio`, `video`, `image`, `text`
-- `content_kind`: `captioned_subtitle`, `captioned_summarized_audio`, `visual_temporal`
-- `source_type`: `embedded_subtitle`, `embedded_closed_caption`, `transcoded_audio_summary`
-- `source_confidence`: `0.0 - 1.0`
-- `video_file_id`: file identifier
-- `video_segment_id`: deterministic segment fingerprint
+- `content_type`: `audio`
+- `modality`: `audio`
+- `content_kind`: `audio_temporal`
+- `content`: empty string
+- `content_sha256`: SHA-256 of the segment WAV bytes
+- `mime_type`: `audio/wav`
+- `source_mime_type`: the original video MIME type
+- `startTimeSeconds` / `endTimeSeconds`
 - `segment_start_s` / `segment_end_s`
-- `caption_model_name`: resolved admin model name for captions
-- `chunking_version`: `audio_v1` / `video_temporal_v1`
+- `chunkIndex`
+- `video_segment_id`
+- `duration_seconds`
+- `audio_extraction_version`
+- `chunking_version`
 
-Caching and dedupe:
-- Cache key = hash(content_id + source fingerprint + stream fingerprint + segment bounds + model version + caption prompt fingerprint).
-- If cache key unchanged, skip re-extract/recompute captioning for that segment.
-- Job/job-id level idempotence remains via existing embedding job keys and manifest hashes.
+`AudioEmbeddingInput` is immutable and carries only `audio: bytes` plus the
+literal MIME type `audio/wav`. Provider input bytes remain process-local; only
+their digest and the approved metadata above enter the chunk manifest.
 
-Failure semantics:
-- No audio track: mark warning `audio_absent` and proceed visual-only.
-- Subtitle parse partial fail: continue with available subtitle tracks; caption missing segments may still attempt multimodal fallback.
-- Caption model unavailable/per-failure: continue visual-only for failed segments and continue ingestion.
-- If all audio extraction methods fail: ingestion status remains success with warnings.
+### 3. Embedding
 
-## E) STT-free audio understanding strategy
+Audio uses the existing Portkey multimodal embedding route and the same model
+space as text, images, and video. The gateway request follows its media
+contract:
 
-1) Subtitle-first (preferred)
-- Prefer embedded tracks extracted from container.
-- Parse and align to segment boundaries.
-- No external API.
+```json
+{
+  "model": "@vertexai/gemini-embedding-2",
+  "input": [
+    {
+      "text": "",
+      "audio": {
+        "base64": "<transient WAV bytes>",
+        "mimeType": "audio/wav"
+      }
+    }
+  ]
+}
+```
 
-2) Captioning fallback (admin multimodal model)
-- Trigger only for segments with no usable subtitle text.
-- Use one model call per planned segment batch.
-- Generate brief semantic summaries of spoken content (not raw transcript reconstruction).
-- Keep captions short and deterministic.
+The provider adapter accepts both supported response forms:
 
-3) No-caption fallback
-- If neither subtitles nor captioning succeed:
-  - continue with visual chunks only;
-  - add visible warning metadata for diagnosis;
-  - never call any transcription/STT service.
+- OpenAI-compatible `data[].embedding`
+- Vertex-compatible `predictions[].audioEmbedding`
 
-## F) Retrieval query-routing strategy
+Text, image, and video chunks follow their normal embedding path. Each audio
+chunk is sent in its own provider call so one audio failure removes only that
+audio chunk. Successful chunks and vectors retain their original relative
+order, then produce one canonical manifest and the normal file and knowledge
+projections.
 
-- Include both `video` and `audio` modality chunks in retrieval candidate union.
-- `audio` chunks should be scored with same retrieval path as text where present, but final rank order continues to prefer:
-  - high semantic similarity first,
-  - recency/segment order as secondary.
-- Overlap handling:
-  - same video segment may return both audio and visual chunks;
-  - do not suppress one solely because the other exists;
-  - preserve both and let downstream rank merge.
-- Optional hardening later: small tie-break multiplier on `audio` for intent keywords in question text (e.g., speak/said/asked/response), deferred.
+If every audio call fails, the file still completes as visual-only with stable
+warnings. A failure in required visual processing retains its existing failure
+semantics.
 
-## G) Security, performance, and cost
+### 4. Dense retrieval
 
-- New worker costs:
-  - ffprobe parsing and audio extraction are local I/O/CPU bounded.
-  - Caption model calls bounded by segment policy and cached by key.
-- Segment policy:
-  - default 16s segmenting already exists for visuals.
-  - keep/adjust segment alignment to avoid extra extractions.
-- Queue pressure:
-- Existing job queue behavior remains unchanged.
-  - Add per-file warning metadata; mark job partially failed only if all embeddings fail.
-- Storage:
-  - One additional audio chunk per video chunk in successful subtitle/caption cases.
-  - Dedupe + pruning by existing TTL/cleanup policy.
-- Observability:
-  - increment counters for:
-    - `retrieval.video.audio_chunks_created`
-    - `retrieval.video.audio_subtitle_hits`
-    - `retrieval.video.audio_caption_calls`
-    - `retrieval.video.audio_fallback_visual_only`
-  - include segment-level warning events for ops visibility.
+An embedding model whose declared modalities include `audio`, `image`, or
+`video` is treated as a dense multimodal space. This avoids applying text-only
+ranking stages to media vectors.
 
-Expected latency impact (typical):
-- No-caption/subtitle-only: low, local extraction only.
-- Captioning fallback: +1 model call per segment batch.
-- No extra embedding model type because embeddings still go through the existing selected provider/model.
+Retrieval behavior is:
 
-## H) `mp4` / `.mov` handling
+- Admit empty-content audio rows returned by dense vector search.
+- Exclude audio rows from BM25 indexing.
+- Exclude audio rows from text reranking and text-embedding fallback scoring.
+- Keep audio and visual sibling hits as separate evidence rows.
+- Rank reconstruction candidates by dense distance and stable metadata
+  tie-breakers.
+- Deduplicate frame and audio reconstruction by `video_segment_id` without
+  suppressing either sibling from retrieval results.
 
-- Support both formats by default in this feature.
-- Container handling:
-  - Accept `video/mp4` and `video/quicktime`/`mov` where decode + stream maps allow.
-  - Validate codec/container compatibility with ffprobe before processing.
-  - For unsupported video-only container edge cases, fail fast with a clear reason and preserve existing upload behavior.
-- No separate feature flag for MOV support.
-- Never transcode unless already necessary for extraction pipeline in existing flow.
+Text queries are embedded by the active model and can therefore match spoken or
+other acoustic evidence without text being generated during ingestion.
 
-## I) Rollout and migration
+### 5. Authorized reconstruction
 
-- Backward-compatible:
-  - current video retrieval remains unchanged.
-  - existing embeddings continue to work.
-  - no schema break for UI behavior.
-- Reprocess path:
-  - start with newly uploaded files only,
-  - optionally requeue older videos in maintenance windows.
-- Config:
-  - no new env vars for this feature.
-  - model/LLM behavior remains admin-config driven from existing settings.
+Audio bytes are reconstructed only after retrieval and only for rows within the
+server-validated attachment scope. A candidate must belong to an attached file
+or attached knowledge collection and must contain the expected audio/video
+metadata contract.
 
-## Validation checklist
+For each selected segment, the server:
 
-- With embedded captions: spoken-content questions return audio-derived citations + frame context.
-- Without captions: fallback path returns visual-only results without failure.
-- Silent/no-audio videos: ingest succeeds with clear warning and no crash.
-- Long videos: audio extraction and indexing run under background queue and complete incrementally.
-- Mixed modalities in results: answer context contains both visual and audio-derived chunks where relevant.
-- Observability:
-  - warnings emitted for unsupported codecs, subtitle parse misses, caption model fallback.
-  - metrics/events show ratio of visual-only vs audio-enriched chunks.
+1. Resolves the stored original video by `file_id`.
+2. Verifies its SHA-256 against the indexed source digest.
+3. Validates finite timestamps against the recorded source duration.
+4. Enforces the configured top-k selection, the audio reconstruction limit, and
+   the maximum video duration bound.
+5. Extracts only the selected range as mono, 16 kHz signed 16-bit PCM.
+6. Wraps the PCM in WAV format in memory.
 
-## Risk register
+Reconstructed audio is not written to file metadata, chunk rows, vector
+metadata, chat citations, logs, or telemetry. It exists only long enough to
+assemble the answer-model request.
 
-- High: Admin-configured caption model lacks required multimodal audio capability.
-  - Mitigation: capability check + clear warning + visual-only safe mode.
-- High: Subtitle parsing for uncommon container variants fails.
-  - Mitigation: robust parser selection + fallback to captioning + explicit segment-level warnings.
-- Medium: chunk volume increases.
-  - Mitigation: segment alignment, dedupe, and warnings-driven triage.
-- Medium: embedding vector search includes extra non-visual docs.
-  - Mitigation: existing filters, no schema changes to query path, conservative text guards.
-- Low: codec/container regressions on rare MOV variants.
-  - Mitigation: ffprobe-first validation and clear skip message instead of silent failure.
+Audio hits remain eligible for the existing timestamped frame reconstruction
+path. This preserves visual grounding when the dense match came from audio and
+allows a model without audio input support to receive compatible frame context.
 
-## Definition of Done
+### 6. Answer-model capability gate
 
-- Video ingestion always attempts audio-aware extraction for captions and generates audio-derived chunks when possible.
-- Visual chunk path remains unchanged and fully backward-compatible.
-- Retrieval returns audio-derived results for audio-relevant prompts and remains robust when audio processing is unavailable.
-- No STT dependency added.
-- No new runtime toggles required.
-- `.mp4` and `.mov` are treated as supported containers.
-- Migration and observability artifacts are in place.
+Audio attachment is stricter than the existing optimistic vision behavior. The
+selected answer model receives WAV evidence only when all of the following are
+true:
+
+- Its resolved identifier is a Gemini model.
+- It is not an embedding model.
+- Audio input support is explicitly declared or safely inferred from a supported
+  Gemini generation.
+
+Explicit `capabilities.audio` metadata is authoritative for a Gemini answer
+model. Known Gemini 1.5-and-later identifiers can be inferred as audio-capable.
+Other models and unrecognized identifiers are treated as unknown and receive no
+audio bytes.
+
+The transient Portkey Gemini media part uses a WAV data URL:
+
+```json
+{
+  "type": "image_url",
+  "image_url": {
+    "url": "data:audio/wav;base64,<transient WAV bytes>"
+  }
+}
+```
+
+Caller-supplied non-text media is removed before processing. Only media
+reconstructed from the authorized retrieval scope can be appended to the latest
+user message.
+
+When retrieved audio cannot be attached because model support is false or
+unknown, the user receives a clear status message. Factual source context is
+still included, for example:
+
+> Retrieved audio evidence from "meeting.mov", 00:16.000–00:32.000.
+
+No inferred meaning, transcript, or description of the audio is added to that
+text.
+
+### 7. Citation sanitization
+
+Frontend source metadata is allowlisted independently for text, visual, and
+audio rows. Audio citations may expose factual identity and timing fields such
+as file name, MIME types, segment ID, timestamps, and duration.
+
+They never expose:
+
+- reconstructed WAV or PCM bytes
+- Base64 or data URLs
+- source filesystem or object-storage paths
+- source or content hashes
+- provider requests or responses
+- private extraction recipes
+
+Audio and visual sibling citations remain separate even when reconstruction is
+deduplicated by segment ID.
+
+## Failure semantics and warnings
+
+| Condition | Result |
+|---|---|
+| No audio stream | Visual ingestion succeeds; `audio_absent` and `audio_fallback_visual_only` are recorded. |
+| Audio probe/transcode/slice failure | Visual ingestion succeeds; `audio_extraction_failed` and visual-only fallback are recorded. |
+| One audio embedding call fails | Only that audio sibling is removed; remaining chunks are persisted. |
+| All audio embedding calls fail | Visual ingestion succeeds with `audio_embedding_failed` and visual-only fallback warnings. |
+| Retrieval source is unauthorized | No frame, audio, or file-backed citation is emitted. |
+| Source bytes no longer match | Audio reconstruction is skipped. |
+| Selected answer model is unsupported or unknown | No audio data URL is sent; the user sees a status warning and retains timestamp/frame context. |
+| FFmpeg is unavailable at retrieval | Audio attachment is skipped and visual-only fallback telemetry is recorded. |
+
+Warnings are public stable codes, while provider exception details and media
+bytes remain private.
+
+## Observability
+
+The audio path uses bounded counters and span events without media content:
+
+- `retrieval.video.audio_extractions`, labeled by outcome
+- `retrieval.video.audio_chunks_created`
+- `retrieval.video.audio_embedding_failures`
+- `retrieval.video.audio_attachments`
+- `retrieval.video.audio_answer_model_unsupported`
+- `retrieval.video.audio_fallback_visual_only`
+
+Failure events may contain an error type, model identifier, stable segment ID,
+or a short source-hash prefix. They never contain audio, Base64, transcripts, or
+provider credentials.
+
+## Persistence and lifecycle
+
+- Chunk manifests include audio modality, byte digest, timing, and extraction
+  version so reprocessing is deterministic.
+- Existing job idempotence, frozen model resolution, and model-aware projection
+  rules remain authoritative.
+- Old private video-audio cache metadata is discarded when a file state is
+  published; no new audio-content cache is created.
+- Existing videos remain valid as visual-only until they are reprocessed through
+  the normal upload or reindex workflow.
+- No automatic backfill or database stamping is part of this change.
+
+## Database migration
+
+Revision `j0k1l2m3n4o5`:
+
+- extends `rag_chunks.content_type` to allow `audio`
+- appends `audio` to the Gemini embedding model's modality list
+- has `c4d5e6f7g8h9` as its sole parent, which is the repository's existing
+  merge head
+
+The database was checked read-only before the parent correction and remained at
+`c4d5e6f7g8h9`; `j0k1l2m3n4o5` had not been applied. The migration history must
+not be stamped, rewritten, or supplemented with another merge revision. With
+the parent corrected, the intended Alembic graph has one head:
+`j0k1l2m3n4o5`.
+
+## Validation scenarios
+
+- MP4 and MOV files with audio produce one raw-audio sibling per visual segment
+  without transcription- or caption-related warnings.
+- A spoken-content text query can retrieve an audio vector and attach the
+  corresponding WAV, timestamps, and compatible frames to a supported Gemini
+  answer model.
+- Files without an audio stream complete visual ingestion with stable warnings.
+- An individual audio extraction or embedding failure does not invalidate
+  successful visual chunks.
+- Unknown, non-Gemini, and embedding answer models receive no audio payload and
+  produce a clear status message.
+- Existing image retrieval, video-vector retrieval, and frame reconstruction
+  behave as before.
+- Citation events and frontend metadata never contain WAV or Base64 data.
+- The intended migration graph has the single head `j0k1l2m3n4o5`.
+
+## Definition of done
+
+- Raw audio is embedded directly in the Gemini cross-modal vector space.
+- Every extractable video audio track produces aligned segment siblings.
+- Audio failures preserve successful visual ingestion and reindex results.
+- Empty audio chunks participate only in dense retrieval.
+- Top-ranked authorized audio hits are reconstructed from their original files.
+- Audio is attached only to compatible non-embedding Gemini answer models.
+- Unsupported or unknown models receive no audio bytes and a clear warning.
+- Citations contain factual source timing only and expose no media payload.
+- The audio migration is based directly on `c4d5e6f7g8h9`.
+- No transcription service, subtitle parser, generated audio description, or
+  audio-content cache remains in this design.
