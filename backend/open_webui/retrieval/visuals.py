@@ -1,14 +1,16 @@
-"""Authorized reconstruction of retrieved image and temporal video chunks."""
+"""Authorized reconstruction of retrieved image, video, and audio chunks."""
 
 from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import logging
 import math
 import os
 import shutil
 import subprocess
+import wave
 from contextlib import ExitStack
 from dataclasses import dataclass
 
@@ -17,16 +19,23 @@ import fitz
 from open_webui.models.files import Files
 from open_webui.retrieval.utils import AuthorizedAttachmentScope
 from open_webui.storage.provider import Storage
+from open_webui.utils.otel_instrumentation import add_metric_counter, add_span_event
 
 
 log = logging.getLogger(__name__)
 
 MAX_RECONSTRUCTED_VISUALS = 4
 MAX_RECONSTRUCTED_VIDEO_SEGMENTS = 4
+MAX_RECONSTRUCTED_AUDIO_SEGMENTS = 4
 VIDEO_FRAMES_PER_SEGMENT = 2
 VIDEO_FRAME_MAX_DIMENSION = 1024
 VIDEO_FRAME_MAX_BYTES = 2 * 1024 * 1024
 VIDEO_FRAME_EXTRACTION_TIMEOUT_SECONDS = 15
+AUDIO_SEGMENT_EXTRACTION_TIMEOUT_SECONDS = 30
+AUDIO_SAMPLE_RATE = 16_000
+AUDIO_SAMPLE_WIDTH = 2
+AUDIO_CHANNELS = 1
+MAX_AUDIO_SEGMENT_DURATION_SECONDS = 120
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _JPEG_SIGNATURE = b"\xff\xd8\xff"
 _RECONSTRUCTABLE_VIDEO_MIME_TYPES = {
@@ -35,8 +44,7 @@ _RECONSTRUCTABLE_VIDEO_MIME_TYPES = {
     "video/quicktime",
 }
 _AUDIO_VIDEO_CONTENT_KINDS = {
-    "captioned_subtitle",
-    "captioned_summarized_audio",
+    "audio_temporal",
 }
 
 _PUBLIC_VISUAL_METADATA = {
@@ -69,7 +77,15 @@ _PUBLIC_FILE_TEXT_METADATA = {
     "page_number",
     "element_number",
     "start_index",
+}
+_PUBLIC_AUDIO_METADATA = {
+    "file_id",
+    "name",
+    "source",
+    "modality",
+    "content_kind",
     "mime_type",
+    "source_mime_type",
     "startTimeSeconds",
     "endTimeSeconds",
     "segment_start_s",
@@ -77,10 +93,6 @@ _PUBLIC_FILE_TEXT_METADATA = {
     "chunkIndex",
     "video_segment_id",
     "duration_seconds",
-    "source_type",
-    "source_confidence",
-    "caption_model_name",
-    "chunking_version",
 }
 
 
@@ -153,6 +165,35 @@ class ReconstructedVideoSegment:
 
 
 @dataclass(frozen=True)
+class ReconstructedAudioSegment:
+    segment_id: tuple[str, str, str, str]
+    file_id: str
+    source_name: str
+    start_seconds: float
+    end_seconds: float
+    data: bytes
+
+    def message_parts(self) -> list[dict]:
+        encoded = base64.b64encode(self.data).decode("ascii")
+        return [
+            {
+                "type": "text",
+                "text": (
+                    f'Retrieved audio evidence from "{self.source_name}", '
+                    f"{_format_timestamp(self.start_seconds)}–"
+                    f"{_format_timestamp(self.end_seconds)}."
+                ),
+            },
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:audio/wav;base64,{encoded}",
+                },
+            },
+        ]
+
+
+@dataclass(frozen=True)
 class _VisualCandidate:
     metadata: dict
     distance: float | None
@@ -171,15 +212,35 @@ def is_reconstructable_video_metadata(metadata: dict) -> bool:
         if content_kind != "video_temporal":
             return False
     elif modality == "audio":
-        if content_kind not in _AUDIO_VIDEO_CONTENT_KINDS:
+        if not is_reconstructable_audio_metadata(metadata):
             return False
     else:
         return False
 
     return (
-        metadata.get("mime_type") in _RECONSTRUCTABLE_VIDEO_MIME_TYPES
+        _source_video_mime_type(metadata) in _RECONSTRUCTABLE_VIDEO_MIME_TYPES
         and _video_segment_id(metadata) is not None
     )
+
+
+def is_reconstructable_audio_metadata(metadata: dict) -> bool:
+    """Return whether an authorized dense hit can reconstruct raw audio."""
+
+    if not isinstance(metadata, dict):
+        return False
+    return bool(
+        metadata.get("modality") == "audio"
+        and metadata.get("content_kind") in _AUDIO_VIDEO_CONTENT_KINDS
+        and metadata.get("mime_type") == "audio/wav"
+        and metadata.get("source_mime_type") in _RECONSTRUCTABLE_VIDEO_MIME_TYPES
+        and _video_segment_id(metadata) is not None
+    )
+
+
+def _source_video_mime_type(metadata: dict) -> str:
+    if metadata.get("modality") == "audio":
+        return str(metadata.get("source_mime_type") or "")
+    return str(metadata.get("mime_type") or "")
 
 
 def reconstruct_and_sanitize_sources(
@@ -187,21 +248,23 @@ def reconstruct_and_sanitize_sources(
     *,
     authorized_scope: AuthorizedAttachmentScope,
     vision_enabled: bool,
+    audio_enabled: bool,
     limit: int = MAX_RECONSTRUCTED_VISUALS,
 ) -> tuple[list[dict], list[dict]]:
-    """Reconstruct authorized visual hits and return frontend-safe sources.
+    """Reconstruct authorized media hits and return frontend-safe sources.
 
     Authorization is inherited only from the canonical server-validated scope:
     a hit must belong to an attached file or attached knowledge collection.
-    Images and selected video frames are attached transiently to the answer-model
-    request. Storage paths, crop geometry, hashes, recipes, and Base64 are never
-    returned in the sanitized citation metadata.
+    Images, selected video frames, and supported audio segments are attached
+    transiently to the answer-model request. Storage paths, crop geometry,
+    hashes, recipes, and Base64 are never returned in citation metadata.
     """
     direct_file_ids = set(authorized_scope.file_ids)
     knowledge_ids = set(authorized_scope.knowledge_ids)
     image_candidates_by_id: dict[str, _VisualCandidate] = {}
     video_candidates_by_id: dict[tuple[str, str, str, str], _VisualCandidate] = {}
-    if vision_enabled:
+    audio_candidates_by_id: dict[tuple[str, str, str, str], _VisualCandidate] = {}
+    if vision_enabled or audio_enabled:
         for source_index, source in enumerate(sources or []):
             if not isinstance(source, dict):
                 continue
@@ -228,7 +291,7 @@ def reconstruct_and_sanitize_sources(
                     row_index=row_index,
                 )
                 modality = metadata.get("modality")
-                if modality == "image":
+                if vision_enabled and modality == "image":
                     visual_id = str(metadata.get("visual_asset_id") or "")
                     if not visual_id:
                         continue
@@ -237,7 +300,7 @@ def reconstruct_and_sanitize_sources(
                         candidate
                     ) < _candidate_rank_key(current):
                         image_candidates_by_id[visual_id] = candidate
-                elif is_reconstructable_video_metadata(metadata):
+                if vision_enabled and is_reconstructable_video_metadata(metadata):
                     segment_id = _video_segment_id(metadata)
                     if segment_id is None:
                         continue
@@ -246,6 +309,15 @@ def reconstruct_and_sanitize_sources(
                         candidate
                     ) < _candidate_rank_key(current):
                         video_candidates_by_id[segment_id] = candidate
+                if audio_enabled and is_reconstructable_audio_metadata(metadata):
+                    segment_id = _video_segment_id(metadata)
+                    if segment_id is None:
+                        continue
+                    current = audio_candidates_by_id.get(segment_id)
+                    if current is None or _candidate_rank_key(
+                        candidate
+                    ) < _candidate_rank_key(current):
+                        audio_candidates_by_id[segment_id] = candidate
 
     selection_limit = max(0, int(limit))
     selected_image_candidates = sorted(
@@ -254,6 +326,9 @@ def reconstruct_and_sanitize_sources(
     selected_video_candidates = sorted(
         video_candidates_by_id.values(), key=_candidate_rank_key
     )[: min(selection_limit, MAX_RECONSTRUCTED_VIDEO_SEGMENTS)]
+    selected_audio_candidates = sorted(
+        audio_candidates_by_id.values(), key=_candidate_rank_key
+    )[: min(selection_limit, MAX_RECONSTRUCTED_AUDIO_SEGMENTS)]
 
     reconstructed_images = _reconstruct_candidates(
         [candidate.metadata for candidate in selected_image_candidates]
@@ -261,11 +336,17 @@ def reconstruct_and_sanitize_sources(
     reconstructed_video_segments = _reconstruct_video_candidates(
         [candidate.metadata for candidate in selected_video_candidates]
     )
+    reconstructed_audio_segments = _reconstruct_audio_candidates(
+        [candidate.metadata for candidate in selected_audio_candidates]
+    )
     reconstructed_image_ids = {
         visual.visual_asset_id for visual in reconstructed_images
     }
     reconstructed_video_ids = {
         segment.segment_id for segment in reconstructed_video_segments
+    }
+    reconstructed_audio_ids = {
+        segment.segment_id for segment in reconstructed_audio_segments
     }
     selected_image_positions = {
         (candidate.source_index, candidate.row_index)
@@ -278,16 +359,25 @@ def reconstruct_and_sanitize_sources(
         for candidate in selected_video_candidates
         if _video_segment_id(candidate.metadata) in reconstructed_video_ids
     }
+    selected_audio_positions = {
+        (candidate.source_index, candidate.row_index)
+        for candidate in selected_audio_candidates
+        if _video_segment_id(candidate.metadata) in reconstructed_audio_ids
+    }
     sanitized_sources = _sanitize_sources(
         sources,
         direct_file_ids=direct_file_ids,
         knowledge_ids=knowledge_ids,
         selected_visual_positions=selected_image_positions,
         selected_video_positions=selected_video_positions,
+        selected_audio_positions=selected_audio_positions,
     )
     content_parts = [visual.image_url_part() for visual in reconstructed_images]
     for segment in reconstructed_video_segments:
         content_parts.extend(segment.message_parts())
+    for segment in reconstructed_audio_segments:
+        content_parts.extend(segment.message_parts())
+        add_metric_counter("retrieval.video.audio_attachments")
     return content_parts, sanitized_sources
 
 
@@ -303,6 +393,7 @@ def sanitize_text_sources(
         knowledge_ids=knowledge_ids,
         selected_visual_positions=set(),
         selected_video_positions=set(),
+        selected_audio_positions=set(),
     )
 
 
@@ -313,6 +404,7 @@ def _sanitize_sources(
     knowledge_ids: set[str],
     selected_visual_positions: set[tuple[int, int]],
     selected_video_positions: set[tuple[int, int]],
+    selected_audio_positions: set[tuple[int, int]],
 ) -> list[dict]:
     sanitized_sources: list[dict] = []
     for source_index, source in enumerate(sources or []):
@@ -334,6 +426,7 @@ def _sanitize_sources(
             modality = metadata.get("modality")
             is_image = modality == "image"
             is_video = modality == "video"
+            is_audio = modality == "audio"
             if is_image:
                 if (source_index, row_index) not in selected_visual_positions:
                     continue
@@ -343,6 +436,19 @@ def _sanitize_sources(
                     continue
                 safe_document = ""
                 safe_metadata = _sanitize_visual_metadata(metadata)
+                kept_file_backed_row = True
+            elif is_audio:
+                if not is_reconstructable_audio_metadata(metadata):
+                    continue
+                if not _metadata_is_authorized(
+                    metadata, direct_file_ids, knowledge_ids
+                ):
+                    continue
+                safe_document = _audio_context_text(
+                    metadata,
+                    attached=(source_index, row_index) in selected_audio_positions,
+                )
+                safe_metadata = _sanitize_audio_metadata(metadata)
                 kept_file_backed_row = True
             elif is_video:
                 if not _metadata_is_authorized(
@@ -564,6 +670,169 @@ def _reconstruct_video_candidates(
     ]
 
 
+def _reconstruct_audio_candidates(
+    candidates: list[dict],
+) -> list[ReconstructedAudioSegment]:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        if candidates:
+            log.warning(
+                "Retrieved audio reconstruction skipped because FFmpeg is unavailable"
+            )
+            add_metric_counter(
+                "retrieval.video.audio_fallback_visual_only",
+                {"stage": "retrieval"},
+            )
+        return []
+
+    grouped: dict[str, list[dict]] = {}
+    for metadata in candidates:
+        grouped.setdefault(str(metadata.get("file_id") or ""), []).append(metadata)
+
+    output: dict[tuple[str, str, str, str], ReconstructedAudioSegment] = {}
+    for file_id, group in grouped.items():
+        stored_source = _load_stored_source(file_id)
+        if stored_source is None:
+            continue
+        path, source_bytes = stored_source
+
+        source_hashes = {str(item.get("source_sha256") or "") for item in group}
+        source_hash = next(iter(source_hashes), "")
+        if (
+            len(source_hashes) != 1
+            or not _is_sha256(source_hash)
+            or not _hash_matches(source_bytes, source_hash)
+        ):
+            continue
+
+        for metadata in group:
+            segment = _reconstruct_audio_segment(
+                ffmpeg=ffmpeg,
+                path=path,
+                file_id=file_id,
+                metadata=metadata,
+            )
+            if segment is None:
+                add_metric_counter(
+                    "retrieval.video.audio_fallback_visual_only",
+                    {"stage": "retrieval"},
+                )
+                add_span_event(
+                    "retrieval.video.audio.reconstruction_failed",
+                    {"video.segment_id": str(metadata.get("video_segment_id") or "")},
+                )
+                continue
+            output[segment.segment_id] = segment
+
+    return [
+        output[segment_id]
+        for segment_id in (_video_segment_id(item) for item in candidates)
+        if segment_id in output
+    ]
+
+
+def _reconstruct_audio_segment(
+    *,
+    ffmpeg: str,
+    path: str,
+    file_id: str,
+    metadata: dict,
+) -> ReconstructedAudioSegment | None:
+    segment_id = _video_segment_id(metadata)
+    timing = _video_segment_timing(metadata)
+    if (
+        segment_id is None
+        or timing is None
+        or not is_reconstructable_audio_metadata(metadata)
+    ):
+        return None
+
+    start_seconds, end_seconds = timing
+    duration_seconds = end_seconds - start_seconds
+    if duration_seconds > MAX_AUDIO_SEGMENT_DURATION_SECONDS:
+        return None
+    pcm_bytes = _extract_audio_pcm(
+        ffmpeg,
+        path,
+        start_seconds=start_seconds,
+        duration_seconds=duration_seconds,
+    )
+    if pcm_bytes is None:
+        return None
+    return ReconstructedAudioSegment(
+        segment_id=segment_id,
+        file_id=file_id,
+        source_name=_safe_source_name(metadata),
+        start_seconds=start_seconds,
+        end_seconds=end_seconds,
+        data=_build_audio_wav(pcm_bytes),
+    )
+
+
+def _extract_audio_pcm(
+    ffmpeg: str,
+    path: str,
+    *,
+    start_seconds: float,
+    duration_seconds: float,
+) -> bytes | None:
+    try:
+        result = subprocess.run(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-i",
+                path,
+                "-ss",
+                f"{start_seconds:.3f}",
+                "-t",
+                f"{duration_seconds:.3f}",
+                "-map",
+                "0:a:0",
+                "-vn",
+                "-ac",
+                str(AUDIO_CHANNELS),
+                "-ar",
+                str(AUDIO_SAMPLE_RATE),
+                "-c:a",
+                "pcm_s16le",
+                "-f",
+                "s16le",
+                "pipe:1",
+            ],
+            capture_output=True,
+            timeout=AUDIO_SEGMENT_EXTRACTION_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+    pcm_bytes = result.stdout
+    frame_width = AUDIO_CHANNELS * AUDIO_SAMPLE_WIDTH
+    maximum_frames = math.ceil(duration_seconds * AUDIO_SAMPLE_RATE)
+    maximum_bytes = maximum_frames * frame_width
+    if (
+        result.returncode != 0
+        or not pcm_bytes
+        or len(pcm_bytes) > maximum_bytes
+        or len(pcm_bytes) % frame_width
+    ):
+        return None
+    return pcm_bytes
+
+
+def _build_audio_wav(pcm_bytes: bytes) -> bytes:
+    output = io.BytesIO()
+    with wave.open(output, "wb") as wav_file:
+        wav_file.setnchannels(AUDIO_CHANNELS)
+        wav_file.setsampwidth(AUDIO_SAMPLE_WIDTH)
+        wav_file.setframerate(AUDIO_SAMPLE_RATE)
+        wav_file.writeframes(pcm_bytes)
+    return output.getvalue()
+
+
 def _load_stored_source(file_id: str) -> tuple[str, bytes] | None:
     if not file_id:
         return None
@@ -756,10 +1025,24 @@ def _video_context_text(metadata: dict) -> str:
     )
 
 
+def _audio_context_text(metadata: dict, *, attached: bool) -> str:
+    timing = _video_segment_timing(metadata)
+    if timing is None:
+        return ""
+    start_seconds, end_seconds = timing
+    text = (
+        f'Retrieved audio evidence from "{_safe_source_name(metadata)}", '
+        f"{_format_timestamp(start_seconds)}–{_format_timestamp(end_seconds)}."
+    )
+    if attached:
+        text += " The WAV segment is attached to the latest user message."
+    return text
+
+
 def _safe_source_name(metadata: dict) -> str:
-    raw_name = str(metadata.get("name") or metadata.get("source") or "attached video")
+    raw_name = str(metadata.get("name") or metadata.get("source") or "attached file")
     name = " ".join(raw_name.split())[:200]
-    return name or "attached video"
+    return name or "attached file"
 
 
 def _format_timestamp(seconds: float) -> str:
@@ -942,6 +1225,14 @@ def _sanitize_visual_metadata(metadata: dict) -> dict:
     }
 
 
+def _sanitize_audio_metadata(metadata: dict) -> dict:
+    return {
+        key: metadata[key]
+        for key in _PUBLIC_AUDIO_METADATA
+        if metadata.get(key) is not None
+    }
+
+
 def _sanitize_text_metadata(metadata: dict, *, file_backed: bool) -> dict:
     if not file_backed:
         return dict(metadata)
@@ -987,11 +1278,14 @@ def _sanitize_source_descriptor(source) -> dict:
 
 
 __all__ = [
+    "MAX_RECONSTRUCTED_AUDIO_SEGMENTS",
     "MAX_RECONSTRUCTED_VISUALS",
     "MAX_RECONSTRUCTED_VIDEO_SEGMENTS",
+    "ReconstructedAudioSegment",
     "ReconstructedVisual",
     "ReconstructedVideoFrame",
     "ReconstructedVideoSegment",
+    "is_reconstructable_audio_metadata",
     "is_reconstructable_video_metadata",
     "reconstruct_and_sanitize_sources",
     "sanitize_text_sources",

@@ -149,6 +149,14 @@ _OPENAI_NON_VISION_VARIANTS = (
     "-transcribe",
     "-tts",
 )
+_GEMINI_MODEL_PATTERN = re.compile(
+    r"(?:^|[./@])gemini(?:$|[-./@])",
+    re.IGNORECASE,
+)
+_GEMINI_AUDIO_INFERENCE_PATTERN = re.compile(
+    r"(?:^|[./@])gemini[-_.]?(?:1[.-]?5|[2-9])(?:$|[-./@0-9])",
+    re.IGNORECASE,
+)
 
 
 def model_vision_capability(model: dict) -> bool | None:
@@ -198,9 +206,78 @@ def model_supports_vision(model: dict) -> bool:
     return model_vision_capability(model) is True
 
 
+def model_audio_capability(model: dict) -> bool | None:
+    """Resolve safe answer-model support for transient WAV evidence.
+
+    Audio attachments use the Portkey Gemini media data-URL contract, so an
+    explicit capability is accepted only for a non-embedding Gemini model.
+    Otherwise, inference is limited to Gemini generations known to accept audio.
+    ``None`` means the route is unknown and must not receive audio bytes.
+    """
+
+    if not isinstance(model, dict):
+        return None
+
+    info = model.get("info") if isinstance(model.get("info"), dict) else {}
+    explicit_audio = None
+    for container in (info, model):
+        if not isinstance(container, dict):
+            continue
+        capability_sources = []
+        meta = container.get("meta")
+        if isinstance(meta, dict) and isinstance(meta.get("capabilities"), dict):
+            capability_sources.append(meta["capabilities"])
+        if isinstance(container.get("capabilities"), dict):
+            capability_sources.append(container["capabilities"])
+        for capabilities in capability_sources:
+            declared = capabilities.get("audio")
+            if isinstance(declared, bool):
+                explicit_audio = declared
+                break
+        if explicit_audio is not None:
+            break
+
+    identifiers = (
+        model.get("id"),
+        model.get("base_model_id"),
+        info.get("base_model_id"),
+    )
+    normalized_identifiers = tuple(
+        str(identifier or "").strip().lower()
+        for identifier in identifiers
+        if str(identifier or "").strip()
+    )
+    gemini_identifiers = tuple(
+        identifier
+        for identifier in normalized_identifiers
+        if _GEMINI_MODEL_PATTERN.search(identifier) and "embedding" not in identifier
+    )
+    if not gemini_identifiers:
+        return False if explicit_audio is False else None
+    if explicit_audio is not None:
+        return explicit_audio
+    if any(
+        _GEMINI_AUDIO_INFERENCE_PATTERN.search(identifier)
+        for identifier in gemini_identifiers
+    ):
+        return True
+    return None
+
+
+def model_supports_audio(model: dict) -> bool:
+    """Return whether audio input support is declared or safely inferred."""
+
+    return model_audio_capability(model) is True
+
+
 def _add_inferred_model_capabilities(model: dict) -> None:
     """Expose inferred capabilities to both the API response and chat cache."""
-    if not model_supports_vision(model):
+    inferred_capabilities = {}
+    if model_supports_vision(model):
+        inferred_capabilities["vision"] = True
+    if model_supports_audio(model):
+        inferred_capabilities["audio"] = True
+    if not inferred_capabilities:
         return
     info = model.get("info")
     if not isinstance(info, dict):
@@ -214,7 +291,8 @@ def _add_inferred_model_capabilities(model: dict) -> None:
     if not isinstance(capabilities, dict):
         capabilities = {}
         meta["capabilities"] = capabilities
-    capabilities.setdefault("vision", True)
+    for capability, supported in inferred_capabilities.items():
+        capabilities.setdefault(capability, supported)
 
 
 async def get_all_base_models(request: Request, user: UserModel = None):

@@ -23,6 +23,7 @@ from fastapi import Request
 
 from open_webui.utils.models import (
     get_models_for_user,
+    model_audio_capability,
     model_vision_capability,
 )
 
@@ -76,10 +77,12 @@ from open_webui.retrieval.utils import (
     get_embedding_function,
 )
 from open_webui.retrieval.visuals import (
+    is_reconstructable_audio_metadata,
     is_reconstructable_video_metadata,
     reconstruct_and_sanitize_sources,
     sanitize_text_sources,
 )
+from open_webui.utils.otel_instrumentation import add_metric_counter
 from open_webui.routers.retrieval import get_ef
 
 
@@ -744,10 +747,10 @@ async def process_chat_payload(request, form_data, metadata, user, model):
         "__model__": model,
     }
 
-    # Client-provided image parts are not authorized retrieval results. Remove
+    # Client-provided media parts are not authorized retrieval results. Remove
     # them before any inlet/tool/model processing; the retrieval stage below is
-    # the sole path allowed to append server-reconstructed image bytes.
-    _strip_untrusted_image_parts(form_data.get("messages", []))
+    # the sole path allowed to append server-reconstructed media bytes.
+    _strip_untrusted_media_parts(form_data.get("messages", []))
 
     # Initialize events to store additional event to be sent to the client
     # Initialize contexts and citation
@@ -985,16 +988,41 @@ async def process_chat_payload(request, form_data, metadata, user, model):
                 },
             }
         )
+    retrieved_audio = any(
+        is_reconstructable_audio_metadata(metadata)
+        for source in retrieved_sources
+        if isinstance(source, dict)
+        for metadata in (source.get("metadata") or [])
+    )
+    audio_capability = model_audio_capability(model)
+    audio_enabled = audio_capability is True
+    if retrieved_audio and not audio_enabled:
+        add_metric_counter("retrieval.video.audio_answer_model_unsupported")
+        await event_emitter(
+            {
+                "type": "status",
+                "data": {
+                    "description": (
+                        "Retrieved audio evidence was not attached because the "
+                        "selected answer model has unsupported or unknown audio "
+                        "input support. Timestamp and compatible frame context "
+                        "will still be included."
+                    ),
+                    "done": True,
+                },
+            }
+        )
     try:
         reconstructed_parts, sources = reconstruct_and_sanitize_sources(
             retrieved_sources,
             authorized_scope=authorized_scope,
             vision_enabled=vision_enabled,
+            audio_enabled=audio_enabled,
             limit=max(0, int(request.app.state.config.TOP_K.get(user.email))),
         )
     except Exception as reconstruction_error:
         log.warning(
-            "Retrieved visual reconstruction failed (%s)",
+            "Retrieved media reconstruction failed (%s)",
             type(reconstruction_error).__name__,
         )
         reconstructed_parts = []
@@ -1075,9 +1103,9 @@ def _append_reconstructed_parts_to_latest_user_message(
 ) -> None:
     """Attach only transient, server-reconstructed evidence to the latest user turn.
 
-    Browser/API callers are not an authority for answer-model visual bytes. Drop
-    any pre-existing non-text content parts before adding images and timestamped
-    video frames reconstructed from the server-authorized retrieval scope.
+    Browser/API callers are not an authority for answer-model media bytes. Drop
+    any pre-existing non-text parts before adding images, timestamped video
+    frames, and audio reconstructed from the server-authorized retrieval scope.
     """
     message = get_last_user_message_item(messages)
     if message is None:
@@ -1099,8 +1127,8 @@ def _append_reconstructed_parts_to_latest_user_message(
     message["content"] = parts
 
 
-def _strip_untrusted_image_parts(messages: list[dict]) -> None:
-    """Remove caller-supplied image parts from every chat turn in place."""
+def _strip_untrusted_media_parts(messages: list[dict]) -> None:
+    """Remove caller-supplied media parts from every chat turn in place."""
     if not isinstance(messages, list):
         return
     for message in messages:

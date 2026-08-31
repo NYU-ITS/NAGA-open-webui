@@ -123,9 +123,9 @@ class VectorSearchRetriever(BaseRetriever):
                 if has_scope
                 else self.allow_unscoped_legacy
             )
-            if (
-                metadata.get("modality", "text") not in {"text", "audio"}
-                or not page_content.strip()
+            modality = metadata.get("modality", "text")
+            if modality != "audio" and (
+                modality != "text" or not page_content.strip()
             ):
                 continue
             if not authorized:
@@ -295,7 +295,7 @@ def query_doc_with_hybrid_search(
             )
             if isinstance(document, str)
             and document.strip()
-            and (metadata or {}).get("modality", "text") in {"text", "audio"}
+            and (metadata or {}).get("modality", "text") == "text"
             and (
                 _metadata_matches_scope(
                     metadata or {}, knowledge_ids=knowledge_ids, file_ids=file_ids
@@ -370,7 +370,7 @@ def _is_multimodal_model_space(
     from open_webui.retrieval.embedding.registry import get_model_spec_by_id
 
     modalities = get_model_spec_by_id(embedding_model_id).modalities
-    return "image" in modalities or "video" in modalities
+    return bool({"audio", "image", "video"}.intersection(modalities))
 
 
 def merge_get_results(get_results: list[dict]) -> dict:
@@ -709,7 +709,7 @@ def _full_context_sort_key(row: tuple) -> tuple:
         _sortable_number(metadata.get("chunk_index")),
         _sortable_number(metadata.get("page_index")),
         top_norm if top_norm is not None else math.inf,
-        1 if metadata.get("modality") in {"image", "video"} else 0,
+        1 if metadata.get("modality") in {"audio", "image", "video"} else 0,
         _sortable_number(metadata.get("source_sequence")),
         hashlib.sha256(
             (document if isinstance(document, str) else "").encode("utf-8")
@@ -1333,11 +1333,14 @@ def get_sources_from_files(
 
                 model_spec = get_model_spec_by_id(embedding_model_id)
                 multimodal_model_space = (
-                    "image" in model_spec.modalities
-                    or "video" in model_spec.modalities
+                    bool(
+                        {"audio", "image", "video"}.intersection(
+                            model_spec.modalities
+                        )
+                    )
                 )
                 if multimodal_model_space:
-                    # Empty image/video chunks must never enter BM25 or reranking.
+                    # Empty media chunks must never enter BM25 or text reranking.
                     hybrid_search = False
             else:
                 # RetrievalReadyNoState: legacy admin, no model-aware search.
@@ -2047,6 +2050,15 @@ class RerankCompressor(BaseDocumentCompressor):
         query: str,
         callbacks: Optional[Callbacks] = None,
     ) -> Sequence[Document]:
+        documents = [
+            document
+            for document in documents
+            if document.metadata.get("modality", "text") == "text"
+            and document.page_content.strip()
+        ]
+        if not documents:
+            return []
+
         reranking = self.reranking_function is not None
 
         if reranking:
