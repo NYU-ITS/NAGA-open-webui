@@ -123,7 +123,10 @@ class VectorSearchRetriever(BaseRetriever):
                 if has_scope
                 else self.allow_unscoped_legacy
             )
-            if metadata.get("modality") in {"image", "video"} or not page_content.strip():
+            if (
+                metadata.get("modality", "text") not in {"text", "audio"}
+                or not page_content.strip()
+            ):
                 continue
             if not authorized:
                 continue
@@ -292,7 +295,7 @@ def query_doc_with_hybrid_search(
             )
             if isinstance(document, str)
             and document.strip()
-            and (metadata or {}).get("modality", "text") == "text"
+            and (metadata or {}).get("modality", "text") in {"text", "audio"}
             and (
                 _metadata_matches_scope(
                     metadata or {}, knowledge_ids=knowledge_ids, file_ids=file_ids

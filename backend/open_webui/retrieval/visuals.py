@@ -29,6 +29,15 @@ VIDEO_FRAME_MAX_BYTES = 2 * 1024 * 1024
 VIDEO_FRAME_EXTRACTION_TIMEOUT_SECONDS = 15
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _JPEG_SIGNATURE = b"\xff\xd8\xff"
+_RECONSTRUCTABLE_VIDEO_MIME_TYPES = {
+    "video/mp4",
+    "video/mpeg",
+    "video/quicktime",
+}
+_AUDIO_VIDEO_CONTENT_KINDS = {
+    "captioned_subtitle",
+    "captioned_summarized_audio",
+}
 
 _PUBLIC_VISUAL_METADATA = {
     "file_id",
@@ -44,7 +53,10 @@ _PUBLIC_VISUAL_METADATA = {
     "pixel_height",
     "startTimeSeconds",
     "endTimeSeconds",
+    "segment_start_s",
+    "segment_end_s",
     "chunkIndex",
+    "video_segment_id",
     "duration_seconds",
 }
 _PUBLIC_FILE_TEXT_METADATA = {
@@ -57,6 +69,18 @@ _PUBLIC_FILE_TEXT_METADATA = {
     "page_number",
     "element_number",
     "start_index",
+    "mime_type",
+    "startTimeSeconds",
+    "endTimeSeconds",
+    "segment_start_s",
+    "segment_end_s",
+    "chunkIndex",
+    "video_segment_id",
+    "duration_seconds",
+    "source_type",
+    "source_confidence",
+    "caption_model_name",
+    "chunking_version",
 }
 
 
@@ -136,6 +160,28 @@ class _VisualCandidate:
     row_index: int
 
 
+def is_reconstructable_video_metadata(metadata: dict) -> bool:
+    """Return whether one authorized hit can ground reconstructed video frames."""
+    if not isinstance(metadata, dict):
+        return False
+
+    modality = metadata.get("modality")
+    content_kind = metadata.get("content_kind")
+    if modality == "video":
+        if content_kind != "video_temporal":
+            return False
+    elif modality == "audio":
+        if content_kind not in _AUDIO_VIDEO_CONTENT_KINDS:
+            return False
+    else:
+        return False
+
+    return (
+        metadata.get("mime_type") in _RECONSTRUCTABLE_VIDEO_MIME_TYPES
+        and _video_segment_id(metadata) is not None
+    )
+
+
 def reconstruct_and_sanitize_sources(
     sources: list[dict],
     *,
@@ -191,7 +237,7 @@ def reconstruct_and_sanitize_sources(
                         candidate
                     ) < _candidate_rank_key(current):
                         image_candidates_by_id[visual_id] = candidate
-                elif modality == "video":
+                elif is_reconstructable_video_metadata(metadata):
                     segment_id = _video_segment_id(metadata)
                     if segment_id is None:
                         continue
@@ -555,8 +601,7 @@ def _reconstruct_video_segment(
     if (
         segment_id is None
         or timing is None
-        or metadata.get("content_kind") != "video_temporal"
-        or metadata.get("mime_type") not in {"video/mp4", "video/mpeg"}
+        or not is_reconstructable_video_metadata(metadata)
     ):
         return None
 
@@ -601,10 +646,14 @@ def _video_segment_id(metadata: dict) -> tuple[str, str, str, str] | None:
     if not file_id or timing is None:
         return None
     start_seconds, end_seconds = timing
-    chunk_index = metadata.get("chunk_index", metadata.get("chunkIndex", ""))
+    segment_key = str(metadata.get("video_segment_id") or "").strip()
+    if not segment_key:
+        segment_key = str(
+            metadata.get("chunkIndex", metadata.get("chunk_index", ""))
+        )
     return (
         file_id,
-        str(chunk_index),
+        segment_key,
         f"{start_seconds:.6f}",
         f"{end_seconds:.6f}",
     )
@@ -612,8 +661,14 @@ def _video_segment_id(metadata: dict) -> tuple[str, str, str, str] | None:
 
 def _video_segment_timing(metadata: dict) -> tuple[float, float] | None:
     try:
-        start_seconds = float(metadata["startTimeSeconds"])
-        end_seconds = float(metadata["endTimeSeconds"])
+        start_value = metadata.get("startTimeSeconds")
+        if start_value is None:
+            start_value = metadata["segment_start_s"]
+        end_value = metadata.get("endTimeSeconds")
+        if end_value is None:
+            end_value = metadata["segment_end_s"]
+        start_seconds = float(start_value)
+        end_seconds = float(end_value)
         duration_seconds = float(metadata["duration_seconds"])
     except (KeyError, TypeError, ValueError):
         return None
@@ -937,6 +992,7 @@ __all__ = [
     "ReconstructedVisual",
     "ReconstructedVideoFrame",
     "ReconstructedVideoSegment",
+    "is_reconstructable_video_metadata",
     "reconstruct_and_sanitize_sources",
     "sanitize_text_sources",
 ]

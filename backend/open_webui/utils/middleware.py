@@ -76,6 +76,7 @@ from open_webui.retrieval.utils import (
     get_embedding_function,
 )
 from open_webui.retrieval.visuals import (
+    is_reconstructable_video_metadata,
     reconstruct_and_sanitize_sources,
     sanitize_text_sources,
 )
@@ -966,7 +967,7 @@ async def process_chat_payload(request, form_data, metadata, user, model):
             }
         )
     retrieved_video = any(
-        isinstance(metadata, dict) and metadata.get("modality") == "video"
+        is_reconstructable_video_metadata(metadata)
         for source in retrieved_sources
         if isinstance(source, dict)
         for metadata in (source.get("metadata") or [])
