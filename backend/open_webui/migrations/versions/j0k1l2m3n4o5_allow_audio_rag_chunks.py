@@ -1,7 +1,7 @@
 """Allow audio content in RAG chunks and the Gemini embedding model.
 
 Revision ID: j0k1l2m3n4o5
-Revises: i9j0k1l2m3n4
+Revises: c4d5e6f7g8h9
 """
 
 from typing import Sequence, Union
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 
 
 revision: str = "j0k1l2m3n4o5"
-down_revision: Union[str, None] = "i9j0k1l2m3n4"
+down_revision: Union[str, None] = "c4d5e6f7g8h9"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
