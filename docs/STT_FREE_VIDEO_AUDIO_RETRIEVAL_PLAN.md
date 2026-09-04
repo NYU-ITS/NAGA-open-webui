@@ -15,9 +15,10 @@ invalidate successfully embedded visual chunks.
 
 At retrieval time, a text query can match an audio vector directly. For the
 highest-ranked authorized audio hits, the server reconstructs the corresponding
-WAV ranges from the original video and attaches them transiently to a compatible
-Gemini answer model. Unknown, embedding-only, or incompatible answer models
-receive timestamp and compatible frame context but no audio bytes.
+WAV ranges from the original video and attaches them transiently to the selected
+answer model using that model provider's supported request contract. Unknown,
+embedding-only, or incompatible answer models receive timestamp and compatible
+frame context but no audio bytes.
 
 ## Design principles
 
@@ -30,6 +31,8 @@ receive timestamp and compatible frame context but no audio bytes.
 - Authorize retrieval from canonical server-side file and knowledge scope.
 - Reconstruct only bounded, top-ranked evidence from the original source file.
 - Send audio only when answer-model support is declared or safely inferred.
+- Let the selected answer model analyze retrieved audio directly; do not route
+  it through a task model or transcription service.
 - Keep existing image, video-vector, and video-frame behavior unchanged.
 - Add no audio feature flag or separate audio model configuration.
 
@@ -167,15 +170,20 @@ Audio attachment is stricter than the existing optimistic vision behavior. The
 selected answer model receives WAV evidence only when all of the following are
 true:
 
-- Its resolved identifier is a Gemini model.
 - It is not an embedding model.
-- Audio input support is explicitly declared or safely inferred from a supported
-  Gemini generation.
+- Audio input support is explicitly declared or safely inferred from a known
+  audio-capable model identifier.
+- A concrete request format is known for the selected provider.
 
-Explicit `capabilities.audio` metadata is authoritative for a Gemini answer
-model. Known Gemini 1.5-and-later identifiers can be inferred as audio-capable.
-Other models and unrecognized identifiers are treated as unknown and receive no
-audio bytes.
+Known Gemini 1.5-and-later identifiers use Portkey's Gemini media data-URL
+contract. Known OpenAI Chat Completions audio models use native `input_audio`
+parts. An explicit `audio_input_format` model metadata value can declare one of
+those contracts for a compatible custom route using `gemini_data_url` or
+`openai_input_audio`. Explicit `capabilities.audio: false` remains authoritative.
+Plain `gpt-4o` and `gpt-4o-mini` are treated as unsupported because those models
+do not accept audio input; an audio-family model such as `gpt-audio-1.5` is
+required for the OpenAI contract. Known OpenAI audio-only models are also kept
+from receiving reconstructed image or video-frame parts.
 
 The transient Portkey Gemini media part uses a WAV data URL:
 
@@ -187,6 +195,22 @@ The transient Portkey Gemini media part uses a WAV data URL:
   }
 }
 ```
+
+The transient OpenAI Chat Completions part carries raw Base64 without a data-URL
+prefix:
+
+```json
+{
+  "type": "input_audio",
+  "input_audio": {
+    "data": "<transient WAV bytes>",
+    "format": "wav"
+  }
+}
+```
+
+Both forms are appended to the latest user message sent to the model selected
+for that chat. Neither form invokes or substitutes the configured task model.
 
 Caller-supplied non-text media is removed before processing. Only media
 reconstructed from the authorized retrieval scope can be appended to the latest
@@ -229,7 +253,7 @@ deduplicated by segment ID.
 | All audio embedding calls fail | Visual ingestion succeeds with `audio_embedding_failed` and visual-only fallback warnings. |
 | Retrieval source is unauthorized | No frame, audio, or file-backed citation is emitted. |
 | Source bytes no longer match | Audio reconstruction is skipped. |
-| Selected answer model is unsupported or unknown | No audio data URL is sent; the user sees a status warning and retains timestamp/frame context. |
+| Selected answer model is unsupported or unknown | No audio payload is sent; the user sees a model-specific status warning and retains timestamp/frame context. |
 | FFmpeg is unavailable at retrieval | Audio attachment is skipped and visual-only fallback telemetry is recorded. |
 
 Warnings are public stable codes, while provider exception details and media
@@ -282,13 +306,14 @@ the parent corrected, the intended Alembic graph has one head:
 - MP4 and MOV files with audio produce one raw-audio sibling per visual segment
   without transcription- or caption-related warnings.
 - A spoken-content text query can retrieve an audio vector and attach the
-  corresponding WAV, timestamps, and compatible frames to a supported Gemini
-  answer model.
+  corresponding WAV and timestamps to a supported Gemini or OpenAI Chat
+  Completions audio answer model, plus reconstructed frames when the model also
+  supports vision.
 - Files without an audio stream complete visual ingestion with stable warnings.
 - An individual audio extraction or embedding failure does not invalidate
   successful visual chunks.
-- Unknown, non-Gemini, and embedding answer models receive no audio payload and
-  produce a clear status message.
+- Plain GPT-4o Mini, unknown, and embedding answer models receive no audio
+  payload and produce a clear status message.
 - Existing image retrieval, video-vector retrieval, and frame reconstruction
   behave as before.
 - Citation events and frontend metadata never contain WAV or Base64 data.
@@ -301,7 +326,8 @@ the parent corrected, the intended Alembic graph has one head:
 - Audio failures preserve successful visual ingestion and reindex results.
 - Empty audio chunks participate only in dense retrieval.
 - Top-ranked authorized audio hits are reconstructed from their original files.
-- Audio is attached only to compatible non-embedding Gemini answer models.
+- Audio is attached directly to compatible selected answer models using their
+  provider-specific request contract.
 - Unsupported or unknown models receive no audio bytes and a clear warning.
 - Citations contain factual source timing only and expose no media payload.
 - The audio migration is based directly on `c4d5e6f7g8h9`.

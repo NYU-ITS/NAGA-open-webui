@@ -19,6 +19,11 @@ import fitz
 from open_webui.models.files import Files
 from open_webui.retrieval.utils import AuthorizedAttachmentScope
 from open_webui.storage.provider import Storage
+from open_webui.utils.multimodal import (
+    AUDIO_INPUT_FORMAT_GEMINI_DATA_URL,
+    AUDIO_INPUT_FORMAT_OPENAI,
+    SUPPORTED_AUDIO_INPUT_FORMATS,
+)
 from open_webui.utils.otel_instrumentation import add_metric_counter, add_span_event
 
 
@@ -173,8 +178,25 @@ class ReconstructedAudioSegment:
     end_seconds: float
     data: bytes
 
-    def message_parts(self) -> list[dict]:
+    def message_parts(self, audio_input_format: str) -> list[dict]:
         encoded = base64.b64encode(self.data).decode("ascii")
+        if audio_input_format == AUDIO_INPUT_FORMAT_GEMINI_DATA_URL:
+            audio_part = {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:audio/wav;base64,{encoded}",
+                },
+            }
+        elif audio_input_format == AUDIO_INPUT_FORMAT_OPENAI:
+            audio_part = {
+                "type": "input_audio",
+                "input_audio": {
+                    "data": encoded,
+                    "format": "wav",
+                },
+            }
+        else:
+            return []
         return [
             {
                 "type": "text",
@@ -184,12 +206,7 @@ class ReconstructedAudioSegment:
                     f"{_format_timestamp(self.end_seconds)}."
                 ),
             },
-            {
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:audio/wav;base64,{encoded}",
-                },
-            },
+            audio_part,
         ]
 
 
@@ -248,7 +265,7 @@ def reconstruct_and_sanitize_sources(
     *,
     authorized_scope: AuthorizedAttachmentScope,
     vision_enabled: bool,
-    audio_enabled: bool,
+    audio_input_format: str | None,
     limit: int = MAX_RECONSTRUCTED_VISUALS,
 ) -> tuple[list[dict], list[dict]]:
     """Reconstruct authorized media hits and return frontend-safe sources.
@@ -261,6 +278,7 @@ def reconstruct_and_sanitize_sources(
     """
     direct_file_ids = set(authorized_scope.file_ids)
     knowledge_ids = set(authorized_scope.knowledge_ids)
+    audio_enabled = audio_input_format in SUPPORTED_AUDIO_INPUT_FORMATS
     image_candidates_by_id: dict[str, _VisualCandidate] = {}
     video_candidates_by_id: dict[tuple[str, str, str, str], _VisualCandidate] = {}
     audio_candidates_by_id: dict[tuple[str, str, str, str], _VisualCandidate] = {}
@@ -375,9 +393,10 @@ def reconstruct_and_sanitize_sources(
     content_parts = [visual.image_url_part() for visual in reconstructed_images]
     for segment in reconstructed_video_segments:
         content_parts.extend(segment.message_parts())
-    for segment in reconstructed_audio_segments:
-        content_parts.extend(segment.message_parts())
-        add_metric_counter("retrieval.video.audio_attachments")
+    if audio_enabled and audio_input_format is not None:
+        for segment in reconstructed_audio_segments:
+            content_parts.extend(segment.message_parts(audio_input_format))
+            add_metric_counter("retrieval.video.audio_attachments")
     return content_parts, sanitized_sources
 
 

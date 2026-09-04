@@ -22,6 +22,11 @@ from open_webui.models.models import Models
 
 from open_webui.utils.plugin import load_function_module_by_id
 from open_webui.utils.access_control import has_access
+from open_webui.utils.multimodal import (
+    AUDIO_INPUT_FORMAT_GEMINI_DATA_URL,
+    AUDIO_INPUT_FORMAT_OPENAI,
+    SUPPORTED_AUDIO_INPUT_FORMATS,
+)
 
 
 from open_webui.config import (
@@ -157,20 +162,46 @@ _GEMINI_AUDIO_INFERENCE_PATTERN = re.compile(
     r"(?:^|[./@])gemini[-_.]?(?:1[.-]?5|[2-9])(?:$|[-./@0-9])",
     re.IGNORECASE,
 )
+_OPENAI_CHAT_AUDIO_MODEL_PATTERN = re.compile(
+    r"(?:^|[./@])(?:"
+    r"gpt-audio(?:-1[._]5|-mini)?|"
+    r"gpt-4o(?:-mini)?-audio-preview"
+    r")(?:-\d{4}-\d{2}-\d{2})?(?:$|[./@])",
+    re.IGNORECASE,
+)
+_OPENAI_PROVIDER_PATTERN = re.compile(
+    r"(?:^|[./])@?openai(?:$|[-./@])",
+    re.IGNORECASE,
+)
 
 
 def model_vision_capability(model: dict) -> bool | None:
     """Resolve declared answer-model vision support and known model IDs.
 
-    Explicit metadata is authoritative across the model shapes used by the
-    API, workspace models, and direct model requests. ``None`` means the
-    capability is unknown; callers can choose optimistic handling instead of
-    incorrectly treating an unrecognized model as non-vision.
+    Known OpenAI audio-only model identifiers cannot receive reconstructed
+    frames. Otherwise, explicit metadata is authoritative across API, workspace,
+    and direct model shapes. ``None`` means the capability is unknown.
     """
     if not isinstance(model, dict):
         return None
 
     info = model.get("info") if isinstance(model.get("info"), dict) else {}
+    identifiers = (
+        model.get("id"),
+        model.get("base_model_id"),
+        info.get("base_model_id"),
+    )
+    normalized_identifiers = tuple(
+        str(identifier or "").strip().lower()
+        for identifier in identifiers
+        if str(identifier or "").strip()
+    )
+    if any(
+        _OPENAI_CHAT_AUDIO_MODEL_PATTERN.search(identifier)
+        for identifier in normalized_identifiers
+    ):
+        return False
+
     capability_sources = []
     for container in (info, model):
         if not isinstance(container, dict):
@@ -189,10 +220,8 @@ def model_vision_capability(model: dict) -> bool | None:
         if isinstance(explicit_vision, bool):
             return explicit_vision
 
-    identifiers = (model.get("id"), info.get("base_model_id"))
-    for identifier in identifiers:
-        normalized = str(identifier or "").strip().lower()
-        if not normalized or any(
+    for normalized in normalized_identifiers:
+        if any(
             variant in normalized for variant in _OPENAI_NON_VISION_VARIANTS
         ):
             continue
@@ -206,36 +235,41 @@ def model_supports_vision(model: dict) -> bool:
     return model_vision_capability(model) is True
 
 
-def model_audio_capability(model: dict) -> bool | None:
-    """Resolve safe answer-model support for transient WAV evidence.
-
-    Audio attachments use the Portkey Gemini media data-URL contract, so an
-    explicit capability is accepted only for a non-embedding Gemini model.
-    Otherwise, inference is limited to Gemini generations known to accept audio.
-    ``None`` means the route is unknown and must not receive audio bytes.
-    """
-
+def _resolve_model_audio_input(model: dict) -> tuple[bool | None, str | None]:
     if not isinstance(model, dict):
-        return None
+        return None, None
 
     info = model.get("info") if isinstance(model.get("info"), dict) else {}
     explicit_audio = None
+    explicit_input_format = None
     for container in (info, model):
         if not isinstance(container, dict):
             continue
         capability_sources = []
         meta = container.get("meta")
-        if isinstance(meta, dict) and isinstance(meta.get("capabilities"), dict):
-            capability_sources.append(meta["capabilities"])
+        if isinstance(meta, dict):
+            if isinstance(meta.get("capabilities"), dict):
+                capability_sources.append(meta["capabilities"])
+            declared_format = meta.get("audio_input_format")
+            if (
+                explicit_input_format is None
+                and isinstance(declared_format, str)
+                and declared_format in SUPPORTED_AUDIO_INPUT_FORMATS
+            ):
+                explicit_input_format = declared_format
         if isinstance(container.get("capabilities"), dict):
             capability_sources.append(container["capabilities"])
+        declared_format = container.get("audio_input_format")
+        if (
+            explicit_input_format is None
+            and isinstance(declared_format, str)
+            and declared_format in SUPPORTED_AUDIO_INPUT_FORMATS
+        ):
+            explicit_input_format = declared_format
         for capabilities in capability_sources:
             declared = capabilities.get("audio")
-            if isinstance(declared, bool):
+            if explicit_audio is None and isinstance(declared, bool):
                 explicit_audio = declared
-                break
-        if explicit_audio is not None:
-            break
 
     identifiers = (
         model.get("id"),
@@ -247,21 +281,64 @@ def model_audio_capability(model: dict) -> bool | None:
         for identifier in identifiers
         if str(identifier or "").strip()
     )
+    if explicit_audio is False or any(
+        "embedding" in identifier for identifier in normalized_identifiers
+    ):
+        return False, None
+    if explicit_input_format is not None:
+        return True, explicit_input_format
+
+    if any(
+        _OPENAI_CHAT_AUDIO_MODEL_PATTERN.search(identifier)
+        for identifier in normalized_identifiers
+    ):
+        return True, AUDIO_INPUT_FORMAT_OPENAI
+
     gemini_identifiers = tuple(
         identifier
         for identifier in normalized_identifiers
         if _GEMINI_MODEL_PATTERN.search(identifier) and "embedding" not in identifier
     )
-    if not gemini_identifiers:
-        return False if explicit_audio is False else None
-    if explicit_audio is not None:
-        return explicit_audio
+    if gemini_identifiers:
+        if explicit_audio is True or any(
+            _GEMINI_AUDIO_INFERENCE_PATTERN.search(identifier)
+            for identifier in gemini_identifiers
+        ):
+            return True, AUDIO_INPUT_FORMAT_GEMINI_DATA_URL
+        return None, None
+
     if any(
-        _GEMINI_AUDIO_INFERENCE_PATTERN.search(identifier)
-        for identifier in gemini_identifiers
+        _OPENAI_GPT_4O_VISION_PATTERN.search(identifier)
+        for identifier in normalized_identifiers
     ):
-        return True
-    return None
+        return False, None
+
+    if explicit_audio is True and any(
+        _OPENAI_PROVIDER_PATTERN.search(identifier)
+        for identifier in normalized_identifiers
+    ):
+        return True, AUDIO_INPUT_FORMAT_OPENAI
+    return None, None
+
+
+def model_audio_capability(model: dict) -> bool | None:
+    """Resolve safe answer-model support for transient WAV evidence.
+
+    Known Gemini audio models use Portkey's media data-URL contract. Known
+    OpenAI Chat Completions audio models use native ``input_audio`` parts.
+    Plain GPT-4o and GPT-4o Mini are known not to accept audio. ``None`` means
+    either model support or the required request format is unknown.
+    """
+
+    capability, _ = _resolve_model_audio_input(model)
+    return capability
+
+
+def model_audio_input_format(model: dict) -> str | None:
+    """Return the selected model's safe transient WAV request format."""
+
+    _, input_format = _resolve_model_audio_input(model)
+    return input_format
 
 
 def model_supports_audio(model: dict) -> bool:

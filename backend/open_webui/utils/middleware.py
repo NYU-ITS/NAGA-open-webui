@@ -24,6 +24,7 @@ from fastapi import Request
 from open_webui.utils.models import (
     get_models_for_user,
     model_audio_capability,
+    model_audio_input_format,
     model_vision_capability,
 )
 
@@ -995,19 +996,35 @@ async def process_chat_payload(request, form_data, metadata, user, model):
         for metadata in (source.get("metadata") or [])
     )
     audio_capability = model_audio_capability(model)
-    audio_enabled = audio_capability is True
+    audio_input_format = model_audio_input_format(model)
+    audio_enabled = audio_input_format is not None
     if retrieved_audio and not audio_enabled:
         add_metric_counter("retrieval.video.audio_answer_model_unsupported")
+        selected_model_name = str(
+            model.get("name")
+            or model.get("id")
+            or form_data.get("model")
+            or "selected model"
+        )
+        if audio_capability is False:
+            audio_warning = (
+                f'Retrieved audio evidence was not attached because "{selected_model_name}" '
+                "does not support audio input. Choose an audio-capable answer model "
+                "to analyze or transcribe it. Timestamp and compatible frame context "
+                "will still be included."
+            )
+        else:
+            audio_warning = (
+                f'Retrieved audio evidence was not attached because "{selected_model_name}" '
+                "has unknown audio input support or request format. Choose a declared "
+                "audio-capable answer model to analyze or transcribe it. Timestamp and "
+                "compatible frame context will still be included."
+            )
         await event_emitter(
             {
                 "type": "status",
                 "data": {
-                    "description": (
-                        "Retrieved audio evidence was not attached because the "
-                        "selected answer model has unsupported or unknown audio "
-                        "input support. Timestamp and compatible frame context "
-                        "will still be included."
-                    ),
+                    "description": audio_warning,
                     "done": True,
                 },
             }
@@ -1017,7 +1034,7 @@ async def process_chat_payload(request, form_data, metadata, user, model):
             retrieved_sources,
             authorized_scope=authorized_scope,
             vision_enabled=vision_enabled,
-            audio_enabled=audio_enabled,
+            audio_input_format=audio_input_format,
             limit=max(0, int(request.app.state.config.TOP_K.get(user.email))),
         )
     except Exception as reconstruction_error:
