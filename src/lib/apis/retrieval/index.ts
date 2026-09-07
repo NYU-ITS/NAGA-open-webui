@@ -248,7 +248,13 @@ export const updateEmbeddingConfig = async (token: string, payload: EmbeddingMod
 		})
 		.catch((err) => {
 			console.log(err);
-			error = err.detail;
+			const detail = err?.detail ?? err;
+			error =
+				typeof detail === 'string'
+					? detail
+					: typeof detail?.message === 'string'
+						? detail.message
+						: `Target model '${payload.embedding_model}' is not in the list of approved/available embedding models.`;
 			return null;
 		});
 
