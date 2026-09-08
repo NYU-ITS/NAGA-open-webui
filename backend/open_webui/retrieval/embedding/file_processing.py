@@ -32,10 +32,7 @@ from open_webui.retrieval.embedding.preparation import (
     build_persisted_chunks,
     prepare_file_for_embedding,
 )
-from open_webui.retrieval.embedding.resolution import (
-    resolve_admin_for_knowledge,
-    resolve_frozen,
-)
+from open_webui.retrieval.embedding.resolution import resolve_frozen
 from open_webui.retrieval.embedding.service import EmbeddingService
 from open_webui.retrieval.vector.model_aware import ModelAwareVectorRepository
 from open_webui.storage.provider import Storage
@@ -554,17 +551,11 @@ def _resolve_knowledge_projection_ids(
             owner = owners.get(row.user_id)
             if owner is None:
                 raise EmbeddingError(FILE_PROCESSING_FAILED)
-            if owner.role == "admin":
-                governing_admin_id = owner.id
-            else:
-                # Non-admin ownership inherits through the existing stable-ID
-                # resolver. The locked Knowledge row still protects membership.
-                governing_admin_id = resolve_admin_for_knowledge(
-                    str(row.id),
-                    requesting_user_id=admin_id,
-                ).id
-            if governing_admin_id != admin_id:
-                raise EmbeddingError(FILE_PROCESSING_FAILED)
+            # Only directly admin-owned knowledge bases belong to a durable
+            # admin/model space. Group-shared non-admin knowledge bases are
+            # deliberately excluded from this admin's projections.
+            if owner.role != "admin" or owner.id != admin_id:
+                continue
 
     if db is None:
         with get_db() as session:

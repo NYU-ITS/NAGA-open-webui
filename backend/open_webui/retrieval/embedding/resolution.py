@@ -88,32 +88,34 @@ def resolve_admin_for_user(user_id: str):
     return admins[0]
 
 
-def resolve_admin_for_knowledge(knowledge_id: str, requesting_user_id: str):
-    """
-    Resolve admin for a knowledge base.
-    Loads the knowledge owner and resolves that owner through stable-ID rule.
-    
-    Args:
-        knowledge_id: The knowledge base ID.
-        requesting_user_id: The user requesting the operation.
-        
-    Returns:
-        The admin user object.
-        
-    Raises:
-        EmbeddingError: If admin cannot be resolved or is ambiguous.
+def resolve_admin_for_knowledge(knowledge_id: str, requesting_user_id: str | None):
+    """Resolve only a knowledge base's direct admin owner.
+
+    Access-control groups grant read/write access, not embedding governance.
+    A non-admin-owned knowledge base therefore has no durable admin model space
+    and fails closed instead of inheriting a group owner's model.
+
+    ``requesting_user_id`` remains part of the public signature for callers
+    that use this resolver during upload authorization.
     """
     from open_webui.models.knowledge import Knowledges
-    
+
     knowledge = Knowledges.get_knowledge_by_id(knowledge_id)
-    if knowledge is None or knowledge.user_id is None:
+    owner = (
+        Users.get_user_by_id(knowledge.user_id)
+        if knowledge is not None and knowledge.user_id
+        else None
+    )
+    if owner is None or owner.role != "admin":
         raise EmbeddingError(
             EMBEDDING_ADMIN_UNRESOLVED,
-            detail=f"Knowledge {knowledge_id} not found or has no owner.",
+            detail=(
+                f"Knowledge {knowledge_id} is missing or is not directly owned "
+                "by an admin."
+            ),
         )
-    
-    # Resolve the knowledge owner through stable-ID rule
-    return resolve_admin_for_user(knowledge.user_id)
+
+    return owner
 
 
 def resolve_admin_for_admin_id(admin_id: str):
@@ -345,8 +347,9 @@ def resolve_model_space_for_knowledge(knowledge_id: str, config) -> tuple[str, s
     Resolve the (admin_id, embedding_model_id) provenance space a knowledge base
     belongs to.
 
-    A knowledge base resolves to its owning admin (RBAC group owner), and the
-    model is that admin's currently selected registry model.
+    A knowledge base resolves only to its directly owning admin, and the model
+    is that admin's currently selected registry model. Group access does not
+    create an embedding model space.
 
     Args:
         knowledge_id: The knowledge base ID.

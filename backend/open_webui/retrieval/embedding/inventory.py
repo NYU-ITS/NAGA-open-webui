@@ -175,26 +175,17 @@ class ReindexFile:
 
 @dataclass(frozen=True)
 class ReindexAdminResolver:
-    """Shared group-first governance resolver for reindex-related reads.
+    """Shared ownership snapshot for reindex-related reads.
 
-    Build this once per database session so callers that inspect several
+    Build this once per database session so callers that inspect chats and
     knowledge bases reuse the same user and group snapshot as the inventory
-    builder. Resolution errors intentionally remain ``EmbeddingError`` values
-    so each caller can choose whether to fail the operation or present an
-    unavailable status for one source.
+    builder. Chat resolution errors intentionally remain ``EmbeddingError``
+    values so callers can fail closed for an affected source.
     """
 
     roles: dict[str, str]
     group_admins: dict[str, Optional[str]]
     user_group_ids: dict[str, set[str]]
-
-    def resolve_knowledge(self, knowledge: Knowledge) -> str:
-        return _resolve_knowledge_admin(
-            knowledge,
-            self.roles,
-            self.group_admins,
-            self.user_group_ids,
-        )
 
     def resolve_chat(self, chat: Chat) -> str:
         return _resolve_chat_admin(
@@ -386,112 +377,16 @@ def _user_owned_by_admin(
     )
 
 
-def _knowledge_access_groups(knowledge: Knowledge) -> set[str]:
-    """Group ids from access_control read/write permissions, deduplicated.
-
-    ``None`` access_control or an empty dict means no assigned groups (the
-    owner rule then applies). A present but wrong-typed structure (non-dict
-    ``read``/``write``, non-list ``group_ids``, non-string group id) is a
-    malformed reference: silently ignoring it would change governance to the
-    knowledge owner, so it raises instead.
-    """
-    access_control = knowledge.access_control
-    if access_control is None:
-        return set()
-    if not isinstance(access_control, dict):
-        raise EmbeddingError(
-            EMBEDDING_INVENTORY_MALFORMED_REFERENCE,
-            detail=(
-                f"knowledge {knowledge.id}: access_control is "
-                f"{type(access_control).__name__}, expected a dict or None."
-            ),
-        )
-    group_ids: set[str] = set()
-    for permission in ("read", "write"):
-        rule = access_control.get(permission)
-        if rule is None:
-            continue
-        if not isinstance(rule, dict):
-            raise EmbeddingError(
-                EMBEDDING_INVENTORY_MALFORMED_REFERENCE,
-                detail=(
-                    f"knowledge {knowledge.id}: access_control.{permission} is "
-                    f"{type(rule).__name__}, expected a dict."
-                ),
-            )
-        group_id_list = rule.get("group_ids")
-        if group_id_list is None:
-            continue
-        if not isinstance(group_id_list, list):
-            raise EmbeddingError(
-                EMBEDDING_INVENTORY_MALFORMED_REFERENCE,
-                detail=(
-                    f"knowledge {knowledge.id}: access_control.{permission}.group_ids "
-                    f"is {type(group_id_list).__name__}, expected a list."
-                ),
-            )
-        for group_id in group_id_list:
-            if not isinstance(group_id, str) or not group_id:
-                raise EmbeddingError(
-                    EMBEDDING_INVENTORY_MALFORMED_REFERENCE,
-                    detail=(
-                        f"knowledge {knowledge.id}: access_control.{permission}.group_ids "
-                        f"contains a non-string entry: {group_id!r}."
-                    ),
-                )
-            group_ids.add(group_id)
-    return group_ids
-
-
-def _knowledge_owned_by_admin(
+def knowledge_owned_by_admin(
     knowledge: Knowledge,
     admin_id: str,
     roles: dict[str, str],
 ) -> bool:
-    """Return whether a knowledge base is directly owned by ``admin_id``."""
-    return _user_owned_by_admin(knowledge.user_id, admin_id, roles)
+    """Return whether a knowledge base is directly owned by ``admin_id``.
 
-
-def _resolve_knowledge_admin(
-    knowledge: Knowledge,
-    roles: dict[str, str],
-    group_admins: dict[str, Optional[str]],
-    user_group_ids: dict[str, set[str]],
-) -> str:
-    """Resolve the single governing admin of a knowledge base.
-
-    RBAC-group-first: when the knowledge base is assigned to groups via
-    ``access_control``, every assigned group must resolve to the same admin.
-    With no assigned groups, resolve through the knowledge owner.
+    Knowledge access-control groups do not participate in reindex governance.
     """
-    source_desc = f"knowledge {knowledge.id}"
-    group_ids = _knowledge_access_groups(knowledge)
-    if group_ids:
-        resolved: list[str] = []
-        for group_id in sorted(group_ids):
-            admin_id = group_admins.get(group_id)
-            if admin_id is None:
-                raise EmbeddingError(
-                    EMBEDDING_INVENTORY_UNRESOLVED_SOURCE,
-                    detail=(
-                        f"{source_desc}: assigned group {group_id!r} does not "
-                        f"resolve to an admin owner."
-                    ),
-                )
-            resolved.append(admin_id)
-        distinct = set(resolved)
-        if len(distinct) != 1:
-            raise EmbeddingError(
-                EMBEDDING_INVENTORY_AMBIGUOUS_SOURCE,
-                detail=(
-                    f"{source_desc}: assigned groups resolve to multiple admins: "
-                    f"{sorted(distinct)}."
-                ),
-            )
-        return next(iter(distinct))
-    return _resolve_user_admin(
-        knowledge.user_id, roles, group_admins, user_group_ids, source_desc
-    )
+    return _user_owned_by_admin(knowledge.user_id, admin_id, roles)
 
 
 def _resolve_chat_admin(
@@ -667,7 +562,7 @@ def _build_inventory(
         file_contexts.setdefault(file_id, set()).add(context)
 
     for knowledge in _load_knowledge(db):
-        if not _knowledge_owned_by_admin(
+        if not knowledge_owned_by_admin(
             knowledge,
             admin_id,
             admin_resolver.roles,

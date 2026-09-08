@@ -14,8 +14,10 @@ from open_webui.models.embeddings import (
 )
 from open_webui.models.files import File
 from open_webui.models.knowledge import Knowledge
-from open_webui.retrieval.embedding.errors import EmbeddingError
-from open_webui.retrieval.embedding.inventory import build_reindex_admin_resolver
+from open_webui.retrieval.embedding.inventory import (
+    build_reindex_admin_resolver,
+    knowledge_owned_by_admin,
+)
 from open_webui.retrieval.embedding.jobs import (
     FILE_STATUS_COMPLETED,
     FILE_STATUS_FAILED,
@@ -91,6 +93,7 @@ class KnowledgeIndexingFailure(KnowledgeIndexingFileIssue):
 class KnowledgeIndexingStatusSummary(BaseModel):
     knowledge_id: str
     display_state: KnowledgeIndexingDisplayState
+    in_reindex_scope: bool = True
     job_status: str | None = None
     retrieval_available: bool
     current_file_count: int = 0
@@ -352,18 +355,16 @@ def build_knowledge_indexing_statuses(
         return []
 
     admin_resolver = build_reindex_admin_resolver(db)
-    admin_by_knowledge: dict[str, str] = {}
-    resolution_errors: dict[str, EmbeddingError] = {}
-    for knowledge in knowledge_rows:
-        try:
-            admin_by_knowledge[knowledge.id] = admin_resolver.resolve_knowledge(knowledge)
-        except EmbeddingError as error:
-            resolution_errors[knowledge.id] = error
-            log.warning(
-                "[KNOWLEDGE_INDEXING_STATUS] governance unavailable for knowledge %s: %s",
-                knowledge.id,
-                error.code,
-            )
+    admin_by_knowledge: dict[str, str] = {
+        knowledge.id: knowledge.user_id
+        for knowledge in knowledge_rows
+        if knowledge.user_id
+        and knowledge_owned_by_admin(
+            knowledge,
+            knowledge.user_id,
+            admin_resolver.roles,
+        )
+    }
 
     admin_ids = sorted(set(admin_by_knowledge.values()))
     states = (
@@ -500,15 +501,14 @@ def build_knowledge_indexing_statuses(
 
     responses = []
     for knowledge in knowledge_rows:
-        resolution_error = resolution_errors.get(knowledge.id)
-        if resolution_error is not None:
+        if knowledge.id not in admin_by_knowledge:
             responses.append(
                 KnowledgeIndexingStatusResponse(
                     knowledge_id=knowledge.id,
-                    display_state="unavailable",
+                    in_reindex_scope=False,
+                    display_state="ready",
+                    job_display_state="ready",
                     retrieval_available=False,
-                    error_code=resolution_error.code,
-                    error_message="Indexing status is unavailable for this knowledge base.",
                 )
             )
             continue
