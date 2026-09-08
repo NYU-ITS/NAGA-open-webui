@@ -759,11 +759,6 @@
 							{/if}
 						</div>
 
-						<div class="mt-1 mb-1 text-xs text-gray-600 dark:text-gray-500">
-							{$i18n.t(
-								'Warning: If you update or change your embedding model, you will need to re-import all documents.'
-							)}
-						</div>
 					</div>
 
 					{#if embeddingEngine === 'ollama' || embeddingEngine === 'openai' || embeddingEngine == 'portkey'}

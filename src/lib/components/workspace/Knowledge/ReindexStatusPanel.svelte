@@ -188,7 +188,9 @@
 				{$i18n.t('Last Successful Reindex')}
 			</div>
 			<div class="mt-0.5 text-gray-500 dark:text-gray-400">
-				{formatTime(status.last_successful_indexed_at)}
+				{status.last_successful_indexed_at
+					? formatTime(status.last_successful_indexed_at)
+					: 'N/A'}
 			</div>
 		</div>
 		<div>
