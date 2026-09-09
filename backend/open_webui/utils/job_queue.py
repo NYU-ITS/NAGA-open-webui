@@ -201,6 +201,7 @@ def enqueue_file_processing_job(
     user_id: Optional[str] = None,
     admin_id: Optional[str] = None,
     embedding_model_id: Optional[str] = None,
+    reliability_policy: Optional[dict] = None,
     job_timeout: int = DEFAULT_JOB_TIMEOUT,
 ) -> Optional[str]:
     """
@@ -226,7 +227,7 @@ def enqueue_file_processing_job(
     if not file_id or not isinstance(file_id, str) or not file_id.strip():
         log.error(f"Invalid file_id: must be non-empty string, got {type(file_id).__name__}")
         return None
-    
+
     # Validate that all arguments are JSON-serializable (basic check)
     try:
         json.dumps({
@@ -237,6 +238,7 @@ def enqueue_file_processing_job(
             "user_id": user_id,
             "admin_id": admin_id,
             "embedding_model_id": embedding_model_id,
+            "reliability_policy": reliability_policy,
         })
     except (TypeError, ValueError) as e:
         log.error(f"Job arguments are not JSON-serializable for file_id={file_id}: {e}")
@@ -313,6 +315,7 @@ def enqueue_file_processing_job(
             "user_id": user_id,
             "admin_id": admin_id,  # Frozen admin ID for credential-safe resolution
             "embedding_model_id": embedding_model_id,  # Frozen model ID for credential-safe resolution
+            "reliability_policy": reliability_policy,
         }
         
         # Add trace context to job metadata if available
@@ -383,6 +386,40 @@ def enqueue_file_processing_job(
     except Exception as e:
         log.error(f"Failed to enqueue file processing job for file_id={file_id}: {e}", exc_info=True)
         return None
+
+
+def enqueue_audio_repair_job(
+    *,
+    knowledge_id: str,
+    file_id: str,
+    admin_id: str,
+    embedding_model_id: str,
+    lease_token: str,
+    reliability_policy: dict,
+) -> Optional[str]:
+    """Enqueue one lease-protected audio repair without provider-level RQ retries."""
+    queue = get_job_queue()
+    if queue is None:
+        return None
+    from open_webui.workers.file_processor import repair_audio_embeddings_job
+
+    job_id = f"audio_repair_{lease_token}"
+    job = queue.enqueue(
+        repair_audio_embeddings_job,
+        kwargs={
+            "knowledge_id": knowledge_id,
+            "file_id": file_id,
+            "admin_id": admin_id,
+            "embedding_model_id": embedding_model_id,
+            "lease_token": lease_token,
+            "reliability_policy": reliability_policy,
+        },
+        job_id=job_id,
+        job_timeout=DEFAULT_JOB_TIMEOUT,
+        result_ttl=JOB_RESULT_TTL,
+        failure_ttl=JOB_FAILURE_TTL,
+    )
+    return job.id
 
 
 def get_job_status(job_id: str) -> Optional[Dict[str, Any]]:
@@ -514,4 +551,3 @@ def is_job_queue_available() -> bool:
     if not ENABLE_JOB_QUEUE:
         return False
     return get_job_queue() is not None
-

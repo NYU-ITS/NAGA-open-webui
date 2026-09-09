@@ -232,6 +232,25 @@ class ModelAwareVectorRepository:
             session=session,
         )
 
+    def upsert_model_aware_many(
+        self,
+        *,
+        projections: Sequence[tuple[str, Sequence[VectorItem]]],
+        model: EmbeddingModelSpec,
+        session=None,
+    ) -> None:
+        """Add or update only the supplied rows without deleting siblings."""
+        collection_names = [name for name, _ in projections]
+        if len(collection_names) != len(set(collection_names)):
+            raise EmbeddingError(EMBEDDING_STORAGE_DIMENSION_UNSUPPORTED)
+        client = self._client_for(model.dimension)
+        if not hasattr(client, "upsert_model_aware_many"):
+            raise EmbeddingError(EMBEDDING_STORAGE_DIMENSION_UNSUPPORTED)
+        client.upsert_model_aware_many(
+            [(name, list(items)) for name, items in projections],
+            session=session,
+        )
+
     def invalidate_model_projections(
         self,
         *,

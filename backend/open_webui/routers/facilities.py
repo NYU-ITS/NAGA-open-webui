@@ -422,7 +422,7 @@ def search_knowledge_base(query: str, user_id: str, request: Request, model, k: 
                     knowledge_ids=[cid for cid in collection_names] or None,
                 )
                 if isinstance(result, RetrievalModelSpace):
-                    admin_id, embedding_model_id = result.admin_id, result.active_model_id
+                    admin_id, embedding_model_id = result.admin_id, result.effective_model_id
                     staged_job_ids = list(result.staged_job_ids) or None
                     staged_file_ids = list(result.staged_file_ids) or None
                     staged_collection_files = (

@@ -1316,7 +1316,7 @@ def get_sources_from_files(
             )
             if isinstance(result, RetrievalModelSpace):
                 admin_id = result.admin_id
-                embedding_model_id = result.active_model_id
+                embedding_model_id = result.effective_model_id
                 staged_job_ids = list(result.staged_job_ids) or None
                 staged_file_ids = list(result.staged_file_ids) or None
                 staged_collection_files = list(result.staged_collection_files) or None

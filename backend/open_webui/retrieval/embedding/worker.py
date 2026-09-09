@@ -66,6 +66,7 @@ from open_webui.retrieval.embedding.errors import (
     EMBEDDING_REINDEX_SOURCE_CHANGED,
 )
 from open_webui.retrieval.embedding.file_processing import (
+    AUDIO_REPAIR_STATE_META_KEY,
     CONTENT_ORIGIN_STORED_SOURCE,
     embed_prepared_file_best_effort_audio,
     read_stored_content_provenance,
@@ -79,6 +80,7 @@ from open_webui.retrieval.embedding.preparation import (
     prepare_file_for_embedding,
     preparation_recipe_from_snapshot,
 )
+from open_webui.retrieval.embedding.reliability import EmbeddingReliabilityPolicy
 from open_webui.retrieval.embedding.jobs import (
     EmbeddingJobRepository,
     EmbeddingJobView,
@@ -689,11 +691,24 @@ def _process_file(
         raise EmbeddingError(EMBEDDING_REINDEX_SOURCE_CHANGED)
 
     # Generate and fully validate all vectors before mutating chunks/projections.
+    file_embedding_service = EmbeddingService(
+        config,
+        reliability_policy=EmbeddingReliabilityPolicy.from_dict(
+            file_snapshot.get("reliability_policy")
+        ),
+        call_context={
+            "call_id": job_id,
+            "operation": "reindex",
+            "job_id": job_id,
+            "file_id": file_id,
+        },
+    )
     prepared, embeddings = embed_prepared_file_best_effort_audio(
         prepared=prepared,
-        embedding_service=embedding_service,
+        embedding_service=file_embedding_service,
         admin_id=admin.id,
         embedding_model_id=target_model.id,
+        preparation_recipe=preparation_recipe,
     )
     if not prepared.chunks or len(embeddings) != len(prepared.chunks):
         raise EmbeddingError(FILE_ERROR_EMBEDDING_FAILED)
@@ -907,6 +922,8 @@ def _stage_prepared_manifest(
             "projection_ids": [f"file-{file_id}", *projection_ids],
             "processing_warnings": list(dict.fromkeys(prepared.warnings)),
             "visual_summary": dict(prepared.visual_summary),
+            "audio_embedding": dict(prepared.audio_embedding),
+            "audio_repair_state": dict(prepared.audio_repair_state),
         }
         job_file.file_snapshot = snapshot
         db.commit()
@@ -1300,6 +1317,11 @@ def _apply_staged_processing_summaries(*, job_id: str, db) -> None:
         file_row.hash = content_hash
         metadata = dict(file_row.meta or {})
         metadata.pop("cache_video_audio_v1", None)
+        repair_state = summary.get("audio_repair_state")
+        if isinstance(repair_state, dict) and repair_state:
+            metadata[AUDIO_REPAIR_STATE_META_KEY] = repair_state
+        else:
+            metadata.pop(AUDIO_REPAIR_STATE_META_KEY, None)
         file_row.meta = {
             **metadata,
             "collection_name": f"file-{file_row.id}",
@@ -1310,6 +1332,7 @@ def _apply_staged_processing_summaries(*, job_id: str, db) -> None:
                 dict.fromkeys(summary.get("processing_warnings") or [])
             ),
             "visual_summary": dict(summary.get("visual_summary") or {}),
+            "audio_embedding": dict(summary.get("audio_embedding") or {}),
             "processing_status": "completed",
             "processing_completed_at": now,
             "processing_error": None,

@@ -101,6 +101,8 @@ class KnowledgeIndexingStatusSummary(BaseModel):
     job_type: str | None = None
     active_model: EmbeddingModelSummary | None = None
     target_model: EmbeddingModelSummary | None = None
+    effective_model: EmbeddingModelSummary | None = None
+    model_scope: Literal["active", "staged", "legacy", "unavailable"] = "unavailable"
 
     collection_progress: KnowledgeIndexingProgress = Field(
         default_factory=KnowledgeIndexingProgress
@@ -533,12 +535,17 @@ def build_knowledge_indexing_statuses(
             if state and state.target_embedding_model_id
             else None
         )
+        active_model_available = (
+            active_model is not None and active_model.status == "enabled"
+        )
+        target_model_available = (
+            target_model is not None and target_model.status == "enabled"
+        )
         models_available = state is None or (
-            active_model is not None
-            and active_model.status == "enabled"
+            (active_model_available or target_model_available)
             and (
                 state.target_embedding_model_id is None
-                or (target_model is not None and target_model.status == "enabled")
+                or target_model_available
             )
         )
         if not models_available:
@@ -585,6 +592,25 @@ def build_knowledge_indexing_statuses(
         # source has a failed administrator-wide operation.
         if current_file_count == 0:
             display_state, retrieval_available = "ready", True
+        uses_staged_model = bool(
+            job is not None
+            and job.status == JOB_STATUS_PARTIALLY_FAILED
+            and display_state == "ready"
+            and current_file_count > 0
+            and target_model is not None
+        )
+        if state is None:
+            effective_model = None
+            model_scope = "legacy"
+        elif not retrieval_available:
+            effective_model = None
+            model_scope = "unavailable"
+        elif uses_staged_model:
+            effective_model = target_model
+            model_scope = "staged"
+        else:
+            effective_model = active_model
+            model_scope = "active"
         retry_eligible = False
         if job is not None and models_available:
             retry_eligible = is_job_retry_eligible(
@@ -627,6 +653,8 @@ def build_knowledge_indexing_statuses(
                 job_type=job.job_type if job is not None else None,
                 active_model=_model_summary(active_model),
                 target_model=_model_summary(target_model),
+                effective_model=_model_summary(effective_model),
+                model_scope=model_scope,
                 collection_progress=_progress_from_rows(collection_rows),
                 job_progress=_job_progress(job),
                 failed_document_count=len(failed_rows),

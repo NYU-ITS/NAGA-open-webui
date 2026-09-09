@@ -59,6 +59,7 @@ class FileModel(BaseModel):
 _PRIVATE_FILE_METADATA_KEYS = frozenset(
     {
         "alpha",
+        "audio_embedding_repair_state",
         "bbox",
         "cache",
         "chunk_manifest_id",
@@ -104,6 +105,28 @@ def sanitize_public_visual_summary(value: Any) -> dict[str, int]:
     return result
 
 
+def sanitize_public_audio_embedding(value: Any) -> dict[str, Any]:
+    """Expose only the bounded audio-repair status contract."""
+    source = value if isinstance(value, Mapping) else {}
+    raw_status = source.get("status")
+    status = (
+        raw_status
+        if raw_status in {"complete", "degraded", "repairing", "not_applicable"}
+        else "not_applicable"
+    )
+    result: dict[str, Any] = {"status": status}
+    for key in ("total_chunks", "embedded_chunks", "failed_chunks"):
+        try:
+            result[key] = max(0, int(source.get(key, 0) or 0))
+        except (TypeError, ValueError, OverflowError):
+            result[key] = 0
+    result["repairable"] = bool(source.get("repairable", False))
+    updated_at = source.get("updated_at")
+    if isinstance(updated_at, int) and not isinstance(updated_at, bool):
+        result["updated_at"] = updated_at
+    return result
+
+
 def sanitize_public_file_metadata(value: Any) -> Any:
     """Return a copy of file metadata with private processing fields removed."""
 
@@ -141,6 +164,8 @@ def sanitize_public_file_metadata(value: Any) -> Any:
                 result[key] = safe_file_processing_warnings(item)
             elif key == "visual_summary":
                 result[key] = sanitize_public_visual_summary(item)
+            elif key == "audio_embedding":
+                result[key] = sanitize_public_audio_embedding(item)
             else:
                 result[key] = sanitize_public_file_metadata(item)
         return result

@@ -213,6 +213,9 @@
 		if (statusResponse?.visual_summary) {
 			fileItem.visual_summary = statusResponse.visual_summary;
 		}
+		if (statusResponse?.audio_embedding) {
+			fileItem.audio_embedding = statusResponse.audio_embedding;
+		}
 
 		if (processingStatus === 'completed') {
 			fileItem.status = 'uploaded';
@@ -539,6 +542,7 @@
 					uploadedFile?.meta?.processing_warnings
 				);
 				fileItem.visual_summary = uploadedFile?.meta?.visual_summary ?? null;
+				fileItem.audio_embedding = uploadedFile?.meta?.audio_embedding ?? null;
 
 				// Check processing status from upload response
 				const processingStatus = uploadedFile?.meta?.processing_status;
@@ -1067,7 +1071,7 @@
 													/>
 												{/if}
 
-												{#if file.status === 'processing' || file.status === 'error' || file.processing_warnings?.length || file.visual_summary}
+												{#if file.status === 'processing' || file.status === 'error' || file.processing_warnings?.length || file.visual_summary || file.audio_embedding}
 													<div class="max-w-60 px-1 text-xs text-gray-500 dark:text-gray-400">
 														{#if file.status === 'processing'}
 															<div>
@@ -1089,6 +1093,11 @@
 														{/each}
 														{#if file.visual_summary && formatVisualSummary(file.visual_summary)}
 															<div class="capitalize">{formatVisualSummary(file.visual_summary)}</div>
+														{/if}
+														{#if file.audio_embedding?.status === 'degraded'}
+															<div class="text-amber-600 dark:text-amber-400">
+																{$i18n.t('Visual retrieval remains available. Audio retrieval is incomplete.')}
+															</div>
 														{/if}
 
 														{#if file.id && (file.status === 'processing' || file.status === 'error')}

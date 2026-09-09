@@ -14,6 +14,7 @@ from open_webui.models.files import (
     FileForm,
     FileModelResponse,
     Files,
+    sanitize_public_audio_embedding,
     sanitize_public_visual_summary,
 )
 from open_webui.models.knowledge import Knowledges
@@ -230,6 +231,13 @@ def upload_file(
                             "text_chunk_count": 0,
                             "video_chunk_count": 0,
                             "audio_chunk_count": 0,
+                        },
+                        "audio_embedding": {
+                            "status": "not_applicable",
+                            "total_chunks": 0,
+                            "embedded_chunks": 0,
+                            "failed_chunks": 0,
+                            "repairable": False,
                         },
                     },
                 }
@@ -526,6 +534,7 @@ def get_file_processing_status(id: str, user=Depends(get_verified_user)):
 
     warnings = safe_file_processing_warnings(meta.get("processing_warnings"))
     visual_summary = sanitize_public_visual_summary(meta.get("visual_summary"))
+    audio_embedding = sanitize_public_audio_embedding(meta.get("audio_embedding"))
 
     return {
         "file_id": id,
@@ -537,6 +546,7 @@ def get_file_processing_status(id: str, user=Depends(get_verified_user)):
         "processing_error_code": error_code,
         "processing_warnings": warnings,
         "visual_summary": visual_summary,
+        "audio_embedding": audio_embedding,
         "collection_name": meta.get("collection_name"),
     }
 

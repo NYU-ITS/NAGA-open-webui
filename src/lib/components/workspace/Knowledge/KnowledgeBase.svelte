@@ -24,6 +24,7 @@
 		removeFileFromKnowledgeById,
 		resetKnowledgeById,
 		updateFileFromKnowledgeById,
+		repairKnowledgeFileAudio,
 		updateKnowledgeById
 	} from '$lib/apis/knowledge';
 
@@ -104,6 +105,23 @@
 		if (!file) return file;
 
 		const processingStatus = file?.processing_status ?? file?.meta?.processing_status;
+		const processingWarnings = Array.isArray(
+			file?.processing_warnings ?? file?.meta?.processing_warnings
+		)
+			? (file?.processing_warnings ?? file.meta.processing_warnings)
+			: [];
+		const storedAudioEmbedding = file?.audio_embedding ?? file?.meta?.audio_embedding;
+		const audioEmbedding =
+			storedAudioEmbedding ??
+			(processingWarnings.includes('audio_embedding_failed')
+				? {
+						status: 'degraded',
+						total_chunks: 0,
+						embedded_chunks: 0,
+						failed_chunks: 0,
+						repairable: true
+					}
+				: null);
 		let status = 'ready';
 
 		if (
@@ -125,12 +143,9 @@
 					: '',
 			processing_error_code:
 				file?.processing_error_code ?? file?.meta?.processing_error_code ?? null,
-			processing_warnings: Array.isArray(
-				file?.processing_warnings ?? file?.meta?.processing_warnings
-			)
-				? (file?.processing_warnings ?? file.meta.processing_warnings)
-				: [],
-			visual_summary: normalizeVisualSummary(file?.visual_summary ?? file?.meta?.visual_summary)
+			processing_warnings: processingWarnings,
+			visual_summary: normalizeVisualSummary(file?.visual_summary ?? file?.meta?.visual_summary),
+			audio_embedding: audioEmbedding
 		};
 	};
 
@@ -146,7 +161,10 @@
 	};
 
 	const hasProcessingFiles = () =>
-		knowledge?.files?.some((file) => file?.status === 'processing') ?? false;
+		knowledge?.files?.some(
+			(file) =>
+				file?.status === 'processing' || file?.audio_embedding?.status === 'repairing'
+		) ?? false;
 
 	const stopProcessingPolling = () => {
 		if (processingPollInterval) {
@@ -265,6 +283,32 @@
 		} catch (_error) {
 			await refreshKnowledge();
 			toast.error($i18n.t('Failed to retry file processing.'));
+		}
+	};
+
+	const retryAudioEmbedding = async (fileId: string) => {
+		if (!knowledge || !id) return;
+		knowledge = {
+			...knowledge,
+			files: (knowledge.files ?? []).map((file) =>
+				file.id === fileId
+					? {
+							...file,
+							audio_embedding: {
+								...(file.audio_embedding ?? {}),
+								status: 'repairing'
+							}
+						}
+					: file
+			)
+		};
+		try {
+			await repairKnowledgeFileAudio(localStorage.token, id, fileId);
+			startProcessingPolling();
+			toast.success($i18n.t('Audio repair requested'));
+		} catch (error) {
+			await refreshKnowledge();
+			toast.error(error instanceof Error ? error.message : $i18n.t('Audio repair failed.'));
 		}
 	};
 
@@ -1391,6 +1435,7 @@
 										deleteFileHandler(e.detail);
 									}}
 									on:retry={(e) => retryFileProcessing(e.detail)}
+									on:retryAudio={(e) => retryAudioEmbedding(e.detail)}
 								/>
 							</div>
 						{:else}

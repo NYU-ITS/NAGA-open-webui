@@ -357,6 +357,111 @@ class PgvectorClient:
             )
             raise
 
+    def upsert_model_aware_many(
+        self,
+        projections: List[tuple[str, List[VectorItem]]],
+        session=None,
+    ) -> None:
+        """Atomically upsert supplied model-aware rows without stale deletion."""
+        non_empty = [projection for projection in projections if projection[1]]
+        if not non_empty:
+            return
+        db = session if session is not None else self.session
+        try:
+            for collection_name, items in non_empty:
+                self._upsert_model_aware_projection(
+                    collection_name,
+                    items,
+                    session=db,
+                )
+            if session is None:
+                db.commit()
+            else:
+                db.flush()
+        except Exception as error:
+            if session is None:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+            log.error(
+                "Additive model-aware upsert failed | type=%s",
+                type(error).__name__,
+            )
+            raise
+
+    def _upsert_model_aware_projection(
+        self,
+        collection_name: str,
+        items: List[VectorItem],
+        session=None,
+    ) -> None:
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        db = session if session is not None else self.session
+        now = int(time.time())
+        rows = []
+        for item in items:
+            if not self._is_model_aware(item) or not item.get("rag_chunk_id"):
+                raise ValueError("model-aware upsert requires complete provenance")
+            rows.append(
+                {
+                    "id": str(uuid.uuid4()),
+                    "vector": item["vector"],
+                    "collection_name": collection_name,
+                    "text": item["text"],
+                    "vmetadata": item["metadata"],
+                    "admin_id": item["admin_id"],
+                    "embedding_model_id": item["embedding_model_id"],
+                    "file_id": item.get("file_id"),
+                    "knowledge_id": item.get("knowledge_id"),
+                    "rag_chunk_id": item["rag_chunk_id"],
+                    "modality": item.get("modality") or "text",
+                    "embedding_status": item.get("embedding_status") or "active",
+                    "embedding_job_id": item.get("embedding_job_id"),
+                    "provenance_status": "attributed",
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            )
+        first = items[0]
+        for item in items[1:]:
+            if any(
+                item.get(key) != first.get(key)
+                for key in (
+                    "admin_id",
+                    "embedding_model_id",
+                    "file_id",
+                    "knowledge_id",
+                    "embedding_status",
+                    "embedding_job_id",
+                )
+            ):
+                raise ValueError("model-aware upsert requires one provenance scope")
+        stmt = pg_insert(DocumentChunk).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[
+                DocumentChunk.admin_id,
+                DocumentChunk.embedding_model_id,
+                DocumentChunk.rag_chunk_id,
+                DocumentChunk.collection_name,
+            ],
+            index_where=DocumentChunk.rag_chunk_id.isnot(None),
+            set_={
+                "vector": stmt.excluded.vector,
+                "text": stmt.excluded.text,
+                "vmetadata": stmt.excluded.vmetadata,
+                "file_id": stmt.excluded.file_id,
+                "knowledge_id": stmt.excluded.knowledge_id,
+                "modality": stmt.excluded.modality,
+                "embedding_status": stmt.excluded.embedding_status,
+                "embedding_job_id": stmt.excluded.embedding_job_id,
+                "provenance_status": stmt.excluded.provenance_status,
+                "updated_at": stmt.excluded.updated_at,
+            },
+        )
+        db.execute(stmt)
+
     def _reconcile_model_aware_projection(
         self,
         collection_name: str,

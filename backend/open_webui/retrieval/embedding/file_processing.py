@@ -14,8 +14,9 @@ import hashlib
 import logging
 import os
 import time
+import uuid
 from dataclasses import dataclass, replace
-from typing import Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from open_webui.internal.db import get_db
 from open_webui.models.embeddings import RagChunk
@@ -31,9 +32,17 @@ from open_webui.retrieval.embedding.errors import (
     safe_file_processing_error_message,
 )
 from open_webui.retrieval.embedding.preparation import (
+    PreparationRecipe,
+    PreparedChunk,
     PreparedFile,
+    build_preparation_recipe,
     build_persisted_chunks,
     prepare_file_for_embedding,
+)
+from open_webui.retrieval.embedding.inputs import AudioEmbeddingInput
+from open_webui.retrieval.embedding.reliability import (
+    EmbeddingReliabilityPolicy,
+    snapshot_reliability_policy,
 )
 from open_webui.retrieval.embedding.resolution import (
     resolve_admin_for_knowledge,
@@ -43,9 +52,12 @@ from open_webui.retrieval.embedding.service import EmbeddingService
 from open_webui.retrieval.vector.model_aware import ModelAwareVectorRepository
 from open_webui.storage.provider import Storage
 from open_webui.utils.otel_instrumentation import add_metric_counter, add_span_event
+from open_webui.retrieval.video_audio import split_pcm_wav
 
 
 log = logging.getLogger(__name__)
+
+AUDIO_REPAIR_STATE_META_KEY = "audio_embedding_repair_state"
 
 
 @dataclass(frozen=True)
@@ -63,6 +75,7 @@ class FileProcessingResult:
     extraction_version: str | None
     processing_warnings: tuple[str, ...]
     visual_summary: Mapping[str, int]
+    audio_embedding: Mapping[str, Any]
 
 
 def embed_prepared_file_best_effort_audio(
@@ -71,8 +84,9 @@ def embed_prepared_file_best_effort_audio(
     embedding_service: EmbeddingService,
     admin_id: str,
     embedding_model_id: str,
+    preparation_recipe: PreparationRecipe | None = None,
 ) -> tuple[PreparedFile, tuple[tuple[float, ...], ...]]:
-    """Embed non-audio chunks together and isolate every audio provider call."""
+    """Embed a file, adaptively bisecting only timeout/oversize audio chunks."""
 
     vectors_by_index: dict[int, tuple[float, ...]] = {}
     non_audio = [
@@ -91,60 +105,268 @@ def embed_prepared_file_best_effort_audio(
             for (index, _), vector in zip(non_audio, batch.vectors)
         )
 
-    audio_indexes = [
-        index
+    retained: list[tuple[int, PreparedChunk, tuple[float, ...]]] = [
+        (index, chunk, vectors_by_index[index]) for index, chunk in non_audio
+    ]
+    failed_audio: list[dict[str, Any]] = []
+    audio_chunks = [
+        (index, chunk)
         for index, chunk in enumerate(prepared.chunks)
         if chunk.modality == "audio"
     ]
-    failed_audio_count = 0
-    for index in audio_indexes:
-        try:
-            batch = embedding_service.embed_for_frozen_context(
-                inputs=(prepared.chunks[index].embedding_input,),
-                admin_id=admin_id,
-                embedding_model_id=embedding_model_id,
-            )
-            vectors_by_index[index] = batch.vectors[0]
-        except Exception as error:
-            failed_audio_count += 1
-            add_metric_counter("retrieval.video.audio_embedding_failures")
-            add_span_event(
-                "retrieval.video.audio.embedding_failed",
-                {
-                    "error.type": type(error).__name__,
-                    "embedding.model_id": embedding_model_id,
-                },
-            )
-            log.warning(
-                "Video audio embedding failed; retaining visual chunks | "
-                "model_id=%s | error_type=%s",
-                embedding_model_id,
-                type(error).__name__,
-            )
-
-    retained_indexes = tuple(sorted(vectors_by_index))
-    retained_chunks = tuple(prepared.chunks[index] for index in retained_indexes)
-    retained_vectors = tuple(vectors_by_index[index] for index in retained_indexes)
-    if failed_audio_count:
-        warnings = [*prepared.warnings, VIDEO_AUDIO_EMBEDDING_FAILED]
-        retained_audio_count = sum(
-            chunk.modality == "audio" for chunk in retained_chunks
+    audio_leaf_count = 0
+    for index, chunk in audio_chunks:
+        successes, failures = _embed_audio_chunk_with_splitting(
+            chunk=chunk,
+            embedding_service=embedding_service,
+            admin_id=admin_id,
+            embedding_model_id=embedding_model_id,
+            split_depth=0,
+            split_path="",
         )
-        if audio_indexes and retained_audio_count == 0:
+        audio_leaf_count += len(successes) + len(failures)
+        retained.extend((index, child, vector) for child, vector in successes)
+        failed_audio.extend(failures)
+
+    # Stable ordering keeps non-audio/audio siblings at their original temporal
+    # position while split children retain left-to-right order.
+    retained.sort(
+        key=lambda item: (
+            item[0],
+            float(item[1].chunk_metadata.get("segment_start_s", 0)),
+            str(item[1].chunk_metadata.get("audio_split_path", "")),
+        )
+    )
+    retained_chunks = tuple(item[1] for item in retained)
+    retained_vectors = tuple(item[2] for item in retained)
+    failed_audio_count = len(failed_audio)
+    now = int(time.time())
+    total_audio = audio_leaf_count if audio_chunks else 0
+    embedded_audio = total_audio - failed_audio_count
+    audio_summary = {
+        "status": (
+            "not_applicable"
+            if not audio_chunks
+            else "degraded" if failed_audio_count else "complete"
+        ),
+        "total_chunks": total_audio,
+        "embedded_chunks": embedded_audio,
+        "failed_chunks": failed_audio_count,
+        "repairable": bool(failed_audio),
+        "updated_at": now,
+    }
+    repair_state: dict[str, Any] = {}
+    if failed_audio:
+        add_metric_counter(
+            "retrieval.video.audio_degraded_files",
+            {"failed_chunks": failed_audio_count},
+        )
+        warnings = [*prepared.warnings, VIDEO_AUDIO_EMBEDDING_FAILED]
+        if embedded_audio == 0:
             warnings.append(VIDEO_AUDIO_FALLBACK_VISUAL_ONLY)
             add_metric_counter("retrieval.video.audio_fallback_visual_only")
         visual_summary = {
             **dict(prepared.visual_summary),
-            "audio_chunk_count": retained_audio_count,
+            "audio_chunk_count": embedded_audio,
+        }
+        first_audio_metadata = dict(audio_chunks[0][1].chunk_metadata)
+        repair_state = {
+            "schema_version": 1,
+            "source_sha256": prepared.source_sha256,
+            "embedding_model_id": embedding_model_id,
+            "extraction_version": prepared.extraction_version,
+            "audio_extraction_version": first_audio_metadata.get(
+                "audio_extraction_version"
+            ),
+            "audio_chunking_version": first_audio_metadata.get("chunking_version"),
+            "failed_chunks": failed_audio,
+            "total_chunks": total_audio,
+            "embedded_chunks": embedded_audio,
+            "created_at": now,
+            "updated_at": now,
+            **(
+                {"preparation_recipe": preparation_recipe.to_dict()}
+                if preparation_recipe is not None
+                else {}
+            ),
         }
         prepared = replace(
             prepared,
             chunks=retained_chunks,
             warnings=tuple(dict.fromkeys(warnings)),
             visual_summary=visual_summary,
+            audio_embedding=audio_summary,
+            audio_repair_state=repair_state,
+        )
+    else:
+        prepared = replace(
+            prepared,
+            chunks=retained_chunks,
+            audio_embedding=audio_summary,
+            audio_repair_state={},
         )
 
     return prepared, retained_vectors
+
+
+def _embed_audio_chunk_with_splitting(
+    *,
+    chunk: PreparedChunk,
+    embedding_service: EmbeddingService,
+    admin_id: str,
+    embedding_model_id: str,
+    split_depth: int,
+    split_path: str,
+    heartbeat: Callable[[], None] | None = None,
+) -> tuple[
+    list[tuple[PreparedChunk, tuple[float, ...]]],
+    list[dict[str, Any]],
+]:
+    try:
+        if heartbeat is not None:
+            heartbeat()
+        batch = embedding_service.embed_for_frozen_context(
+            inputs=(chunk.embedding_input,),
+            admin_id=admin_id,
+            embedding_model_id=embedding_model_id,
+            call_context={
+                **({"operation": "split"} if split_depth else {}),
+                "chunk_index": chunk.chunk_metadata.get("chunkIndex"),
+                "start_offset_seconds": chunk.chunk_metadata.get("segment_start_s"),
+                "end_offset_seconds": chunk.chunk_metadata.get("segment_end_s"),
+                "split_depth": split_depth,
+            },
+        )
+        return [(chunk, batch.vectors[0])], []
+    except Exception as error:
+        failure_reason = (
+            error.failure_reason
+            if isinstance(error, EmbeddingError)
+            else "provider_failure"
+        )
+        metadata = dict(chunk.chunk_metadata)
+        duration = float(metadata.get("segment_end_s", 0)) - float(
+            metadata.get("segment_start_s", 0)
+        )
+        policy = embedding_service.reliability_policy
+        can_split = (
+            failure_reason in {"timeout", "payload_too_large"}
+            and split_depth < policy.audio_split_max_depth
+            and duration >= 2 * policy.audio_split_min_duration_seconds
+        )
+        if can_split:
+            try:
+                children = _split_audio_prepared_chunk(
+                    chunk,
+                    split_depth=split_depth,
+                    split_path=split_path,
+                )
+            except (TypeError, ValueError):
+                children = ()
+            if children:
+                add_metric_counter(
+                    "retrieval.video.audio_adaptive_splits",
+                    {"reason": failure_reason, "depth": split_depth + 1},
+                )
+                successes: list[tuple[PreparedChunk, tuple[float, ...]]] = []
+                failures: list[dict[str, Any]] = []
+                for child_index, child in enumerate(children):
+                    child_successes, child_failures = _embed_audio_chunk_with_splitting(
+                        chunk=child,
+                        embedding_service=embedding_service,
+                        admin_id=admin_id,
+                        embedding_model_id=embedding_model_id,
+                        split_depth=split_depth + 1,
+                        split_path=f"{split_path}{child_index}",
+                        heartbeat=heartbeat,
+                    )
+                    successes.extend(child_successes)
+                    failures.extend(child_failures)
+                return successes, failures
+
+        add_metric_counter(
+            "retrieval.video.audio_embedding_failures",
+            {"reason": failure_reason, "split_depth": split_depth},
+        )
+        add_span_event(
+            "retrieval.video.audio.embedding_failed",
+            {
+                "error.type": type(error).__name__,
+                "failure.reason": failure_reason,
+                "embedding.model_id": embedding_model_id,
+                "audio.split_depth": split_depth,
+            },
+        )
+        log.warning(
+            "Video audio embedding failed; retaining other chunks | "
+            "model_id=%s reason=%s split_depth=%s",
+            embedding_model_id,
+            failure_reason,
+            split_depth,
+        )
+        return [], [
+            {
+                "chunk_index": metadata.get("chunkIndex"),
+                "start_seconds": metadata.get("segment_start_s"),
+                "end_seconds": metadata.get("segment_end_s"),
+                "audio_sha256": chunk.content_sha256,
+                "split_depth": split_depth,
+                "split_path": split_path,
+                "failure_reason": failure_reason,
+                "failed_at": int(time.time()),
+            }
+        ]
+
+
+def _split_audio_prepared_chunk(
+    chunk: PreparedChunk,
+    *,
+    split_depth: int,
+    split_path: str,
+) -> tuple[PreparedChunk, PreparedChunk]:
+    if not isinstance(chunk.embedding_input, AudioEmbeddingInput):
+        raise TypeError("audio chunk is required")
+    left_audio, right_audio = split_pcm_wav(chunk.embedding_input.audio)
+    metadata = dict(chunk.chunk_metadata)
+    start = float(metadata["segment_start_s"])
+    end = float(metadata["segment_end_s"])
+    midpoint = start + (end - start) / 2
+    root_sha256 = str(metadata.get("audio_root_sha256") or chunk.content_sha256)
+    children = []
+    for child_index, (audio, child_start, child_end) in enumerate(
+        (
+            (left_audio, start, midpoint),
+            (right_audio, midpoint, end),
+        )
+    ):
+        audio_sha256 = hashlib.sha256(audio).hexdigest()
+        child_path = f"{split_path}{child_index}"
+        child_metadata = {
+            **metadata,
+            "startTimeSeconds": child_start,
+            "endTimeSeconds": child_end,
+            "segment_start_s": child_start,
+            "segment_end_s": child_end,
+            "audio_root_sha256": root_sha256,
+            "audio_parent_sha256": chunk.content_sha256,
+            "audio_split_depth": split_depth + 1,
+            "audio_split_path": child_path,
+            "audio_sha256": audio_sha256,
+        }
+        children.append(
+            PreparedChunk(
+                content="",
+                content_type="audio",
+                embedding_input=AudioEmbeddingInput(
+                    audio=audio,
+                    mime_type=chunk.embedding_input.mime_type,
+                ),
+                content_sha256=audio_sha256,
+                modality="audio",
+                chunk_metadata=child_metadata,
+            )
+        )
+    return children[0], children[1]
 
 
 CONTENT_ORIGIN_STORED_SOURCE = "stored_source"
@@ -301,6 +523,7 @@ def process_stored_file_for_embedding(
     embedding_model_id: str,
     knowledge_id: str | None = None,
     collection_name: str | None = None,
+    reliability_policy: Mapping[str, Any] | None = None,
 ) -> FileProcessingResult:
     """Prepare and index one stored file using a frozen admin/model context.
 
@@ -309,6 +532,8 @@ def process_stored_file_for_embedding(
     an error cannot activate only a prefix of a multimodal PDF manifest.
     """
 
+    call_id = str(uuid.uuid4())
+    started_at = time.monotonic()
     _mark_processing(file_id)
     try:
         file = Files.get_file_by_id(file_id)
@@ -336,6 +561,13 @@ def process_stored_file_for_embedding(
             requested_knowledge_id=requested_knowledge_id,
         )
 
+        preparation_recipe = build_preparation_recipe(config, admin.email)
+        frozen_reliability = (
+            EmbeddingReliabilityPolicy.from_dict(reliability_policy)
+            if reliability_policy is not None
+            else snapshot_reliability_policy(config)
+        )
+
         prepared = prepare_file_for_embedding(
             source_bytes=source_bytes,
             source_path=resolved_path,
@@ -346,6 +578,7 @@ def process_stored_file_for_embedding(
             model=context.model,
             config=config,
             admin_email=admin.email,
+            preparation_recipe=preparation_recipe,
             content_override=content_provenance.content_override,
         )
         if not prepared.chunks:
@@ -355,9 +588,19 @@ def process_stored_file_for_embedding(
         # at a time so a provider failure can drop only that transient input.
         prepared, vectors = embed_prepared_file_best_effort_audio(
             prepared=prepared,
-            embedding_service=EmbeddingService(config),
+            embedding_service=EmbeddingService(
+                config,
+                reliability_policy=frozen_reliability,
+                call_context={
+                    "call_id": call_id,
+                    "operation": "initial",
+                    "file_id": file.id,
+                    "knowledge_id": requested_knowledge_id,
+                },
+            ),
             admin_id=admin_id,
             embedding_model_id=embedding_model_id,
+            preparation_recipe=preparation_recipe,
         )
         if not prepared.chunks or len(vectors) != len(prepared.chunks):
             raise EmbeddingError(FILE_PROCESSING_FAILED)
@@ -468,9 +711,23 @@ def process_stored_file_for_embedding(
                 manifest_id=manifest_id,
                 processing_warnings=warnings,
                 visual_summary=visual_summary,
+                audio_embedding=prepared.audio_embedding,
+                audio_repair_state=prepared.audio_repair_state,
                 collection_name=file_collection,
             )
             db.commit()
+        log.info(
+            "embedding_file_outcome call_id=%s provider=%s model_id=%s "
+            "operation=initial file_id=%s status=completed audio_status=%s chunks=%s "
+            "elapsed_seconds=%.3f",
+            call_id,
+            context.model.provider,
+            embedding_model_id,
+            file_id,
+            prepared.audio_embedding.get("status", "not_applicable"),
+            len(prepared.chunks),
+            time.monotonic() - started_at,
+        )
         return FileProcessingResult(
             file_id=file.id,
             collection_names=tuple(name for name, _ in projections),
@@ -491,15 +748,19 @@ def process_stored_file_for_embedding(
             extraction_version=prepared.extraction_version,
             processing_warnings=warnings,
             visual_summary=visual_summary,
+            audio_embedding=dict(prepared.audio_embedding),
         )
     except Exception as error:
         code = _safe_error_code(error)
         _mark_failed(file_id, code)
         log.error(
-            "Stored file processing failed | file_id=%s | code=%s | type=%s",
+            "embedding_file_outcome call_id=%s operation=initial file_id=%s "
+            "status=failed code=%s type=%s elapsed_seconds=%.3f",
+            call_id,
             file_id,
             code,
             type(error).__name__,
+            time.monotonic() - started_at,
         )
         raise
 
@@ -691,6 +952,8 @@ def _apply_completed_file_state(
     manifest_id: str,
     processing_warnings: Sequence[str],
     visual_summary: Mapping[str, int],
+    audio_embedding: Mapping[str, Any],
+    audio_repair_state: Mapping[str, Any],
     collection_name: str,
 ) -> None:
     now = int(time.time())
@@ -698,6 +961,10 @@ def _apply_completed_file_state(
     row.hash = hashlib.sha256(extracted_text.encode("utf-8")).hexdigest()
     metadata = dict(row.meta or {})
     metadata.pop("cache_video_audio_v1", None)
+    if audio_repair_state:
+        metadata[AUDIO_REPAIR_STATE_META_KEY] = dict(audio_repair_state)
+    else:
+        metadata.pop(AUDIO_REPAIR_STATE_META_KEY, None)
     row.meta = {
         **metadata,
         "collection_name": collection_name,
@@ -706,6 +973,7 @@ def _apply_completed_file_state(
         "chunk_manifest_id": manifest_id,
         "processing_warnings": list(processing_warnings),
         "visual_summary": dict(visual_summary),
+        "audio_embedding": dict(audio_embedding),
         "processing_status": "completed",
         "processing_completed_at": now,
         "processing_error": None,
@@ -735,6 +1003,7 @@ def _safe_error_code(error: Exception) -> str:
 __all__ = [
     "CONTENT_ORIGIN_OVERRIDE",
     "CONTENT_ORIGIN_STORED_SOURCE",
+    "AUDIO_REPAIR_STATE_META_KEY",
     "FILE_PROCESSING_FAILED",
     "FileProcessingResult",
     "StoredContentProvenance",

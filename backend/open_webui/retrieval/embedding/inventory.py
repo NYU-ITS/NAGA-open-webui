@@ -46,7 +46,7 @@ fields plus the canonical preparation recipe and its digest (used by Spec 11's
 import hashlib
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from open_webui.internal.db import get_db
@@ -73,6 +73,7 @@ from open_webui.retrieval.embedding.preparation import (
     PreparationRecipe,
     preparation_recipe_from_snapshot,
 )
+from open_webui.retrieval.embedding.reliability import EmbeddingReliabilityPolicy
 from open_webui.storage.provider import Storage
 
 log = logging.getLogger(__name__)
@@ -110,10 +111,15 @@ class ReindexFile:
     content_origin: str = CONTENT_ORIGIN_STORED_SOURCE
     content_override_sha256: Optional[str] = None
     updated_at: Optional[int] = None
+    reliability_policy: EmbeddingReliabilityPolicy = field(
+        default_factory=EmbeddingReliabilityPolicy
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.preparation_recipe, PreparationRecipe):
             raise TypeError("reindex snapshots require a preparation recipe")
+        if not isinstance(self.reliability_policy, EmbeddingReliabilityPolicy):
+            raise TypeError("reindex snapshots require an embedding reliability policy")
         if (
             not isinstance(self.source_sha256, str)
             or len(self.source_sha256) != 64
@@ -159,6 +165,7 @@ class ReindexFile:
         }
         snapshot["preparation_recipe"] = self.preparation_recipe.to_dict()
         snapshot["preparation_recipe_sha256"] = self.preparation_recipe.sha256
+        snapshot["reliability_policy"] = self.reliability_policy.to_dict()
         return snapshot
 
     @classmethod
@@ -179,6 +186,9 @@ class ReindexFile:
             content_override_sha256=data.get("content_override_sha256"),
             updated_at=data.get("updated_at"),
             preparation_recipe=preparation_recipe_from_snapshot(data),
+            reliability_policy=EmbeddingReliabilityPolicy.from_dict(
+                data.get("reliability_policy")
+            ),
         )
 
 
@@ -230,6 +240,7 @@ def build_reindex_inventory(
     db=None,
     *,
     preparation_recipe: PreparationRecipe,
+    reliability_policy: EmbeddingReliabilityPolicy | None = None,
 ) -> list[ReindexFile]:
     """Build the deterministic reindex inventory for one admin.
 
@@ -253,9 +264,19 @@ def build_reindex_inventory(
     if db is None:
         with get_db() as session:
             _assert_admin(session, admin_id)
-            return _build_inventory(session, admin_id, preparation_recipe)
+            return _build_inventory(
+                session,
+                admin_id,
+                preparation_recipe,
+                reliability_policy or EmbeddingReliabilityPolicy(),
+            )
     _assert_admin(db, admin_id)
-    return _build_inventory(db, admin_id, preparation_recipe)
+    return _build_inventory(
+        db,
+        admin_id,
+        preparation_recipe,
+        reliability_policy or EmbeddingReliabilityPolicy(),
+    )
 
 
 def _assert_admin(db, admin_id: str) -> None:
@@ -626,6 +647,7 @@ def _build_inventory(
     db,
     admin_id: str,
     preparation_recipe: PreparationRecipe,
+    reliability_policy: EmbeddingReliabilityPolicy,
 ) -> list[ReindexFile]:
     admin_resolver = build_reindex_admin_resolver(db)
     files_by_id = _load_files(db)
@@ -725,6 +747,7 @@ def _build_inventory(
                 ),
                 updated_at=file_row.updated_at,
                 preparation_recipe=preparation_recipe,
+                reliability_policy=reliability_policy,
             )
         )
 

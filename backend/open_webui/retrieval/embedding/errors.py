@@ -9,9 +9,24 @@ class EmbeddingError(Exception):
     Carries only a stable error code; no secrets, provider details, or upstream error text.
     """
 
-    def __init__(self, code: str, detail: Optional[str] = None):
+    def __init__(
+        self,
+        code: str,
+        detail: Optional[str] = None,
+        *,
+        retryable: bool = False,
+        failure_reason: Optional[str] = None,
+        http_status: Optional[int] = None,
+        provider_request_id: Optional[str] = None,
+    ):
         self.code = code
         self.detail = detail
+        # Provider diagnostics are deliberately bounded to safe scalar fields.
+        # They are used for adaptive recovery and structured telemetry only.
+        self.retryable = bool(retryable)
+        self.failure_reason = failure_reason
+        self.http_status = http_status
+        self.provider_request_id = provider_request_id
         super().__init__(code)
 
     def __str__(self) -> str:
@@ -70,6 +85,9 @@ EMBEDDING_FILE_WRONG_STATUS = "embedding_file_wrong_status"
 EMBEDDING_REINDEX_NOT_READY = "embedding_reindex_not_ready"
 EMBEDDING_REINDEX_SOURCE_CHANGED = "embedding_reindex_source_changed"
 EMBEDDING_RETRY_ACTIVE_EXISTS = "embedding_retry_active_exists"
+AUDIO_REPAIR_STATE_STALE = "audio_repair_state_stale"
+AUDIO_REPAIR_NOT_REQUIRED = "audio_repair_not_required"
+AUDIO_REPAIR_UNAVAILABLE = "audio_repair_unavailable"
 
 
 # Public file-status messages must be selected from this allowlist. In

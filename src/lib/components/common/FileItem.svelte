@@ -29,6 +29,7 @@
 	let showModal = false;
 	let processingWarnings: string[] = [];
 	let visualSummary: Record<string, any> | null = null;
+	let audioEmbedding: Record<string, any> | null = null;
 	let processingFailed = false;
 	let processingErrorCode: string | null = null;
 	let processingError = '';
@@ -43,6 +44,7 @@
 				)
 			: [];
 	$: visualSummary = item?.visual_summary ?? item?.meta?.visual_summary ?? null;
+	$: audioEmbedding = item?.audio_embedding ?? item?.meta?.audio_embedding ?? null;
 	$: processingFailed =
 		item?.status === 'error' ||
 		item?.processing_status === 'error' ||
@@ -160,6 +162,15 @@
 					{/if}
 				</div>
 			{/if}
+			{#if showProcessingDetails && audioEmbedding?.status === 'degraded'}
+				<div class="mt-1 text-xs text-amber-600 dark:text-amber-400">
+					Visual retrieval remains available. Audio retrieval is incomplete{Number(audioEmbedding.total_chunks ?? 0) > 0
+						? `: ${Number(audioEmbedding.failed_chunks ?? 0)} of ${Number(audioEmbedding.total_chunks)} chunks need repair.`
+						: '.'}
+				</div>
+			{:else if showProcessingDetails && audioEmbedding?.status === 'repairing'}
+				<div class="mt-1 text-xs text-amber-600 dark:text-amber-400">Audio retrieval is being repaired.</div>
+			{/if}
 		</div>
 	{:else}
 		<Tooltip content={name} className="flex flex-col w-full" placement="top-start">
@@ -202,6 +213,15 @@
 							</div>
 						{/if}
 					</div>
+				{/if}
+				{#if showProcessingDetails && audioEmbedding?.status === 'degraded'}
+					<div class="mt-1 text-xs text-amber-600 dark:text-amber-400">
+						Visual retrieval remains available. Audio retrieval is incomplete{Number(audioEmbedding.total_chunks ?? 0) > 0
+							? `: ${Number(audioEmbedding.failed_chunks ?? 0)} of ${Number(audioEmbedding.total_chunks)} chunks need repair.`
+							: '.'}
+					</div>
+				{:else if showProcessingDetails && audioEmbedding?.status === 'repairing'}
+					<div class="mt-1 text-xs text-amber-600 dark:text-amber-400">Audio retrieval is being repaired.</div>
 				{/if}
 			</div>
 		</Tooltip>

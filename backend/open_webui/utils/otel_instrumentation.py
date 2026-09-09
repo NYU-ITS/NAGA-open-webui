@@ -526,6 +526,7 @@ def add_span_event(name: str, attributes: Optional[Dict[str, Any]] = None):
 
 
 _METRIC_COUNTERS: Dict[str, Any] = {}
+_METRIC_HISTOGRAMS: Dict[str, Any] = {}
 
 
 def add_metric_counter(name: str, attributes: Optional[Dict[str, Any]] = None) -> None:
@@ -547,6 +548,32 @@ def add_metric_counter(name: str, attributes: Optional[Dict[str, Any]] = None) -
         counter.add(1, attributes=filtered_attrs)
     except Exception as e:
         log.debug(f"Failed to increment metric '{name}': {e}")
+
+
+def record_metric_histogram(
+    name: str,
+    value: float,
+    attributes: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Record an OpenTelemetry duration/size observation without affecting work."""
+    try:
+        from opentelemetry import metrics
+
+        histogram = _METRIC_HISTOGRAMS.get(name)
+        if histogram is None:
+            histogram = metrics.get_meter("open_webui").create_histogram(
+                name,
+                description="Open WebUI application observation",
+            )
+            _METRIC_HISTOGRAMS[name] = histogram
+        filtered_attrs = {
+            key: item
+            for key, item in (attributes or {}).items()
+            if item is not None
+        }
+        histogram.record(float(value), attributes=filtered_attrs)
+    except Exception as e:
+        log.debug(f"Failed to record metric '{name}': {e}")
 
 
 def set_span_status(status: Any, description: Optional[str] = None):

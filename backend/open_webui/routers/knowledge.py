@@ -133,6 +133,31 @@ def safe_trace_span_async(*args, **kwargs):
 
 router = APIRouter()
 
+
+def _audio_repair_http_error(error) -> HTTPException:
+    from open_webui.retrieval.embedding.errors import (
+        AUDIO_REPAIR_NOT_REQUIRED,
+        AUDIO_REPAIR_STATE_STALE,
+        AUDIO_REPAIR_UNAVAILABLE,
+        EmbeddingError,
+    )
+
+    code = error.code if isinstance(error, EmbeddingError) else AUDIO_REPAIR_UNAVAILABLE
+    status_code = {
+        AUDIO_REPAIR_NOT_REQUIRED: status.HTTP_409_CONFLICT,
+        AUDIO_REPAIR_STATE_STALE: status.HTTP_409_CONFLICT,
+        AUDIO_REPAIR_UNAVAILABLE: status.HTTP_422_UNPROCESSABLE_ENTITY,
+    }.get(code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+    messages = {
+        AUDIO_REPAIR_NOT_REQUIRED: "This file has no failed audio chunks to repair.",
+        AUDIO_REPAIR_STATE_STALE: "The audio repair state no longer matches the active file and model.",
+        AUDIO_REPAIR_UNAVAILABLE: "Audio repair state could not be reconstructed for this file.",
+    }
+    return HTTPException(
+        status_code=status_code,
+        detail={"error_code": code, "message": messages.get(code, "Audio repair failed.")},
+    )
+
 ############################
 # getKnowledgeBases
 ############################
@@ -780,6 +805,14 @@ async def add_file_to_knowledge_by_id(
                                 "image_chunk_count": 0,
                                 "text_chunk_count": 0,
                                 "video_chunk_count": 0,
+                                "audio_chunk_count": 0,
+                            },
+                            "audio_embedding": {
+                                "status": "not_applicable",
+                                "total_chunks": 0,
+                                "embedded_chunks": 0,
+                                "failed_chunks": 0,
+                                "repairable": False,
                             },
                         },
                     }
@@ -894,6 +927,116 @@ async def add_file_to_knowledge_by_id(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=ERROR_MESSAGES.DEFAULT("Error uploading file"),
             )
+
+
+@router.post(
+    "/{knowledge_id}/file/{file_id}/audio/repair",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def repair_knowledge_file_audio(
+    request: Request,
+    knowledge_id: str,
+    file_id: str,
+    background_tasks: BackgroundTasks,
+    user=Depends(get_verified_user),
+):
+    """Queue or join an idempotent repair of failed audio leaves."""
+    knowledge = Knowledges.get_knowledge_by_id(id=knowledge_id)
+    if knowledge is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.NOT_FOUND)
+    can_write = (
+        user.role == "admin"
+        or knowledge.user_id == user.id
+        or has_access(user.id, "write", knowledge.access_control)
+    )
+    if not can_write:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+    file_ids = (
+        knowledge.data.get("file_ids", [])
+        if isinstance(knowledge.data, dict)
+        else []
+    )
+    if not isinstance(file_ids, list) or file_id not in file_ids:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.NOT_FOUND)
+
+    from open_webui.retrieval.embedding.audio_repair import (
+        claim_audio_repair,
+        ensure_legacy_audio_repair_state,
+        repair_audio_embeddings,
+    )
+    from open_webui.retrieval.embedding.resolution import resolve_admin_for_knowledge
+    from open_webui.retrieval.embedding.reliability import snapshot_reliability_policy
+    from open_webui.retrieval.embedding.state import AdminEmbeddingModelStateRepository
+    from open_webui.utils.job_queue import enqueue_audio_repair_job
+
+    try:
+        admin = resolve_admin_for_knowledge(knowledge_id, user.id)
+        state = AdminEmbeddingModelStateRepository.ensure_state(
+            admin.id,
+            request.app.state.config,
+        )
+        active_model_id = state.active_embedding_model_id
+        ensure_legacy_audio_repair_state(
+            config=request.app.state.config,
+            file_id=file_id,
+            admin_id=admin.id,
+            embedding_model_id=active_model_id,
+        )
+        claim = claim_audio_repair(
+            file_id=file_id,
+            admin_id=admin.id,
+            embedding_model_id=active_model_id,
+        )
+        policy = snapshot_reliability_policy(request.app.state.config).to_dict()
+        dispatch_mode = "active"
+        queue_job_id = None
+        if not claim.already_active:
+            try:
+                queue_job_id = enqueue_audio_repair_job(
+                    knowledge_id=knowledge_id,
+                    file_id=file_id,
+                    admin_id=admin.id,
+                    embedding_model_id=active_model_id,
+                    lease_token=claim.lease_token,
+                    reliability_policy=policy,
+                )
+            except Exception as queue_error:
+                log.warning(
+                    "Audio repair queue dispatch failed; using background task | "
+                    "knowledge_id=%s file_id=%s type=%s",
+                    knowledge_id,
+                    file_id,
+                    type(queue_error).__name__,
+                )
+            if queue_job_id:
+                dispatch_mode = "queue"
+            else:
+                background_tasks.add_task(
+                    repair_audio_embeddings,
+                    config=request.app.state.config,
+                    knowledge_id=knowledge_id,
+                    file_id=file_id,
+                    admin_id=admin.id,
+                    embedding_model_id=active_model_id,
+                    lease_token=claim.lease_token,
+                    reliability_policy=policy,
+                )
+                dispatch_mode = "background"
+        return {
+            "status": claim.status,
+            "already_active": claim.already_active,
+            "dispatch_mode": dispatch_mode,
+            "job_id": queue_job_id,
+            "file_id": file_id,
+            "knowledge_id": knowledge_id,
+        }
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise _audio_repair_http_error(error) from None
 
 
 @router.post("/{id}/file/update", response_model=Optional[KnowledgeFilesResponse])

@@ -73,7 +73,8 @@ class RetrievalModelSpace:
     """Resolved model space and any safely scoped staged-vector allowance."""
 
     admin_id: str
-    active_model_id: str
+    active_model_id: str | None
+    effective_model_id: str
     staged_job_ids: tuple[str, ...] = ()
     staged_file_ids: tuple[str, ...] = ()
     staged_collection_files: tuple[tuple[str, str], ...] = ()
@@ -164,6 +165,7 @@ def assert_embedding_retrieval_ready(
     staged_file_ids: tuple[str, ...] = ()
     staged_collection_files: tuple[tuple[str, str], ...] = ()
     partial_scope_ready = False
+    partial_model_id: str | None = None
 
     if latest_job_id is not None:
         latest_job = EmbeddingJobRepository.get_job(latest_job_id)
@@ -222,6 +224,7 @@ def assert_embedding_retrieval_ready(
             staged_file_ids = tuple(sorted(approved_file_ids))
             staged_collection_files = tuple(sorted(approved_collection_files))
             partial_scope_ready = True
+            partial_model_id = latest_job.embedding_model_id
         elif latest_job.status in _BLOCKING_JOB_STATUSES:
             _raise_blocked(
                 job_id=latest_job_id,
@@ -262,35 +265,46 @@ def assert_embedding_retrieval_ready(
             ),
         )
 
-    # 6. Active model must exist.
+    # 6. A durable active model is normally required. For a terminal partial
+    # first-time index, completed target sources can still provide the scoped
+    # effective model even though there is no previously promoted model.
     active_model_id = state.active_embedding_model_id
-    if not active_model_id:
+    if not active_model_id and not partial_model_id:
         _raise_blocked(
             job_id=latest_job_id,
             job_status=None,
             retryable=False,
             message=f"Admin {admin_id} has no active embedding model.",
         )
+    effective_model_id = partial_model_id or active_model_id
+    if effective_model_id is None:
+        _raise_blocked(
+            job_id=latest_job_id,
+            job_status=None,
+            retryable=False,
+            message=f"Admin {admin_id} has no effective embedding model.",
+        )
     try:
-        active_model = get_model_spec_by_id(active_model_id)
+        effective_model = get_model_spec_by_id(effective_model_id)
     except EmbeddingError:
         _raise_blocked(
             job_id=latest_job_id,
             job_status=None,
             retryable=False,
-            message="Retrieval blocked: active embedding model is unavailable.",
+            message="Retrieval blocked: effective embedding model is unavailable.",
         )
-    if active_model.status != "enabled":
+    if effective_model.status != "enabled":
         _raise_blocked(
             job_id=latest_job_id,
             job_status=None,
             retryable=False,
-            message="Retrieval blocked: active embedding model is disabled.",
+            message="Retrieval blocked: effective embedding model is disabled.",
         )
 
     return RetrievalModelSpace(
         admin_id=admin_id,
         active_model_id=active_model_id,
+        effective_model_id=effective_model_id,
         staged_job_ids=staged_job_ids,
         staged_file_ids=staged_file_ids,
         staged_collection_files=staged_collection_files,

@@ -26,6 +26,7 @@
 		((status === null && temporarilyUnavailable) ||
 			(status !== null &&
 			(!status.retrieval_available ||
+				status.model_scope === 'staged' ||
 				status.failed_document_count > 0 ||
 				status.incompatible_document_count > 0)));
 
@@ -103,6 +104,11 @@
 		progress.total > 0 ? Math.min(100, (progressValue(progress) / progress.total) * 100) : 0;
 
 	const impactMessage = (indexingStatus: KnowledgeIndexingStatus) => {
+		if (indexingStatus.retrieval_available && indexingStatus.model_scope === 'staged') {
+			return $i18n.t(
+				'Retrieval is available for completed documents using the staged target model; failed documents remain excluded.'
+			);
+		}
 		if (indexingStatus.retrieval_available && indexingStatus.failed_document_count > 0) {
 			return $i18n.t(
 				'The latest administrator-wide reindex has failures for documents in this knowledge base.'
@@ -166,6 +172,12 @@
 					<IndexingStatusBadge state={status.display_state} />
 				</div>
 			</div>
+			{#if status.effective_model}
+				<p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
+					{$i18n.t('Queryable model')}: {status.effective_model.display_name}
+					({status.model_scope === 'staged' ? $i18n.t('staged scope') : $i18n.t('active scope')})
+				</p>
+			{/if}
 
 			{#if temporarilyUnavailable}
 				<p class="mt-2 text-xs text-gray-500 dark:text-gray-400">

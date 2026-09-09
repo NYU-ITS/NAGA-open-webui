@@ -7,7 +7,7 @@ import json
 import math
 import os
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal, Mapping, Optional
@@ -929,6 +929,8 @@ class PreparedFile:
     extraction_version: Optional[str]
     warnings: tuple[str, ...]
     visual_summary: Mapping[str, int]
+    audio_embedding: Mapping[str, Any] = field(default_factory=dict)
+    audio_repair_state: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not _is_sha256(self.source_sha256):
@@ -944,6 +946,16 @@ class PreparedFile:
                     for key, value in dict(self.visual_summary).items()
                 }
             ),
+        )
+        object.__setattr__(
+            self,
+            "audio_embedding",
+            MappingProxyType(dict(self.audio_embedding)),
+        )
+        object.__setattr__(
+            self,
+            "audio_repair_state",
+            MappingProxyType(dict(self.audio_repair_state)),
         )
 
 

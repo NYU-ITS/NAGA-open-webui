@@ -3,7 +3,7 @@
 import logging
 import math
 import numbers
-from typing import Sequence, Optional
+from typing import Any, Mapping, Sequence, Optional
 
 from .inputs import (
     EmbeddingInput,
@@ -26,6 +26,7 @@ from .errors import (
 )
 from .provider import EmbeddingProvider, EmbeddingProviderFactory
 from .providers.portkey import PortkeyEmbeddingProvider
+from .reliability import EmbeddingReliabilityPolicy, snapshot_reliability_policy
 from .resolution import (
     EmbeddingExecutionContext,
     resolve_for_user,
@@ -46,7 +47,13 @@ class EmbeddingService:
     exposed beyond the provider call.
     """
     
-    def __init__(self, config):
+    def __init__(
+        self,
+        config,
+        *,
+        reliability_policy: EmbeddingReliabilityPolicy | None = None,
+        call_context: Mapping[str, Any] | None = None,
+    ):
         """
         Initialize the embedding service.
         
@@ -54,6 +61,10 @@ class EmbeddingService:
             config: The app config (request.app.state.config).
         """
         self._config = config
+        self.reliability_policy = (
+            reliability_policy or snapshot_reliability_policy(config)
+        )
+        self._call_context = dict(call_context or {})
     
     def embed_for_user(self, inputs: Sequence[EmbeddingInput], user_id: str) -> EmbeddingBatch:
         """
@@ -94,6 +105,7 @@ class EmbeddingService:
         inputs: Sequence[EmbeddingInput],
         admin_id: str,
         embedding_model_id: str,
+        call_context: Mapping[str, Any] | None = None,
     ) -> EmbeddingBatch:
         """
         Generate embeddings from a frozen (enqueued) context.
@@ -110,12 +122,13 @@ class EmbeddingService:
             EmbeddingError: On resolution, modality, provider, or validation errors.
         """
         context = resolve_frozen(admin_id, embedding_model_id)
-        return self._embed(inputs, context)
+        return self._embed(inputs, context, call_context=call_context)
     
     def _embed(
         self,
         inputs: Sequence[EmbeddingInput],
         context: EmbeddingExecutionContext,
+        call_context: Mapping[str, Any] | None = None,
     ) -> EmbeddingBatch:
         """
         Internal embedding method that handles the full pipeline.
@@ -139,7 +152,13 @@ class EmbeddingService:
         base_url = resolve_base_url_for_admin(context.model, self._config)
         
         # Create request-scoped provider
-        provider = self._create_provider(context.model, credential, base_url)
+        provider_context = {**self._call_context, **dict(call_context or {})}
+        provider = self._create_provider(
+            context.model,
+            credential,
+            base_url,
+            provider_context,
+        )
         
         # Call provider
         raw_vectors = provider.embed(inputs, context.model)
@@ -210,6 +229,7 @@ class EmbeddingService:
         model: EmbeddingModelSpec,
         credential: str,
         base_url: str,
+        call_context: Mapping[str, Any] | None = None,
     ) -> EmbeddingProvider:
         """
         Create a request-scoped provider based on the model's provider field.
@@ -226,7 +246,12 @@ class EmbeddingService:
             EmbeddingError: If provider is unsupported.
         """
         if model.provider == "portkey":
-            return PortkeyEmbeddingProvider(base_url=base_url, credential=credential)
+            return PortkeyEmbeddingProvider(
+                base_url=base_url,
+                credential=credential,
+                reliability_policy=self.reliability_policy,
+                call_context=call_context or {},
+            )
         else:
             raise EmbeddingError(
                 EMBEDDING_PROVIDER_UNSUPPORTED,

@@ -2193,6 +2193,41 @@ RAG_EMBEDDING_ENGINE = PersistentConfig(
     os.environ.get("RAG_EMBEDDING_ENGINE", "portkey"),
 )
 
+# Operational reliability is deliberately stored outside the preparation recipe.
+# Updating these values affects only newly dispatched work and never requests a
+# reindex of already prepared content.
+RAG_EMBEDDING_MAX_ATTEMPTS = PersistentConfig(
+    "RAG_EMBEDDING_MAX_ATTEMPTS",
+    "rag.embedding_reliability.max_attempts",
+    int(os.environ.get("RAG_EMBEDDING_MAX_ATTEMPTS", "3")),
+)
+
+RAG_EMBEDDING_CONNECTION_TIMEOUT = PersistentConfig(
+    "RAG_EMBEDDING_CONNECTION_TIMEOUT",
+    "rag.embedding_reliability.connection_timeout_seconds",
+    int(os.environ.get("RAG_EMBEDDING_CONNECTION_TIMEOUT", "10")),
+)
+
+RAG_EMBEDDING_READ_TIMEOUT = PersistentConfig(
+    "RAG_EMBEDDING_READ_TIMEOUT",
+    "rag.embedding_reliability.read_timeout_seconds",
+    int(os.environ.get("RAG_EMBEDDING_READ_TIMEOUT", "120")),
+)
+
+# Internal guardrails for adaptive audio splitting. These are intentionally not
+# part of the administrator-facing reliability controls.
+RAG_EMBEDDING_AUDIO_SPLIT_MAX_DEPTH = PersistentConfig(
+    "RAG_EMBEDDING_AUDIO_SPLIT_MAX_DEPTH",
+    "rag.embedding_reliability.audio_split_max_depth",
+    int(os.environ.get("RAG_EMBEDDING_AUDIO_SPLIT_MAX_DEPTH", "2")),
+)
+
+RAG_EMBEDDING_AUDIO_SPLIT_MIN_DURATION = PersistentConfig(
+    "RAG_EMBEDDING_AUDIO_SPLIT_MIN_DURATION",
+    "rag.embedding_reliability.audio_split_min_duration_seconds",
+    int(os.environ.get("RAG_EMBEDDING_AUDIO_SPLIT_MIN_DURATION", "5")),
+)
+
 # PDF_EXTRACT_IMAGES: Extract images from PDFs during processing
 # WARNING: Setting this to True can cause significant slowdowns (2+ minutes) or hangs
 # on PDFs with many images. PyPDFLoader's image extraction is CPU-intensive and can deadlock.

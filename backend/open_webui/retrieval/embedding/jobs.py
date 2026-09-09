@@ -26,7 +26,7 @@ Invariants enforced:
 import logging
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Mapping, Optional, Protocol, Sequence
 
 from sqlalchemy.exc import IntegrityError
@@ -67,6 +67,7 @@ from open_webui.retrieval.embedding.preparation import (
     PreparationRecipe,
     preparation_recipe_from_snapshot,
 )
+from open_webui.retrieval.embedding.reliability import EmbeddingReliabilityPolicy
 
 log = logging.getLogger(__name__)
 
@@ -414,6 +415,7 @@ def _create_retry_job(
     source_job_id: str,
     admin_id: str,
     preparation_recipe: PreparationRecipe,
+    reliability_policy: EmbeddingReliabilityPolicy | None = None,
 ) -> CreateJobResult:
     """Create a retry_failed job from a source job's failed files (Spec 11).
 
@@ -714,6 +716,16 @@ def _create_retry_job(
             "[JOB] re-enqueue path for source job %s (enqueue-only failure)",
             source_job_id,
         )
+        policy = reliability_policy or EmbeddingReliabilityPolicy()
+        for file_row in all_source_rows:
+            try:
+                fresh_snapshot = replace(
+                    ReindexFile.from_dict(file_row.file_snapshot),
+                    reliability_policy=policy,
+                ).to_dict()
+            except (KeyError, TypeError, ValueError):
+                continue
+            file_row.file_snapshot = fresh_snapshot
         return CreateJobResult(
             job=_job_to_view(source_row),
             files=tuple(_file_to_view(fr) for fr in all_source_rows),
@@ -731,7 +743,12 @@ def _create_retry_job(
     # memberships to be promoted by a later retry.
     try:
         retry_files = [
-            ReindexFile.from_dict(file_row.file_snapshot)
+            replace(
+                ReindexFile.from_dict(file_row.file_snapshot),
+                reliability_policy=(
+                    reliability_policy or EmbeddingReliabilityPolicy()
+                ),
+            )
             for file_row in all_source_rows
         ]
     except (KeyError, TypeError, ValueError):
@@ -2137,6 +2154,7 @@ class EmbeddingJobRepository:
         source_job_id: str,
         admin_id: str,
         preparation_recipe: PreparationRecipe,
+        reliability_policy: EmbeddingReliabilityPolicy | None = None,
         db=None,
     ) -> CreateJobResult:
         """Create a retry_failed job from a source job's failed files.
@@ -2156,6 +2174,7 @@ class EmbeddingJobRepository:
                     source_job_id,
                     admin_id,
                     preparation_recipe,
+                    reliability_policy,
                 )
                 session.commit()
                 return result
@@ -2164,6 +2183,7 @@ class EmbeddingJobRepository:
             source_job_id,
             admin_id,
             preparation_recipe,
+            reliability_policy,
         )
 
     @staticmethod

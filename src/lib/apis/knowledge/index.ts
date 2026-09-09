@@ -76,6 +76,8 @@ export type KnowledgeIndexingStatus = {
 	job_type: string | null;
 	active_model: EmbeddingModelSummary | null;
 	target_model: EmbeddingModelSummary | null;
+	effective_model: EmbeddingModelSummary | null;
+	model_scope: 'active' | 'staged' | 'legacy' | 'unavailable';
 	collection_progress: KnowledgeIndexingProgress;
 	job_progress: KnowledgeIndexingProgress;
 	failed_document_count: number;
@@ -404,6 +406,28 @@ export const updateFileFromKnowledgeById = async (token: string, id: string, fil
 	}
 
 	return res;
+};
+
+export const repairKnowledgeFileAudio = async (
+	token: string,
+	knowledgeId: string,
+	fileId: string
+) => {
+	const response = await fetch(
+		`${WEBUI_API_BASE_URL}/knowledge/${encodeURIComponent(knowledgeId)}/file/${encodeURIComponent(fileId)}/audio/repair`,
+		{
+			method: 'POST',
+			headers: {
+				Accept: 'application/json',
+				authorization: `Bearer ${token}`
+			}
+		}
+	);
+	if (!response.ok) {
+		const payload = await response.json().catch(() => null);
+		throw new KnowledgeIndexingApiError(response.status, payload);
+	}
+	return response.json();
 };
 
 export const removeFileFromKnowledgeById = async (token: string, id: string, fileId: string) => {

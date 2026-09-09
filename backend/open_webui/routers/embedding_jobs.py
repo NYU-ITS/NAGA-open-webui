@@ -36,6 +36,7 @@ from open_webui.retrieval.embedding.jobs import (
     is_job_retry_eligible,
 )
 from open_webui.retrieval.embedding.preparation import build_preparation_recipe
+from open_webui.retrieval.embedding.reliability import snapshot_reliability_policy
 from open_webui.retrieval.embedding.enqueue import dispatch_embedding_job
 from open_webui.retrieval.embedding.model_change import (
     ModelChangeResult,
@@ -83,6 +84,8 @@ class EmbeddingJobStatusResponse(BaseModel):
     # Admin state
     active_model_id: str | None = None
     target_model_id: str | None = None
+    effective_model_id: str | None = None
+    model_scope: str = "unavailable"
 
     # Aggregate counters
     total_files: int = 0
@@ -194,6 +197,15 @@ def _build_status_response(
         pending_or_processing = status_view.pending_or_processing
 
     retry_eligible = _compute_retry_eligible(job_view, admin_id)
+    if job_view.status == "partially_failed":
+        effective_model_id = job_view.embedding_model_id
+        model_scope = "staged_scoped"
+    elif state_view is not None and state_view.target_embedding_model_id is None:
+        effective_model_id = state_view.active_embedding_model_id
+        model_scope = "active"
+    else:
+        effective_model_id = None
+        model_scope = "unavailable"
 
     return EmbeddingJobStatusResponse(
         job_id=job_view.id,
@@ -204,6 +216,8 @@ def _build_status_response(
         previous_embedding_model_id=job_view.previous_embedding_model_id,
         active_model_id=state_view.active_embedding_model_id if state_view else None,
         target_model_id=state_view.target_embedding_model_id if state_view else None,
+        effective_model_id=effective_model_id,
+        model_scope=model_scope,
         total_files=job_view.total_files,
         processed_files=job_view.processed_files,
         failed_files=job_view.failed_files,
@@ -428,6 +442,9 @@ def retry_failed_job(
                 preparation_recipe=build_preparation_recipe(
                     request.app.state.config,
                     user.email,
+                ),
+                reliability_policy=snapshot_reliability_policy(
+                    request.app.state.config
                 ),
                 db=db,
             )

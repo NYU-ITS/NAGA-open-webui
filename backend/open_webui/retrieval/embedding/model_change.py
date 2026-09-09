@@ -62,6 +62,7 @@ from open_webui.retrieval.embedding.inventory import (
 from open_webui.retrieval.embedding.preparation import (
     build_preparation_recipe,
 )
+from open_webui.retrieval.embedding.reliability import snapshot_reliability_policy
 from open_webui.retrieval.embedding.registry import (
     get_model_spec_by_id,
     get_model_spec_by_name,
@@ -105,6 +106,7 @@ def request_model_change(
     target_model_id: str,
     authenticated_user_id: str,
     config=None,
+    force_reindex: bool = False,
 ) -> tuple[ModelChangeResult | ModelChangeNoOp, str]:
     """Execute the model-change transaction atomically.
 
@@ -164,6 +166,20 @@ def request_model_change(
             # An active (queued/processing) job always blocks — no replacement.
             active_job = EmbeddingJobRepository.get_active_job(admin_id, db=db)
             if active_job is not None:
+                if (
+                    target_spec.id == state_view.target_embedding_model_id
+                    and not force_reindex
+                ):
+                    if config is not None:
+                        config.RAG_EMBEDDING_MODEL_USER.set(
+                            admin_email, target_spec.model_name, db=db
+                        )
+                    db.commit()
+                    return ModelChangeNoOp(
+                        active_model_id=state_view.active_embedding_model_id,
+                        target_model_id=target_spec.id,
+                        reason="Target already has active indexing work.",
+                    ), admin_email
                 raise EmbeddingError(
                     EMBEDDING_JOB_ACTIVE_EXISTS,
                     detail=f"Admin {admin_id} has active job {active_job.id} in status {active_job.status}.",
@@ -194,9 +210,24 @@ def request_model_change(
                     ),
                 )
 
-            # A terminal failed target may be replaced even when the requested
-            # model is already the selected active model. Selection advanced at
-            # trigger, so this is a fresh attempt, not a no-op.
+            # Saving the same pending target is idempotent, including after a
+            # partial/failed run. Recovery is an explicit retry action so an
+            # unrelated settings save never creates surprise indexing work.
+            if (
+                target_spec.id == state_view.target_embedding_model_id
+                and not force_reindex
+            ):
+                if config is not None:
+                    config.RAG_EMBEDDING_MODEL_USER.set(
+                        admin_email, target_spec.model_name, db=db
+                    )
+                db.commit()
+                return ModelChangeNoOp(
+                    active_model_id=state_view.active_embedding_model_id,
+                    target_model_id=target_spec.id,
+                    reason="Target already selected; use retry for failed indexing work.",
+                ), admin_email
+
             replace_existing = True
 
         # Step 6: Check for active job (only when no pending target)
@@ -216,6 +247,7 @@ def request_model_change(
         if (
             target_spec.id == state_view.active_embedding_model_id
             and state_view.target_embedding_model_id is None
+            and not force_reindex
         ):
             if config is not None:
                 current_cfg = config.RAG_EMBEDDING_MODEL_USER.get(admin_email) or ""
@@ -235,6 +267,7 @@ def request_model_change(
             admin_id,
             db=db,
             preparation_recipe=preparation_recipe,
+            reliability_policy=snapshot_reliability_policy(config),
         )
 
         # Step 9: Create job atomically

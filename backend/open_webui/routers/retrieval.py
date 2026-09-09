@@ -26,7 +26,7 @@ from open_webui.utils.job_queue import (
     is_job_queue_available,
 )
 from fastapi.concurrency import run_in_threadpool
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import tiktoken
 from sqlalchemy import cast, func
 from sqlalchemy.dialects.postgresql import JSONB
@@ -334,7 +334,7 @@ async def get_status(request: Request, user=Depends(get_verified_user)):
 
 
 @router.get("/embedding")
-async def get_embedding_config(request: Request, user=Depends(get_verified_user)):
+async def get_embedding_config(request: Request, user=Depends(get_admin_user)):
     """
     Get embedding configuration for the requesting user.
     Returns embedding configuration, including the stored API key, for the requesting user.
@@ -347,6 +347,11 @@ async def get_embedding_config(request: Request, user=Depends(get_verified_user)
         "embedding_engine": request.app.state.config.RAG_EMBEDDING_ENGINE,
         "embedding_model": embedding_model,
         "embedding_batch_size": request.app.state.config.RAG_EMBEDDING_BATCH_SIZE,
+        "reliability": {
+            "max_attempts": request.app.state.config.RAG_EMBEDDING_MAX_ATTEMPTS,
+            "connection_timeout_seconds": request.app.state.config.RAG_EMBEDDING_CONNECTION_TIMEOUT,
+            "read_timeout_seconds": request.app.state.config.RAG_EMBEDDING_READ_TIMEOUT,
+        },
         "openai_config": {
             "url": request.app.state.config.RAG_OPENAI_API_BASE_URL,
             "key": request.app.state.config.RAG_OPENAI_API_KEY.get(requesting_email) or "",
@@ -372,18 +377,26 @@ class OllamaConfigForm(BaseModel):
     key: str
 
 
+class EmbeddingReliabilityForm(BaseModel):
+    max_attempts: int = Field(default=3, ge=1, le=5)
+    connection_timeout_seconds: int = Field(default=10, ge=1, le=60)
+    read_timeout_seconds: int = Field(default=120, ge=30, le=600)
+
+
 class EmbeddingModelUpdateForm(BaseModel):
     openai_config: Optional[OpenAIConfigForm] = None
     ollama_config: Optional[OllamaConfigForm] = None
     embedding_engine: str
     embedding_model: str
     embedding_batch_size: Optional[int] = 1
+    reliability: Optional[EmbeddingReliabilityForm] = None
+    force_reindex: bool = False
 
 
 @router.post("/embedding/update")
 async def update_embedding_config(
     request: Request, form_data: EmbeddingModelUpdateForm,
-    background_tasks: BackgroundTasks, user=Depends(get_verified_user)
+    background_tasks: BackgroundTasks, user=Depends(get_admin_user)
 ):
     log.info(
         f"Embedding config update: admin='{user.email}' engine='{form_data.embedding_engine}' "
@@ -405,6 +418,31 @@ async def update_embedding_config(
 
     admin_email = user.email
     try:
+        if form_data.reliability is not None:
+            from open_webui.config import (
+                RAG_EMBEDDING_CONNECTION_TIMEOUT,
+                RAG_EMBEDDING_MAX_ATTEMPTS,
+                RAG_EMBEDDING_READ_TIMEOUT,
+                save_persistent_config_values,
+            )
+
+            save_persistent_config_values(
+                {
+                    "rag.embedding_reliability.max_attempts": (
+                        RAG_EMBEDDING_MAX_ATTEMPTS,
+                        form_data.reliability.max_attempts,
+                    ),
+                    "rag.embedding_reliability.connection_timeout_seconds": (
+                        RAG_EMBEDDING_CONNECTION_TIMEOUT,
+                        form_data.reliability.connection_timeout_seconds,
+                    ),
+                    "rag.embedding_reliability.read_timeout_seconds": (
+                        RAG_EMBEDDING_READ_TIMEOUT,
+                        form_data.reliability.read_timeout_seconds,
+                    ),
+                }
+            )
+
         request.app.state.config.RAG_EMBEDDING_ENGINE = form_data.embedding_engine
         # NOTE: RAG_EMBEDDING_MODEL_USER is NOT written here.  It is persisted
         # atomically inside request_model_change() so a validation or inventory
@@ -456,6 +494,7 @@ async def update_embedding_config(
                     target_model_id=form_data.embedding_model,
                     authenticated_user_id=user.id,
                     config=request.app.state.config,
+                    force_reindex=form_data.force_reindex,
                 )
                 # Config was written atomically inside the transaction.
                 # Invalidate caches now that the transaction has committed.
@@ -535,6 +574,11 @@ async def update_embedding_config(
             "embedding_engine": request.app.state.config.RAG_EMBEDDING_ENGINE,
             "embedding_model": saved_model,
             "embedding_batch_size": request.app.state.config.RAG_EMBEDDING_BATCH_SIZE,
+            "reliability": {
+                "max_attempts": request.app.state.config.RAG_EMBEDDING_MAX_ATTEMPTS,
+                "connection_timeout_seconds": request.app.state.config.RAG_EMBEDDING_CONNECTION_TIMEOUT,
+                "read_timeout_seconds": request.app.state.config.RAG_EMBEDDING_READ_TIMEOUT,
+            },
             "openai_config": {
                 "url": request.app.state.config.RAG_OPENAI_API_BASE_URL,
                 "key": request.app.state.config.RAG_OPENAI_API_KEY.get(user.email) or "",
@@ -761,6 +805,7 @@ class VideoConfig(BaseModel):
 
 
 class ConfigUpdateForm(BaseModel):
+    defer_embedding_reindex: bool = False
     RAG_FULL_CONTEXT: Optional[bool] = None
     BYPASS_EMBEDDING_AND_RETRIEVAL: Optional[bool] = None
     pdf_extract_images: Optional[bool] = None
@@ -909,8 +954,14 @@ def _update_video_settings(request, video_config, user):
 
 @router.post("/config/update")
 async def update_rag_config(
-    request: Request, form_data: ConfigUpdateForm, user=Depends(get_admin_user)
+    request: Request,
+    form_data: ConfigUpdateForm,
+    background_tasks: BackgroundTasks,
+    user=Depends(get_admin_user),
 ):
+    from open_webui.retrieval.embedding.preparation import build_preparation_recipe
+
+    previous_recipe = build_preparation_recipe(request.app.state.config, user.email)
     # Authorize and validate the video block before mutating any other settings.
     if form_data.video is not None:
         _update_video_settings(request, form_data.video, user)
@@ -1077,8 +1128,38 @@ async def update_rag_config(
             form_data.web.search.internal_facilities_sites
         )
 
+    current_recipe = build_preparation_recipe(request.app.state.config, user.email)
+    recipe_changed = current_recipe.sha256 != previous_recipe.sha256
+    reindex_job = None
+    if recipe_changed and not form_data.defer_embedding_reindex:
+        selected_model = request.app.state.config.RAG_EMBEDDING_MODEL_USER.get(
+            user.email
+        )
+        if selected_model:
+            change_result, _ = request_model_change(
+                admin_id=user.id,
+                target_model_id=selected_model,
+                authenticated_user_id=user.id,
+                config=request.app.state.config,
+                force_reindex=True,
+            )
+            if isinstance(change_result, ModelChangeResult):
+                dispatch_mode = dispatch_embedding_job(
+                    change_result.job_id,
+                    background_tasks,
+                )
+                reindex_job = {
+                    "job_id": change_result.job_id,
+                    "status": change_result.status,
+                    "target_model_id": change_result.target_model_id,
+                    "total_files": change_result.total_files,
+                    "dispatch_mode": dispatch_mode,
+                }
+
     return {
         "status": True,
+        "embedding_recipe_changed": recipe_changed,
+        **({"reindex_job": reindex_job} if reindex_job else {}),
         "pdf_extract_images": request.app.state.config.PDF_EXTRACT_IMAGES,
         "RAG_FULL_CONTEXT": request.app.state.config.RAG_FULL_CONTEXT.get(user.email),
         "BYPASS_EMBEDDING_AND_RETRIEVAL": request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL,
@@ -2532,6 +2613,7 @@ def _process_file_sync(
     user_id: Optional[str] = None,
     admin_id: Optional[str] = None,
     embedding_model_id: Optional[str] = None,
+    reliability_policy: Optional[dict] = None,
 ) -> None:
     """Process a stored file through the shared mixed-modality pipeline."""
 
@@ -2572,6 +2654,7 @@ def _process_file_sync(
             embedding_model_id=embedding_model_id or "",
             knowledge_id=knowledge_id,
             collection_name=collection_name,
+            reliability_policy=reliability_policy,
         )
     except Exception as error:
         error_code = (
@@ -2888,6 +2971,13 @@ def process_file(
         from open_webui.retrieval.embedding.file_processing import (
             persist_content_provenance_before_dispatch,
         )
+        from open_webui.retrieval.embedding.reliability import (
+            snapshot_reliability_policy,
+        )
+
+        reliability_policy = snapshot_reliability_policy(
+            request.app.state.config
+        ).to_dict()
 
         # Background and RQ workers must read one durable, authoritative input;
         # never rely on an ephemeral request/queue payload for text overrides.
@@ -2907,6 +2997,7 @@ def process_file(
                     user_id=user.id,
                     admin_id=admin_id,
                     embedding_model_id=embedding_model_id,
+                    reliability_policy=reliability_policy,
                 )
                 
                 if job_id is not None:
@@ -2937,6 +3028,7 @@ def process_file(
                     user_id=user.id,
                     admin_id=admin_id,
                     embedding_model_id=embedding_model_id,
+                    reliability_policy=reliability_policy,
                 )
                 background_task_added = True
                 log.debug(f"Added BackgroundTask for file_id={form_data.file_id}")
@@ -3444,7 +3536,7 @@ def _resolve_model_aware_query_context(
         if isinstance(result, RetrievalModelSpace):
             return (
                 result.admin_id,
-                result.active_model_id,
+                result.effective_model_id,
                 list(result.staged_job_ids) or None,
                 list(result.staged_file_ids) or None,
                 list(result.staged_collection_files) or None,
@@ -3826,6 +3918,9 @@ def process_files_batch(
     from open_webui.retrieval.embedding.resolution import (
         freeze_for_knowledge_enqueue,
     )
+    from open_webui.retrieval.embedding.reliability import (
+        snapshot_reliability_policy,
+    )
 
     try:
         admin_id, embedding_model_id = freeze_for_knowledge_enqueue(
@@ -3862,6 +3957,9 @@ def process_files_batch(
     # The shared processor reads the authoritative stored bytes, prepares all
     # modalities, and reconciles the file plus every current knowledge
     # membership governed by this frozen admin/model context.
+    reliability_policy = snapshot_reliability_policy(
+        request.app.state.config
+    ).to_dict()
     for file in files:
         try:
             process_stored_file_for_embedding(
@@ -3871,6 +3969,7 @@ def process_files_batch(
                 embedding_model_id=embedding_model_id,
                 knowledge_id=collection_name,
                 collection_name=collection_name,
+                reliability_policy=reliability_policy,
             )
             results.append(
                 BatchProcessFilesResult(file_id=file.id, status="completed")

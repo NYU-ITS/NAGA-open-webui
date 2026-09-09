@@ -52,6 +52,18 @@
 					</button>
 				</div>
 			{/if}
+			{#if file?.audio_embedding?.status === 'degraded' || file?.audio_embedding?.status === 'repairing'}
+				<div class="mt-1 flex justify-end px-2">
+					<button
+						class="text-xs font-medium text-amber-700 underline hover:text-amber-900 disabled:cursor-wait disabled:no-underline disabled:opacity-60 dark:text-amber-300"
+						type="button"
+						disabled={file.audio_embedding.status === 'repairing'}
+						on:click={() => dispatch('retryAudio', file.id)}
+					>
+						{file.audio_embedding.status === 'repairing' ? 'Repairing audio…' : 'Retry audio'}
+					</button>
+				</div>
+			{/if}
 		</div>
 	{/each}
 </div>

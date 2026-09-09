@@ -55,6 +55,11 @@ from open_webui.config import (
     RAG_EMBEDDING_MODEL,
     RAG_EMBEDDING_MODEL_USER,  # RBAC: Per-admin model name
     RAG_EMBEDDING_BATCH_SIZE,
+    RAG_EMBEDDING_MAX_ATTEMPTS,
+    RAG_EMBEDDING_CONNECTION_TIMEOUT,
+    RAG_EMBEDDING_READ_TIMEOUT,
+    RAG_EMBEDDING_AUDIO_SPLIT_MAX_DEPTH,
+    RAG_EMBEDDING_AUDIO_SPLIT_MIN_DURATION,
     RAG_RERANKING_MODEL,
     RAG_OPENAI_API_BASE_URL,
     RAG_OPENAI_API_KEY,
@@ -186,6 +191,21 @@ def get_worker_config():
             _worker_config.RAG_EMBEDDING_MODEL = RAG_EMBEDDING_MODEL
             _worker_config.RAG_EMBEDDING_MODEL_USER = RAG_EMBEDDING_MODEL_USER  # RBAC: Per-admin model name
             _worker_config.RAG_EMBEDDING_BATCH_SIZE = RAG_EMBEDDING_BATCH_SIZE
+            _worker_config.RAG_EMBEDDING_MAX_ATTEMPTS = (
+                RAG_EMBEDDING_MAX_ATTEMPTS
+            )
+            _worker_config.RAG_EMBEDDING_CONNECTION_TIMEOUT = (
+                RAG_EMBEDDING_CONNECTION_TIMEOUT
+            )
+            _worker_config.RAG_EMBEDDING_READ_TIMEOUT = (
+                RAG_EMBEDDING_READ_TIMEOUT
+            )
+            _worker_config.RAG_EMBEDDING_AUDIO_SPLIT_MAX_DEPTH = (
+                RAG_EMBEDDING_AUDIO_SPLIT_MAX_DEPTH
+            )
+            _worker_config.RAG_EMBEDDING_AUDIO_SPLIT_MIN_DURATION = (
+                RAG_EMBEDDING_AUDIO_SPLIT_MIN_DURATION
+            )
             _worker_config.RAG_RERANKING_MODEL = RAG_RERANKING_MODEL
             _worker_config.RAG_OPENAI_API_BASE_URL = RAG_OPENAI_API_BASE_URL
             _worker_config.RAG_OPENAI_API_KEY = RAG_OPENAI_API_KEY
@@ -383,6 +403,21 @@ class _FallbackConfig:
         # NOTE: This should NOT be used - jobs pass embedding_model parameter (RBAC-protected)
         self.RAG_EMBEDDING_MODEL_USER = MockUserScopedConfig(os.environ.get("RAG_EMBEDDING_MODEL", "@openai-embedding/text-embedding-3-small"))
         self.RAG_EMBEDDING_BATCH_SIZE = int(os.environ.get("RAG_EMBEDDING_BATCH_SIZE", "1"))
+        self.RAG_EMBEDDING_MAX_ATTEMPTS = int(
+            os.environ.get("RAG_EMBEDDING_MAX_ATTEMPTS", "3")
+        )
+        self.RAG_EMBEDDING_CONNECTION_TIMEOUT = int(
+            os.environ.get("RAG_EMBEDDING_CONNECTION_TIMEOUT", "10")
+        )
+        self.RAG_EMBEDDING_READ_TIMEOUT = int(
+            os.environ.get("RAG_EMBEDDING_READ_TIMEOUT", "120")
+        )
+        self.RAG_EMBEDDING_AUDIO_SPLIT_MAX_DEPTH = int(
+            os.environ.get("RAG_EMBEDDING_AUDIO_SPLIT_MAX_DEPTH", "2")
+        )
+        self.RAG_EMBEDDING_AUDIO_SPLIT_MIN_DURATION = int(
+            os.environ.get("RAG_EMBEDDING_AUDIO_SPLIT_MIN_DURATION", "5")
+        )
         self.RAG_RERANKING_MODEL = os.environ.get("RAG_RERANKING_MODEL", "")
         self.RAG_OPENAI_API_BASE_URL = os.environ.get("RAG_OPENAI_API_BASE_URL", "")
         # UserScopedConfig objects - use MockUserScopedConfig for compatibility
@@ -1242,6 +1277,7 @@ def process_file_job(
     user_id: Optional[str] = None,
     admin_id: Optional[str] = None,
     embedding_model_id: Optional[str] = None,
+    reliability_policy: Optional[dict] = None,
     _otel_trace_context: Optional[dict] = None,
 ) -> dict:
     """Process an RQ file job through the shared mixed-modality pipeline."""
@@ -1280,6 +1316,7 @@ def process_file_job(
             embedding_model_id=embedding_model_id or "",
             knowledge_id=knowledge_id,
             collection_name=collection_name,
+            reliability_policy=reliability_policy,
         )
         return {
             "status": "success",
@@ -1308,3 +1345,34 @@ def process_file_job(
             Session.remove()
         except Exception:
             log.warning("RQ file processing session cleanup failed")
+
+
+def repair_audio_embeddings_job(
+    *,
+    knowledge_id: str,
+    file_id: str,
+    admin_id: str,
+    embedding_model_id: str,
+    lease_token: str,
+    reliability_policy: dict,
+) -> dict:
+    """RQ entry point for an idempotent audio repair lease."""
+    from open_webui.retrieval.embedding.audio_repair import (
+        repair_audio_embeddings,
+    )
+
+    try:
+        return repair_audio_embeddings(
+            config=get_worker_config(),
+            knowledge_id=knowledge_id,
+            file_id=file_id,
+            admin_id=admin_id,
+            embedding_model_id=embedding_model_id,
+            lease_token=lease_token,
+            reliability_policy=reliability_policy,
+        )
+    finally:
+        try:
+            Session.remove()
+        except Exception:
+            log.warning("RQ audio repair session cleanup failed")

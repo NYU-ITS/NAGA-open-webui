@@ -263,6 +263,29 @@ def _build_wav(pcm_bytes: bytes) -> bytes:
     return output.getvalue()
 
 
+def split_pcm_wav(wav_bytes: bytes) -> tuple[bytes, bytes]:
+    """Split a canonical PCM WAV into two non-empty, frame-aligned WAVs."""
+    try:
+        with wave.open(io.BytesIO(wav_bytes), "rb") as source_wav:
+            if (
+                source_wav.getnchannels() != AUDIO_CHANNELS
+                or source_wav.getframerate() != AUDIO_SAMPLE_RATE
+                or source_wav.getsampwidth() != AUDIO_SAMPLE_WIDTH
+                or source_wav.getcomptype() != "NONE"
+            ):
+                raise ValueError("audio does not match the PCM contract")
+            frame_count = source_wav.getnframes()
+            pcm_bytes = source_wav.readframes(frame_count)
+    except (EOFError, wave.Error) as error:
+        raise ValueError("audio is not a valid WAV file") from error
+    if frame_count < 2:
+        raise ValueError("audio is too short to split")
+    frame_width = AUDIO_CHANNELS * AUDIO_SAMPLE_WIDTH
+    midpoint = frame_count // 2
+    split_at = midpoint * frame_width
+    return _build_wav(pcm_bytes[:split_at]), _build_wav(pcm_bytes[split_at:])
+
+
 def _finish(
     *,
     segments: Sequence[AudioSegment],
@@ -302,6 +325,7 @@ def _video_suffix(mime_type: str) -> str:
 __all__ = [
     "AUDIO_CHUNKING_VERSION",
     "AUDIO_EXTRACTION_VERSION",
+    "split_pcm_wav",
     "AUDIO_MIME_TYPE",
     "AudioSegment",
     "VideoAudioResult",

@@ -59,6 +59,9 @@
 	let embeddingEngine = 'portkey';
 	let embeddingModel = '';  // CRITICAL RBAC: No default - each admin must set their own model
 	let embeddingBatchSize = 1;
+	let embeddingMaxAttempts = 3;
+	let embeddingConnectionTimeoutSeconds = 10;
+	let embeddingReadTimeoutSeconds = 120;
 	let rerankingModel = '';
 
 	let fileMaxSize = null;
@@ -104,14 +107,14 @@
 		hybrid: false
 	};
 
-	const embeddingModelUpdateHandler = async () => {
+	const embeddingModelUpdateHandler = async (forceReindex = false) => {
 		if (embeddingEngine === '' && embeddingModel.split('/').length - 1 > 1) {
 			toast.error(
 				$i18n.t(
 					'Model filesystem path detected. Model shortname is required for update, cannot continue.'
 				)
 			);
-			return;
+			return false;
 		}
 		if (embeddingEngine === 'ollama' && embeddingModel === '') {
 			toast.error(
@@ -119,7 +122,7 @@
 					'Model filesystem path detected. Model shortname is required for update, cannot continue.'
 				)
 			);
-			return;
+			return false;
 		}
 
 		// Embedding model is mandatory for OpenAI/Portkey engines
@@ -128,17 +131,17 @@
 			(embeddingModel === '' || embeddingModel.trim() === '')
 		) {
 			toast.error($i18n.t('Embedding model required.'));
-			return;
+			return false;
 		}
 
 		// API key is mandatory for OpenAI/Portkey engines (URL may fall back on backend)
 		if (embeddingEngine === 'openai' && OpenAIKey === '') {
 			toast.error($i18n.t('OpenAI API key required.'));
-			return;
+			return false;
 		}
 		if (embeddingEngine === 'portkey' && PortkeyKey === '') {
 			toast.error($i18n.t('PORTKEY API key required.'));
-			return;
+			return false;
 		}
 
 		console.log('Update embedding model attempt:', embeddingModel);
@@ -149,6 +152,12 @@
 			embedding_engine: embeddingEngine,
 			embedding_model: embeddingModel,
 			embedding_batch_size: embeddingBatchSize,
+			reliability: {
+				max_attempts: embeddingMaxAttempts,
+				connection_timeout_seconds: embeddingConnectionTimeoutSeconds,
+				read_timeout_seconds: embeddingReadTimeoutSeconds
+			},
+			force_reindex: forceReindex,
 			ollama_config: {
 				key: OllamaKey,
 				url: OllamaUrl
@@ -188,6 +197,7 @@
 				});
 			}
 		}
+		return Boolean(res);
 	};
 
 	const rerankingModelUpdateHandler = async () => {
@@ -233,18 +243,11 @@
 			return;
 		}
 
-		if (!BYPASS_EMBEDDING_AND_RETRIEVAL) {
-			await embeddingModelUpdateHandler();
-
-			if (querySettings.hybrid) {
-				await rerankingModelUpdateHandler();
-			}
-		}
-
 		console.log('BEFORE SAVE - chunkSize:', chunkSize, 'chunkOverlap:', chunkOverlap);
 		
 		const res = await updateRAGConfig(localStorage.token, {
 			email: $user.email,
+			defer_embedding_reindex: !BYPASS_EMBEDDING_AND_RETRIEVAL,
 			pdf_extract_images: pdfExtractImages,
 			enable_google_drive_integration: enableGoogleDriveIntegration,
 			enable_onedrive_integration: enableOneDriveIntegration,
@@ -278,6 +281,14 @@
 				}
 			}
 		});
+
+		if (!BYPASS_EMBEDDING_AND_RETRIEVAL) {
+			await embeddingModelUpdateHandler(Boolean(res?.embedding_recipe_changed));
+
+			if (querySettings.hybrid) {
+				await rerankingModelUpdateHandler();
+			}
+		}
 
 		console.log('AFTER SAVE - Response:', res);
 		console.log('AFTER SAVE - res.chunk:', res?.chunk);
@@ -335,6 +346,11 @@
 
 			// embeddingModel = embeddingConfig.embedding_model;
 			embeddingBatchSize = embeddingConfig.embedding_batch_size ?? 1;
+			embeddingMaxAttempts = embeddingConfig.reliability?.max_attempts ?? 3;
+			embeddingConnectionTimeoutSeconds =
+				embeddingConfig.reliability?.connection_timeout_seconds ?? 10;
+			embeddingReadTimeoutSeconds =
+				embeddingConfig.reliability?.read_timeout_seconds ?? 120;
 
 			if (embeddingConfig.embedding_engine === 'portkey') {
 				PortkeyKey = embeddingConfig.openai_config?.key || PortkeyKey;
@@ -782,6 +798,45 @@
 							</div>
 						</div>
 					{/if}
+
+					<div class="mb-2.5 rounded-lg border border-gray-100 p-3 dark:border-gray-850">
+						<div class="mb-2 text-xs font-medium">{$i18n.t('Embedding Provider Reliability')}</div>
+						<div class="grid grid-cols-1 gap-2 sm:grid-cols-3">
+							<label class="text-xs text-gray-600 dark:text-gray-400">
+								{$i18n.t('Maximum attempts')}
+								<input
+									bind:value={embeddingMaxAttempts}
+									type="number"
+									class="mt-1 w-full rounded-lg bg-transparent px-2 py-1 outline-hidden"
+									min="1"
+									max="5"
+								/>
+							</label>
+							<label class="text-xs text-gray-600 dark:text-gray-400">
+								{$i18n.t('Connection timeout (seconds)')}
+								<input
+									bind:value={embeddingConnectionTimeoutSeconds}
+									type="number"
+									class="mt-1 w-full rounded-lg bg-transparent px-2 py-1 outline-hidden"
+									min="1"
+									max="60"
+								/>
+							</label>
+							<label class="text-xs text-gray-600 dark:text-gray-400">
+								{$i18n.t('Read timeout (seconds)')}
+								<input
+									bind:value={embeddingReadTimeoutSeconds}
+									type="number"
+									class="mt-1 w-full rounded-lg bg-transparent px-2 py-1 outline-hidden"
+									min="30"
+									max="600"
+								/>
+							</label>
+						</div>
+						<div class="mt-2 text-xs text-gray-500">
+							{$i18n.t('Changes apply to newly dispatched embedding work and do not reindex files.')}
+						</div>
+					</div>
 
 					<div class="  mb-2.5 flex w-full justify-between">
 						<div class=" self-center text-xs font-medium">{$i18n.t('Full Context Mode')}</div>

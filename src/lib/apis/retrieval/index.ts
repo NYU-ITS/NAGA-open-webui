@@ -58,6 +58,9 @@ type VideoConfigForm = {
 
 type RAGConfigForm = {
 	email: string;
+	defer_embedding_reindex?: boolean;
+	RAG_FULL_CONTEXT?: boolean;
+	BYPASS_EMBEDDING_AND_RETRIEVAL?: boolean;
 	pdf_extract_images?: boolean;
 	enable_google_drive_integration?: boolean;
 	enable_onedrive_integration?: boolean;
@@ -227,6 +230,12 @@ type EmbeddingModelUpdateForm = {
 	embedding_engine: string;
 	embedding_model: string;
 	embedding_batch_size?: number;
+	reliability?: {
+		max_attempts: number;
+		connection_timeout_seconds: number;
+		read_timeout_seconds: number;
+	};
+	force_reindex?: boolean;
 };
 
 export const updateEmbeddingConfig = async (token: string, payload: EmbeddingModelUpdateForm) => {
