@@ -989,10 +989,14 @@ def _write_vectors(
         
         projections = [(file_collection_name, file_items)]
         for knowledge_id in knowledge_collection_ids:
+            knowledge_metadata = [
+                {**item, "knowledge_id": str(knowledge_id)}
+                for item in metadata
+            ]
             knowledge_items = vector_repo.make_items(
                 texts=texts,
                 vectors=embeddings,
-                metadata=metadata,
+                metadata=knowledge_metadata,
                 rag_chunk_ids=rag_chunk_ids,
                 admin_id=admin_id,
                 model=target_model,
