@@ -58,6 +58,7 @@ from open_webui.retrieval.embedding.errors import (
     PDF_VISUAL_EXTRACTION_FAILED,
     PDF_VISUAL_LIMIT_EXCEEDED,
     PDF_VISUALS_REQUIRE_MULTIMODAL_MODEL,
+    safe_file_processing_error_message,
     EMBEDDING_INVENTORY_AMBIGUOUS_SOURCE,
     EMBEDDING_INVENTORY_AMBIGUOUS_ADMIN,
     EMBEDDING_INVENTORY_UNRESOLVED_SOURCE,
@@ -1263,10 +1264,6 @@ def _apply_staged_processing_summaries(*, job_id: str, db) -> None:
             else {}
         )
         summary = snapshot.get("prepared_processing_summary")
-        if not isinstance(summary, dict):
-            if job_file.status == FILE_STATUS_INCOMPATIBLE:
-                continue
-            raise EmbeddingError(FILE_ERROR_PROCESSING_FAILED)
         file_row = (
             db.query(File)
             .filter(File.id == job_file.file_id)
@@ -1275,6 +1272,21 @@ def _apply_staged_processing_summaries(*, job_id: str, db) -> None:
         )
         if file_row is None:
             raise EmbeddingError(EMBEDDING_FILE_NOT_FOUND)
+        if not isinstance(summary, dict):
+            if job_file.status == FILE_STATUS_INCOMPATIBLE:
+                now = int(time.time())
+                file_row.meta = {
+                    **(file_row.meta or {}),
+                    "processing_status": "error",
+                    "processing_completed_at": now,
+                    "processing_error_code": job_file.error_code,
+                    "processing_error": safe_file_processing_error_message(
+                        job_file.error_code
+                    ),
+                }
+                file_row.updated_at = now
+                continue
+            raise EmbeddingError(FILE_ERROR_PROCESSING_FAILED)
         text_content = summary.get("text_content")
         content_hash = summary.get("content_hash")
         source_sha256 = summary.get("source_sha256")
