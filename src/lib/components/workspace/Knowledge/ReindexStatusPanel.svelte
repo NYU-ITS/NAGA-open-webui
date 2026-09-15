@@ -66,7 +66,10 @@
 				errorCode === 'embedding_retry_active_exists'
 			) {
 				toast.info($i18n.t('Indexing is already queued or in progress.'));
-			} else if (errorCode === 'embedding_reindex_source_changed') {
+			} else if (
+				errorCode === 'embedding_reindex_source_changed' ||
+				errorCode === 'embedding_job_stale_operation'
+			) {
 				toast.warning(
 					$i18n.t('The indexing operation changed. Refresh the status before retrying.')
 				);
@@ -75,7 +78,7 @@
 					$i18n.t('This retry is no longer available. Review the updated indexing status.')
 				);
 			} else {
-				toast.error(`${error}`);
+				toast.error(error instanceof Error ? error.message : `${error}`);
 			}
 		} finally {
 			retrying = false;

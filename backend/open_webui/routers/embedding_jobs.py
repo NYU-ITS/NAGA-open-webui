@@ -19,8 +19,16 @@ from open_webui.internal.db import get_db
 from open_webui.models.users import Users
 from open_webui.retrieval.embedding.errors import (
     EmbeddingError,
+    EMBEDDING_ADMIN_UNRESOLVED,
+    EMBEDDING_INVENTORY_AMBIGUOUS_ADMIN,
+    EMBEDDING_INVENTORY_AMBIGUOUS_SOURCE,
+    EMBEDDING_INVENTORY_MALFORMED_REFERENCE,
+    EMBEDDING_INVENTORY_MISSING_FILE,
+    EMBEDDING_INVENTORY_UNRESOLVED_SOURCE,
     EMBEDDING_JOB_ACTIVE_EXISTS,
+    EMBEDDING_JOB_LEDGER_MISMATCH,
     EMBEDDING_JOB_NOT_FOUND,
+    EMBEDDING_JOB_STALE_OPERATION,
     EMBEDDING_JOB_WRONG_STATUS,
     EMBEDDING_MODEL_STATE_CONFLICT,
     EMBEDDING_REINDEX_SOURCE_CHANGED,
@@ -362,7 +370,7 @@ def _retry_http_error(error: EmbeddingError) -> HTTPException:
                 "message": "Another embedding indexing operation is already active.",
             },
         )
-    if error.code == EMBEDDING_REINDEX_SOURCE_CHANGED:
+    if error.code in (EMBEDDING_REINDEX_SOURCE_CHANGED, EMBEDDING_JOB_STALE_OPERATION):
         return HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
@@ -374,7 +382,10 @@ def _retry_http_error(error: EmbeddingError) -> HTTPException:
     if error.code == EMBEDDING_JOB_NOT_FOUND:
         return HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Embedding job not found.",
+            detail={
+                "error_code": error.code,
+                "message": "Embedding job not found.",
+            },
         )
     if error.code in (EMBEDDING_JOB_WRONG_STATUS, EMBEDDING_MODEL_STATE_CONFLICT):
         return HTTPException(
@@ -384,9 +395,48 @@ def _retry_http_error(error: EmbeddingError) -> HTTPException:
                 "message": "The embedding indexing operation cannot be retried in its current state.",
             },
         )
+    # Use fixed public messages: domain details can contain source data.
+    messages = {
+        EMBEDDING_ADMIN_UNRESOLVED: (
+            "The administrator for this indexing operation could not be resolved."
+        ),
+        EMBEDDING_INVENTORY_UNRESOLVED_SOURCE: (
+            "A failed document's knowledge base or chat has no valid governing "
+            "administrator. Review its owner and group assignments before retrying."
+        ),
+        EMBEDDING_INVENTORY_AMBIGUOUS_SOURCE: (
+            "A failed document's knowledge base or chat resolves to multiple "
+            "administrators. Review its owner and group assignments before retrying."
+        ),
+        EMBEDDING_INVENTORY_AMBIGUOUS_ADMIN: (
+            "A failed document is shared across sources governed by different "
+            "administrators. Resolve its ownership before retrying."
+        ),
+        EMBEDDING_INVENTORY_MISSING_FILE: (
+            "An original document is missing or cannot be read from storage. "
+            "Restore the source file or re-upload the document before retrying."
+        ),
+        EMBEDDING_INVENTORY_MALFORMED_REFERENCE: (
+            "A failed document has invalid references or content metadata. "
+            "Repair the affected document or source metadata before retrying."
+        ),
+        EMBEDDING_JOB_LEDGER_MISMATCH: (
+            "The indexing job history is inconsistent. Contact support to repair "
+            "the job history before retrying."
+        ),
+    }
     return HTTPException(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        detail="The embedding indexing operation could not be retried.",
+        status_code=(
+            status.HTTP_500_INTERNAL_SERVER_ERROR
+            if error.code == EMBEDDING_JOB_LEDGER_MISMATCH
+            else status.HTTP_400_BAD_REQUEST
+        ),
+        detail={
+            "error_code": error.code,
+            "message": messages.get(
+                error.code, "The embedding indexing operation could not be retried."
+            ),
+        },
     )
 
 
@@ -495,6 +545,11 @@ def retry_failed_job(
                 message="Nothing to retry. No eligible failed files remain; successful files stay available.",
             )
         else:
+            log.warning(
+                "[RETRY] Retry validation failed | source_job_id=%s | error_code=%s",
+                job_id,
+                error.code,
+            )
             raise _retry_http_error(error)
 
     # Enqueue the job.  On failure, mark the job as failed so it does not
