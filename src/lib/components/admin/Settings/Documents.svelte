@@ -1,8 +1,7 @@
 <script lang="ts">
 	import { toast } from 'svelte-sonner';
 
-	import { onMount, onDestroy, getContext, createEventDispatcher } from 'svelte';
-	import { getLatestEmbeddingJob, type EmbeddingJobStatus } from '$lib/apis/embedding';
+	import { onMount, getContext, createEventDispatcher } from 'svelte';
 
 	import { user } from '$lib/stores';
 	import { getSuperAdminEmails } from '$lib/apis/users';
@@ -63,30 +62,6 @@
 	let embeddingMaxAttempts = 3;
 	let embeddingConnectionTimeoutSeconds = 10;
 	let embeddingReadTimeoutSeconds = 120;
-	let embeddingJobStatus: EmbeddingJobStatus | null = null;
-	let embeddingStatusTimer: ReturnType<typeof setInterval> | null = null;
-	let loadingEmbeddingStatus = false;
-	let documentsDestroyed = false;
-	const refreshEmbeddingStatus = async () => {
-		if (loadingEmbeddingStatus || document.hidden || !$user?.id) return;
-		loadingEmbeddingStatus = true;
-		try {
-			const latest = await getLatestEmbeddingJob(localStorage.token);
-			if (!documentsDestroyed) embeddingJobStatus = latest;
-		} catch {
-			// Keep the last known status when polling is temporarily unavailable.
-		} finally {
-			loadingEmbeddingStatus = false;
-		}
-	};
-	onMount(() => {
-		refreshEmbeddingStatus();
-		embeddingStatusTimer = setInterval(refreshEmbeddingStatus, 3000);
-	});
-	onDestroy(() => {
-		documentsDestroyed = true;
-		if (embeddingStatusTimer) clearInterval(embeddingStatusTimer);
-	});
 	let rerankingModel = '';
 
 	let fileMaxSize = null;
@@ -217,7 +192,6 @@
 				}
 				// Re-fetch config to ensure we have the latest values
 				await setEmbeddingConfig();
-				await refreshEmbeddingStatus();
 				toast.success($i18n.t('Embedding model set to "{{embedding_model}}"', res), {
 					duration: 1000 * 10
 				});
@@ -801,24 +775,6 @@
 							{/if}
 						</div>
 
-						<div class="mt-1 mb-1 text-xs text-gray-600 dark:text-gray-500">
-							{$i18n.t(
-								'Saving selects this model for new indexing work. It becomes active on the first successfully indexed file; successful files remain searchable while others are processed or retried.'
-							)}
-						</div>
-						{#if embeddingJobStatus}
-							<div class="mt-2 text-xs text-gray-600 dark:text-gray-400" role="status" aria-live="polite">
-								<p>{$i18n.t('Selected model')}: {embeddingJobStatus.selected_model_id ?? $i18n.t('Not configured')}</p>
-								<p>{$i18n.t('Active model')}: {embeddingJobStatus.active_model_id ?? $i18n.t('Awaiting first indexed file')}</p>
-								<p>{$i18n.t('Queryable model')}: {embeddingJobStatus.effective_model_id ?? $i18n.t('Unavailable')}</p>
-								{#if embeddingJobStatus.generation_progress}
-									<p>{$i18n.t('{{ready}} of {{total}} files available', {
-										ready: embeddingJobStatus.generation_progress.processed,
-										total: embeddingJobStatus.generation_progress.total
-									})}</p>
-								{/if}
-							</div>
-						{/if}
 					</div>
 
 					{#if embeddingEngine === 'ollama' || embeddingEngine === 'openai' || embeddingEngine == 'portkey'}
