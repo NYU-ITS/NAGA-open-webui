@@ -12,6 +12,7 @@ from open_webui.models.embeddings import RagChunk
 from open_webui.models.knowledge import Knowledge, Knowledges
 from open_webui.retrieval.vector.connector import VECTOR_DB_CLIENT
 from open_webui.storage.provider import Storage
+from open_webui.utils.file_references import chat_file_ids
 
 
 log = logging.getLogger(__name__)
@@ -29,9 +30,17 @@ def process_file_cleanup_task(task_id: str) -> bool:
         if task is None:
             return False
         try:
-            if task.kind != "storage":
+            if task.kind == "storage":
+                Storage.delete_file(task.storage_path)
+            elif task.kind == "orphan":
+                success, details = cleanup_file_completely(
+                    task.file_id, only_if_unreferenced=True
+                )
+                # A storage task has taken responsibility after SQL deletion.
+                if not success and not details.get("storage_cleanup_pending"):
+                    raise RuntimeError("Orphan file cleanup failed")
+            else:
                 raise ValueError("Unknown file cleanup task kind")
-            Storage.delete_file(task.storage_path)
         except Exception as error:
             log.exception("File cleanup deferred | file=%s", task.file_id)
             task.attempts += 1
@@ -47,6 +56,15 @@ def process_file_cleanup_task(task_id: str) -> bool:
         return True
 
 
+def process_file_cleanup_tasks(task_ids) -> None:
+    """Attempt committed work immediately; failures remain queued for retry."""
+    for task_id in task_ids:
+        try:
+            process_file_cleanup_task(task_id)
+        except Exception:
+            log.exception("Could not process file cleanup task | task=%s", task_id)
+
+
 def retry_pending_file_cleanup() -> None:
     with get_db() as db:
         task_ids = [
@@ -57,11 +75,7 @@ def retry_pending_file_cleanup() -> None:
             .limit(100)
             .all()
         ]
-    for task_id in task_ids:
-        try:
-            process_file_cleanup_task(task_id)
-        except Exception:
-            log.exception("Could not process file cleanup task | task=%s", task_id)
+    process_file_cleanup_tasks(task_ids)
 
 
 async def periodic_file_cleanup() -> None:
@@ -81,7 +95,17 @@ def _transactional_vector_delete(name: str):
 
 def _file_ids(data) -> list[str]:
     values = data.get("file_ids", []) if isinstance(data, dict) else []
-    return list(values) if isinstance(values, list) else []
+    if not isinstance(values, list):
+        return []
+    return [value for value in values if isinstance(value, str) and value]
+
+
+def _file_is_referenced(db, file_id: str) -> bool:
+    from open_webui.models.chats import Chat
+
+    if any(file_id in _file_ids(row.data) for row in db.query(Knowledge.data)):
+        return True
+    return any(file_id in chat_file_ids(row.chat) for row in db.query(Chat.chat))
 
 
 def cleanup_knowledge_collection(
@@ -89,34 +113,9 @@ def cleanup_knowledge_collection(
     *,
     delete_knowledge: bool = False,
 ) -> bool:
-    """Clear a Knowledge collection, atomically when pgvector is primary-backed."""
-
+    """Delete the collection and durably schedule its now-unreferenced uploads."""
+    task_ids = []
     delete_collection_rows = _transactional_vector_delete("delete_collection_rows")
-    if delete_collection_rows is None:
-        # Legacy vector stores cannot join the primary transaction. Preserve the
-        # safer ordering: vector cleanup must succeed before membership is hidden.
-        try:
-            VECTOR_DB_CLIENT.delete_collection(collection_name=knowledge_id)
-            if delete_knowledge:
-                return Knowledges.delete_knowledge_by_id(id=knowledge_id)
-            knowledge = Knowledges.get_knowledge_by_id(id=knowledge_id)
-            if knowledge is None:
-                return False
-            data = dict(knowledge.data or {})
-            data["file_ids"] = []
-            return bool(
-                Knowledges.update_knowledge_data_by_id(
-                    id=knowledge_id,
-                    data=data,
-                )
-            )
-        except Exception:
-            log.exception(
-                "Knowledge collection cleanup failed | knowledge=%s",
-                knowledge_id,
-            )
-            return False
-
     try:
         with get_db() as db:
             knowledge = (
@@ -127,8 +126,15 @@ def cleanup_knowledge_collection(
             )
             if knowledge is None:
                 return False
-            delete_collection_rows(collection_name=knowledge_id, session=db)
+            if delete_collection_rows is not None:
+                delete_collection_rows(collection_name=knowledge_id, session=db)
+            else:
+                VECTOR_DB_CLIENT.delete_collection(collection_name=knowledge_id)
             if delete_knowledge:
+                task_ids = [
+                    enqueue_file_cleanup(db, file_id)
+                    for file_id in sorted(set(_file_ids(knowledge.data)))
+                ]
                 db.delete(knowledge)
             else:
                 data = dict(knowledge.data or {})
@@ -136,19 +142,20 @@ def cleanup_knowledge_collection(
                 knowledge.data = data
                 knowledge.updated_at = int(time.time())
             db.commit()
-        return True
     except Exception:
-        log.exception(
-            "Atomic knowledge collection cleanup failed | knowledge=%s",
-            knowledge_id,
-        )
+        log.exception("Knowledge collection cleanup failed | knowledge=%s", knowledge_id)
         return False
+
+    process_file_cleanup_tasks(task_ids)
+    return True
 
 
 def cleanup_file_completely(
     file_id: str,
     exclude_knowledge_id: Optional[str] = None,
     delete_physical_file: bool = True,
+    *,
+    only_if_unreferenced: bool = False,
 ) -> Tuple[bool, Dict]:
     """Remove content and commit a storage deletion intent with the File deletion."""
 
@@ -173,8 +180,14 @@ def cleanup_file_completely(
                 .first()
             )
             if file is None:
+                if only_if_unreferenced:
+                    return True, details
                 details["errors"].append("File not found")
                 return False, details
+
+            if only_if_unreferenced and _file_is_referenced(db, file_id):
+                details["preserved_shared_file"] = True
+                return True, details
 
             candidate_ids = {
                 row.id

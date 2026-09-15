@@ -7,6 +7,7 @@ from typing import Optional
 from open_webui.internal.db import Base, get_db
 from open_webui.models.tags import TagModel, Tag, Tags
 from open_webui.env import SRC_LOG_LEVELS
+from open_webui.utils.file_references import chat_file_ids, lock_chat_files
 
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import BigInteger, Boolean, Column, String, Text, JSON
@@ -175,6 +176,7 @@ class ChatTable:
             )
 
             result = Chat(**chat.model_dump())
+            lock_chat_files(db, result.chat)
             db.add(result)
             db.commit()
             db.refresh(result)
@@ -209,6 +211,7 @@ class ChatTable:
             )
 
             result = Chat(**chat.model_dump())
+            lock_chat_files(db, result.chat)
             db.add(result)
             db.commit()
             db.refresh(result)
@@ -218,6 +221,20 @@ class ChatTable:
         try:
             with get_db() as db:
                 chat_item = db.get(Chat, id)
+                if chat_item is None:
+                    return None
+                missing_file_ids = lock_chat_files(db, chat, previous=chat_item.chat)
+                chat_item = (
+                    db.query(Chat)
+                    .filter(Chat.id == id)
+                    .populate_existing()
+                    .with_for_update()
+                    .first()
+                )
+                if chat_item is None:
+                    return None
+                if missing_file_ids - chat_file_ids(chat_item.chat):
+                    return None
                 chat_item.chat = chat
                 chat_item.title = chat["title"] if "title" in chat else "New Chat"
                 chat_item.updated_at = int(time.time())
@@ -326,6 +343,19 @@ class ChatTable:
         with get_db() as db:
             # Get the existing chat to share
             chat = db.get(Chat, chat_id)
+            if chat is None:
+                return None
+            source_file_ids = chat_file_ids(chat.chat)
+            lock_chat_files(db, chat.chat, previous=chat.chat)
+            chat = (
+                db.query(Chat)
+                .filter(Chat.id == chat_id)
+                .populate_existing()
+                .with_for_update()
+                .first()
+            )
+            if chat is None or chat_file_ids(chat.chat) != source_file_ids:
+                return None
             # Check if the chat is already shared
             if chat.share_id:
                 return self.get_chat_by_id_and_user_id(chat.share_id, "shared")
@@ -342,27 +372,36 @@ class ChatTable:
             )
             shared_result = Chat(**shared_chat.model_dump())
             db.add(shared_result)
+            chat.share_id = shared_chat.id
             db.commit()
-            db.refresh(shared_result)
-
-            # Update the original chat with the share_id
-            result = (
-                db.query(Chat)
-                .filter_by(id=chat_id)
-                .update({"share_id": shared_chat.id})
-            )
-            db.commit()
-            return shared_chat if (shared_result and result) else None
+            return shared_chat
 
     def update_shared_chat_by_chat_id(self, chat_id: str) -> Optional[ChatModel]:
         try:
             with get_db() as db:
                 chat = db.get(Chat, chat_id)
+                if chat is None:
+                    return None
+                source_file_ids = chat_file_ids(chat.chat)
+                lock_chat_files(db, chat.chat, previous=chat.chat)
+                chat = (
+                    db.query(Chat)
+                    .filter(Chat.id == chat_id)
+                    .populate_existing()
+                    .with_for_update()
+                    .first()
+                )
+                if chat is None or chat_file_ids(chat.chat) != source_file_ids:
+                    return None
                 shared_chat = (
-                    db.query(Chat).filter_by(user_id=f"shared-{chat_id}").first()
+                    db.query(Chat)
+                    .filter_by(user_id=f"shared-{chat_id}")
+                    .with_for_update()
+                    .first()
                 )
 
                 if shared_chat is None:
+                    db.rollback()
                     return self.insert_shared_chat_by_chat_id(chat_id)
 
                 shared_chat.title = chat.title
@@ -377,14 +416,7 @@ class ChatTable:
             return None
 
     def delete_shared_chat_by_chat_id(self, chat_id: str) -> bool:
-        try:
-            with get_db() as db:
-                db.query(Chat).filter_by(user_id=f"shared-{chat_id}").delete()
-                db.commit()
-
-                return True
-        except Exception:
-            return False
+        return self._delete_chats(Chat.user_id == f"shared-{chat_id}")
 
     def update_chat_share_id_by_id(
         self, id: str, share_id: Optional[str]
@@ -1061,61 +1093,69 @@ class ChatTable:
         except Exception:
             return False
 
-    def delete_chat_by_id(self, id: str) -> bool:
+    def _delete_chats(self, *filters) -> bool:
+        from open_webui.models.file_cleanup import enqueue_file_cleanup
+        from open_webui.utils.file_cleanup import process_file_cleanup_tasks
+
         try:
             with get_db() as db:
-                db.query(Chat).filter_by(id=id).delete()
+                chats = (
+                    db.query(Chat)
+                    .filter(*filters)
+                    .order_by(Chat.id)
+                    .with_for_update()
+                    .all()
+                )
+                shared_owners = [f"shared-{chat.id}" for chat in chats]
+                shared_chats = (
+                    db.query(Chat)
+                    .filter(Chat.user_id.in_(shared_owners))
+                    .order_by(Chat.id)
+                    .with_for_update()
+                    .all()
+                    if shared_owners
+                    else []
+                )
+                rows = {chat.id: chat for chat in chats + shared_chats}
+                file_ids = set()
+                for chat in rows.values():
+                    file_ids.update(chat_file_ids(chat.chat))
+                    db.delete(chat)
+                task_ids = [
+                    enqueue_file_cleanup(db, file_id) for file_id in sorted(file_ids)
+                ]
                 db.commit()
-
-                return True and self.delete_shared_chat_by_chat_id(id)
         except Exception:
+            log.exception("Chat deletion failed")
             return False
+
+        process_file_cleanup_tasks(task_ids)
+        return True
+
+    def delete_chat_by_id(self, id: str) -> bool:
+        return self._delete_chats(Chat.id == id)
 
     def delete_chat_by_id_and_user_id(self, id: str, user_id: str) -> bool:
-        try:
-            with get_db() as db:
-                db.query(Chat).filter_by(id=id, user_id=user_id).delete()
-                db.commit()
-
-                return True and self.delete_shared_chat_by_chat_id(id)
-        except Exception:
-            return False
+        return self._delete_chats(Chat.id == id, Chat.user_id == user_id)
 
     def delete_chats_by_user_id(self, user_id: str) -> bool:
-        try:
-            with get_db() as db:
-                self.delete_shared_chats_by_user_id(user_id)
-
-                db.query(Chat).filter_by(user_id=user_id).delete()
-                db.commit()
-
-                return True
-        except Exception:
-            return False
+        return self._delete_chats(Chat.user_id == user_id)
 
     def delete_chats_by_user_id_and_folder_id(
         self, user_id: str, folder_id: str
     ) -> bool:
-        try:
-            with get_db() as db:
-                db.query(Chat).filter_by(user_id=user_id, folder_id=folder_id).delete()
-                db.commit()
-
-                return True
-        except Exception:
-            return False
+        return self._delete_chats(Chat.user_id == user_id, Chat.folder_id == folder_id)
 
     def delete_shared_chats_by_user_id(self, user_id: str) -> bool:
         try:
             with get_db() as db:
-                chats_by_user = db.query(Chat).filter_by(user_id=user_id).all()
-                shared_chat_ids = [f"shared-{chat.id}" for chat in chats_by_user]
-
-                db.query(Chat).filter(Chat.user_id.in_(shared_chat_ids)).delete()
-                db.commit()
-
-                return True
+                shared_owners = [
+                    f"shared-{row.id}"
+                    for row in db.query(Chat.id).filter(Chat.user_id == user_id)
+                ]
+            return self._delete_chats(Chat.user_id.in_(shared_owners))
         except Exception:
+            log.exception("Shared chat deletion failed")
             return False
 
 
