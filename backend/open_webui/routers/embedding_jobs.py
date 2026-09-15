@@ -31,18 +31,18 @@ from open_webui.retrieval.embedding.jobs import (
     EmbeddingJobView,
     EmbeddingJobFileView,
     EmbeddingJobStatusView,
-    FILE_STATUS_FAILED,
     FILE_STATUS_PENDING,
     is_job_retry_eligible,
 )
-from open_webui.retrieval.embedding.preparation import build_preparation_recipe
+from open_webui.retrieval.embedding.knowledge_status import (
+    KnowledgeIndexingProgress,
+    get_generation_coverage,
+    get_generation_retry_files,
+)
 from open_webui.retrieval.embedding.reliability import snapshot_reliability_policy
 from open_webui.retrieval.embedding.enqueue import dispatch_embedding_job
-from open_webui.retrieval.embedding.model_change import (
-    ModelChangeResult,
-    request_model_change,
-)
 from open_webui.retrieval.embedding.state import AdminEmbeddingModelStateRepository
+from open_webui.retrieval.embedding.registry import get_model_spec_by_id
 from open_webui.utils.auth import get_verified_user
 
 log = logging.getLogger(__name__)
@@ -84,7 +84,11 @@ class EmbeddingJobStatusResponse(BaseModel):
     # Admin state
     active_model_id: str | None = None
     target_model_id: str | None = None
+    selected_model_id: str | None = None
     effective_model_id: str | None = None
+    index_generation_id: str | None = None
+    job_index_generation_id: str | None = None
+    availability: str = "unavailable"
     model_scope: str = "unavailable"
 
     # Aggregate counters
@@ -93,6 +97,8 @@ class EmbeddingJobStatusResponse(BaseModel):
     failed_files: int = 0
     incompatible_files: int = 0
     pending_or_processing: int = 0
+    generation_progress: KnowledgeIndexingProgress | None = None
+    retry_file_count: int = 0
 
     # Source-context breakdown
     source_contexts: dict[str, dict] | None = None
@@ -124,6 +130,9 @@ class RetryResponse(BaseModel):
     status: str
     total_files: int
     dispatch_mode: str
+    index_generation_id: str | None = None
+    nothing_to_retry: bool = False
+    message: str | None = None
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -156,12 +165,16 @@ def _compute_retry_eligible(
     active = EmbeddingJobRepository.get_active_job(admin_id)
     state = AdminEmbeddingModelStateRepository.get_state(admin_id)
     files = EmbeddingJobRepository.list_files(job_view.id)
+    if state is None or job_view.index_generation_id != state.index_generation_id:
+        return False
     return is_job_retry_eligible(
         job_view,
-        target_model_id=state.target_embedding_model_id if state else None,
+        target_model_id=state.target_embedding_model_id
+        or state.active_embedding_model_id,
         has_active_job=active is not None,
-        has_failed_files=any(file.status == FILE_STATUS_FAILED for file in files),
-        all_files_pending=all(file.status == FILE_STATUS_PENDING for file in files),
+        has_failed_files=bool(get_generation_retry_files(admin_id)),
+        all_files_pending=bool(files)
+        and all(file.status == FILE_STATUS_PENDING for file in files),
     )
 
 
@@ -197,15 +210,16 @@ def _build_status_response(
         pending_or_processing = status_view.pending_or_processing
 
     retry_eligible = _compute_retry_eligible(job_view, admin_id)
-    if job_view.status == "partially_failed":
-        effective_model_id = job_view.embedding_model_id
-        model_scope = "staged_scoped"
-    elif state_view is not None and state_view.target_embedding_model_id is None:
-        effective_model_id = state_view.active_embedding_model_id
-        model_scope = "active"
-    else:
-        effective_model_id = None
-        model_scope = "unavailable"
+    coverage = KnowledgeIndexingProgress(**get_generation_coverage(admin_id))
+    effective_model_id = None
+    if state_view is not None and state_view.target_embedding_model_id is None:
+        try:
+            effective_model_id = get_model_spec_by_id(
+                state_view.active_embedding_model_id
+            ).id
+        except EmbeddingError:
+            pass
+    model_scope = "active" if effective_model_id else "unavailable"
 
     return EmbeddingJobStatusResponse(
         job_id=job_view.id,
@@ -216,7 +230,32 @@ def _build_status_response(
         previous_embedding_model_id=job_view.previous_embedding_model_id,
         active_model_id=state_view.active_embedding_model_id if state_view else None,
         target_model_id=state_view.target_embedding_model_id if state_view else None,
+        selected_model_id=(
+            (
+                state_view.target_embedding_model_id
+                or state_view.active_embedding_model_id
+            )
+            if state_view
+            else None
+        ),
         effective_model_id=effective_model_id,
+        index_generation_id=(
+            state_view.index_generation_id
+            if state_view
+            else job_view.index_generation_id
+        ),
+        job_index_generation_id=job_view.index_generation_id,
+        availability=(
+            "ready"
+            if coverage.processed == coverage.total and effective_model_id
+            else (
+                "partial"
+                if coverage.processed and effective_model_id
+                else "unavailable"
+            )
+        ),
+        generation_progress=coverage,
+        retry_file_count=len(get_generation_retry_files(admin_id)),
         model_scope=model_scope,
         total_files=job_view.total_files,
         processed_files=job_view.processed_files,
@@ -266,7 +305,7 @@ def _safe_job_error_message(error_code: str | None) -> str | None:
     if error_code == "enqueue_failed":
         return "The indexing job could not be queued. Try again later."
     if error_code == "embedding_reindex_source_changed":
-        return "Source content changed during indexing. Start a new reindex operation."
+        return "Source content changed during indexing. Retry the failed file to index its current contents."
     if error_code == "embedding_job_stale_operation":
         return "This indexing job was superseded by a newer operation."
     if error_code in {
@@ -328,7 +367,8 @@ def _retry_http_error(error: EmbeddingError) -> HTTPException:
             status_code=status.HTTP_409_CONFLICT,
             detail={
                 "error_code": error.code,
-                "message": "Source content or preparation settings changed. Start a fresh model-change operation.",
+                "message": "The indexing operation changed. Refresh the status before retrying.",
+                "retryable": True,
             },
         )
     if error.code == EMBEDDING_JOB_NOT_FOUND:
@@ -415,34 +455,15 @@ def retry_failed_job(
     background_tasks: BackgroundTasks,
     user=Depends(get_verified_user),
 ):
-    """Retry failed files from a terminal embedding job.
-
-    Creates a new ``retry_failed`` job containing the failed inventory. An
-    untouched enqueue failure whose frozen recipe is obsolete is replaced by a
-    fresh model-change job. Partially processed stale jobs continue to fail
-    closed with 409.
-    """
+    """Retry only eligible failures, preserving the generation and frozen recipe."""
     admin_id = _require_admin(user)
-
-    # Verify source job belongs to this admin before attempting retry.
     source_job = _get_job_for_admin(job_id, admin_id)
-    source_files = EmbeddingJobRepository.list_files(job_id)
-    enqueue_only_failure = bool(source_files) and all(
-        file.status == FILE_STATUS_PENDING for file in source_files
-    )
-
-    result_job = None
     retry_already_active = False
-
     try:
         with get_db() as db:
             result = EmbeddingJobRepository.create_retry_job(
                 source_job_id=job_id,
                 admin_id=admin_id,
-                preparation_recipe=build_preparation_recipe(
-                    request.app.state.config,
-                    user.email,
-                ),
                 reliability_policy=snapshot_reliability_policy(
                     request.app.state.config
                 ),
@@ -450,51 +471,31 @@ def retry_failed_job(
             )
             db.commit()
             result_job = result.job
+            retry_already_active = result.already_active
     except EmbeddingError as error:
         if error.code in (EMBEDDING_JOB_ACTIVE_EXISTS, EMBEDDING_RETRY_ACTIVE_EXISTS):
             result_job = _active_retry_for_source(admin_id, job_id)
             if result_job is None:
                 raise _retry_http_error(error)
             retry_already_active = True
-        elif error.code != EMBEDDING_REINDEX_SOURCE_CHANGED or not enqueue_only_failure:
-            raise _retry_http_error(error)
+        elif (
+            error.code == EMBEDDING_JOB_WRONG_STATUS
+            and isinstance(error.detail, str)
+            and error.detail.startswith("Nothing to retry")
+        ):
+            return RetryResponse(
+                job_id=job_id,
+                source_job_id=job_id,
+                job_type=source_job.job_type,
+                status=source_job.status,
+                total_files=0,
+                dispatch_mode="none",
+                index_generation_id=source_job.index_generation_id,
+                nothing_to_retry=True,
+                message="Nothing to retry. No eligible failed files remain; successful files stay available.",
+            )
         else:
-            # No file was ever claimed, so no v1/v2 or old/new source projection can
-            # be mixed. Replace the untouched operation with a fresh current inventory.
-            try:
-                replacement, _ = request_model_change(
-                    admin_id=admin_id,
-                    target_model_id=source_job.embedding_model_id,
-                    authenticated_user_id=admin_id,
-                    config=request.app.state.config,
-                )
-            except EmbeddingError as replacement_error:
-                raise _retry_http_error(replacement_error)
-            if not isinstance(replacement, ModelChangeResult):
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail={
-                        "error_code": EMBEDDING_MODEL_STATE_CONFLICT,
-                        "message": "The indexing operation no longer requires a retry.",
-                    },
-                )
-            result_job = EmbeddingJobRepository.get_job(replacement.job_id)
-            if result_job is None:
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="The replacement indexing job could not be loaded.",
-                )
-            from open_webui.config import invalidate_user_scoped_config_cache
-
-            invalidate_user_scoped_config_cache(
-                user.email,
-                "rag.embedding_model_user",
-            )
-            log.info(
-                "[RETRY] Replaced untouched stale job %s with fresh job %s",
-                job_id,
-                result_job.id,
-            )
+            raise _retry_http_error(error)
 
     # Enqueue the job.  On failure, mark the job as failed so it does not
     # remain stuck as queued.
@@ -538,4 +539,6 @@ def retry_failed_job(
         status=result_job.status,
         total_files=result_job.total_files,
         dispatch_mode=dispatch_mode,
+        index_generation_id=result_job.index_generation_id,
+        message=f"Retrying {result_job.total_files} eligible files. Successful files remain available.",
     )

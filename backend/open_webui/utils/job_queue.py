@@ -203,6 +203,7 @@ def enqueue_file_processing_job(
     embedding_model_id: Optional[str] = None,
     reliability_policy: Optional[dict] = None,
     job_timeout: int = DEFAULT_JOB_TIMEOUT,
+    indexing_snapshot: Optional[dict] = None,
 ) -> Optional[str]:
     """
     Enqueue a file processing job to the distributed job queue.
@@ -243,7 +244,7 @@ def enqueue_file_processing_job(
     except (TypeError, ValueError) as e:
         log.error(f"Job arguments are not JSON-serializable for file_id={file_id}: {e}")
         return None
-    
+
     import time
     enqueue_start = time.time()
     log.info(f"[JOB_QUEUE] Starting enqueue operation | file_id={file_id} | timestamp={enqueue_start:.3f}")
@@ -255,10 +256,11 @@ def enqueue_file_processing_job(
         if queue is None:
             log.warning(f"[JOB_QUEUE] Job queue unavailable, cannot enqueue file processing for file_id={file_id}")
             return None
-        
+
         # Generate unique job ID per file
-        job_id_str = f"file_processing_{file_id}"
-        
+        generation = (indexing_snapshot or {}).get("index_generation_id", "legacy")
+        job_id_str = f"file_processing_{file_id}_{generation}"
+
         # Check if a job with this ID already exists
         job_fetch_start = time.time()
         try:
@@ -267,7 +269,7 @@ def enqueue_file_processing_job(
             log.info(f"[JOB_QUEUE] Job fetch check | duration={job_fetch_end - job_fetch_start:.3f}s | timestamp={job_fetch_end:.3f}")
             if existing_job:
                 existing_status = existing_job.get_status()
-                
+
                 # If job is queued or started, file is already being processed
                 if existing_status in [JobStatus.QUEUED, JobStatus.STARTED]:
                     enqueue_end = time.time()
@@ -276,7 +278,7 @@ def enqueue_file_processing_job(
                         f"for file_id={file_id}, returning existing job ID | total_duration={enqueue_end - enqueue_start:.3f}s | timestamp={enqueue_end:.3f}"
                     )
                     return existing_job.id
-                
+
                 # If job is finished or failed, we can create a new one
                 # But log it for monitoring
                 log.debug(
@@ -286,14 +288,14 @@ def enqueue_file_processing_job(
         except Exception as fetch_error:
             # Job doesn't exist or fetch failed - this is fine, we'll create a new one
             log.debug(f"Job {job_id_str} does not exist or could not be fetched: {fetch_error}")
-        
+
         # Extract trace context from current span for propagation to worker process
         trace_context = {}
         if OTEL_AVAILABLE and is_otel_enabled():
             try:
                 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
                 from opentelemetry import trace
-                
+
                 # Get current span context
                 current_span = trace.get_current_span()
                 if current_span and current_span.get_span_context().is_valid:
@@ -304,11 +306,12 @@ def enqueue_file_processing_job(
             except Exception as trace_error:
                 log.debug(f"Failed to extract trace context: {trace_error}")
                 trace_context = {}
-        
+
         # Prepare job arguments (serializable data only)
         # Credential-safe: Only pass stable IDs, no credentials
         job_kwargs = {
             "file_id": file_id,
+            "indexing_snapshot": indexing_snapshot,
             "content": content,
             "collection_name": collection_name,
             "knowledge_id": knowledge_id,
@@ -317,11 +320,11 @@ def enqueue_file_processing_job(
             "embedding_model_id": embedding_model_id,  # Frozen model ID for credential-safe resolution
             "reliability_policy": reliability_policy,
         }
-        
+
         # Add trace context to job metadata if available
         if trace_context:
             job_kwargs["_otel_trace_context"] = trace_context
-        
+
         # Create OTEL span for job enqueueing
         # CRITICAL: Use safe_trace_span to ensure OTEL failures never prevent job enqueueing
         with safe_trace_span(
@@ -337,7 +340,7 @@ def enqueue_file_processing_job(
             # Enqueue job with retry logic
             # Import here to avoid circular imports
             from open_webui.workers.file_processor import process_file_job
-        
+
             # Try to enqueue the job
             # RQ may raise an exception if job_id already exists (race condition)
             enqueue_redis_start = time.time()
@@ -375,7 +378,7 @@ def enqueue_file_processing_job(
                             return existing_job.id
                     except Exception as fetch_error:
                         log.warning(f"Failed to fetch existing job {job_id_str}: {fetch_error}")
-                
+
                 # Log error event
                 safe_add_span_event("job.enqueue.failed", {
                     "error.type": type(enqueue_error).__name__,
@@ -390,7 +393,7 @@ def enqueue_file_processing_job(
 
 def enqueue_audio_repair_job(
     *,
-    knowledge_id: str,
+    knowledge_id: str | None,
     file_id: str,
     admin_id: str,
     embedding_model_id: str,
@@ -415,7 +418,7 @@ def enqueue_audio_repair_job(
             "reliability_policy": reliability_policy,
         },
         job_id=job_id,
-        job_timeout=DEFAULT_JOB_TIMEOUT,
+        job_timeout=360,
         result_ttl=JOB_RESULT_TTL,
         failure_ttl=JOB_FAILURE_TTL,
     )

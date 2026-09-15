@@ -43,16 +43,22 @@
 	const retryHandler = async () => {
 		if (!status.job_id || !status.can_retry || retrying) return;
 		const requestedJobId = status.job_id;
+		const requestedCount = status.retry_file_count ?? status.job_failed_document_count;
 		retrying = true;
 		try {
 			await onRefresh();
 			await tick();
-			if (status.job_id !== requestedJobId || !status.can_retry) {
+			if (status.job_id !== requestedJobId || !status.can_retry ||
+				(status.retry_file_count ?? status.job_failed_document_count) !== requestedCount) {
 				toast.info($i18n.t('Indexing status changed. Review the updated status before retrying.'));
 				return;
 			}
-			await retryEmbeddingJob(localStorage.token, requestedJobId);
-			toast.success($i18n.t('Embedding reindex retry queued.'));
+			const result = await retryEmbeddingJob(localStorage.token, requestedJobId);
+			if (result.nothing_to_retry) {
+				toast.info($i18n.t('Nothing to retry. Successful files remain available.'));
+			} else {
+				toast.success($i18n.t('Retry queued for {{count}} files. Successful files remain available.', { count: result.total_files }));
+			}
 		} catch (error) {
 			const errorCode = getErrorCode(error);
 			if (
@@ -62,7 +68,7 @@
 				toast.info($i18n.t('Indexing is already queued or in progress.'));
 			} else if (errorCode === 'embedding_reindex_source_changed') {
 				toast.warning(
-					$i18n.t('The indexed files changed. Start a fresh reindex by selecting the model again.')
+					$i18n.t('The indexing operation changed. Refresh the status before retrying.')
 				);
 			} else if (getHttpStatus(error) === 409) {
 				toast.warning(
@@ -95,9 +101,10 @@
 <ConfirmDialog
 	bind:show={showRetryConfirm}
 	title={$i18n.t(status.retry_kind === 'indexing_operation' ? 'Retry indexing?' : 'Retry failed documents?')}
-	message={$i18n.t(
-		'This retries every eligible failed document in this administrator-wide model-change job. Retry cannot be limited to one knowledge base and may also affect chat uploads.'
-	)}
+	message={$i18n.t(status.retry_kind === 'indexing_operation'
+		? 'Resume the {{count}} files in the original queued inventory. Successful files remain available.'
+		: 'Retry {{count}} eligible failed files using their current contents. Successful files remain available and will not be reindexed.',
+		{ count: status.retry_file_count ?? status.job_failed_document_count })}
 	confirmLabel={$i18n.t(
 		status.retry_kind === 'indexing_operation' ? 'Retry indexing' : 'Retry failed documents'
 	)}
@@ -130,7 +137,7 @@
 					? 'mt-1 text-sm font-medium text-gray-700 dark:text-gray-200'
 					: 'mt-0.5 text-xs text-gray-500 dark:text-gray-400'}
 			>
-				{status.job_display_state === 'partial'
+				{(status.generation_progress?.processed ?? 0) > 0
 					? $i18n.t('Completed sources are available; failed sources remain unavailable')
 					: status.retrieval_available
 					? $i18n.t('Available for Retrieval')
@@ -168,7 +175,7 @@
 					</div>
 				{/if}
 				<p class="mt-1 text-gray-500 dark:text-gray-400">
-					{$i18n.t('The selected model becomes active after every required file indexes successfully.')}
+					{$i18n.t('The selected model becomes active when the first file is indexed successfully.')}
 				</p>
 			{:else if status.active_model}
 				<div class="mt-0.5 text-gray-500 dark:text-gray-400">
@@ -203,7 +210,7 @@
 
 	<div class="mt-3 rounded-xl bg-gray-50 p-3 dark:bg-gray-850">
 		<div class="flex items-center justify-between gap-2 text-xs">
-			<span class="text-sm font-semibold text-gray-900 dark:text-gray-100">{$i18n.t('Reindex Progress')}</span>
+			<span class="text-sm font-semibold text-gray-900 dark:text-gray-100">{$i18n.t(status.job_type === 'retry_failed' ? 'Retry attempt progress' : 'Reindex Progress')}</span>
 			<span class="text-gray-500 dark:text-gray-400">
 				{progressValue(status.job_progress)}/{status.job_progress.total}
 			</span>
@@ -222,6 +229,13 @@
 					style:width={`${progressPercent(status.job_progress)}%`}
 				/>
 			</div>
+		{/if}
+		{#if status.generation_progress}
+			<p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
+				{$i18n.t('Overall index coverage: {{ready}} of {{total}} files available.', {
+					ready: status.generation_progress.processed, total: status.generation_progress.total
+				})}
+			</p>
 		{/if}
 		<p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
 			{$i18n.t('Completed')}: {status.job_progress.processed} · {$i18n.t('Incompatible')}: {status

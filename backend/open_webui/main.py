@@ -8,6 +8,7 @@ import shutil
 import sys
 import time
 import random
+import uuid
 
 from contextlib import asynccontextmanager
 from urllib.parse import urlencode, parse_qs, urlparse
@@ -526,7 +527,7 @@ def ensure_chat_group_id_column():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     start_logger()
-    
+
     # Initialize OpenTelemetry SDK (Phase 1)
     otel_initialized = False
     try:
@@ -539,7 +540,7 @@ async def lifespan(app: FastAPI):
         otel_initialized = initialize_otel()
         if otel_initialized:
             log.info("OpenTelemetry SDK initialized successfully")
-            
+
             # Instrument FastAPI (after app is created)
             try:
                 fastapi_instrumented = instrument_fastapi(app)
@@ -547,7 +548,7 @@ async def lifespan(app: FastAPI):
                     log.info("FastAPI auto-instrumentation enabled")
             except Exception as e:
                 log.warning(f"FastAPI instrumentation failed: {e}", exc_info=True)
-            
+
             # Instrument requests library
             try:
                 requests_instrumented = instrument_requests()
@@ -560,7 +561,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         # Don't crash if OTEL fails - log and continue
         log.warning(f"OpenTelemetry initialization failed: {e}", exc_info=True)
-    
+
     if RESET_CONFIG_ON_START:
         reset_config()
 
@@ -593,7 +594,7 @@ async def lifespan(app: FastAPI):
     ensure_chat_group_id_column()
     # Cross-pod models cache invalidation via Redis pub/sub
     start_models_cache_invalidation_listener(app)
-    # Cache KaTeX TTF fonts locally once on startup 
+    # Cache KaTeX TTF fonts locally once on startup
     try:
         compiler = KaTeXCompiler()
         node_katex_dist = compiler.node_modules_path / 'katex' / 'dist'
@@ -618,9 +619,21 @@ async def lifespan(app: FastAPI):
                 log.warning(f"Failed to copy KaTeX fonts from node_modules: {e}")
     except Exception as e:
         log.debug(f"KaTeX font cache init failed: {e}")
-    
-    yield
-    
+
+    from open_webui.retrieval.reconstruction import ReconstructionExecutor
+    from open_webui.retrieval.embedding.audio_repair import (
+        start_audio_repair_reconciliation,
+        stop_audio_repair_reconciliation,
+    )
+
+    app.state.reconstruction_executor = ReconstructionExecutor()
+    start_audio_repair_reconciliation(app.state.config)
+    try:
+        yield
+    finally:
+        stop_audio_repair_reconciliation()
+        await app.state.reconstruction_executor.shutdown()
+
     # Shutdown OpenTelemetry (flush remaining spans/metrics)
     if otel_initialized:
         try:
@@ -1352,6 +1365,8 @@ async def chat_completion(
             request, form_data, metadata, user, model
         )
 
+    except HTTPException:
+        raise
     except Exception as error:
         log.debug(
             "Chat payload processing failed | model=%s | error_type=%s",
@@ -1365,7 +1380,72 @@ async def chat_completion(
 
     try:
         log.debug("Calling the chat completion handler...")
-        response = await chat_completion_handler(request, form_data, user)
+        retrieval_model_space = getattr(request.state, "retrieval_model_space", None)
+        if retrieval_model_space is not None:
+            from open_webui.retrieval.embedding.errors import EmbeddingError
+            from open_webui.retrieval.embedding.gate import (
+                assert_retrieval_generation_current,
+            )
+            from open_webui.retrieval.chat_errors import evidence_error, retrieval_error
+
+            try:
+                await asyncio.to_thread(
+                    assert_retrieval_generation_current, retrieval_model_space
+                )
+            except EmbeddingError as error:
+                raise retrieval_error(error) from None
+            except Exception:
+                raise evidence_error(
+                    503,
+                    "retrieval_unavailable",
+                    "The current index could not be verified. Please retry your message.",
+                    retryable=True,
+                ) from None
+        if metadata.get("retrieval_no_match"):
+            response = {
+                "id": f"chatcmpl-{uuid.uuid4()}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": form_data.get("model"),
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "No matching evidence was found in the requested sources. Try a more specific question or select different sources.",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "retrieval": {"status": "no_match"},
+            }
+            if form_data.get("stream"):
+                no_match_response = response
+
+                async def no_match_stream():
+                    chunk = {
+                        **no_match_response,
+                        "object": "chat.completion.chunk",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": no_match_response["choices"][0]["message"],
+                                "finish_reason": None,
+                            }
+                        ],
+                    }
+                    yield f"data: {json.dumps(chunk)}\n\n"
+                    chunk["choices"] = [
+                        {"index": 0, "delta": {}, "finish_reason": "stop"}
+                    ]
+                    yield f"data: {json.dumps(chunk)}\n\n"
+                    yield "data: [DONE]\n\n"
+
+                response = StreamingResponse(
+                    no_match_stream(), media_type="text/event-stream"
+                )
+        else:
+            response = await chat_completion_handler(request, form_data, user)
         messages = form_data.get("messages")
         message_count = len(messages) if isinstance(messages, list) else 0
         log.debug(
@@ -1378,6 +1458,8 @@ async def chat_completion(
         return await process_chat_response(
             request, response, form_data, user, events, metadata, tasks
         )
+    except HTTPException:
+        raise
     except Exception as error:
         log.debug(
             "Chat completion failed | model=%s | error_type=%s",

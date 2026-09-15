@@ -94,7 +94,9 @@
 			(item) =>
 				!item?.meta?.document &&
 				(indexingStatuses[item.id]?.job_status === 'queued' ||
-					indexingStatuses[item.id]?.job_status === 'processing')
+					indexingStatuses[item.id]?.job_status === 'processing' ||
+					indexingStatuses[item.id]?.availability === 'partial' ||
+					indexingStatuses[item.id]?.retrieval_available === false)
 		);
 
 	const stopIndexingPolling = () => {

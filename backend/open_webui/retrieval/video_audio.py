@@ -13,9 +13,14 @@ from pathlib import Path
 from typing import Sequence
 
 from open_webui.retrieval.embedding.errors import (
+    EmbeddingError,
     VIDEO_AUDIO_ABSENT,
     VIDEO_AUDIO_EXTRACTION_FAILED,
     VIDEO_AUDIO_FALLBACK_VISUAL_ONLY,
+)
+from open_webui.retrieval.embedding.execution_budget import (
+    capped_timeout,
+    remaining_seconds,
 )
 from open_webui.utils.otel_instrumentation import add_metric_counter, add_span_event
 
@@ -68,6 +73,7 @@ def prepare_video_audio(
     """
 
     normalized_windows = _validate_windows(windows)
+    remaining_seconds()
     if not normalized_windows:
         return VideoAudioResult(segments=(), warnings=())
 
@@ -94,6 +100,12 @@ def prepare_video_audio(
                 extraction_outcome="succeeded",
             )
     except Exception as error:
+        if (
+            isinstance(error, EmbeddingError)
+            and error.failure_reason == "budget_exhausted"
+        ):
+            raise
+        remaining_seconds()
         add_span_event(
             "retrieval.video.audio.extraction_failed",
             {
@@ -154,7 +166,7 @@ def _has_audio_stream(source_path: Path) -> bool:
         ],
         capture_output=True,
         check=False,
-        timeout=_AUDIO_PROBE_TIMEOUT_SECONDS,
+        timeout=capped_timeout(_AUDIO_PROBE_TIMEOUT_SECONDS),
     )
     if result.returncode != 0:
         raise OSError("video audio stream inspection failed")
@@ -191,7 +203,7 @@ def _transcode_audio_wav(source_path: Path, wav_path: Path) -> bytes:
         ],
         capture_output=True,
         check=False,
-        timeout=_AUDIO_EXTRACTION_TIMEOUT_SECONDS,
+        timeout=capped_timeout(_AUDIO_EXTRACTION_TIMEOUT_SECONDS),
     )
     if result.returncode != 0 or not wav_path.is_file():
         raise OSError("video audio extraction failed")
@@ -227,6 +239,7 @@ def _slice_wav(
     frame_count = len(pcm_bytes) // frame_width
     segments = []
     for window in windows:
+        remaining_seconds()
         start_frame = max(0, int(round(window.start_seconds * AUDIO_SAMPLE_RATE)))
         end_frame = max(
             start_frame + 1,

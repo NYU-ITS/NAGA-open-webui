@@ -374,11 +374,17 @@ export const generateOpenAIChatCompletion = async (
 		body: JSON.stringify(body)
 	})
 		.then(async (res) => {
-			if (!res.ok) throw await res.json();
+			if (!res.ok) {
+				const payload = await res.json();
+				const detail = payload?.detail ?? payload;
+				throw Object.assign(new Error(
+					typeof detail === 'string' ? detail : detail?.message ?? 'Source retrieval failed. Please retry.'
+				), { detail, status: res.status });
+			}
 			return res.json();
 		})
 		.catch((err) => {
-			error = `${err?.detail ?? err}`;
+			error = err;
 			return null;
 		});
 

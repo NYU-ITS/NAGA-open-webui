@@ -2,9 +2,9 @@
 
 This module owns the normal file-ingestion transaction boundary used by both
 FastAPI background tasks and RQ workers. It resolves the frozen execution
-context, prepares every text/image/video/audio chunk, embeds visual and text
-inputs atomically while isolating audio failures, persists the successful chunk
-rows, and atomically reconciles all requested vector projections. No caller is
+context, prepares and embeds required text/image/video chunks, publishes their
+vectors atomically, and leaves optional audio descriptors for independent repair
+execution. No caller is
 allowed to rebuild parallel text, modality, hash, or metadata lists independently.
 """
 
@@ -16,18 +16,15 @@ import os
 import time
 import uuid
 from dataclasses import dataclass, replace
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from open_webui.internal.db import get_db
-from open_webui.models.embeddings import RagChunk
 from open_webui.models.files import File, Files
 from open_webui.models.knowledge import Knowledge
-from open_webui.models.users import User, Users
+from open_webui.models.users import Users
 from open_webui.retrieval.embedding.errors import (
     EMBEDDING_FILE_NOT_FOUND,
     FILE_PROCESSING_FAILED,
-    VIDEO_AUDIO_EMBEDDING_FAILED,
-    VIDEO_AUDIO_FALLBACK_VISUAL_ONLY,
     EmbeddingError,
     safe_file_processing_error_message,
 )
@@ -35,8 +32,6 @@ from open_webui.retrieval.embedding.preparation import (
     PreparationRecipe,
     PreparedChunk,
     PreparedFile,
-    build_preparation_recipe,
-    build_persisted_chunks,
     prepare_file_for_embedding,
 )
 from open_webui.retrieval.embedding.inputs import AudioEmbeddingInput
@@ -45,13 +40,11 @@ from open_webui.retrieval.embedding.reliability import (
     snapshot_reliability_policy,
 )
 from open_webui.retrieval.embedding.resolution import (
-    resolve_admin_for_knowledge,
     resolve_frozen,
 )
 from open_webui.retrieval.embedding.service import EmbeddingService
 from open_webui.retrieval.vector.model_aware import ModelAwareVectorRepository
 from open_webui.storage.provider import Storage
-from open_webui.utils.otel_instrumentation import add_metric_counter, add_span_event
 from open_webui.retrieval.video_audio import split_pcm_wav
 
 
@@ -85,237 +78,75 @@ def embed_prepared_file_best_effort_audio(
     admin_id: str,
     embedding_model_id: str,
     preparation_recipe: PreparationRecipe | None = None,
+    index_generation_id: str | None = None,
 ) -> tuple[PreparedFile, tuple[tuple[float, ...], ...]]:
-    """Embed a file, adaptively bisecting only timeout/oversize audio chunks."""
+    """Embed required evidence and durably describe optional audio for later work."""
 
-    vectors_by_index: dict[int, tuple[float, ...]] = {}
-    non_audio = [
-        (index, chunk)
-        for index, chunk in enumerate(prepared.chunks)
-        if chunk.modality != "audio"
-    ]
-    if non_audio:
-        batch = embedding_service.embed_for_frozen_context(
-            inputs=tuple(chunk.embedding_input for _, chunk in non_audio),
+    required = tuple(chunk for chunk in prepared.chunks if chunk.modality != "audio")
+    batch = (
+        embedding_service.embed_for_frozen_context(
+            inputs=tuple(chunk.embedding_input for chunk in required),
             admin_id=admin_id,
             embedding_model_id=embedding_model_id,
         )
-        vectors_by_index.update(
-            (index, vector)
-            for (index, _), vector in zip(non_audio, batch.vectors)
-        )
-
-    retained: list[tuple[int, PreparedChunk, tuple[float, ...]]] = [
-        (index, chunk, vectors_by_index[index]) for index, chunk in non_audio
-    ]
-    failed_audio: list[dict[str, Any]] = []
-    audio_chunks = [
-        (index, chunk)
-        for index, chunk in enumerate(prepared.chunks)
-        if chunk.modality == "audio"
-    ]
-    audio_leaf_count = 0
-    for index, chunk in audio_chunks:
-        successes, failures = _embed_audio_chunk_with_splitting(
-            chunk=chunk,
-            embedding_service=embedding_service,
-            admin_id=admin_id,
-            embedding_model_id=embedding_model_id,
-            split_depth=0,
-            split_path="",
-        )
-        audio_leaf_count += len(successes) + len(failures)
-        retained.extend((index, child, vector) for child, vector in successes)
-        failed_audio.extend(failures)
-
-    # Stable ordering keeps non-audio/audio siblings at their original temporal
-    # position while split children retain left-to-right order.
-    retained.sort(
-        key=lambda item: (
-            item[0],
-            float(item[1].chunk_metadata.get("segment_start_s", 0)),
-            str(item[1].chunk_metadata.get("audio_split_path", "")),
-        )
+        if required
+        else None
     )
-    retained_chunks = tuple(item[1] for item in retained)
-    retained_vectors = tuple(item[2] for item in retained)
-    failed_audio_count = len(failed_audio)
     now = int(time.time())
-    total_audio = audio_leaf_count if audio_chunks else 0
-    embedded_audio = total_audio - failed_audio_count
-    audio_summary = {
-        "status": (
-            "not_applicable"
-            if not audio_chunks
-            else "degraded" if failed_audio_count else "complete"
-        ),
-        "total_chunks": total_audio,
-        "embedded_chunks": embedded_audio,
-        "failed_chunks": failed_audio_count,
-        "repairable": bool(failed_audio),
-        "updated_at": now,
-    }
-    repair_state: dict[str, Any] = {}
-    if failed_audio:
-        add_metric_counter(
-            "retrieval.video.audio_degraded_files",
-            {"failed_chunks": failed_audio_count},
+    pending = list(prepared.audio_repair_state.get("failed_chunks") or [])
+    for chunk in prepared.chunks:
+        if chunk.modality != "audio":
+            continue
+        metadata = chunk.chunk_metadata
+        pending.append(
+            {
+                "chunk_index": metadata.get("chunkIndex"),
+                "start_seconds": metadata.get("segment_start_s"),
+                "end_seconds": metadata.get("segment_end_s"),
+                "audio_sha256": chunk.content_sha256,
+                "split_depth": 0,
+                "split_path": "",
+                "failure_reason": "pending",
+            }
         )
-        warnings = [*prepared.warnings, VIDEO_AUDIO_EMBEDDING_FAILED]
-        if embedded_audio == 0:
-            warnings.append(VIDEO_AUDIO_FALLBACK_VISUAL_ONLY)
-            add_metric_counter("retrieval.video.audio_fallback_visual_only")
-        visual_summary = {
-            **dict(prepared.visual_summary),
-            "audio_chunk_count": embedded_audio,
-        }
-        first_audio_metadata = dict(audio_chunks[0][1].chunk_metadata)
-        repair_state = {
-            "schema_version": 1,
+    state = {}
+    if pending:
+        state = {
+            **dict(prepared.audio_repair_state),
+            "schema_version": 2,
+            "admin_id": admin_id,
+            "index_generation_id": index_generation_id,
             "source_sha256": prepared.source_sha256,
             "embedding_model_id": embedding_model_id,
             "extraction_version": prepared.extraction_version,
-            "audio_extraction_version": first_audio_metadata.get(
-                "audio_extraction_version"
-            ),
-            "audio_chunking_version": first_audio_metadata.get("chunking_version"),
-            "failed_chunks": failed_audio,
-            "total_chunks": total_audio,
-            "embedded_chunks": embedded_audio,
+            "failed_chunks": pending,
+            "total_chunks": len(pending),
+            "embedded_chunks": 0,
+            "phase": "queued",
             "created_at": now,
             "updated_at": now,
+            "reliability_policy": embedding_service.reliability_policy.to_dict(),
             **(
                 {"preparation_recipe": preparation_recipe.to_dict()}
                 if preparation_recipe is not None
                 else {}
             ),
         }
-        prepared = replace(
-            prepared,
-            chunks=retained_chunks,
-            warnings=tuple(dict.fromkeys(warnings)),
-            visual_summary=visual_summary,
-            audio_embedding=audio_summary,
-            audio_repair_state=repair_state,
-        )
-    else:
-        prepared = replace(
-            prepared,
-            chunks=retained_chunks,
-            audio_embedding=audio_summary,
-            audio_repair_state={},
-        )
-
-    return prepared, retained_vectors
-
-
-def _embed_audio_chunk_with_splitting(
-    *,
-    chunk: PreparedChunk,
-    embedding_service: EmbeddingService,
-    admin_id: str,
-    embedding_model_id: str,
-    split_depth: int,
-    split_path: str,
-    heartbeat: Callable[[], None] | None = None,
-) -> tuple[
-    list[tuple[PreparedChunk, tuple[float, ...]]],
-    list[dict[str, Any]],
-]:
-    try:
-        if heartbeat is not None:
-            heartbeat()
-        batch = embedding_service.embed_for_frozen_context(
-            inputs=(chunk.embedding_input,),
-            admin_id=admin_id,
-            embedding_model_id=embedding_model_id,
-            call_context={
-                **({"operation": "split"} if split_depth else {}),
-                "chunk_index": chunk.chunk_metadata.get("chunkIndex"),
-                "start_offset_seconds": chunk.chunk_metadata.get("segment_start_s"),
-                "end_offset_seconds": chunk.chunk_metadata.get("segment_end_s"),
-                "split_depth": split_depth,
-            },
-        )
-        return [(chunk, batch.vectors[0])], []
-    except Exception as error:
-        failure_reason = (
-            error.failure_reason
-            if isinstance(error, EmbeddingError)
-            else "provider_failure"
-        )
-        metadata = dict(chunk.chunk_metadata)
-        duration = float(metadata.get("segment_end_s", 0)) - float(
-            metadata.get("segment_start_s", 0)
-        )
-        policy = embedding_service.reliability_policy
-        can_split = (
-            failure_reason in {"timeout", "payload_too_large"}
-            and split_depth < policy.audio_split_max_depth
-            and duration >= 2 * policy.audio_split_min_duration_seconds
-        )
-        if can_split:
-            try:
-                children = _split_audio_prepared_chunk(
-                    chunk,
-                    split_depth=split_depth,
-                    split_path=split_path,
-                )
-            except (TypeError, ValueError):
-                children = ()
-            if children:
-                add_metric_counter(
-                    "retrieval.video.audio_adaptive_splits",
-                    {"reason": failure_reason, "depth": split_depth + 1},
-                )
-                successes: list[tuple[PreparedChunk, tuple[float, ...]]] = []
-                failures: list[dict[str, Any]] = []
-                for child_index, child in enumerate(children):
-                    child_successes, child_failures = _embed_audio_chunk_with_splitting(
-                        chunk=child,
-                        embedding_service=embedding_service,
-                        admin_id=admin_id,
-                        embedding_model_id=embedding_model_id,
-                        split_depth=split_depth + 1,
-                        split_path=f"{split_path}{child_index}",
-                        heartbeat=heartbeat,
-                    )
-                    successes.extend(child_successes)
-                    failures.extend(child_failures)
-                return successes, failures
-
-        add_metric_counter(
-            "retrieval.video.audio_embedding_failures",
-            {"reason": failure_reason, "split_depth": split_depth},
-        )
-        add_span_event(
-            "retrieval.video.audio.embedding_failed",
-            {
-                "error.type": type(error).__name__,
-                "failure.reason": failure_reason,
-                "embedding.model_id": embedding_model_id,
-                "audio.split_depth": split_depth,
-            },
-        )
-        log.warning(
-            "Video audio embedding failed; retaining other chunks | "
-            "model_id=%s reason=%s split_depth=%s",
-            embedding_model_id,
-            failure_reason,
-            split_depth,
-        )
-        return [], [
-            {
-                "chunk_index": metadata.get("chunkIndex"),
-                "start_seconds": metadata.get("segment_start_s"),
-                "end_seconds": metadata.get("segment_end_s"),
-                "audio_sha256": chunk.content_sha256,
-                "split_depth": split_depth,
-                "split_path": split_path,
-                "failure_reason": failure_reason,
-                "failed_at": int(time.time()),
-            }
-        ]
+    return replace(
+        prepared,
+        chunks=required,
+        visual_summary={**dict(prepared.visual_summary), "audio_chunk_count": 0},
+        audio_embedding={
+            "status": "queued" if pending else "not_applicable",
+            "total_chunks": len(pending),
+            "embedded_chunks": 0,
+            "failed_chunks": 0,
+            "pending_chunks": len(pending),
+            "repairable": False,
+            "updated_at": now,
+        },
+        audio_repair_state=state,
+    ), (tuple(batch.vectors) if batch is not None else ())
 
 
 def _split_audio_prepared_chunk(
@@ -524,217 +355,119 @@ def process_stored_file_for_embedding(
     knowledge_id: str | None = None,
     collection_name: str | None = None,
     reliability_policy: Mapping[str, Any] | None = None,
+    indexing_snapshot: dict | None = None,
 ) -> FileProcessingResult:
-    """Prepare and index one stored file using a frozen admin/model context.
-
-    Provider calls and validation finish before ``rag_chunks`` or vectors are
-    changed. File and optional knowledge projections are reconciled together;
-    an error cannot activate only a prefix of a multimodal PDF manifest.
-    """
+    """Prepare required evidence and publish it in one fenced transaction."""
+    from open_webui.retrieval.embedding.publication import (
+        freeze_file_indexing,
+        claim_required_indexing,
+        publish_prepared_file,
+        release_required_indexing,
+    )
+    from open_webui.retrieval.embedding.preparation import (
+        preparation_recipe_from_snapshot,
+    )
 
     call_id = str(uuid.uuid4())
-    started_at = time.monotonic()
-    _mark_processing(file_id)
+    owner_token = None
+    snapshot = indexing_snapshot or freeze_file_indexing(
+        config=config,
+        file_id=file_id,
+        admin_id=admin_id,
+        embedding_model_id=embedding_model_id,
+    )
     try:
+        owner_token = claim_required_indexing(
+            admin_id=admin_id,
+            model_id=embedding_model_id,
+            snapshot=snapshot,
+        )
         file = Files.get_file_by_id(file_id)
         if file is None:
             raise EmbeddingError(EMBEDDING_FILE_NOT_FOUND)
-
         context = resolve_frozen(admin_id, embedding_model_id)
         admin = Users.get_user_by_id(context.admin_id)
         if admin is None or not admin.email:
             raise EmbeddingError(FILE_PROCESSING_FAILED)
-        resolved_path, source_bytes = _read_source(file.path)
-        content_provenance = resolve_authoritative_content_provenance(
-            file,
-            source_bytes,
-        )
-        content_type = str((file.meta or {}).get("content_type") or "") or None
-        requested_knowledge_id = _effective_knowledge_id(
-            file_id=file.id,
-            knowledge_id=knowledge_id,
-            collection_name=collection_name,
-        )
-        knowledge_ids = _resolve_knowledge_projection_ids(
-            file_id=file.id,
-            admin_id=admin_id,
-            requested_knowledge_id=requested_knowledge_id,
-        )
-
-        preparation_recipe = build_preparation_recipe(config, admin.email)
-        frozen_reliability = (
+        path, source_bytes = _read_source(file.path)
+        provenance = resolve_authoritative_content_provenance(file, source_bytes)
+        recipe = preparation_recipe_from_snapshot(snapshot)
+        policy = (
             EmbeddingReliabilityPolicy.from_dict(reliability_policy)
             if reliability_policy is not None
             else snapshot_reliability_policy(config)
         )
-
         prepared = prepare_file_for_embedding(
             source_bytes=source_bytes,
-            source_path=resolved_path,
+            source_path=path,
             filename=file.filename,
-            content_type=content_type,
+            content_type=str((file.meta or {}).get("content_type") or "") or None,
             file_id=file.id,
             created_by=file.user_id,
             model=context.model,
             config=config,
             admin_email=admin.email,
-            preparation_recipe=preparation_recipe,
-            content_override=content_provenance.content_override,
+            preparation_recipe=recipe,
+            content_override=provenance.content_override,
+            defer_audio=True,
         )
-        if not prepared.chunks:
-            raise EmbeddingError(FILE_PROCESSING_FAILED)
-
-        # Visual/text embeddings remain atomic. Audio siblings are embedded one
-        # at a time so a provider failure can drop only that transient input.
         prepared, vectors = embed_prepared_file_best_effort_audio(
             prepared=prepared,
             embedding_service=EmbeddingService(
                 config,
-                reliability_policy=frozen_reliability,
+                reliability_policy=policy,
                 call_context={
                     "call_id": call_id,
                     "operation": "initial",
-                    "file_id": file.id,
-                    "knowledge_id": requested_knowledge_id,
+                    "file_id": file_id,
                 },
             ),
             admin_id=admin_id,
             embedding_model_id=embedding_model_id,
-            preparation_recipe=preparation_recipe,
+            preparation_recipe=recipe,
+            index_generation_id=snapshot["index_generation_id"],
         )
-        if not prepared.chunks or len(vectors) != len(prepared.chunks):
-            raise EmbeddingError(FILE_PROCESSING_FAILED)
-
-        # Membership may change while provider calls are in flight. Re-read it
-        # before writing any chunks or vectors so removed knowledge bases never
-        # receive a stale/orphaned projection.
-        knowledge_ids = _resolve_knowledge_projection_ids(
-            file_id=file.id,
+        collections = publish_prepared_file(
             admin_id=admin_id,
-            requested_knowledge_id=requested_knowledge_id,
-        )
-
-        persisted_chunks = build_persisted_chunks(
-            prepared,
-            admin_id=admin_id,
-            file_id=file.id,
-        )
-        chunk_metadata = [chunk["chunk_metadata"] for chunk in persisted_chunks]
-        manifest_id = RagChunk.build_manifest_id(
-            persisted_chunks,
-            source_sha256=prepared.source_sha256,
-            extraction_version=prepared.extraction_version,
-        )
-        file_collection = f"file-{file.id}"
-        vector_repo = ModelAwareVectorRepository()
-        warnings = tuple(
-            dict.fromkeys(str(value) for value in prepared.warnings if value)
-        )
-        visual_summary = {
-            str(key): int(value)
-            for key, value in dict(prepared.visual_summary).items()
-        }
-        with get_db() as db:
-            locked_file = (
-                db.query(File).filter(File.id == file.id).with_for_update().first()
-            )
-            if locked_file is None:
-                raise EmbeddingError(FILE_PROCESSING_FAILED)
-            current_path, current_bytes = _read_source(locked_file.path)
-            if (
-                current_path != resolved_path
-                or hashlib.sha256(current_bytes).hexdigest()
-                != prepared.source_sha256
-                or resolve_authoritative_content_provenance(
-                    locked_file,
-                    current_bytes,
-                )
-                != content_provenance
-            ):
-                raise EmbeddingError(FILE_PROCESSING_FAILED)
-            knowledge_ids = _resolve_knowledge_projection_ids(
-                file_id=file.id,
-                admin_id=admin_id,
-                requested_knowledge_id=requested_knowledge_id,
-                db=db,
-            )
-            rag_chunk_ids = RagChunk.insert_chunks(
-                admin_id,
-                file.id,
-                persisted_chunks,
-                manifest_id=manifest_id,
-                db=db,
-            )
-            if len(rag_chunk_ids) != len(prepared.chunks):
-                raise EmbeddingError(FILE_PROCESSING_FAILED)
-            file_items = _make_vector_items(
-                vector_repo=vector_repo,
-                chunks=prepared.chunks,
-                vectors=vectors,
-                metadata=chunk_metadata,
-                rag_chunk_ids=rag_chunk_ids,
-                admin_id=admin_id,
-                model=context.model,
-                file_id=file.id,
-                knowledge_id=None,
-            )
-            projections: list[tuple[str, Sequence[dict]]] = [
-                (file_collection, file_items)
-            ]
-            for effective_knowledge_id in knowledge_ids:
-                knowledge_metadata = [
-                    {**metadata, "knowledge_id": effective_knowledge_id}
-                    for metadata in chunk_metadata
-                ]
-                knowledge_items = _make_vector_items(
-                    vector_repo=vector_repo,
-                    chunks=prepared.chunks,
-                    vectors=vectors,
-                    metadata=knowledge_metadata,
-                    rag_chunk_ids=rag_chunk_ids,
-                    admin_id=admin_id,
-                    model=context.model,
-                    file_id=file.id,
-                    knowledge_id=effective_knowledge_id,
-                )
-                projections.append((effective_knowledge_id, knowledge_items))
-            vector_repo.reconcile_model_aware_many(
-                projections=projections,
-                model=context.model,
-                session=db,
-            )
-            _apply_completed_file_state(
-                row=locked_file,
-                extracted_text=prepared.text_content,
-                source_sha256=prepared.source_sha256,
-                extraction_version=prepared.extraction_version,
-                manifest_id=manifest_id,
-                processing_warnings=warnings,
-                visual_summary=visual_summary,
-                audio_embedding=prepared.audio_embedding,
-                audio_repair_state=prepared.audio_repair_state,
-                collection_name=file_collection,
-            )
-            db.commit()
-        log.info(
-            "embedding_file_outcome call_id=%s provider=%s model_id=%s "
-            "operation=initial file_id=%s status=completed audio_status=%s chunks=%s "
-            "elapsed_seconds=%.3f",
-            call_id,
-            context.model.provider,
-            embedding_model_id,
-            file_id,
-            prepared.audio_embedding.get("status", "not_applicable"),
-            len(prepared.chunks),
-            time.monotonic() - started_at,
-        )
-        return FileProcessingResult(
-            file_id=file.id,
-            collection_names=tuple(name for name, _ in projections),
-            chunk_count=len(prepared.chunks),
-            text_chunk_count=sum(
-                chunk.modality == "text" for chunk in prepared.chunks
+            model=context.model,
+            snapshot=snapshot,
+            prepared=prepared,
+            vectors=vectors,
+            owner_token=owner_token,
+            requested_knowledge_id=_effective_knowledge_id(
+                file_id=file_id,
+                knowledge_id=knowledge_id,
+                collection_name=collection_name,
             ),
+        )
+        release_required_indexing(file_id, owner_token)
+        owner_token = None
+        # Publication is already committed. A dispatch failure is recoverable
+        # through the durable queued descriptors and never fails required work.
+        try:
+            from open_webui.retrieval.embedding.audio_repair import (
+                dispatch_pending_audio,
+            )
+
+            dispatch_pending_audio(
+                config=config,
+                file_id=file_id,
+                admin_id=admin_id,
+                embedding_model_id=embedding_model_id,
+                reliability_policy=policy.to_dict(),
+                knowledge_id=knowledge_id,
+            )
+        except Exception as error:
+            log.warning(
+                "initial_audio_dispatch_pending file_id=%s type=%s",
+                file_id,
+                type(error).__name__,
+            )
+        return FileProcessingResult(
+            file_id=file_id,
+            collection_names=collections,
+            chunk_count=len(prepared.chunks),
+            text_chunk_count=sum(chunk.modality == "text" for chunk in prepared.chunks),
             image_chunk_count=sum(
                 chunk.modality == "image" for chunk in prepared.chunks
             ),
@@ -746,23 +479,36 @@ def process_stored_file_for_embedding(
             ),
             source_sha256=prepared.source_sha256,
             extraction_version=prepared.extraction_version,
-            processing_warnings=warnings,
-            visual_summary=visual_summary,
+            processing_warnings=tuple(dict.fromkeys(prepared.warnings)),
+            visual_summary=dict(prepared.visual_summary),
             audio_embedding=dict(prepared.audio_embedding),
         )
     except Exception as error:
-        code = _safe_error_code(error)
-        _mark_failed(file_id, code)
-        log.error(
-            "embedding_file_outcome call_id=%s operation=initial file_id=%s "
-            "status=failed code=%s type=%s elapsed_seconds=%.3f",
-            call_id,
-            file_id,
-            code,
-            type(error).__name__,
-            time.monotonic() - started_at,
-        )
+        # An obsolete worker must never overwrite a newer publication's state.
+        if owner_token is not None:
+            with get_db() as db:
+                row = db.query(File).filter_by(id=file_id).with_for_update().first()
+                if row is not None:
+                    meta = dict(row.meta or {})
+                    if (meta.get("required_indexing") or {}).get(
+                        "token"
+                    ) == owner_token:
+                        code = _safe_error_code(error)
+                        meta.pop("required_indexing", None)
+                        if meta.get("processing_status") != "completed":
+                            meta.update(
+                                processing_status="error",
+                                processing_error_code=code,
+                                processing_error=safe_file_processing_error_message(
+                                    code
+                                ),
+                            )
+                        row.meta = meta
+                        db.commit()
         raise
+    finally:
+        if owner_token is not None:
+            release_required_indexing(file_id, owner_token)
 
 
 def _read_source(source_path: str | None) -> tuple[str, bytes]:
@@ -893,29 +639,16 @@ def _resolve_knowledge_projection_ids(
 
         if not knowledge_ids:
             return
-        owner_ids = {
-            row.user_id for row in knowledge_rows if str(row.id) in knowledge_ids
-        }
-        owners = {
-            row.id: row
-            for row in session.query(User).filter(User.id.in_(owner_ids)).all()
-        }
+        from open_webui.retrieval.embedding.inventory import (
+            build_reindex_admin_resolver,
+        )
+
+        resolver = build_reindex_admin_resolver(session)
         for row in knowledge_rows:
-            if str(row.id) not in knowledge_ids:
-                continue
-            owner = owners.get(row.user_id)
-            if owner is None:
-                raise EmbeddingError(FILE_PROCESSING_FAILED)
-            if owner.role == "admin":
-                governing_admin_id = owner.id
-            else:
-                # Non-admin ownership inherits through the existing stable-ID
-                # resolver. The locked Knowledge row still protects membership.
-                governing_admin_id = resolve_admin_for_knowledge(
-                    str(row.id),
-                    requesting_user_id=admin_id,
-                ).id
-            if governing_admin_id != admin_id:
+            if (
+                str(row.id) in knowledge_ids
+                and resolver.resolve_knowledge(row) != admin_id
+            ):
                 raise EmbeddingError(FILE_PROCESSING_FAILED)
 
     if db is None:
@@ -961,6 +694,9 @@ def _apply_completed_file_state(
     row.hash = hashlib.sha256(extracted_text.encode("utf-8")).hexdigest()
     metadata = dict(row.meta or {})
     metadata.pop("cache_video_audio_v1", None)
+    metadata.pop("audio_fragment_manifest_ids", None)
+    metadata.pop("publication_recovery_error", None)
+    metadata.pop("publication_recovery_generation_id", None)
     if audio_repair_state:
         metadata[AUDIO_REPAIR_STATE_META_KEY] = dict(audio_repair_state)
     else:

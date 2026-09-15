@@ -6,6 +6,26 @@ export type RetryEmbeddingJobResponse = {
 	job_type: string;
 	status: string;
 	total_files: number;
+	index_generation_id?: string | null;
+	dispatch_mode?: string;
+	nothing_to_retry?: boolean;
+	message?: string;
+};
+
+export type EmbeddingJobStatus = {
+	job_id: string;
+	status: string;
+	embedding_model_id: string;
+	selected_model_id: string | null;
+	active_model_id: string | null;
+	effective_model_id: string | null;
+	index_generation_id: string | null;
+	availability: 'ready' | 'partial' | 'unavailable';
+	total_files: number;
+	processed_files: number;
+	failed_files: number;
+	retry_file_count: number;
+	generation_progress: { total: number; processed: number; failed: number };
 };
 
 export class EmbeddingJobApiError extends Error {
@@ -53,5 +73,14 @@ export const retryEmbeddingJob = async (
 		throw new EmbeddingJobApiError(response.status, payload);
 	}
 
+	return response.json();
+};
+
+export const getLatestEmbeddingJob = async (token: string): Promise<EmbeddingJobStatus | null> => {
+	const response = await fetch(`${WEBUI_API_BASE_URL}/embedding/jobs/latest`, {
+		headers: { Accept: 'application/json', authorization: `Bearer ${token}` }
+	});
+	if (response.status === 404) return null;
+	if (!response.ok) throw new EmbeddingJobApiError(response.status, await response.json().catch(() => null));
 	return response.json();
 };

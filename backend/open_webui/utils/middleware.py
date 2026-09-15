@@ -19,11 +19,10 @@ from concurrent.futures import ThreadPoolExecutor
 import atexit
 
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 
 from open_webui.utils.models import (
     get_models_for_user,
-    model_audio_capability,
     model_audio_input_format,
     model_vision_capability,
 )
@@ -72,18 +71,21 @@ from open_webui.models.functions import Functions
 from open_webui.models.models import Models
 
 from open_webui.retrieval.embedding.errors import EmbeddingError
+from open_webui.retrieval.chat_errors import (
+    evidence_error,
+    retrieval_error,
+    safe_stream_error,
+)
+from open_webui.retrieval.reconstruction import ReconstructionTimeout
 from open_webui.retrieval.utils import (
     AuthorizedAttachmentScope,
     get_sources_from_files,
     get_embedding_function,
 )
 from open_webui.retrieval.visuals import (
-    is_reconstructable_audio_metadata,
-    is_reconstructable_video_metadata,
-    reconstruct_and_sanitize_sources,
+    ReconstructionResult,
     sanitize_text_sources,
 )
-from open_webui.utils.otel_instrumentation import add_metric_counter
 from open_webui.routers.retrieval import get_ef
 
 
@@ -575,6 +577,8 @@ async def chat_completion_files_handler(
     trusted_attachment_ids: set[int] | None = None,
 ) -> tuple[dict, dict]:
     sources = []
+    excluded_sources = []
+    model_space = None
     authorized_scope = AuthorizedAttachmentScope(frozenset(), frozenset())
 
     if files := body.get("metadata", {}).get("files", None):
@@ -625,8 +629,12 @@ async def chat_completion_files_handler(
             # This ensures each user uses their own (or their group admin's) model/key
             user_email = user.email if user else None
             if not user_email:
-                log.error("No user email available for RAG query")
-                sources = []
+                raise evidence_error(
+                    503,
+                    "retrieval_unavailable",
+                    "Source retrieval requires an authenticated account. Please sign in again.",
+                    retryable=False,
+                )
             else:
                 try:
                     # Offload get_sources_from_files to module-level thread pool
@@ -650,12 +658,14 @@ async def chat_completion_files_handler(
                     )
                     sources = retrieval_result.sources
                     authorized_scope = retrieval_result.authorized_scope
+                    excluded_sources = getattr(retrieval_result, "excluded_sources", [])
+                    model_space = getattr(retrieval_result, "model_space", None)
                 except Exception as error:
                     log.error(
                         "Embedding service failed for RAG query | error_type=%s",
                         type(error).__name__,
                     )
-                    sources = []
+                    raise
                 total_chunks = 0
                 for s in sources:
                     doc_list = s.get("document") if isinstance(s.get("document"), list) else []
@@ -666,21 +676,28 @@ async def chat_completion_files_handler(
                     len(sources),
                 )
         except EmbeddingError as error:
-            # Propagated blocked state (e.g. EMBEDDING_REINDEX_NOT_READY):
-            # log with structured code and degrade to no-RAG gracefully.
             log.warning("[RAG Chat] retrieval blocked | code=%s", error.code)
-            sources = []
+            raise retrieval_error(error) from None
+        except HTTPException:
+            raise
         except Exception as error:
             log.exception(
                 "RAG retrieval failed | error_type=%s", type(error).__name__
             )
-            sources = []
+            raise evidence_error(
+                503,
+                "retrieval_unavailable",
+                "The source retrieval service failed. Please retry your message.",
+                retryable=True,
+            ) from None
 
         log.debug("RAG contexts ready | sources_count=%s", len(sources))
 
     return body, {
         "sources": sources,
         "authorized_scope": authorized_scope,
+        "excluded_sources": excluded_sources,
+        "model_space": model_space,
     }
 
 
@@ -932,23 +949,18 @@ async def process_chat_payload(request, form_data, metadata, user, model):
             except Exception as e:
                 log.exception(e)
 
+    retrieval_flags = {}
     if not model["id"].startswith("customrag"):
-        # if True:
-        try:
-            form_data, flags = await chat_completion_files_handler(
-                request,
-                form_data,
-                user,
-                trusted_legacy_collection_names=trusted_legacy_collection_names,
-                trusted_attachment_ids=trusted_attachment_ids,
-            )
-            sources.extend(flags.get("sources", []))
-            authorized_scope = flags.get("authorized_scope", authorized_scope)
-            log.info("Working within inbuilt RAG")
-        except Exception as error:
-            log.exception(
-                "Inbuilt RAG failed | error_type=%s", type(error).__name__
-            )
+        form_data, retrieval_flags = await chat_completion_files_handler(
+            request,
+            form_data,
+            user,
+            trusted_legacy_collection_names=trusted_legacy_collection_names,
+            trusted_attachment_ids=trusted_attachment_ids,
+        )
+        sources.extend(retrieval_flags.get("sources", []))
+        authorized_scope = retrieval_flags.get("authorized_scope", authorized_scope)
+        log.info("Working within inbuilt RAG")
     else:
         log.info("Using Custom RAG")
 
@@ -957,96 +969,187 @@ async def process_chat_payload(request, form_data, metadata, user, model):
     # Unknown capability is handled optimistically: let the selected model
     # decide whether it can consume reconstructed visual evidence.
     vision_enabled = vision_capability is not False
-    if vision_capability is False and any(
-        isinstance(item, dict) and item.get("type") == "image"
-        for item in (metadata.get("files") or [])
-    ):
-        await event_emitter(
-            {
-                "type": "status",
-                "data": {
-                    "description": "The selected answer model cannot view image attachments; usable text sources will still be included.",
-                    "done": True,
-                },
-            }
-        )
-    retrieved_video = any(
-        is_reconstructable_video_metadata(metadata)
-        for source in retrieved_sources
-        if isinstance(source, dict)
-        for metadata in (source.get("metadata") or [])
-    )
-    if vision_capability is False and retrieved_video:
-        await event_emitter(
-            {
-                "type": "status",
-                "data": {
-                    "description": (
-                        "The selected answer model cannot view retrieved video "
-                        "frames; choose a vision-capable model to analyze video content."
-                    ),
-                    "done": True,
-                },
-            }
-        )
-    retrieved_audio = any(
-        is_reconstructable_audio_metadata(metadata)
-        for source in retrieved_sources
-        if isinstance(source, dict)
-        for metadata in (source.get("metadata") or [])
-    )
-    audio_capability = model_audio_capability(model)
     audio_input_format = model_audio_input_format(model)
-    audio_enabled = audio_input_format is not None
-    if retrieved_audio and not audio_enabled:
-        add_metric_counter("retrieval.video.audio_answer_model_unsupported")
-        selected_model_name = str(
-            model.get("name")
-            or model.get("id")
-            or form_data.get("model")
-            or "selected model"
-        )
-        if audio_capability is False:
-            audio_warning = (
-                f'Retrieved audio evidence was not attached because "{selected_model_name}" '
-                "does not support audio input. Choose an audio-capable answer model "
-                "to analyze or transcribe it. Timestamp and compatible frame context "
-                "will still be included."
+    has_media_hits = any(
+        isinstance(item, dict) and item.get("modality") in {"image", "video", "audio"}
+        for source in retrieved_sources
+        if isinstance(source, dict)
+        for item in (source.get("metadata") or [])
+    )
+    try:
+        if has_media_hits:
+            reconstruction = (
+                await request.app.state.reconstruction_executor.reconstruct(
+                    retrieved_sources,
+                    request=request,
+                    authorized_scope=authorized_scope,
+                    vision_enabled=vision_enabled,
+                    audio_input_format=audio_input_format,
+                    limit=max(0, int(request.app.state.config.TOP_K.get(user.email))),
+                )
             )
         else:
-            audio_warning = (
-                f'Retrieved audio evidence was not attached because "{selected_model_name}" '
-                "has unknown audio input support or request format. Choose a declared "
-                "audio-capable answer model to analyze or transcribe it. Timestamp and "
-                "compatible frame context will still be included."
+            reconstruction = ReconstructionResult(
+                [],
+                sanitize_text_sources(
+                    retrieved_sources, authorized_scope=authorized_scope
+                ),
+                [],
             )
-        await event_emitter(
-            {
-                "type": "status",
-                "data": {
-                    "description": audio_warning,
-                    "done": True,
-                },
-            }
-        )
-    try:
-        reconstructed_parts, sources = reconstruct_and_sanitize_sources(
-            retrieved_sources,
-            authorized_scope=authorized_scope,
-            vision_enabled=vision_enabled,
-            audio_input_format=audio_input_format,
-            limit=max(0, int(request.app.state.config.TOP_K.get(user.email))),
-        )
     except Exception as reconstruction_error:
         log.warning(
             "Retrieved media reconstruction failed (%s)",
             type(reconstruction_error).__name__,
         )
-        reconstructed_parts = []
-        sources = sanitize_text_sources(
-            retrieved_sources,
-            authorized_scope=authorized_scope,
+        timed_out = isinstance(reconstruction_error, ReconstructionTimeout)
+        partial = getattr(reconstruction_error, "partial_result", None)
+        unavailable = (
+            [
+                {
+                    **item,
+                    "reason": (
+                        "reconstruction_timeout"
+                        if timed_out
+                        and item.get("reason") == "media_reconstruction_failed"
+                        else item.get("reason")
+                    ),
+                }
+                for item in partial.unavailable_evidence
+            ]
+            if partial
+            else [
+                {
+                    "reason": (
+                        "reconstruction_timeout"
+                        if timed_out
+                        else "media_reconstruction_failed"
+                    ),
+                    "name": "Retrieved media",
+                }
+            ]
         )
+        reconstruction = ReconstructionResult(
+            partial.content_parts if partial else [],
+            (
+                partial.sources
+                if partial
+                else sanitize_text_sources(
+                    retrieved_sources, authorized_scope=authorized_scope
+                )
+            ),
+            unavailable,
+            timed_out=timed_out,
+        )
+    reconstructed_parts = reconstruction.content_parts
+    sources = reconstruction.sources
+    omissions = [
+        *retrieval_flags.get("excluded_sources", []),
+        *reconstruction.unavailable_evidence,
+    ]
+    if not reconstruction.has_usable_evidence and omissions:
+        reasons = {item.get("reason") or item.get("error_code") for item in omissions}
+        if reconstruction.timed_out:
+            raise evidence_error(
+                504,
+                "reconstruction_timeout",
+                "Preparing the requested media exceeded the time limit. Retry with fewer sources or shorter video segments.",
+                retryable=True,
+            )
+        if reasons.intersection({"source_changed", "embedding_reindex_not_ready"}):
+            raise evidence_error(
+                409,
+                "embedding_reindex_source_changed",
+                "A requested source changed or is not ready. Wait for indexing or retry the affected files, then send your message again.",
+                retryable=True,
+            )
+        if reasons <= {"answer_model_unsupported", "evidence_limit"}:
+            raise evidence_error(
+                422,
+                "answer_model_evidence_unsupported",
+                "The selected answer model cannot consume the requested evidence. Choose a model supporting the required image, video, or audio input.",
+                retryable=False,
+            )
+        raise evidence_error(
+            503,
+            "requested_evidence_unavailable",
+            "The requested evidence could not be prepared. Retry your message, or reindex the affected files if the problem continues.",
+            retryable=True,
+        )
+    if omissions:
+        reason_labels = {
+            "answer_model_unsupported": "unsupported by the answer model",
+            "reconstruction_timeout": "preparation timed out",
+            "media_reconstruction_failed": "media preparation failed",
+            "source_changed": "source changed",
+            "evidence_limit": "attachment limit",
+            "embedding_reindex_not_ready": "not indexed yet",
+            "embedding_retrieval_failed": "retrieval failed",
+        }
+        names = []
+        for item in omissions:
+            name = str(
+                item.get("name")
+                or item.get("file_id")
+                or item.get("source_id")
+                or "source"
+            )
+            modality = item.get("modality")
+            reason = reason_labels.get(
+                item.get("reason") or item.get("error_code"), "unavailable"
+            )
+            description = f"{name} ({modality + ': ' if modality else ''}{reason})"
+            if description not in names:
+                names.append(description)
+        warning = {
+            "error_code": "partial_evidence",
+            "message": "Some requested evidence was omitted: "
+            + ", ".join(names[:20])
+            + ". The answer uses only the available evidence.",
+            "omitted_sources": omissions,
+        }
+        events.append({"warnings": [warning]})
+        await event_emitter(
+            {
+                "type": "status",
+                "data": {
+                    "description": warning["message"],
+                    "done": True,
+                    "warnings": [warning],
+                },
+            }
+        )
+        form_data["messages"] = add_or_update_system_message(
+            "Some requested sources or media could not be supplied. Base the answer only on the attached media and supplied source text; state the evidence limitations and do not infer missing audio from timestamps.",
+            form_data["messages"],
+        )
+    if (
+        metadata.get("files")
+        and retrieval_flags
+        and not reconstruction.has_usable_evidence
+    ):
+        metadata["retrieval_no_match"] = True
+    # Media reads can take time; fence the result again before invoking the model.
+    request.state.retrieval_model_space = retrieval_flags.get("model_space")
+    if retrieval_flags.get("model_space") is not None:
+        from open_webui.retrieval.embedding.gate import (
+            assert_retrieval_generation_current,
+        )
+
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                _RAG_EXECUTOR,
+                assert_retrieval_generation_current,
+                retrieval_flags["model_space"],
+            )
+        except EmbeddingError as error:
+            raise retrieval_error(error) from None
+        except Exception:
+            raise evidence_error(
+                503,
+                "retrieval_unavailable",
+                "The current index could not be verified. Please retry your message.",
+                retryable=True,
+            ) from None
     if reconstructed_parts:
         _append_reconstructed_parts_to_latest_user_message(
             form_data["messages"], reconstructed_parts
@@ -1144,6 +1247,27 @@ def _append_reconstructed_parts_to_latest_user_message(
     message["content"] = parts
 
 
+async def _assert_chat_generation_current(request) -> None:
+    space = getattr(request.state, "retrieval_model_space", None)
+    if space is None:
+        return
+    from open_webui.retrieval.embedding.gate import assert_retrieval_generation_current
+
+    try:
+        await asyncio.get_running_loop().run_in_executor(
+            _RAG_EXECUTOR, assert_retrieval_generation_current, space
+        )
+    except EmbeddingError as error:
+        raise retrieval_error(error) from None
+    except Exception:
+        raise evidence_error(
+            503,
+            "retrieval_unavailable",
+            "The current index could not be verified. Please retry your message.",
+            retryable=True,
+        ) from None
+
+
 def _strip_untrusted_media_parts(messages: list[dict]) -> None:
     """Remove caller-supplied media parts from every chat turn in place."""
     if not isinstance(messages, list):
@@ -1184,12 +1308,12 @@ async def process_chat_response(
                 # Get available models and find Gemini Flash Lite before running tasks
                 models = await get_models_for_user(request, user)
                 task_model_id = find_gemini_flash_lite_model(models)
-                
+
                 # If Gemini Flash Lite is not available, skip all background tasks
                 if not task_model_id:
                     log.debug(f"Gemini Flash Lite not available for user {user.email}, skipping background tasks")
                     return  # Exit early, don't run any tasks
-                
+
                 if TASKS.TITLE_GENERATION in tasks:
                     if tasks[TASKS.TITLE_GENERATION]:
                         res = await generate_title(
@@ -1311,6 +1435,9 @@ async def process_chat_response(
 
     # Non-streaming response
     if not isinstance(response, StreamingResponse):
+        for event in events:
+            if isinstance(event, dict):
+                response.update(event)
         if event_emitter:
             if "selected_model_id" in response:
                 Chats.upsert_message_to_chat_by_id_and_message_id(
@@ -1959,6 +2086,8 @@ async def process_chat_response(
                                         "data": data,
                                     }
                                 )
+                        except (HTTPException, EmbeddingError):
+                            raise
                         except Exception as e:
                             done = "data: [DONE]" in line
                             if done:
@@ -2081,6 +2210,7 @@ async def process_chat_response(
                     )
 
                     try:
+                        await _assert_chat_generation_current(request)
                         res = await generate_chat_completion(
                             request,
                             {
@@ -2099,6 +2229,8 @@ async def process_chat_response(
                             await stream_body_handler(res)
                         else:
                             break
+                    except (HTTPException, EmbeddingError):
+                        raise
                     except Exception as e:
                         log.debug(e)
                         break
@@ -2263,6 +2395,7 @@ async def process_chat_response(
                         )
 
                         try:
+                            await _assert_chat_generation_current(request)
                             res = await generate_chat_completion(
                                 request,
                                 {
@@ -2285,6 +2418,8 @@ async def process_chat_response(
                                 await stream_body_handler(res)
                             else:
                                 break
+                        except (HTTPException, EmbeddingError):
+                            raise
                         except Exception as e:
                             log.debug(e)
                             break
@@ -2344,8 +2479,26 @@ async def process_chat_response(
                         },
                     )
 
-            if response.background is not None:
-                await response.background()
+            except Exception as error:
+                envelope = safe_stream_error(error)
+                Chats.upsert_message_to_chat_by_id_and_message_id(
+                    metadata["chat_id"],
+                    metadata["message_id"],
+                    {
+                        "error": {"content": envelope["message"], **envelope},
+                        "done": True,
+                    },
+                )
+                await event_emitter(
+                    {
+                        "type": "chat:completion",
+                        "data": {"error": envelope, "done": True},
+                    }
+                )
+                raise RuntimeError(envelope["message"]) from None
+            finally:
+                if response.background is not None:
+                    await response.background()
 
         # background_tasks.add_task(post_response_handler, response, events)
         task_id, _ = create_task(post_response_handler(response, events))
@@ -2369,17 +2522,23 @@ async def process_chat_response(
                 if event:
                     yield wrap_item(json.dumps(event))
 
-            async for data in original_generator:
-                data, _ = await process_filter_functions(
-                    request=request,
-                    filter_ids=filter_ids,
-                    filter_type="stream",
-                    form_data=data,
-                    extra_params=extra_params,
-                )
+            try:
+                async for data in original_generator:
+                    data, _ = await process_filter_functions(
+                        request=request,
+                        filter_ids=filter_ids,
+                        filter_type="stream",
+                        form_data=data,
+                        extra_params=extra_params,
+                    )
 
-                if data:
-                    yield data
+                    if data:
+                        yield data
+            except Exception as error:
+                yield wrap_item(
+                    json.dumps({"error": safe_stream_error(error), "done": True})
+                )
+                yield wrap_item("[DONE]")
 
         return StreamingResponse(
             stream_wrapper(response.body_iterator, events),

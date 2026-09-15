@@ -113,6 +113,7 @@ class ModelAwareVectorRepository:
         modality: str = "text",
         embedding_status: str = VECTOR_STATUS_ACTIVE,
         embedding_job_id: Optional[str] = None,
+        index_generation_id: Optional[str] = None,
     ) -> list[VectorItem]:
         """Build provenance-bearing vector items aligned by index.
 
@@ -172,6 +173,7 @@ class ModelAwareVectorRepository:
                     "modality": item_modality,
                     "embedding_status": embedding_status,
                     "embedding_job_id": embedding_job_id,
+                    "index_generation_id": index_generation_id,
                 }
             )
         return items

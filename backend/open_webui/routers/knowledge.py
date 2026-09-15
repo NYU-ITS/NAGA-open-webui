@@ -964,13 +964,12 @@ def repair_knowledge_file_audio(
 
     from open_webui.retrieval.embedding.audio_repair import (
         claim_audio_repair,
+        dispatch_pending_audio,
         ensure_legacy_audio_repair_state,
-        repair_audio_embeddings,
     )
     from open_webui.retrieval.embedding.resolution import resolve_admin_for_knowledge
     from open_webui.retrieval.embedding.reliability import snapshot_reliability_policy
     from open_webui.retrieval.embedding.state import AdminEmbeddingModelStateRepository
-    from open_webui.utils.job_queue import enqueue_audio_repair_job
 
     try:
         admin = resolve_admin_for_knowledge(knowledge_id, user.id)
@@ -991,45 +990,17 @@ def repair_knowledge_file_audio(
             embedding_model_id=active_model_id,
         )
         policy = snapshot_reliability_policy(request.app.state.config).to_dict()
-        dispatch_mode = "active"
-        queue_job_id = None
-        if not claim.already_active:
-            try:
-                queue_job_id = enqueue_audio_repair_job(
-                    knowledge_id=knowledge_id,
-                    file_id=file_id,
-                    admin_id=admin.id,
-                    embedding_model_id=active_model_id,
-                    lease_token=claim.lease_token,
-                    reliability_policy=policy,
-                )
-            except Exception as queue_error:
-                log.warning(
-                    "Audio repair queue dispatch failed; using background task | "
-                    "knowledge_id=%s file_id=%s type=%s",
-                    knowledge_id,
-                    file_id,
-                    type(queue_error).__name__,
-                )
-            if queue_job_id:
-                dispatch_mode = "queue"
-            else:
-                background_tasks.add_task(
-                    repair_audio_embeddings,
-                    config=request.app.state.config,
-                    knowledge_id=knowledge_id,
-                    file_id=file_id,
-                    admin_id=admin.id,
-                    embedding_model_id=active_model_id,
-                    lease_token=claim.lease_token,
-                    reliability_policy=policy,
-                )
-                dispatch_mode = "background"
+        dispatch = dispatch_pending_audio(
+            config=request.app.state.config,
+            knowledge_id=knowledge_id,
+            file_id=file_id,
+            admin_id=admin.id,
+            embedding_model_id=active_model_id,
+            reliability_policy=policy,
+        )
         return {
-            "status": claim.status,
+            **dispatch,
             "already_active": claim.already_active,
-            "dispatch_mode": dispatch_mode,
-            "job_id": queue_job_id,
             "file_id": file_id,
             "knowledge_id": knowledge_id,
         }

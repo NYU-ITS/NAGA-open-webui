@@ -36,7 +36,6 @@ Non-goals:
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
 
 from open_webui.internal.db import get_db
 from open_webui.models.users import Users
@@ -234,6 +233,23 @@ def request_model_change(
         if not replace_existing:
             active_job = EmbeddingJobRepository.get_active_job(admin_id, db=db)
             if active_job is not None:
+                if (
+                    target_spec.id == state_view.active_embedding_model_id
+                    and not force_reindex
+                ):
+                    if config is not None:
+                        config.RAG_EMBEDDING_MODEL_USER.set(
+                            admin_email, target_spec.model_name, db=db
+                        )
+                    db.commit()
+                    return (
+                        ModelChangeNoOp(
+                            active_model_id=state_view.active_embedding_model_id,
+                            target_model_id=target_spec.id,
+                            reason="Selected model is active; indexing is continuing.",
+                        ),
+                        admin_email,
+                    )
                 raise EmbeddingError(
                     EMBEDDING_JOB_ACTIVE_EXISTS,
                     detail=f"Admin {admin_id} has active job {active_job.id} in status {active_job.status}.",
@@ -344,6 +360,7 @@ def request_model_change(
 
         # Step 13: Reload job from DB to get authoritative state after commit
         committed_job = EmbeddingJobRepository.get_job(job_result.job.id, db=db)
+        state_view = AdminEmbeddingModelStateRepository.get_state(admin_id, db=db)
         if committed_job is None:
             # Should not happen, but defensive
             raise EmbeddingError(

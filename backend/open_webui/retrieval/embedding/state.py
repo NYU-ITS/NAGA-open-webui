@@ -56,6 +56,7 @@ class AdminEmbeddingModelStateView:
     active_embedding_model_id: str
     target_embedding_model_id: Optional[str]
     latest_embedding_job_id: Optional[str]
+    index_generation_id: str = ""
 
 
 def _now() -> int:
@@ -68,6 +69,7 @@ def _to_view(row: AdminEmbeddingModelState) -> AdminEmbeddingModelStateView:
         active_embedding_model_id=row.active_embedding_model_id,
         target_embedding_model_id=row.target_embedding_model_id,
         latest_embedding_job_id=row.latest_embedding_job_id,
+        index_generation_id=row.index_generation_id,
     )
 
 
@@ -91,6 +93,7 @@ def _seed_row(db, admin_id: str, config, now: int) -> AdminEmbeddingModelState:
     assert_dimension_supported(model.dimension)
     row = AdminEmbeddingModelState(
         admin_id=admin.id,
+        index_generation_id=f"baseline:{admin.id}",
         active_embedding_model_id=model.id,
         target_embedding_model_id=None,
         latest_embedding_job_id=None,
@@ -182,6 +185,7 @@ def _request_target(
     # Active remains the last fully promoted model. The target/latest-job pair
     # describes the staged model until finalization promotes it.
     row.target_embedding_model_id = target_model_id
+    row.index_generation_id = job_id
     row.latest_embedding_job_id = job_id
     row.updated_at = now
     db.flush()

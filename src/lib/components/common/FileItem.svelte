@@ -170,6 +170,8 @@
 				</div>
 			{:else if showProcessingDetails && audioEmbedding?.status === 'repairing'}
 				<div class="mt-1 text-xs text-amber-600 dark:text-amber-400">Audio retrieval is being repaired.</div>
+			{:else if showProcessingDetails && audioEmbedding?.status === 'queued'}
+				<div class="mt-1 text-xs text-amber-600 dark:text-amber-400">Visual retrieval is available. Audio processing is queued.</div>
 			{/if}
 		</div>
 	{:else}
@@ -222,6 +224,8 @@
 					</div>
 				{:else if showProcessingDetails && audioEmbedding?.status === 'repairing'}
 					<div class="mt-1 text-xs text-amber-600 dark:text-amber-400">Audio retrieval is being repaired.</div>
+				{:else if showProcessingDetails && audioEmbedding?.status === 'queued'}
+					<div class="mt-1 text-xs text-amber-600 dark:text-amber-400">Visual retrieval is available. Audio processing is queued.</div>
 				{/if}
 			</div>
 		</Tooltip>

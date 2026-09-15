@@ -15,9 +15,9 @@ from open_webui.env import (
     DATABASE_POOL_TIMEOUT,
 )
 from peewee_migrate import Router
-from sqlalchemy import Dialect, create_engine, MetaData, types
+from sqlalchemy import Dialect, create_engine, MetaData, types, event, text
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import scoped_session, sessionmaker
+from sqlalchemy.orm import scoped_session, sessionmaker, Session as SQLAlchemySession
 from sqlalchemy.pool import QueuePool, NullPool
 from sqlalchemy.sql.type_api import _T
 from typing_extensions import Self
@@ -106,6 +106,18 @@ SessionLocal = sessionmaker(
 metadata_obj = MetaData(schema=DATABASE_SCHEMA)
 Base = declarative_base(metadata=metadata_obj)
 Session = scoped_session(SessionLocal)
+
+
+# Each transaction identifies generation-aware API/worker code to the vector
+# write fence. Register on the SQLAlchemy session class so the optional separate
+# pgvector connection receives the same marker. Old, still-running workers do
+# not have this listener and cannot promote or delete current publications.
+@event.listens_for(SQLAlchemySession, "after_begin")
+def _identify_index_writer(session, transaction, connection):
+    if connection.dialect.name == "postgresql":
+        connection.execute(
+            text("SELECT set_config('naga.index_writer_version', '2', true)")
+        )
 
 
 def get_session():

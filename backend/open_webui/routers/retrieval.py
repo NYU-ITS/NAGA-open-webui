@@ -2614,6 +2614,7 @@ def _process_file_sync(
     admin_id: Optional[str] = None,
     embedding_model_id: Optional[str] = None,
     reliability_policy: Optional[dict] = None,
+    indexing_snapshot: Optional[dict] = None,
 ) -> None:
     """Process a stored file through the shared mixed-modality pipeline."""
 
@@ -2655,6 +2656,7 @@ def _process_file_sync(
             knowledge_id=knowledge_id,
             collection_name=collection_name,
             reliability_policy=reliability_policy,
+            indexing_snapshot=indexing_snapshot,
         )
     except Exception as error:
         error_code = (
@@ -2694,7 +2696,7 @@ def process_file(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid file ID format: {form_data.file_id}. File ID must be a valid UUID."
         )
-    
+
     # BUG #7 fix: Cache file object to avoid multiple database fetches
     file = Files.get_file_by_id(form_data.file_id)
     if not file:
@@ -2723,7 +2725,7 @@ def process_file(
     # Cache file object and metadata for reuse throughout the function
     cached_file = file
     cached_meta = file.meta or {}
-    
+
     # Use Redis distributed lock to prevent race conditions in multi-replica deployments
     # This ensures only one pod can start processing a file at a time
     # Lock timeout is configurable via environment variable (default: 1 hour for large files)
@@ -2746,7 +2748,7 @@ def process_file(
                 f"Invalid value for {key}: {os.environ.get(key)}, using default {default}. Error: {e}"
             )
             return default
-    
+
     lock_timeout = _safe_int_env("FILE_PROCESSING_LOCK_TIMEOUT", 3600, min_value=60, max_value=86400)  # 1 min to 24 hours
     pending_reclaim_timeout = _safe_int_env(
         "FILE_PROCESSING_PENDING_RECLAIM_TIMEOUT",
@@ -2755,13 +2757,13 @@ def process_file(
         max_value=86400,
     )
     lock_name = f"open-webui:file_processing_lock:{form_data.file_id}"
-    
+
     processing_lock = None
     lock_acquired = False
     redis_available = True
     status_update_succeeded = False  # BUG #1 fix: Initialize at function level to avoid scope issues
     lock_released = False  # BUG #1 fix: Initialize at function level to avoid scope issues (used in background task block)
-    
+
     try:
         # Validate REDIS_URL before attempting to create lock (BUG #8 fix)
         if not REDIS_URL:
@@ -2775,7 +2777,7 @@ def process_file(
             )
             # Try to acquire lock - distinguish between "lock held" vs "Redis unavailable" (BUG #2 fix)
             lock_acquired = processing_lock.aquire_lock()
-            
+
             if not lock_acquired:
                 # Check if Redis is actually available by testing connection
                 # If Redis is down, we'll fall through to database check
@@ -2832,7 +2834,7 @@ def process_file(
         )
         redis_available = False
         lock_acquired = False
-    
+
     # Redis protects the short dispatch window across replicas. The database
     # lease is authoritative in both Redis and degraded modes, so a fresh
     # pending request is deduplicated while a stranded pending request becomes
@@ -2904,7 +2906,7 @@ def process_file(
                     release_error,
                 )
         raise
-    
+
     # Enqueue job to distributed job queue (RQ) if available, otherwise fall back to BackgroundTasks
     # This enables distributed processing across multiple pods in Kubernetes
     # CRITICAL: Keep lock held until we've successfully enqueued job or added BackgroundTask
@@ -2913,7 +2915,7 @@ def process_file(
     use_job_queue = False
     job_enqueued = False
     background_task_added = False
-    
+
     # Credential-safe: Resolve frozen IDs (no credentials in payload)
     from open_webui.retrieval.embedding.resolution import freeze_for_enqueue, freeze_for_knowledge_enqueue
 
@@ -2964,9 +2966,9 @@ def process_file(
             "processing_error_code": error_code,
             "error": public_error,
         }
-    
+
     log.info(f"[PROCESS FILE] file_id={form_data.file_id} admin_id={admin_id} embedding_model_id={embedding_model_id}")
-    
+
     try:
         from open_webui.retrieval.embedding.file_processing import (
             persist_content_provenance_before_dispatch,
@@ -2985,6 +2987,14 @@ def process_file(
             form_data.file_id,
             form_data.content,
         )
+        from open_webui.retrieval.embedding.publication import freeze_file_indexing
+
+        indexing_snapshot = freeze_file_indexing(
+            config=request.app.state.config,
+            file_id=form_data.file_id,
+            admin_id=admin_id,
+            embedding_model_id=embedding_model_id,
+        )
 
         # Try to use job queue first if available
         if is_job_queue_available():
@@ -2998,8 +3008,9 @@ def process_file(
                     admin_id=admin_id,
                     embedding_model_id=embedding_model_id,
                     reliability_policy=reliability_policy,
+                    indexing_snapshot=indexing_snapshot,
                 )
-                
+
                 if job_id is not None:
                     use_job_queue = True
                     job_enqueued = True
@@ -3015,7 +3026,7 @@ def process_file(
                     "falling back to BackgroundTasks",
                     exc_info=True
                 )
-        
+
         if not job_enqueued:
             try:
                 background_tasks.add_task(
@@ -3029,6 +3040,7 @@ def process_file(
                     admin_id=admin_id,
                     embedding_model_id=embedding_model_id,
                     reliability_policy=reliability_policy,
+                    indexing_snapshot=indexing_snapshot,
                 )
                 background_task_added = True
                 log.debug(f"Added BackgroundTask for file_id={form_data.file_id}")
@@ -3038,7 +3050,7 @@ def process_file(
                     exc_info=True
                 )
                 raise
-        
+
         # Only mark as successful if we actually enqueued/added a task
         if not (job_enqueued or background_task_added):
             raise Exception("Failed to enqueue job or add BackgroundTask - no task was created")
@@ -3103,7 +3115,7 @@ def process_file(
                     f"Lock NOT released for file_id={form_data.file_id} due to task creation failure. "
                     "Lock will expire after timeout."
                 )
-    
+
     # Return immediately with processing status (backward compatible format)
     # Include both old format fields and new status for compatibility
     result = {
@@ -3115,11 +3127,11 @@ def process_file(
         "collection_name": None,
         "content": None,
     }
-    
+
     # Add job_id if job was successfully enqueued
     if job_enqueued and job_id:
         result["job_id"] = job_id
-    
+
     return result
 
 
@@ -3540,10 +3552,11 @@ def _resolve_model_aware_query_context(
                 list(result.staged_job_ids) or None,
                 list(result.staged_file_ids) or None,
                 list(result.staged_collection_files) or None,
+                result,
             )
         # RetrievalReadyNoState: legacy admin, use config-resolved model.
         ctx = resolve_for_user(user.id, request.app.state.config)
-        return ctx.admin_id, ctx.model.id, None, None, None
+        return ctx.admin_id, ctx.model.id, None, None, None, None
     except EmbeddingError:
         # All embedding errors (MIXED, NOT_READY, resolution failures) propagate.
         raise
@@ -3593,6 +3606,89 @@ class QueryDocForm(BaseModel):
     hybrid: Optional[bool] = None
 
 
+def _finish_model_aware_query(result, model_space):
+    from open_webui.retrieval.embedding.gate import assert_retrieval_generation_current
+
+    payload = (
+        result.model_dump() if hasattr(result, "model_dump") else dict(result or {})
+    )
+    warnings = payload.pop("_retrieval_errors", [])
+    if model_space is not None:
+        warnings.extend(
+            {
+                "file_id": file_id,
+                "error_code": "embedding_reindex_not_ready",
+                "message": "This file is not available in the current index.",
+                "retryable": True,
+            }
+            for file_id in model_space.excluded_file_ids
+        )
+        metadata = payload.get("metadatas", [[]])[0]
+        keep = [
+            index
+            for index, item in enumerate(metadata)
+            if str((item or {}).get("file_id") or "") in model_space.ready_file_ids
+        ]
+        for key in ("documents", "metadatas", "ids", "distances"):
+            if payload.get(key):
+                payload[key] = [
+                    [
+                        payload[key][0][index]
+                        for index in keep
+                        if index < len(payload[key][0])
+                    ]
+                ]
+        payload.update(
+            index_generation_id=model_space.index_generation_id,
+            effective_model_id=model_space.effective_model_id,
+            availability="partial" if warnings else "ready",
+        )
+    assert_retrieval_generation_current(model_space)
+    if warnings and not any(payload.get("documents", [])):
+        raise EmbeddingError(
+            "embedding_retrieval_failed",
+            detail={
+                "message": "The requested evidence could not be retrieved. Please retry.",
+                "retryable": True,
+            },
+            retryable=True,
+            http_status=503,
+        )
+    if warnings:
+        payload["warnings"] = warnings
+    return payload
+
+
+def _query_http_error(error: Exception) -> HTTPException:
+    if isinstance(error, HTTPException):
+        return error
+    if isinstance(error, EmbeddingError) and error.code in {
+        EMBEDDING_REINDEX_NOT_READY,
+        EMBEDDING_FILE_NOT_FOUND,
+        "embedding_model_space_mixed",
+    }:
+        detail = error.detail if isinstance(error.detail, dict) else {}
+        return HTTPException(
+            status_code=409,
+            detail={
+                "error_code": error.code,
+                "message": detail.get(
+                    "message",
+                    "The requested index or source is unavailable. Refresh and retry.",
+                ),
+                "retryable": True,
+            },
+        )
+    return HTTPException(
+        status_code=503,
+        detail={
+            "error_code": "embedding_retrieval_failed",
+            "message": "The requested evidence could not be retrieved. Please retry.",
+            "retryable": True,
+        },
+    )
+
+
 @router.post("/query/doc")
 def query_doc_handler(
     request: Request,
@@ -3609,6 +3705,7 @@ def query_doc_handler(
             staged_job_ids,
             staged_file_ids,
             staged_collection_files,
+            model_space,
         ) = _resolve_model_aware_query_context(
             request,
             user,
@@ -3628,11 +3725,15 @@ def query_doc_handler(
         )
 
         if request.app.state.config.ENABLE_RAG_HYBRID_SEARCH.get(user.email):
-            return query_doc_with_hybrid_search(
+            result = query_doc_with_hybrid_search(
                 collection_name=form_data.collection_name,
                 query=form_data.query,
                 embedding_function=embedding_function,
-                k=form_data.k if form_data.k else request.app.state.config.TOP_K.get(user.email),
+                k=(
+                    form_data.k
+                    if form_data.k
+                    else request.app.state.config.TOP_K.get(user.email)
+                ),
                 reranking_function=request.app.state.rf,
                 r=(
                     form_data.r
@@ -3648,10 +3749,14 @@ def query_doc_handler(
                 staged_collection_files=staged_collection_files,
             )
         else:
-            return query_doc(
+            result = query_doc(
                 collection_name=form_data.collection_name,
                 query_embedding=embedding_function(form_data.query),
-                k=form_data.k if form_data.k else request.app.state.config.TOP_K.get(user.email),
+                k=(
+                    form_data.k
+                    if form_data.k
+                    else request.app.state.config.TOP_K.get(user.email)
+                ),
                 user=user,
                 admin_id=admin_id,
                 embedding_model_id=embedding_model_id,
@@ -3661,25 +3766,10 @@ def query_doc_handler(
                 staged_file_ids=staged_file_ids,
                 staged_collection_files=staged_collection_files,
             )
-    except EmbeddingError as e:
-        if e.code == EMBEDDING_REINDEX_NOT_READY:
-            detail = e.detail if isinstance(e.detail, dict) else {"message": str(e.detail)}
-            detail["error_code"] = e.code
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=detail,
-            )
-        log.exception(e)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=ERROR_MESSAGES.DEFAULT(e),
-        )
-    except Exception as e:
-        log.exception(e)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=ERROR_MESSAGES.DEFAULT(e),
-        )
+        return _finish_model_aware_query(result, model_space)
+    except Exception as error:
+        log.warning("Model-aware retrieval failed | type=%s", type(error).__name__)
+        raise _query_http_error(error) from error
 
 
 class QueryCollectionsForm(BaseModel):
@@ -3706,6 +3796,7 @@ def query_collection_handler(
             staged_job_ids,
             staged_file_ids,
             staged_collection_files,
+            model_space,
         ) = _resolve_model_aware_query_context(
             request,
             user,
@@ -3725,11 +3816,15 @@ def query_collection_handler(
         )
 
         if request.app.state.config.ENABLE_RAG_HYBRID_SEARCH.get(user.email):
-            return query_collection_with_hybrid_search(
+            result = query_collection_with_hybrid_search(
                 collection_names=form_data.collection_names,
                 queries=[form_data.query],
                 embedding_function=embedding_function,
-                k=form_data.k if form_data.k else request.app.state.config.TOP_K.get(user.email),
+                k=(
+                    form_data.k
+                    if form_data.k
+                    else request.app.state.config.TOP_K.get(user.email)
+                ),
                 reranking_function=request.app.state.rf,
                 r=(
                     form_data.r
@@ -3745,11 +3840,15 @@ def query_collection_handler(
                 staged_collection_files=staged_collection_files,
             )
         else:
-            return query_collection(
+            result = query_collection(
                 collection_names=form_data.collection_names,
                 queries=[form_data.query],
                 embedding_function=embedding_function,
-                k=form_data.k if form_data.k else request.app.state.config.TOP_K.get(user.email),
+                k=(
+                    form_data.k
+                    if form_data.k
+                    else request.app.state.config.TOP_K.get(user.email)
+                ),
                 admin_id=admin_id,
                 embedding_model_id=embedding_model_id,
                 knowledge_ids=knowledge_ids or None,
@@ -3759,25 +3858,10 @@ def query_collection_handler(
                 staged_collection_files=staged_collection_files,
             )
 
-    except EmbeddingError as e:
-        if e.code == EMBEDDING_REINDEX_NOT_READY:
-            detail = e.detail if isinstance(e.detail, dict) else {"message": str(e.detail)}
-            detail["error_code"] = e.code
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=detail,
-            )
-        log.exception(e)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=ERROR_MESSAGES.DEFAULT(e),
-        )
-    except Exception as e:
-        log.exception(e)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=ERROR_MESSAGES.DEFAULT(e),
-        )
+        return _finish_model_aware_query(result, model_space)
+    except Exception as error:
+        log.warning("Model-aware retrieval failed | type=%s", type(error).__name__)
+        raise _query_http_error(error) from error
 
 
 ####################################

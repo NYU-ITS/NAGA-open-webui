@@ -14,7 +14,6 @@ from sqlalchemy import (
     or_,
     select,
     String,
-    text,
     Text,
     Table,
     values,
@@ -71,6 +70,7 @@ class DocumentChunk(Base):
     # Spec 07: the durable embedding job that built this row, when it was built
     # by a reindex operation. NULL for ordinary ingestion and legacy rows.
     embedding_job_id = Column(Text, nullable=True)
+    index_generation_id = Column(Text, nullable=True)
     created_at = Column(BigInteger, nullable=True)
     updated_at = Column(BigInteger, nullable=True)
 
@@ -161,6 +161,7 @@ class PgvectorClient:
             "modality": item.get("modality") or "text",
             "embedding_status": item.get("embedding_status") or "active",
             "embedding_job_id": item.get("embedding_job_id"),
+            "index_generation_id": item.get("index_generation_id"),
             "provenance_status": "attributed",
             "created_at": now,
             "updated_at": now,
@@ -184,6 +185,50 @@ class PgvectorClient:
             }
         )
         return metadata
+
+    @staticmethod
+    def _published_visibility(admin_id: str):
+        from open_webui.models.embeddings import AdminEmbeddingModelState
+
+        from open_webui.models.files import File
+
+        file_meta = cast(File.meta, JSONB)
+        published_file = (
+            select(File.id)
+            .where(
+                File.id == DocumentChunk.file_id,
+                file_meta["processing_status"].astext == "completed",
+                or_(
+                    and_(
+                        file_meta["index_generation_id"].astext
+                        == DocumentChunk.index_generation_id,
+                        file_meta["embedding_model_id"].astext
+                        == DocumentChunk.embedding_model_id,
+                        file_meta["published_projection_ids"].op("?")(
+                            DocumentChunk.collection_name
+                        ),
+                    ),
+                    and_(
+                        DocumentChunk.index_generation_id == "baseline:" + admin_id,
+                        file_meta["index_generation_id"].astext.is_(None),
+                    ),
+                ),
+            )
+            .correlate(DocumentChunk)
+            .exists()
+        )
+        return and_(
+            DocumentChunk.embedding_status == "active",
+            or_(DocumentChunk.file_id.is_(None), published_file),
+            DocumentChunk.index_generation_id
+            == select(AdminEmbeddingModelState.index_generation_id)
+            .where(AdminEmbeddingModelState.admin_id == admin_id)
+            .scalar_subquery(),
+            DocumentChunk.embedding_model_id
+            == select(AdminEmbeddingModelState.active_embedding_model_id)
+            .where(AdminEmbeddingModelState.admin_id == admin_id)
+            .scalar_subquery(),
+        )
 
     def insert(self, collection_name: str, items: List[VectorItem]) -> None:
         log.info("[PGVECTOR] insert START | collection=%s | items_count=%s", collection_name, len(items))
@@ -419,6 +464,7 @@ class PgvectorClient:
                     "modality": item.get("modality") or "text",
                     "embedding_status": item.get("embedding_status") or "active",
                     "embedding_job_id": item.get("embedding_job_id"),
+                    "index_generation_id": item.get("index_generation_id"),
                     "provenance_status": "attributed",
                     "created_at": now,
                     "updated_at": now,
@@ -456,6 +502,7 @@ class PgvectorClient:
                 "modality": stmt.excluded.modality,
                 "embedding_status": stmt.excluded.embedding_status,
                 "embedding_job_id": stmt.excluded.embedding_job_id,
+                "index_generation_id": stmt.excluded.index_generation_id,
                 "provenance_status": stmt.excluded.provenance_status,
                 "updated_at": stmt.excluded.updated_at,
             },
@@ -497,6 +544,7 @@ class PgvectorClient:
                     "modality": item.get("modality") or "text",
                     "embedding_status": item.get("embedding_status") or "active",
                     "embedding_job_id": item.get("embedding_job_id"),
+                    "index_generation_id": item.get("index_generation_id"),
                     "provenance_status": "attributed",
                     "created_at": now,
                     "updated_at": now,
@@ -539,6 +587,7 @@ class PgvectorClient:
                 "modality": stmt.excluded.modality,
                 "embedding_status": stmt.excluded.embedding_status,
                 "embedding_job_id": stmt.excluded.embedding_job_id,
+                "index_generation_id": stmt.excluded.index_generation_id,
                 "provenance_status": stmt.excluded.provenance_status,
                 "updated_at": stmt.excluded.updated_at,
             },
@@ -713,24 +762,7 @@ class PgvectorClient:
 
             distance = DocumentChunk.vector.cosine_distance(query_vectors.c.q_vector)
 
-            visibility_clause = DocumentChunk.embedding_status == "active"
-            if staged_job_ids and staged_file_ids and staged_collection_files:
-                staged_projection_clauses = [
-                    and_(
-                        DocumentChunk.collection_name == staged_collection,
-                        DocumentChunk.file_id == staged_file,
-                    )
-                    for staged_collection, staged_file in staged_collection_files
-                ]
-                visibility_clause = or_(
-                    visibility_clause,
-                    and_(
-                        DocumentChunk.embedding_status == "building",
-                        DocumentChunk.embedding_job_id.in_(staged_job_ids),
-                        DocumentChunk.file_id.in_(staged_file_ids),
-                        or_(*staged_projection_clauses),
-                    ),
-                )
+            visibility_clause = self._published_visibility(admin_id)
 
             subq = (
                 select(
@@ -746,8 +778,7 @@ class PgvectorClient:
                 .where(DocumentChunk.collection_name == collection_name)
                 .where(DocumentChunk.admin_id == admin_id)
                 .where(DocumentChunk.embedding_model_id == embedding_model_id)
-                # Building rows are visible only when the readiness gate
-                # approved both their exact terminal-partial job and file IDs.
+                # Every result belongs to an individually published file.
                 .where(visibility_clause)
             )
 
@@ -821,8 +852,8 @@ class PgvectorClient:
                 self.session.rollback()
             except Exception:
                 pass
-            log.exception(f"Error during model-aware search: {e}")
-            return None
+            log.error("Model-aware search failed | type=%s", type(e).__name__)
+            raise
 
     def query(
         self, collection_name: str, filter: Dict[str, Any], limit: Optional[int] = None
@@ -914,24 +945,7 @@ class PgvectorClient:
             embedding_model_id,
         )
         try:
-            visibility_clause = DocumentChunk.embedding_status == "active"
-            if staged_job_ids and staged_file_ids and staged_collection_files:
-                staged_projection_clauses = [
-                    and_(
-                        DocumentChunk.collection_name == staged_collection,
-                        DocumentChunk.file_id == staged_file,
-                    )
-                    for staged_collection, staged_file in staged_collection_files
-                ]
-                visibility_clause = or_(
-                    visibility_clause,
-                    and_(
-                        DocumentChunk.embedding_status == "building",
-                        DocumentChunk.embedding_job_id.in_(staged_job_ids),
-                        DocumentChunk.file_id.in_(staged_file_ids),
-                        or_(*staged_projection_clauses),
-                    ),
-                )
+            visibility_clause = self._published_visibility(admin_id)
 
             query = self.session.query(DocumentChunk).filter(
                 DocumentChunk.collection_name == collection_name,
@@ -972,8 +986,8 @@ class PgvectorClient:
                 self.session.rollback()
             except Exception:
                 pass
-            log.exception(f"Error during get_model_aware: {e}")
-            return None
+            log.error("Model-aware retrieval failed | type=%s", type(e).__name__)
+            raise
 
     def delete(
         self,

@@ -60,6 +60,10 @@ _PRIVATE_FILE_METADATA_KEYS = frozenset(
     {
         "alpha",
         "audio_embedding_repair_state",
+        "audio_fragment_manifest_ids",
+        "required_indexing",
+        "published_content_origin",
+        "published_content_override_sha256",
         "bbox",
         "cache",
         "chunk_manifest_id",
@@ -111,16 +115,19 @@ def sanitize_public_audio_embedding(value: Any) -> dict[str, Any]:
     raw_status = source.get("status")
     status = (
         raw_status
-        if raw_status in {"complete", "degraded", "repairing", "not_applicable"}
+        if raw_status
+        in {"queued", "complete", "degraded", "repairing", "not_applicable"}
         else "not_applicable"
     )
     result: dict[str, Any] = {"status": status}
-    for key in ("total_chunks", "embedded_chunks", "failed_chunks"):
+    for key in ("total_chunks", "embedded_chunks", "failed_chunks", "pending_chunks"):
         try:
             result[key] = max(0, int(source.get(key, 0) or 0))
         except (TypeError, ValueError, OverflowError):
             result[key] = 0
-    result["repairable"] = bool(source.get("repairable", False))
+    result["repairable"] = status == "degraded" and bool(
+        source.get("repairable", False)
+    )
     updated_at = source.get("updated_at")
     if isinstance(updated_at, int) and not isinstance(updated_at, bool):
         result["updated_at"] = updated_at
@@ -165,7 +172,21 @@ def sanitize_public_file_metadata(value: Any) -> Any:
             elif key == "visual_summary":
                 result[key] = sanitize_public_visual_summary(item)
             elif key == "audio_embedding":
-                result[key] = sanitize_public_audio_embedding(item)
+                audio = dict(item) if isinstance(item, Mapping) else {}
+                repair = value.get("audio_embedding_repair_state")
+                if isinstance(repair, Mapping) and repair.get("failed_chunks"):
+                    phase = repair.get("phase")
+                    heartbeat = int(repair.get("lease_heartbeat_at") or 0)
+                    if phase == "running" and int(time.time()) - heartbeat >= 120:
+                        audio.update(
+                            status="degraded",
+                            repairable=True,
+                            failed_chunks=len(repair["failed_chunks"]),
+                            pending_chunks=0,
+                        )
+                    elif phase == "queued":
+                        audio.update(status="queued", repairable=False)
+                result[key] = sanitize_public_audio_embedding(audio)
             else:
                 result[key] = sanitize_public_file_metadata(item)
         return result

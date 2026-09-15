@@ -2,16 +2,13 @@
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
 
 from open_webui.models.users import Users
 from open_webui.models.groups import Groups
-from open_webui.models.embeddings import EmbeddingModel
 from .inputs import EmbeddingModelSpec
 from .errors import (
     EmbeddingError,
     EMBEDDING_MODEL_NOT_CONFIGURED,
-    EMBEDDING_MODEL_DISABLED,
     EMBEDDING_ADMIN_UNRESOLVED,
     EMBEDDING_ADMIN_AMBIGUOUS,
     EMBEDDING_CREDENTIALS_MISSING,
@@ -159,14 +156,30 @@ def resolve_model_for_admin(admin_email: str, config) -> EmbeddingModelSpec:
     Raises:
         EmbeddingError: If model not configured, not found, or not enabled.
     """
-    # Get the model name from config
+    # Durable selection is authoritative immediately, including on API workers
+    # whose compatibility-config cache has not observed the settings save yet.
+    from open_webui.models.embeddings import AdminEmbeddingModelState
+    from open_webui.internal.db import get_db
+
+    admin = Users.get_user_by_email(admin_email)
+    if admin is not None:
+        with get_db() as db:
+            state = (
+                db.query(AdminEmbeddingModelState).filter_by(admin_id=admin.id).first()
+            )
+            if state is not None:
+                return get_model_spec_by_id(
+                    state.target_embedding_model_id or state.active_embedding_model_id
+                )
+
+    # Legacy admins are seeded from their compatibility config.
     model_name = config.RAG_EMBEDDING_MODEL_USER.get(admin_email)
     if not model_name or not model_name.strip():
         raise EmbeddingError(
             EMBEDDING_MODEL_NOT_CONFIGURED,
             detail=f"No embedding model configured for {admin_email}.",
         )
-    
+
     # Look up the model in the registry
     return get_model_spec_by_name(model_name)
 

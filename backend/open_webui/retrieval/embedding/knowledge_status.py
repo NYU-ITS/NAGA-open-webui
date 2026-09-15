@@ -2,9 +2,10 @@
 
 import logging
 from typing import Literal
+from types import SimpleNamespace
 
 from pydantic import BaseModel, Field
-from sqlalchemy import func
+from open_webui.internal.db import get_db
 
 from open_webui.models.embeddings import (
     AdminEmbeddingModelState,
@@ -14,6 +15,8 @@ from open_webui.models.embeddings import (
 )
 from open_webui.models.files import File
 from open_webui.models.knowledge import Knowledge
+from open_webui.models.chats import Chat
+from open_webui.retrieval.embedding.gate import file_publication_is_current
 from open_webui.retrieval.embedding.errors import EmbeddingError
 from open_webui.retrieval.embedding.inventory import build_reindex_admin_resolver
 from open_webui.retrieval.embedding.jobs import (
@@ -96,6 +99,10 @@ class KnowledgeIndexingStatusSummary(BaseModel):
     current_file_count: int = 0
     job_display_state: KnowledgeIndexingDisplayState = "ready"
     retry_kind: str | None = None
+    retry_file_count: int = 0
+    index_generation_id: str | None = None
+    availability: str = "unavailable"
+    selected_model: EmbeddingModelSummary | None = None
 
     job_id: str | None = None
     job_type: str | None = None
@@ -108,6 +115,9 @@ class KnowledgeIndexingStatusSummary(BaseModel):
         default_factory=KnowledgeIndexingProgress
     )
     job_progress: KnowledgeIndexingProgress = Field(
+        default_factory=KnowledgeIndexingProgress
+    )
+    generation_progress: KnowledgeIndexingProgress = Field(
         default_factory=KnowledgeIndexingProgress
     )
     failed_document_count: int = 0
@@ -341,6 +351,143 @@ def _snapshot_knowledge_ids(rows: list[EmbeddingJobFile]) -> list[str]:
     return sorted(knowledge_ids)
 
 
+def _generation_snapshot(db, state, resolver):
+    """Latest attempt outcomes plus current published uploads, without re-preparing sources."""
+    from open_webui.retrieval.embedding.inventory import (
+        _iter_chat_refs,
+        _iter_knowledge_refs,
+    )
+
+    # Polling must not load every document's extracted text into API memory.
+    all_files = {
+        row.id: SimpleNamespace(
+            id=row.id,
+            filename=row.filename,
+            meta=row.meta,
+            data={"status": row.legacy_status},
+        )
+        for row in db.query(
+            File.id,
+            File.filename,
+            File.meta,
+            File.data["status"].as_string().label("legacy_status"),
+        ).all()
+    }
+    memberships: dict[str, set[str]] = {}
+    for knowledge in db.query(Knowledge).all():
+        try:
+            if resolver.resolve_knowledge(knowledge) == state.admin_id:
+                for file_id in _iter_knowledge_refs(knowledge):
+                    memberships.setdefault(file_id, set()).add(knowledge.id)
+        except EmbeddingError:
+            continue
+    for chat in db.query(Chat).all():
+        try:
+            if resolver.resolve_chat(chat) == state.admin_id:
+                for file_id in _iter_chat_refs(chat):
+                    memberships.setdefault(file_id, set()).add(f"file-{file_id}")
+        except EmbeddingError:
+            continue
+
+    # Follow explicit ancestry: timestamps can collide when retries are created rapidly.
+    outcomes = {}
+    cursor = state.latest_embedding_job_id
+    visited = set()
+    while cursor and cursor not in visited:
+        visited.add(cursor)
+        job = db.query(EmbeddingJob).filter(EmbeddingJob.id == cursor).first()
+        if (
+            job is None
+            or job.admin_id != state.admin_id
+            or job.index_generation_id != state.index_generation_id
+        ):
+            break
+        for row in (
+            db.query(EmbeddingJobFile).filter(EmbeddingJobFile.job_id == cursor).all()
+        ):
+            if row.file_id in all_files and row.file_id in memberships:
+                outcomes.setdefault(row.file_id, row)
+        cursor = job.source_job_id
+
+    published = {
+        file_id
+        for file_id, file in all_files.items()
+        if (file.meta or {}).get("index_generation_id") == state.index_generation_id
+        and file_publication_is_current(file, state)
+    }
+    candidate_ids = (set(outcomes) | set(memberships) | published) & all_files.keys()
+    statuses = {}
+    for file_id in candidate_ids:
+        file = all_files[file_id]
+        if file_publication_is_current(file, state) and (
+            file_id in published or file_id in memberships
+        ):
+            statuses[file_id] = FILE_STATUS_COMPLETED
+        elif file_id in outcomes:
+            row_status = outcomes[file_id].status
+            statuses[file_id] = (
+                FILE_STATUS_FAILED
+                if row_status == FILE_STATUS_COMPLETED
+                else row_status
+            )
+        else:
+            statuses[file_id] = FILE_STATUS_PENDING
+    return outcomes, all_files, statuses
+
+
+def _coverage(statuses: dict[str, str]) -> KnowledgeIndexingProgress:
+    processed = sum(value == FILE_STATUS_COMPLETED for value in statuses.values())
+    failed = sum(value == FILE_STATUS_FAILED for value in statuses.values())
+    incompatible = sum(value == FILE_STATUS_INCOMPATIBLE for value in statuses.values())
+    return KnowledgeIndexingProgress(
+        total=len(statuses),
+        processed=processed,
+        failed=failed,
+        incompatible=incompatible,
+        pending_or_processing=len(statuses) - processed - failed - incompatible,
+    )
+
+
+def get_generation_coverage(admin_id: str, db=None) -> dict:
+    """A read-only projection shared by admin job status and knowledge status."""
+    if db is None:
+        with get_db() as session:
+            return get_generation_coverage(admin_id, db=session)
+    state = (
+        db.query(AdminEmbeddingModelState)
+        .filter(AdminEmbeddingModelState.admin_id == admin_id)
+        .first()
+    )
+    if state is None:
+        return KnowledgeIndexingProgress().model_dump()
+    _outcomes, _files, statuses = _generation_snapshot(
+        db, state, build_reindex_admin_resolver(db)
+    )
+    return _coverage(statuses).model_dump()
+
+
+def get_generation_retry_files(admin_id: str, db=None) -> list:
+    if db is None:
+        with get_db() as session:
+            return get_generation_retry_files(admin_id, db=session)
+    state = (
+        db.query(AdminEmbeddingModelState)
+        .filter(AdminEmbeddingModelState.admin_id == admin_id)
+        .first()
+    )
+    if state is None:
+        return []
+    outcomes, _files, statuses = _generation_snapshot(
+        db, state, build_reindex_admin_resolver(db)
+    )
+    return [
+        row
+        for file_id, row in outcomes.items()
+        if row.status == FILE_STATUS_FAILED
+        and statuses.get(file_id) == FILE_STATUS_FAILED
+    ]
+
+
 def build_knowledge_indexing_statuses(
     db,
     knowledge_rows: list[Knowledge],
@@ -349,392 +496,252 @@ def build_knowledge_indexing_statuses(
     viewer_role: str,
     include_failure_details: bool,
 ) -> list[KnowledgeIndexingStatusResponse]:
-    """Build status rows without mutating model state or configuration."""
-    if not knowledge_rows:
-        return []
-
-    admin_resolver = build_reindex_admin_resolver(db)
-    admin_by_knowledge: dict[str, str] = {}
-    resolution_errors: dict[str, EmbeddingError] = {}
-    for knowledge in knowledge_rows:
-        try:
-            admin_by_knowledge[knowledge.id] = admin_resolver.resolve_knowledge(knowledge)
-        except EmbeddingError as error:
-            resolution_errors[knowledge.id] = error
-            log.warning(
-                "[KNOWLEDGE_INDEXING_STATUS] governance unavailable for knowledge %s: %s",
-                knowledge.id,
-                error.code,
-            )
-
-    admin_ids = sorted(set(admin_by_knowledge.values()))
-    states = (
-        db.query(AdminEmbeddingModelState)
-        .filter(AdminEmbeddingModelState.admin_id.in_(admin_ids))
-        .all()
-        if admin_ids
-        else []
-    )
-    state_by_admin = {state.admin_id: state for state in states}
-
-    latest_job_ids = [
-        state.latest_embedding_job_id
-        for state in states
-        if state.latest_embedding_job_id is not None
-    ]
-    jobs = (
-        db.query(EmbeddingJob).filter(EmbeddingJob.id.in_(latest_job_ids)).all()
-        if latest_job_ids
-        else []
-    )
-    job_by_id = {job.id: job for job in jobs}
-
-    valid_jobs_by_admin: dict[str, EmbeddingJob] = {}
-    for state in states:
-        if state.latest_embedding_job_id is None:
-            continue
-        job = job_by_id.get(state.latest_embedding_job_id)
-        if (
-            job is not None
-            and job.admin_id == state.admin_id
-            and job.job_type in _REINDEX_JOB_TYPES
-        ):
-            valid_jobs_by_admin[state.admin_id] = job
-        elif job is not None and job.admin_id != state.admin_id:
-            log.error(
-                "[KNOWLEDGE_INDEXING_STATUS] cross-admin latest job pointer for admin %s",
-                state.admin_id,
-            )
-        elif job is not None:
-            log.error(
-                "[KNOWLEDGE_INDEXING_STATUS] unsupported latest job type for admin %s: %s",
-                state.admin_id,
-                job.job_type,
-            )
-
-    valid_job_ids = [job.id for job in valid_jobs_by_admin.values()]
-    job_file_rows = (
-        db.query(EmbeddingJobFile)
-        .filter(EmbeddingJobFile.job_id.in_(valid_job_ids))
-        .order_by(EmbeddingJobFile.file_id)
-        .all()
-        if valid_job_ids
-        else []
-    )
-    files_by_job: dict[str, list[EmbeddingJobFile]] = {}
-    for row in job_file_rows:
-        files_by_job.setdefault(row.job_id, []).append(row)
-
-    job_file_ids = sorted({row.file_id for row in job_file_rows})
-    file_name_rows = (
-        db.query(File.id, File.filename).filter(File.id.in_(job_file_ids)).all()
-        if job_file_ids
-        else []
-    )
-    filenames_by_id = {
-        str(file_id): str(filename)
-        for file_id, filename in file_name_rows
-        if filename
+    """Project attempt progress separately from publication coverage."""
+    resolver = build_reindex_admin_resolver(db)
+    admin_snapshots = {}
+    models = {model.id: model for model in db.query(EmbeddingModel).all()}
+    knowledge_names = {
+        knowledge.id: knowledge.name for knowledge in db.query(Knowledge).all()
     }
-    snapshot_knowledge_ids = _snapshot_knowledge_ids(job_file_rows)
-    knowledge_name_rows = (
-        db.query(Knowledge.id, Knowledge.name)
-        .filter(Knowledge.id.in_(snapshot_knowledge_ids))
-        .all()
-        if snapshot_knowledge_ids
-        else []
-    )
-    knowledge_names_by_id = {
-        str(knowledge_id): str(name)
-        for knowledge_id, name in knowledge_name_rows
-        if name
-    }
-
-    model_ids = {
-        model_id
-        for state in states
-        for model_id in (
-            state.active_embedding_model_id,
-            state.target_embedding_model_id,
-        )
-        if model_id
-    }
-    model_rows = (
-        db.query(EmbeddingModel).filter(EmbeddingModel.id.in_(sorted(model_ids))).all()
-        if model_ids
-        else []
-    )
-    model_by_id = {model.id: model for model in model_rows}
-
-    active_admin_ids = (
-        {
-            row[0]
-            for row in (
-                db.query(EmbeddingJob.admin_id)
-                .filter(
-                    EmbeddingJob.admin_id.in_(admin_ids),
-                    EmbeddingJob.status.in_((JOB_STATUS_QUEUED, JOB_STATUS_PROCESSING)),
-                )
-                .distinct()
-                .all()
-            )
-        }
-        if admin_ids
-        else set()
-    )
-
-    successful_rows = (
-        db.query(EmbeddingJob.admin_id, func.max(EmbeddingJob.completed_at))
-        .filter(
-            EmbeddingJob.admin_id.in_(admin_ids),
-            EmbeddingJob.status == JOB_STATUS_COMPLETED,
-            EmbeddingJob.job_type.in_(_REINDEX_JOB_TYPES),
-            EmbeddingJob.completed_at.isnot(None),
-        )
-        .group_by(EmbeddingJob.admin_id)
-        .all()
-        if admin_ids
-        else []
-    )
-    last_success_by_admin = {
-        admin_id: completed_at for admin_id, completed_at in successful_rows
-    }
-
     responses = []
     for knowledge in knowledge_rows:
-        resolution_error = resolution_errors.get(knowledge.id)
-        if resolution_error is not None:
+        try:
+            admin_id = resolver.resolve_knowledge(knowledge)
+        except EmbeddingError as error:
             responses.append(
                 KnowledgeIndexingStatusResponse(
                     knowledge_id=knowledge.id,
                     display_state="unavailable",
                     retrieval_available=False,
-                    error_code=resolution_error.code,
+                    error_code=error.code,
                     error_message="Indexing status is unavailable for this knowledge base.",
                 )
             )
             continue
 
-        admin_id = admin_by_knowledge[knowledge.id]
-        knowledge_data = knowledge.data if isinstance(knowledge.data, dict) else {}
-        current_file_ids = {
-            str(file_id)
-            for file_id in knowledge_data.get("file_ids", [])
-            if isinstance(file_id, str)
-        }
-        current_file_count = len(current_file_ids)
-        state = state_by_admin.get(admin_id)
-        job = valid_jobs_by_admin.get(admin_id)
-        job_display_state, _ = _derive_display_state(state, job)
-        display_state, retrieval_available = job_display_state, job_display_state == "ready"
-        active_model = (
-            model_by_id.get(state.active_embedding_model_id) if state else None
-        )
-        target_model = (
-            model_by_id.get(state.target_embedding_model_id)
-            if state and state.target_embedding_model_id
-            else None
-        )
-        active_model_available = (
-            active_model is not None and active_model.status == "enabled"
-        )
-        target_model_available = (
-            target_model is not None and target_model.status == "enabled"
-        )
-        models_available = state is None or (
-            (active_model_available or target_model_available)
-            and (
-                state.target_embedding_model_id is None
-                or target_model_available
+        if admin_id not in admin_snapshots:
+            state = (
+                db.query(AdminEmbeddingModelState)
+                .filter(AdminEmbeddingModelState.admin_id == admin_id)
+                .first()
             )
-        )
-        if not models_available:
-            display_state, retrieval_available = "unavailable", False
-        rows = files_by_job.get(job.id, []) if job is not None else []
-        collection_rows = _knowledge_rows_for_job(knowledge.id, rows)
-        collection_rows = [row for row in collection_rows if row.file_id in current_file_ids]
-        # Coverage is scoped to files the latest job was responsible for.
-        # Files added after the job are indexed by the direct upload path
-        # (no durable job) and must not flip the KB to unavailable.
-        job_expected_file_ids = {row.file_id for row in rows} & current_file_ids
-        if (
-            job is not None
-            and job_expected_file_ids
-            and len({row.file_id for row in collection_rows}) < len(job_expected_file_ids)
-        ):
-            display_state, retrieval_available = "unavailable", False
-        failed_rows = [
-            row for row in collection_rows if row.status == FILE_STATUS_FAILED
-        ]
-        incompatible_rows = [
-            row
-            for row in collection_rows
-            if row.status == FILE_STATUS_INCOMPATIBLE
-        ]
-        job_failed_rows = [
-            row for row in rows if row.status == FILE_STATUS_FAILED
-        ]
-        job_incompatible_rows = [
-            row for row in rows if row.status == FILE_STATUS_INCOMPATIBLE
-        ]
-
-        # A terminal partial job is source-scoped for retrieval. Knowledge
-        # bases whose own frozen files did not fail remain ready; the overview
-        # keeps the administrator-wide partial badge and failed-file details.
-        if (
-            display_state == "partial"
-            and current_file_count > 0
-            and not failed_rows
-        ):
-            display_state, retrieval_available = "ready", True
-
-        # An empty collection is locally ready even when another governed
-        # source has a failed administrator-wide operation.
-        if current_file_count == 0:
-            display_state, retrieval_available = "ready", True
-        uses_staged_model = bool(
-            job is not None
-            and job.status == JOB_STATUS_PARTIALLY_FAILED
-            and display_state == "ready"
-            and current_file_count > 0
-            and target_model is not None
-        )
-        if state is None:
-            effective_model = None
-            model_scope = "legacy"
-        elif not retrieval_available:
-            effective_model = None
-            model_scope = "unavailable"
-        elif uses_staged_model:
-            effective_model = target_model
-            model_scope = "staged"
-        else:
-            effective_model = active_model
-            model_scope = "active"
-        retry_eligible = False
-        if job is not None and models_available:
-            retry_eligible = is_job_retry_eligible(
+            job = (
+                db.query(EmbeddingJob)
+                .filter(EmbeddingJob.id == state.latest_embedding_job_id)
+                .first()
+                if state and state.latest_embedding_job_id
+                else None
+            )
+            if job and job.admin_id != admin_id:
+                job = None
+            outcomes, files, statuses = (
+                _generation_snapshot(db, state, resolver) if state else ({}, {}, {})
+            )
+            has_active = (
+                db.query(EmbeddingJob.id)
+                .filter(
+                    EmbeddingJob.admin_id == admin_id,
+                    EmbeddingJob.status.in_((JOB_STATUS_QUEUED, JOB_STATUS_PROCESSING)),
+                )
+                .first()
+                is not None
+            )
+            admin_snapshots[admin_id] = (
+                state,
                 job,
-                target_model_id=state.target_embedding_model_id if state else None,
-                has_active_job=admin_id in active_admin_ids,
-                has_failed_files=any(
-                    row.status == FILE_STATUS_FAILED for row in rows
-                ),
-                all_files_pending=all(
-                    row.status == FILE_STATUS_PENDING for row in rows
-                ),
+                outcomes,
+                files,
+                statuses,
+                has_active,
             )
-        if current_file_count == 0:
-            retry_eligible = False
-
-        error_code = job.error_code if job is not None else None
-        error_message = _job_error_message(error_code)
-        if current_file_count == 0:
-            error_code = error_message = None
-        if job_display_state in ("failed", "partial") and error_message is None:
-            error_message = "The embedding indexing job did not finish successfully."
+        state, job, outcomes, files, statuses, has_active = admin_snapshots[admin_id]
+        current_ids = {
+            file_id
+            for file_id in (knowledge.data or {}).get("file_ids", [])
+            if isinstance(file_id, str) and file_id
+        }
+        active_model = models.get(state.active_embedding_model_id) if state else None
+        target_model = models.get(state.target_embedding_model_id) if state else None
+        selected_model = target_model or active_model
+        model_available = bool(
+            state is None
+            or (
+                active_model
+                and active_model.status == "enabled"
+                and state.target_embedding_model_id is None
+            )
+        )
+        local_statuses = {
+            file_id: (
+                FILE_STATUS_COMPLETED
+                if state is None
+                or (
+                    model_available
+                    and file_publication_is_current(
+                        files.get(file_id), state, knowledge.id
+                    )
+                )
+                else statuses.get(file_id, FILE_STATUS_PENDING)
+            )
+            for file_id in current_ids
+        }
+        # A completed ledger row alone does not publish a new collection projection.
+        for file_id in local_statuses:
+            if (
+                state
+                and local_statuses[file_id] == FILE_STATUS_COMPLETED
+                and not (
+                    model_available
+                    and file_publication_is_current(
+                        files.get(file_id), state, knowledge.id
+                    )
+                )
+            ):
+                local_statuses[file_id] = FILE_STATUS_PENDING
+        progress = _coverage(local_statuses)
+        generation_progress = _coverage(statuses)
+        retrieval_available = (
+            bool(progress.processed and model_available) or not current_ids
+        )
         if (
-            display_state == "unavailable"
-            and job_display_state not in ("failed", "partial")
-            and error_message is None
+            not current_ids
+            or progress.processed == len(current_ids)
+            and model_available
         ):
-            error_code = error_code or "embedding_status_unavailable"
-            error_message = "Indexing status is temporarily unavailable."
-
+            display_state = "ready"
+        elif retrieval_available:
+            display_state = "partial"
+        elif job and job.status == JOB_STATUS_QUEUED:
+            display_state = "queued"
+        elif job and job.status == JOB_STATUS_PROCESSING:
+            display_state = "indexing"
+        elif progress.failed:
+            display_state = "failed"
+        else:
+            display_state = "unavailable"
+        job_display_state, _unused = _derive_display_state(state, job)
+        failures = [
+            row
+            for file_id, row in outcomes.items()
+            if row.status == FILE_STATUS_FAILED
+            and statuses.get(file_id) == FILE_STATUS_FAILED
+        ]
+        incompatible = [
+            row
+            for file_id, row in outcomes.items()
+            if statuses.get(file_id) == FILE_STATUS_INCOMPATIBLE
+        ]
+        attempt_rows = (
+            db.query(EmbeddingJobFile).filter(EmbeddingJobFile.job_id == job.id).all()
+            if job
+            else []
+        )
+        dispatch_only = bool(attempt_rows) and all(
+            row.status == FILE_STATUS_PENDING for row in attempt_rows
+        )
+        retry_eligible = bool(
+            job
+            and state
+            and job.index_generation_id == state.index_generation_id
+            and selected_model
+            and selected_model.status == "enabled"
+            and is_job_retry_eligible(
+                job,
+                target_model_id=selected_model.id,
+                has_active_job=has_active,
+                has_failed_files=bool(failures),
+                all_files_pending=dispatch_only,
+            )
+        )
+        can_manage = viewer_role == "admin" and viewer_id == admin_id
+        filenames = {file_id: file.filename for file_id, file in files.items()}
+        local_failures = [row for row in failures if row.file_id in current_ids]
+        local_incompatible = [row for row in incompatible if row.file_id in current_ids]
+        failure_kwargs = dict(
+            filenames_by_id=filenames, knowledge_names_by_id=knowledge_names
+        )
+        publication_times = [
+            int((files[file_id].meta or {}).get("processing_completed_at") or 0)
+            for file_id, value in statuses.items()
+            if value == FILE_STATUS_COMPLETED
+        ]
         responses.append(
             KnowledgeIndexingStatusResponse(
                 knowledge_id=knowledge.id,
                 display_state=display_state,
-                current_file_count=current_file_count,
                 job_display_state=job_display_state,
-                job_status=job.status if job is not None else None,
+                job_status=job.status if job else None,
                 retrieval_available=retrieval_available,
-                job_id=job.id if job is not None else None,
-                job_type=job.job_type if job is not None else None,
+                availability=(
+                    "partial"
+                    if retrieval_available and progress.processed < len(current_ids)
+                    else "ready" if retrieval_available else "unavailable"
+                ),
+                current_file_count=len(current_ids),
+                job_id=job.id if job else None,
+                job_type=job.job_type if job else None,
+                index_generation_id=state.index_generation_id if state else None,
                 active_model=_model_summary(active_model),
                 target_model=_model_summary(target_model),
-                effective_model=_model_summary(effective_model),
-                model_scope=model_scope,
-                collection_progress=_progress_from_rows(collection_rows),
+                selected_model=_model_summary(selected_model),
+                effective_model=(
+                    _model_summary(active_model) if retrieval_available else None
+                ),
+                model_scope=(
+                    "legacy"
+                    if state is None
+                    else "active" if retrieval_available else "unavailable"
+                ),
+                collection_progress=progress,
                 job_progress=_job_progress(job),
-                failed_document_count=len(failed_rows),
-                job_failed_document_count=(job.failed_files if job is not None else 0),
+                generation_progress=generation_progress,
+                failed_document_count=len(local_failures),
+                job_failed_document_count=len(failures),
                 job_failed_documents=(
-                    [
-                        _failure_detail(
-                            row,
-                            filenames_by_id=filenames_by_id,
-                            knowledge_names_by_id=knowledge_names_by_id,
-                        )
-                        for row in job_failed_rows
-                    ]
-                    if viewer_role == "admin" and viewer_id == admin_id
+                    [_failure_detail(row, **failure_kwargs) for row in failures]
+                    if can_manage
                     else []
                 ),
-                incompatible_document_count=len(incompatible_rows),
-                job_incompatible_document_count=(
-                    job.incompatible_files if job is not None else 0
-                ),
+                incompatible_document_count=len(local_incompatible),
+                job_incompatible_document_count=len(incompatible),
                 job_incompatible_documents=(
                     [
-                        _incompatible_detail(
-                            row,
-                            filenames_by_id=filenames_by_id,
-                            knowledge_names_by_id=knowledge_names_by_id,
-                        )
-                        for row in job_incompatible_rows
+                        _incompatible_detail(row, **failure_kwargs)
+                        for row in incompatible
                     ]
-                    if viewer_role == "admin" and viewer_id == admin_id
+                    if can_manage
                     else []
                 ),
-                error_code=error_code,
-                error_message=error_message,
-                retry_eligible=retry_eligible,
-                can_retry=(
-                    retry_eligible
-                    and viewer_role == "admin"
-                    and viewer_id == admin_id
-                ),
-                retry_kind=(
-                    "failed_documents"
-                    if job_failed_rows
-                    else (
-                        "indexing_operation"
-                        if display_state in ("failed", "partial", "unavailable")
-                        and current_file_count
-                        else None
-                    )
-                ),
-                created_at=job.created_at if job is not None else None,
-                updated_at=job.updated_at if job is not None else None,
-                started_at=job.started_at if job is not None else None,
-                completed_at=job.completed_at if job is not None else None,
-                last_successful_indexed_at=last_success_by_admin.get(admin_id),
                 failed_documents=(
-                    [
-                        _failure_detail(
-                            row,
-                            filenames_by_id=filenames_by_id,
-                            knowledge_names_by_id=knowledge_names_by_id,
-                        )
-                        for row in failed_rows
-                    ]
+                    [_failure_detail(row, **failure_kwargs) for row in local_failures]
                     if include_failure_details
                     else []
                 ),
                 incompatible_documents=(
                     [
-                        _incompatible_detail(
-                            row,
-                            filenames_by_id=filenames_by_id,
-                            knowledge_names_by_id=knowledge_names_by_id,
-                        )
-                        for row in incompatible_rows
+                        _incompatible_detail(row, **failure_kwargs)
+                        for row in local_incompatible
                     ]
                     if include_failure_details
                     else []
                 ),
+                error_code=job.error_code if job and current_ids else None,
+                error_message=(
+                    _job_error_message(job.error_code) if job and current_ids else None
+                ),
+                retry_eligible=retry_eligible,
+                can_retry=retry_eligible and can_manage,
+                retry_kind=(
+                    "indexing_operation"
+                    if dispatch_only
+                    else "failed_documents" if failures else None
+                ),
+                retry_file_count=len(attempt_rows) if dispatch_only else len(failures),
+                created_at=job.created_at if job else None,
+                updated_at=job.updated_at if job else None,
+                started_at=job.started_at if job else None,
+                completed_at=job.completed_at if job else None,
+                last_successful_indexed_at=max(publication_times, default=0) or None,
             )
         )
-
     return responses

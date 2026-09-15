@@ -8,7 +8,7 @@ import asyncio
 import requests
 import hashlib
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from huggingface_hub import snapshot_download
 from langchain.retrievers import ContextualCompressionRetriever, EnsembleRetriever
@@ -59,6 +59,38 @@ class RetrievalResult:
 
     sources: list[dict]
     authorized_scope: AuthorizedAttachmentScope
+    excluded_sources: list[dict] = field(default_factory=list)
+    model_space: Any = None
+
+
+def _retrieval_failure() -> Exception:
+    from open_webui.retrieval.embedding.errors import EmbeddingError
+
+    return EmbeddingError(
+        "embedding_retrieval_failed",
+        detail={
+            "error_code": "embedding_retrieval_failed",
+            "message": "The requested evidence could not be retrieved. Please retry.",
+            "retryable": True,
+        },
+        retryable=True,
+        http_status=503,
+    )
+
+
+def _unavailable_attachment() -> Exception:
+    from open_webui.retrieval.embedding.errors import EmbeddingError
+
+    return EmbeddingError(
+        "embedding_reindex_not_ready",
+        detail={
+            "error_code": "embedding_reindex_not_ready",
+            "message": "A requested source is unavailable. Remove it or retry after indexing finishes.",
+            "retryable": True,
+        },
+        retryable=True,
+        http_status=409,
+    )
 
 
 class VectorSearchRetriever(BaseRetriever):
@@ -610,6 +642,7 @@ def get_all_items_from_collections(
     allow_unscoped_legacy: bool = False,
 ) -> dict:
     results = []
+    errors = []
 
     for collection_name in collection_names:
         if collection_name:
@@ -650,6 +683,14 @@ def get_all_items_from_collections(
                     "Error when querying a collection | error_type=%s",
                     type(e).__name__,
                 )
+                errors.append(
+                    {
+                        "collection_id": collection_name,
+                        "error_code": "embedding_retrieval_failed",
+                        "message": "Evidence from this source could not be retrieved.",
+                        "retryable": True,
+                    }
+                )
         else:
             pass
 
@@ -675,6 +716,7 @@ def get_all_items_from_collections(
         "documents": [[row[0] for row in rows]],
         "metadatas": [[row[1] for row in rows]],
         "ids": [[row[2] for row in rows]],
+        "_retrieval_errors": errors,
     }
 
 
@@ -731,210 +773,78 @@ def query_collection(
     staged_collection_files: Optional[list[tuple[str, str]]] = None,
     allow_unscoped_legacy: bool = False,
 ) -> dict:
-    log.info(
-        "[QUERY_COLLECTION] START | collections_count=%s | queries_count=%s | k=%s",
-        len(collection_names) if collection_names else 0,
-        len(queries) if queries else 0,
-        k,
-    )
+    """Search each requested source, retaining safe diagnostics for partial failure."""
+    queries = list(dict.fromkeys(query for query in queries if query and query.strip()))
     results = []
-    # pgvector model-aware search returns cosine distance (smaller is better).
-    # Other connector paths retain their legacy score direction.
-    reverse_distances = bool(
-        VECTOR_DB != "chroma" and not (admin_id and embedding_model_id)
-    )
-    
-    # Handle edge cases
-    if not queries or len(queries) == 0:
-        log.warning("[QUERY_COLLECTION] EMPTY | called with empty queries list")
-        return merge_and_sort_query_results(results, k=k, reverse=reverse_distances)
-    
-    if not collection_names or len(collection_names) == 0:
-        log.warning("query_collection called with empty collection_names list")
-        return merge_and_sort_query_results(results, k=k, reverse=reverse_distances)
-    
-    # Filter out empty queries
-    queries = [q for q in queries if q and q.strip()]
-    if not queries:
-        log.warning("All queries were empty after filtering")
-        return merge_and_sort_query_results(results, k=k, reverse=reverse_distances)
-    
-    # Batch embedding generation for multiple queries (faster than individual calls)
-    # The embedding_function supports both single strings and lists of strings
-    query_embedding_map = {}
-    try:
-        if len(queries) > 1:
-            # Batch embed all queries at once - significantly faster for multiple queries
-            log.debug(f"Batching {len(queries)} queries for embedding generation")
-            query_embeddings = embedding_function(queries)
-            
-            # Handle different return formats:
-            # - List of embeddings: [[emb1], [emb2], ...] or [emb1, emb2, ...]
-            # - Single embedding: [emb1] or just emb1 (shouldn't happen for batch)
-            if isinstance(query_embeddings, list):
-                if len(query_embeddings) == len(queries):
-                    # Check if embeddings are nested lists or flat lists
-                    if len(query_embeddings) > 0 and isinstance(query_embeddings[0], list):
-                        # Already in correct format: [[emb1], [emb2], ...]
-                        # Validate embeddings are not empty
-                        for i, emb in enumerate(query_embeddings):
-                            if isinstance(emb, list) and len(emb) > 0:
-                                query_embedding_map[queries[i]] = emb
-                            else:
-                                log.warning(
-                                    "Empty or invalid embedding for query index %s", i
-                                )
-                    else:
-                        # Flat list: might be single embedding or needs wrapping
-                        # If length matches, assume each element is an embedding vector
-                        for i, emb in enumerate(query_embeddings):
-                            if isinstance(emb, list) and len(emb) > 0:
-                                query_embedding_map[queries[i]] = emb
-                            else:
-                                log.warning(
-                                    "Empty or invalid embedding for query index %s", i
-                                )
-                else:
-                    # Mismatch - fallback to individual calls
-                    log.warning(f"Batch embedding returned {len(query_embeddings)} results for {len(queries)} queries, falling back to individual calls")
-                    raise ValueError("Batch embedding result length mismatch")
-            else:
-                # Unexpected return type - fallback
-                log.warning(f"Batch embedding returned unexpected type: {type(query_embeddings)}, falling back to individual calls")
-                raise ValueError("Unexpected batch embedding return type")
-        elif len(queries) == 1:
-            # Single query - embed normally
-            embedding = embedding_function(queries[0])
-            # Ensure it's a list (embedding functions should return list[float])
-            if isinstance(embedding, list) and len(embedding) > 0:
-                query_embedding_map[queries[0]] = embedding
-            else:
-                # Invalid embedding - log and skip
-                log.warning("Empty or invalid embedding for single query")
-                if not isinstance(embedding, list):
-                    # Try wrapping as fallback
-                    query_embedding_map[queries[0]] = [embedding] if embedding else None
-    except Exception as error:
-        log.exception(
-            "Error generating batch embeddings | error_type=%s",
-            type(error).__name__,
-        )
-        # Fallback to individual embedding generation
-        log.debug("Falling back to individual embedding generation")
-        for query in queries:
-            try:
-                embedding = embedding_function(query)
-                if isinstance(embedding, list) and len(embedding) > 0:
-                    query_embedding_map[query] = embedding
-                elif isinstance(embedding, list) and len(embedding) == 0:
-                    log.warning("Empty embedding returned for query")
-                else:
-                    # Wrap non-list embeddings
-                    query_embedding_map[query] = [embedding] if embedding else None
-            except Exception as embed_error:
-                log.exception(
-                    "Error embedding query | error_type=%s",
-                    type(embed_error).__name__,
-                )
-                continue
-    
-    # Validate we have at least some embeddings
-    if not query_embedding_map:
-        log.error("Failed to generate embeddings for any queries")
-        return merge_and_sort_query_results(results, k=k, reverse=reverse_distances)
-    
-    # Parallelize query processing for faster RAG retrieval
-    # Note: Thread-safety depends on the vector DB implementation:
-    # - Postgres (pgvector): Uses scoped_session - thread-safe
-    # - SQLite-based DBs: May have issues with concurrent access
-    # - Chroma/Qdrant/Milvus: Generally thread-safe if using separate clients per thread
-    def process_query_collection_pair(query: str, collection_name: str, query_embedding: list[float]):
-        """Process a single query against a single collection using pre-computed embedding"""
-        try:
-            if collection_name:
-                result = query_doc(
-                    collection_name=collection_name,
-                    k=k,
-                    query_embedding=query_embedding,
-                    admin_id=admin_id,
-                    embedding_model_id=embedding_model_id,
-                    knowledge_ids=knowledge_ids,
-                    file_ids=file_ids,
-                    staged_job_ids=staged_job_ids,
-                    staged_file_ids=staged_file_ids,
-                    staged_collection_files=staged_collection_files,
-                    allow_unscoped_legacy=allow_unscoped_legacy,
-                )
-                if result is not None:
-                    return result.model_dump()
-        except Exception as error:
-            log.exception(
-                "Error when querying collection | error_type=%s",
-                type(error).__name__,
-            )
-        return None
-    
-    # Create all query-collection pairs with pre-computed embeddings
-    # Filter out None embeddings and ensure embeddings are valid lists
-    query_collection_pairs = []
-    for query in queries:
-        if query not in query_embedding_map:
-            continue
-        embedding = query_embedding_map[query]
-        if embedding is None or not isinstance(embedding, list) or len(embedding) == 0:
-            continue
-        for collection_name in collection_names:
-            query_collection_pairs.append((query, collection_name, embedding))
-    
-    if not query_collection_pairs:
-        log.warning("No valid query-collection pairs after filtering invalid embeddings")
-        return merge_and_sort_query_results(results, k=k, reverse=reverse_distances)
-    
-    # For single query-collection pair, process sequentially to avoid overhead
-    # For multiple queries/collections, use parallel processing
-    if len(query_collection_pairs) == 1:
-        # Sequential processing for single query-collection pair
-        query, collection_name, query_embedding = query_collection_pairs[0]
-        if query_embedding and isinstance(query_embedding, list) and len(query_embedding) > 0:
-            result = process_query_collection_pair(query, collection_name, query_embedding)
-            if result is not None:
-                results.append(result)
-    elif len(query_collection_pairs) > 1:
-        # Process in parallel using ThreadPoolExecutor
-        # Limit workers to prevent resource exhaustion and potential SQLite lock issues
-        max_workers = min(len(query_collection_pairs), 10)
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_pair = {
-                executor.submit(process_query_collection_pair, query, collection_name, query_embedding): (query, collection_name)
-                for query, collection_name, query_embedding in query_collection_pairs
-                if query_embedding is not None and isinstance(query_embedding, list) and len(query_embedding) > 0
-            }
-            
-            if not future_to_pair:
-                log.warning("No valid futures created for parallel query processing")
-            else:
-                for future in as_completed(future_to_pair):
-                    try:
-                        result = future.result()
-                        if result is not None:
-                            results.append(result)
-                    except Exception as error:
-                        log.exception(
-                            "Error in parallel query processing | error_type=%s",
-                            type(error).__name__,
-                        )
+    errors = []
+    reverse = bool(VECTOR_DB != "chroma" and not (admin_id and embedding_model_id))
+    if not queries or not collection_names:
+        return merge_and_sort_query_results(results, k=k, reverse=reverse)
 
-    merged = merge_and_sort_query_results(
-        results, k=k, reverse=reverse_distances
+    # A provider error must remain distinguishable from a successful zero-match query.
+    vectors = (
+        embedding_function(queries)
+        if len(queries) > 1
+        else [embedding_function(queries[0])]
     )
-    
-    merged_count = len(merged.get("documents", [[]])[0]) if merged and merged.get("documents") else 0
-    log.info(
-        "[QUERY_COLLECTION] DONE | collections_count=%s | results_merged=%s | k=%s",
-        len(collection_names),
-        merged_count,
-        k,
-    )
+    if (
+        not isinstance(vectors, list)
+        or len(vectors) != len(queries)
+        or any(not isinstance(vector, list) or not vector for vector in vectors)
+    ):
+        raise _retrieval_failure()
+
+    def search(collection_name, vector):
+        result = query_doc(
+            collection_name=collection_name,
+            k=k,
+            query_embedding=vector,
+            admin_id=admin_id,
+            embedding_model_id=embedding_model_id,
+            knowledge_ids=knowledge_ids,
+            file_ids=file_ids,
+            staged_job_ids=staged_job_ids,
+            staged_file_ids=staged_file_ids,
+            staged_collection_files=staged_collection_files,
+            allow_unscoped_legacy=allow_unscoped_legacy,
+        )
+        return result.model_dump() if result is not None else None
+
+    pairs = [
+        (collection, vector) for collection in collection_names for vector in vectors
+    ]
+    with ThreadPoolExecutor(max_workers=min(10, len(pairs))) as executor:
+        futures = {
+            executor.submit(search, collection, vector): collection
+            for collection, vector in pairs
+        }
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+                if result is not None:
+                    results.append(result)
+            except Exception as error:
+                from open_webui.retrieval.embedding.errors import EmbeddingError
+
+                if isinstance(error, EmbeddingError) and error.code in {
+                    "embedding_reindex_not_ready",
+                    "embedding_model_space_mixed",
+                }:
+                    raise
+                log.warning(
+                    "Collection retrieval failed | type=%s", type(error).__name__
+                )
+                errors.append(
+                    {
+                        "collection_id": futures[future],
+                        "error_code": "embedding_retrieval_failed",
+                        "message": "Evidence from this source could not be retrieved.",
+                        "retryable": True,
+                    }
+                )
+    merged = merge_and_sort_query_results(results, k=k, reverse=reverse)
+    if errors:
+        merged["_retrieval_errors"] = errors
     return merged
 
 
@@ -980,22 +890,22 @@ def query_collection_with_hybrid_search(
     )
     results = []
     errors = []
-    
+
     # Handle edge cases
     if not queries or len(queries) == 0:
         log.warning("query_collection_with_hybrid_search called with empty queries list")
         return merge_and_sort_query_results(results, k=k, reverse=True) if VECTOR_DB != "chroma" else merge_and_sort_query_results(results, k=k, reverse=False)
-    
+
     if not collection_names or len(collection_names) == 0:
         log.warning("query_collection_with_hybrid_search called with empty collection_names list")
         return merge_and_sort_query_results(results, k=k, reverse=True) if VECTOR_DB != "chroma" else merge_and_sort_query_results(results, k=k, reverse=False)
-    
+
     # Filter out empty queries
     queries = [q for q in queries if q and q.strip()]
     if not queries:
         log.warning("All queries were empty after filtering in hybrid search")
         return merge_and_sort_query_results(results, k=k, reverse=True) if VECTOR_DB != "chroma" else merge_and_sort_query_results(results, k=k, reverse=False)
-    
+
     # Parallelize query processing for faster RAG retrieval with hybrid search
     # Note: Thread-safety depends on the vector DB implementation
     def process_hybrid_search(query: str, collection_name: str):
@@ -1028,18 +938,18 @@ def query_collection_with_hybrid_search(
                 "error": type(error).__name__,
                 "collection": collection_name,
             }
-    
+
     # Create all query-collection pairs
     query_collection_pairs = [
         (query, collection_name)
         for collection_name in collection_names
         for query in queries
     ]
-    
+
     if not query_collection_pairs:
         log.warning("No valid query-collection pairs for hybrid search")
         return merge_and_sort_query_results(results, k=k, reverse=True) if VECTOR_DB != "chroma" else merge_and_sort_query_results(results, k=k, reverse=False)
-    
+
     # For single query-collection pair, process sequentially to avoid overhead
     # For multiple queries/collections, use parallel processing
     if len(query_collection_pairs) == 1:
@@ -1058,7 +968,7 @@ def query_collection_with_hybrid_search(
                 executor.submit(process_hybrid_search, query, collection_name): (query, collection_name)
                 for query, collection_name in query_collection_pairs
             }
-            
+
             for future in as_completed(future_to_pair):
                 try:
                     pair_result = future.result()
@@ -1079,7 +989,7 @@ def query_collection_with_hybrid_search(
                         }
                     )
 
-    # Only raise error if ALL searches failed
+    # Propagate failed hybrid searches so the caller can attempt dense retrieval.
     if len(errors) == len(query_collection_pairs):
         log.error(
             "[HYBRID_SEARCH] ALL_FAILED | collections_count=%s | errors_count=%s",
@@ -1096,7 +1006,7 @@ def query_collection_with_hybrid_search(
         merged = merge_and_sort_query_results(results, k=k, reverse=False)
     else:
         merged = merge_and_sort_query_results(results, k=k, reverse=True)
-    
+
     merged_count = len(merged.get("documents", [[]])[0]) if merged and merged.get("documents") else 0
     log.info(
         "[HYBRID_SEARCH] DONE | collections_count=%s | results_merged=%s | errors_count=%s | k=%s",
@@ -1105,6 +1015,16 @@ def query_collection_with_hybrid_search(
         len(errors),
         k,
     )
+    if errors:
+        merged["_retrieval_errors"] = [
+            {
+                "collection_id": error["collection"],
+                "error_code": "embedding_retrieval_failed",
+                "message": "Some evidence could not be retrieved.",
+                "retryable": True,
+            }
+            for error in errors
+        ]
     return merged
 
 
@@ -1267,14 +1187,16 @@ def get_sources_from_files(
                         "legacy": True,
                     }
                 )
+            else:
+                raise _unavailable_attachment()
             continue
 
         file_id = str(attached_file.get("id") or "").strip()
         if not file_id:
-            continue
+            raise _unavailable_attachment()
         file_object = Files.get_file_by_id(file_id)
         if file_object is None:
-            continue
+            raise _unavailable_attachment()
         direct_file_ids.append(file_id)
         pending_file_attachments.setdefault(file_id, (attached_file, file_object))
 
@@ -1287,8 +1209,7 @@ def get_sources_from_files(
     if not canonical_files and not pending_file_attachments and not pending_knowledge_attachments:
         return RetrievalResult([], authorized_scope)
 
-    # Phase 3: resolve the requesting user's admin/model provenance space.
-    # Mixed-model requests return no sources, while other model-space errors
+    # Resolve the requesting user's admin/model provenance space. All errors
     # propagate so callers cannot fall back to model-unaware vector search.
     # This guard covers both the hybrid and non-hybrid paths because invalid
     # requests are rejected before any vector search runs.
@@ -1297,6 +1218,8 @@ def get_sources_from_files(
     staged_job_ids = None
     staged_file_ids = None
     staged_collection_files = None
+    model_space = None
+    excluded_sources = []
     multimodal_model_space = False
     if canonical_files or pending_file_attachments or pending_knowledge_attachments:
         try:
@@ -1315,6 +1238,20 @@ def get_sources_from_files(
                 file_ids=file_ids_in_scope or None,
             )
             if isinstance(result, RetrievalModelSpace):
+                model_space = result
+                for file_id in result.excluded_file_ids:
+                    excluded_file = Files.get_file_by_id(file_id)
+                    excluded_sources.append(
+                        {
+                            "file_id": file_id,
+                            "name": (
+                                excluded_file.filename if excluded_file else file_id
+                            ),
+                            "error_code": "embedding_reindex_not_ready",
+                            "message": "This file is pending, failed, or unavailable in the current index.",
+                            "retryable": True,
+                        }
+                    )
                 admin_id = result.admin_id
                 embedding_model_id = result.effective_model_id
                 staged_job_ids = list(result.staged_job_ids) or None
@@ -1351,12 +1288,6 @@ def get_sources_from_files(
                     user_id=user.id,
                 )
         except EmbeddingError as error:
-            if error.code == EMBEDDING_MODEL_SPACE_MIXED:
-                # Mixed-model request: no valid cross-model results exist.
-                log.warning("[RAG Query] retrieval rejected | code=%s", error.code)
-                return RetrievalResult(
-                    [], AuthorizedAttachmentScope(frozenset(), frozenset())
-                )
             if error.code == EMBEDDING_REINDEX_NOT_READY:
                 # Blocked state: propagate so callers can distinguish
                 # "no matches" from "reindex in progress / failed."
@@ -1385,6 +1316,8 @@ def get_sources_from_files(
             }
         )
     for file_id, (attached_file, file_object) in pending_file_attachments.items():
+        if model_space is not None and file_id not in model_space.ready_file_ids:
+            continue
         canonical_files.append(
             {
                 "id": file_id,
@@ -1423,6 +1356,11 @@ def get_sources_from_files(
                 documents = []
                 metadatas = []
                 for file_id in file_ids:
+                    if (
+                        model_space is not None
+                        and file_id not in model_space.ready_file_ids
+                    ):
+                        continue
                     file_object = Files.get_file_by_id(file_id)
 
                     if file_object:
@@ -1486,7 +1424,7 @@ def get_sources_from_files(
                 len(queried_collections_this_file),
                 len(queries),
             )
-            
+
             # Check if collections actually exist and have documents
             for coll_name in collection_names:
                 try:
@@ -1516,9 +1454,23 @@ def get_sources_from_files(
                         allow_unscoped_legacy=bool(file.get("legacy")),
                     )
                 except Exception as error:
+                    if isinstance(error, EmbeddingError) and error.code in {
+                        EMBEDDING_REINDEX_NOT_READY,
+                        EMBEDDING_MODEL_SPACE_MIXED,
+                    }:
+                        raise
                     log.exception(
                         "Full-context retrieval failed | error_type=%s",
                         type(error).__name__,
+                    )
+                    excluded_sources.append(
+                        {
+                            "source_id": file.get("id"),
+                            "name": file.get("name"),
+                            "error_code": "embedding_retrieval_failed",
+                            "message": "Evidence from this source could not be retrieved.",
+                            "retryable": True,
+                        }
                     )
 
             else:
@@ -1569,7 +1521,7 @@ def get_sources_from_files(
                                 staged_collection_files=staged_collection_files,
                                 allow_unscoped_legacy=allow_unscoped_legacy,
                             )
-                            
+
                             # Log if no results were found for debugging
                             if context is None or not context.get("documents") or not context["documents"][0]:
                                 log.warning(
@@ -1577,14 +1529,50 @@ def get_sources_from_files(
                                     "processing, extraction, or embedding may be incomplete"
                                 )
                 except Exception as error:
+                    if isinstance(error, EmbeddingError) and error.code in {
+                        EMBEDDING_REINDEX_NOT_READY,
+                        EMBEDDING_MODEL_SPACE_MIXED,
+                    }:
+                        raise
                     log.exception(
                         "Source retrieval failed | error_type=%s",
                         type(error).__name__,
+                    )
+                    excluded_sources.append(
+                        {
+                            "source_id": file.get("id"),
+                            "name": file.get("name"),
+                            "error_code": "embedding_retrieval_failed",
+                            "message": "Evidence from this source could not be retrieved.",
+                            "retryable": True,
+                        }
                     )
 
             extracted_collections.extend(collection_names)
 
         if context:
+            excluded_sources.extend(context.pop("_retrieval_errors", []))
+            if (
+                model_space is not None
+                and not file.get("legacy")
+                and file.get("type") not in {"web_search", "text"}
+            ):
+                metadata = context.get("metadatas", [[]])[0]
+                keep = [
+                    index
+                    for index, item in enumerate(metadata)
+                    if str((item or {}).get("file_id") or "")
+                    in model_space.ready_file_ids
+                ]
+                for key in ("documents", "metadatas", "ids", "distances"):
+                    if context.get(key):
+                        context[key] = [
+                            [
+                                context[key][0][index]
+                                for index in keep
+                                if index < len(context[key][0])
+                            ]
+                        ]
             if "data" in file:
                 del file["data"]
 
@@ -1617,8 +1605,14 @@ def get_sources_from_files(
             log.exception(
                 "Source assembly failed | error_type=%s", type(error).__name__
             )
+            raise _retrieval_failure() from error
 
-    return RetrievalResult(sources, authorized_scope)
+    from open_webui.retrieval.embedding.gate import assert_retrieval_generation_current
+
+    assert_retrieval_generation_current(model_space)
+    if excluded_sources and not any(source.get("document") for source in sources):
+        raise _retrieval_failure()
+    return RetrievalResult(sources, authorized_scope, excluded_sources, model_space)
 
 
 def get_model_path(model: str, update_model: bool = False):

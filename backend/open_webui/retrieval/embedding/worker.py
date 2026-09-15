@@ -1,45 +1,23 @@
-"""Database-resolved reindex worker with all critical fixes (Spec 06).
+"""Process a frozen reindex inventory and publish each successful file atomically.
 
-Implements the full worker orchestration with all 17 critical fixes:
-1. Use embed_for_frozen_context() with job's target model
-2. Check RQ job status to prevent duplicate delivery corruption
-3. Use reclaim_file() for processing rows with stale threshold
-4. Use ModelAwareVectorRepository.make_items() + reconcile_model_aware()
-   - Build items with full provenance and a gate-controlled "building" status
-   - Idempotent upsert keyed by (admin, model, rag_chunk_id, collection)
-   - Transactional per-projection reconcile: stale target rows for the same
-     (admin, model, file, collection) are deleted in the same transaction;
-     other models/files/collections and shared rag_chunks are never touched
-5. Build items with full provenance (rag_chunk_id, model, admin, file, knowledge)
-6. Use get_worker_config() for proper config initialization
-7. Mark job failed before re-raising EmbeddingError
-8. Skip failed rows (no retry in original job)
-9. Validate chunk reuse with source file hash
-10. Use proper file parsing pipeline (Loader, storage, chunker)
-11. Raise errors for empty/unsupported content
-12. Treat failed claim as skip, not failure
-13. Return actual finalized job status
-14. No-op for all terminal jobs
-15. Use allowlisted error messages
-16. Use stable error codes from EmbeddingError.code
-17. Defer finalization with safe boundary
+Generation and source checks fence every publication. Required text/visual
+vectors become searchable on commit, optional audio is dispatched afterward,
+and job finalization only reconciles the attempt's counters and terminal status.
+Failed rows are retried through a new failed-file-only attempt.
 """
 
 import logging
-import hashlib
 import os
 import time
 from dataclasses import replace
 from typing import Optional
 
 from open_webui.internal.db import get_db
-from open_webui.models.embeddings import EmbeddingJob, EmbeddingJobFile, RagChunk
+from open_webui.models.embeddings import EmbeddingJobFile
 from open_webui.models.files import File
-from open_webui.models.knowledge import Knowledge
 from open_webui.models.users import User
 from open_webui.retrieval.embedding.errors import (
     EmbeddingError,
-    EMBEDDING_JOB_NOT_FOUND,
     EMBEDDING_JOB_STALE_OPERATION,
     EMBEDDING_JOB_TERMINAL,
     EMBEDDING_ADMIN_UNRESOLVED,
@@ -66,17 +44,14 @@ from open_webui.retrieval.embedding.errors import (
     EMBEDDING_REINDEX_SOURCE_CHANGED,
 )
 from open_webui.retrieval.embedding.file_processing import (
-    AUDIO_REPAIR_STATE_META_KEY,
     CONTENT_ORIGIN_STORED_SOURCE,
     embed_prepared_file_best_effort_audio,
     read_stored_content_provenance,
     resolve_authoritative_content_provenance,
 )
 from open_webui.retrieval.embedding.preparation import (
-    PreparedChunk,
     PreparedFile,
     PreparationRecipe,
-    build_persisted_chunks,
     prepare_file_for_embedding,
     preparation_recipe_from_snapshot,
 )
@@ -94,12 +69,10 @@ from open_webui.retrieval.embedding.jobs import (
     FILE_STATUS_PENDING,
     FILE_STATUS_PROCESSING,
 )
-from open_webui.retrieval.embedding.inventory import source_sha256_for_file
 from open_webui.retrieval.embedding.registry import get_model_spec_by_id
 from open_webui.retrieval.embedding.service import EmbeddingService
 from open_webui.retrieval.vector.model_aware import (
     ModelAwareVectorRepository,
-    VECTOR_STATUS_BUILDING,
 )
 from open_webui.storage.provider import Storage
 from open_webui.workers.config import get_worker_config
@@ -258,27 +231,27 @@ def _is_active_status(status: str) -> bool:
 
 
 def process_embedding_job(embedding_job_id: str) -> dict:
-    """Execute a durable reindex job with all critical fixes.
-    
+    """Execute a durable reindex attempt with independent file publication.
+
     Args:
         embedding_job_id: Durable job ID from database
-        
+
     Returns:
         Result dict with actual status, processed count, failed count
     """
     log.info(f"[EMBEDDING_WORKER] Starting job {embedding_job_id}")
     start_time = time.time()
-    
+
     try:
         # Step 1: Load job
         with get_db() as db:
             job_view = EmbeddingJobRepository.get_job(embedding_job_id, db=db)
-        
+
         if job_view is None:
             error_msg = f"Job {embedding_job_id} not found"
             log.error(f"[EMBEDDING_WORKER] {error_msg}")
             return {"status": "not_found", "error": error_msg, "processed": 0, "failed": 0}
-        
+
         # Step 2: No-op for ALL terminal jobs (Fix #14)
         if _is_terminal_status(job_view.status):
             log.info(f"[EMBEDDING_WORKER] Job {embedding_job_id} already terminal ({job_view.status}), no-op")
@@ -287,17 +260,17 @@ def process_embedding_job(embedding_job_id: str) -> dict:
                 "processed": job_view.processed_files,
                 "failed": job_view.failed_files,
             }
-        
+
         # Step 3: Atomically claim job as processing with duplicate detection
         job_view, reclaim_own_processing_files = _claim_job_safe(job_view)
         if job_view is None:
             # Duplicate delivery with live owner - no-op
             return {"status": "no_op", "reason": "live_owner", "processed": 0, "failed": 0}
-        
+
         # Step 4-6: Load admin, target model, credentials
         admin_id = job_view.admin_id
         target_model_id = job_view.embedding_model_id
-        
+
         try:
             admin = _load_and_verify_admin(admin_id)
             target_model = _load_target_model(target_model_id)
@@ -309,30 +282,30 @@ def process_embedding_job(embedding_job_id: str) -> dict:
             error_msg = _sanitize_error_message("job_validation", e)
             _mark_job_failed_safe(embedding_job_id, e.code, error_msg)
             raise
-        
+
         # Initialize embedding service with proper worker config (Fix #6)
         config = get_worker_config()
         embedding_service = EmbeddingService(config)
         vector_repo = ModelAwareVectorRepository()
-        
+
         # Step 7: Load persisted job-file rows
         file_views = _load_job_files(embedding_job_id)
-        
+
         processed_count = 0
         failed_count = 0
-        
+
         # Step 8-14: Process each file
         for file_view in file_views:
             # Skip completed rows
             if file_view.status == FILE_STATUS_COMPLETED:
                 log.debug(f"[EMBEDDING_WORKER] Skipping completed file {file_view.file_id}")
                 continue
-            
+
             # Fix #8: Skip failed rows (no retry in original job)
             if file_view.status == FILE_STATUS_FAILED:
                 log.debug(f"[EMBEDDING_WORKER] Skipping failed file {file_view.file_id} (retry via new job)")
                 continue
-            
+
             # Fix #12: Reload file status to get latest state
             with get_db() as db:
                 fresh_file = (
@@ -346,17 +319,17 @@ def process_embedding_job(embedding_job_id: str) -> dict:
                 if fresh_file is None:
                     log.warning(f"[EMBEDDING_WORKER] File {file_view.file_id} not found, skipping")
                     continue
-                
+
                 # Update file_view with fresh status
                 file_view = replace(file_view, status=fresh_file.status)
-                
+
                 # Skip if now completed by another worker
                 if file_view.status in (FILE_STATUS_COMPLETED, FILE_STATUS_INCOMPATIBLE):
                     log.debug(
                         f"[EMBEDDING_WORKER] File {file_view.file_id} already terminal ({file_view.status})"
                     )
                     continue
-            
+
             try:
                 completed = _process_file(
                     job_view=job_view,
@@ -394,27 +367,27 @@ def process_embedding_job(embedding_job_id: str) -> dict:
                 )
                 _mark_file_failed_safe(embedding_job_id, file_view.file_id, error_code, error_msg)
                 failed_count += 1
-        
+
         # Step 15: Finalize job (Fix #17: defer to Spec 09 with safe boundary)
         _finalize_job_safe(embedding_job_id)
-        
+
         # Fix #13: Return actual finalized job status
         with get_db() as db:
             final_job = EmbeddingJobRepository.get_job(embedding_job_id, db=db)
-        
+
         duration = time.time() - start_time
         log.info(
             f"[EMBEDDING_WORKER] Job {embedding_job_id} completed in {duration:.2f}s: "
             f"status={final_job.status if final_job else 'unknown'}, "
             f"processed={processed_count}, failed={failed_count}"
         )
-        
+
         return {
             "status": final_job.status if final_job else "unknown",
             "processed": final_job.processed_files if final_job else processed_count,
             "failed": final_job.failed_files if final_job else failed_count,
         }
-        
+
     except EmbeddingError:
         # Job-level error already marked in _mark_job_failed_safe
         raise
@@ -615,24 +588,28 @@ def _process_file(
     config,
     reclaim_own_processing_files: bool,
 ):
-    """Process a single file with all critical fixes."""
+    """Prepare, embed, and publish one file against its frozen generation."""
     job_id = job_view.id
     file_id = file_view.file_id
-    
+    from open_webui.retrieval.embedding.publication import reuse_current_publication
+
+    if reuse_current_publication(job_id, file_id):
+        return True
+
     log.debug(f"[EMBEDDING_WORKER] Processing file {file_id} for job {job_id}")
-    
+
     # Step 9: Claim file (Fix #3: use reclaim for processing rows)
     claim_result = _claim_file_safe(
         job_id,
         file_view,
         reclaim_own_processing_files=reclaim_own_processing_files,
     )
-    
+
     # Fix #12: Treat failed claim as skip, not failure
     if claim_result is not True:
         log.debug(f"[EMBEDDING_WORKER] File {file_id} claim failed/skipped")
         return False
-    
+
     # Step 10: Load source file and inventory membership
     source_file = _load_source_file(file_id)
     file_snapshot = file_view.file_snapshot
@@ -642,8 +619,6 @@ def _process_file(
         raise EmbeddingError(EMBEDDING_REINDEX_SOURCE_CHANGED) from None
 
     expected_source_sha256 = file_snapshot.get("source_sha256")
-    expected_updated_at = file_snapshot.get("updated_at")
-    expected_content_hash = file_snapshot.get("content_hash")
     expected_content_origin = file_snapshot.get(
         "content_origin",
         CONTENT_ORIGIN_STORED_SOURCE,
@@ -656,111 +631,102 @@ def _process_file(
     except ValueError:
         raise EmbeddingError(EMBEDDING_REINDEX_SOURCE_CHANGED) from None
     if (
-        expected_updated_at is not None
-        and source_file.updated_at != expected_updated_at
-    ) or source_file.hash != expected_content_hash or (
         current_content_provenance.origin != expected_content_origin
         or current_content_provenance.content_override_sha256
         != expected_content_override_sha256
     ):
         raise EmbeddingError(EMBEDDING_REINDEX_SOURCE_CHANGED)
-    
-    # Step 11: Re-read immutable source bytes and use the canonical preparation
-    # path. Cached text/vector documents are never sufficient for visual input.
-    prepared = _prepare_source_file(
-        source_file=source_file,
-        admin_email=admin.email,
-        target_model=target_model,
-        config=config,
-        preparation_recipe=preparation_recipe,
+
+    from open_webui.retrieval.embedding.publication import (
+        claim_required_indexing,
+        publish_prepared_file,
+        release_required_indexing,
     )
 
-    if not prepared.chunks:
-        raise EmbeddingError(
-            FILE_ERROR_EMPTY_CONTENT,
-            detail=f"File {file_id} contains no extractable content",
-        )
-
-    incompatible_code = (
-        PDF_VISUALS_REQUIRE_MULTIMODAL_MODEL
-        if PDF_VISUALS_REQUIRE_MULTIMODAL_MODEL in prepared.warnings
-        else None
-    )
-
-    if expected_source_sha256 != prepared.source_sha256:
-        raise EmbeddingError(EMBEDDING_REINDEX_SOURCE_CHANGED)
-
-    # Generate and fully validate all vectors before mutating chunks/projections.
-    file_embedding_service = EmbeddingService(
-        config,
-        reliability_policy=EmbeddingReliabilityPolicy.from_dict(
-            file_snapshot.get("reliability_policy")
-        ),
-        call_context={
-            "call_id": job_id,
-            "operation": "reindex",
-            "job_id": job_id,
-            "file_id": file_id,
-        },
-    )
-    prepared, embeddings = embed_prepared_file_best_effort_audio(
-        prepared=prepared,
-        embedding_service=file_embedding_service,
+    token = claim_required_indexing(
         admin_id=admin.id,
-        embedding_model_id=target_model.id,
-        preparation_recipe=preparation_recipe,
-    )
-    if not prepared.chunks or len(embeddings) != len(prepared.chunks):
-        raise EmbeddingError(FILE_ERROR_EMBEDDING_FAILED)
-
-    persisted_chunks = build_persisted_chunks(
-        prepared,
-        admin_id=admin.id,
-        file_id=file_id,
-    )
-    manifest_id = RagChunk.build_manifest_id(
-        persisted_chunks,
-        source_sha256=prepared.source_sha256,
-        extraction_version=prepared.extraction_version,
-    )
-    rag_chunk_ids = RagChunk.insert_chunks(
-        admin.id,
-        file_id,
-        persisted_chunks,
-        manifest_id=manifest_id,
-    )
-
-    _write_vectors(
-        vector_repo=vector_repo,
-        admin_id=admin.id,
-        file_id=file_id,
-        chunks=prepared.chunks,
-        embeddings=embeddings,
-        rag_chunk_ids=rag_chunk_ids,
-        metadata=[chunk["chunk_metadata"] for chunk in persisted_chunks],
-        file_snapshot=file_snapshot,
-        target_model=target_model,
+        model_id=target_model.id,
+        snapshot=file_snapshot,
         job_id=job_id,
     )
-    _stage_prepared_manifest(
-        job_id,
-        file_id,
-        prepared,
-        manifest_id,
-        rag_chunk_ids,
-    )
-
-    # Visual content skipped under a text-only model is a successful terminal
-    # incompatibility; text chunks remain staged for promotion.
-    if incompatible_code is not None:
-        _mark_file_incompatible_safe(job_id, file_id, incompatible_code)
-        log.info(
-            "[EMBEDDING_WORKER] File %s completed with incompatible visual content",
-            file_id,
+    try:
+        # Step 11: Re-read immutable source bytes and use the canonical preparation
+        # path. Cached text/vector documents are never sufficient for visual input.
+        prepared = _prepare_source_file(
+            source_file=source_file,
+            admin_email=admin.email,
+            target_model=target_model,
+            config=config,
+            preparation_recipe=preparation_recipe,
         )
-    else:
-        _mark_file_completed_safe(job_id, file_id)
-        log.debug(f"[EMBEDDING_WORKER] Completed file {file_id}")
+
+        if not prepared.chunks:
+            raise EmbeddingError(
+                FILE_ERROR_EMPTY_CONTENT,
+                detail=f"File {file_id} contains no extractable content",
+            )
+
+        incompatible_code = (
+            PDF_VISUALS_REQUIRE_MULTIMODAL_MODEL
+            if PDF_VISUALS_REQUIRE_MULTIMODAL_MODEL in prepared.warnings
+            else None
+        )
+
+        if expected_source_sha256 != prepared.source_sha256:
+            raise EmbeddingError(EMBEDDING_REINDEX_SOURCE_CHANGED)
+
+        # Generate and fully validate all vectors before mutating chunks/projections.
+        file_embedding_service = EmbeddingService(
+            config,
+            reliability_policy=EmbeddingReliabilityPolicy.from_dict(
+                file_snapshot.get("reliability_policy")
+            ),
+            call_context={
+                "call_id": job_id,
+                "operation": "reindex",
+                "job_id": job_id,
+                "file_id": file_id,
+            },
+        )
+        prepared, embeddings = embed_prepared_file_best_effort_audio(
+            prepared=prepared,
+            embedding_service=file_embedding_service,
+            admin_id=admin.id,
+            embedding_model_id=target_model.id,
+            preparation_recipe=preparation_recipe,
+            index_generation_id=job_view.index_generation_id,
+        )
+        if not prepared.chunks or len(embeddings) != len(prepared.chunks):
+            raise EmbeddingError(FILE_ERROR_EMBEDDING_FAILED)
+
+        publish_prepared_file(
+            admin_id=admin.id,
+            model=target_model,
+            snapshot=file_snapshot,
+            prepared=prepared,
+            vectors=embeddings,
+            owner_token=token,
+            job_id=job_id,
+            incompatible_code=incompatible_code,
+        )
+    finally:
+        release_required_indexing(file_id, token)
+    try:
+        from open_webui.retrieval.embedding.audio_repair import dispatch_pending_audio
+
+        dispatch_pending_audio(
+            config=config,
+            file_id=file_id,
+            admin_id=admin.id,
+            embedding_model_id=target_model.id,
+            reliability_policy=file_snapshot.get("reliability_policy"),
+        )
+    except Exception as error:
+        log.warning(
+            "reindex_audio_dispatch_pending file_id=%s type=%s",
+            file_id,
+            type(error).__name__,
+        )
     return True
 
 
@@ -878,168 +844,12 @@ def _prepare_source_file(
             admin_email=admin_email,
             preparation_recipe=preparation_recipe,
             content_override=content_provenance.content_override,
+            defer_audio=True,
         )
     except EmbeddingError:
         raise
     except Exception:
         raise EmbeddingError(FILE_ERROR_EXTRACTION_FAILED) from None
-
-
-def _stage_prepared_manifest(
-    job_id: str,
-    file_id: str,
-    prepared: PreparedFile,
-    manifest_id: str,
-    rag_chunk_ids: list[str],
-) -> None:
-    """Stage prepared cache/status for publication only after promotion."""
-    with get_db() as db:
-        job_file = (
-            db.query(EmbeddingJobFile)
-            .filter(
-                EmbeddingJobFile.job_id == job_id,
-                EmbeddingJobFile.file_id == file_id,
-            )
-            .first()
-        )
-        if job_file is None:
-            raise EmbeddingError(EMBEDDING_FILE_NOT_FOUND)
-        snapshot = dict(job_file.file_snapshot or {})
-        projection_ids = _current_snapshot_knowledge_ids(
-            file_id=file_id,
-            knowledge_ids=snapshot.get("knowledge_collection_ids", []),
-        )
-        snapshot["prepared_processing_summary"] = {
-            "text_content": prepared.text_content,
-            "content_hash": hashlib.sha256(
-                prepared.text_content.encode("utf-8")
-            ).hexdigest(),
-            "source_sha256": prepared.source_sha256,
-            "extraction_version": prepared.extraction_version,
-            "manifest_id": manifest_id,
-            "chunk_count": len(prepared.chunks),
-            "rag_chunk_ids": list(rag_chunk_ids),
-            "projection_ids": [f"file-{file_id}", *projection_ids],
-            "processing_warnings": list(dict.fromkeys(prepared.warnings)),
-            "visual_summary": dict(prepared.visual_summary),
-            "audio_embedding": dict(prepared.audio_embedding),
-            "audio_repair_state": dict(prepared.audio_repair_state),
-        }
-        job_file.file_snapshot = snapshot
-        db.commit()
-
-
-def _write_vectors(
-    vector_repo: ModelAwareVectorRepository,
-    admin_id: str,
-    file_id: str,
-    chunks: tuple[PreparedChunk, ...],
-    embeddings: list,
-    rag_chunk_ids: list[str],
-    metadata: list[dict],
-    file_snapshot: dict,
-    target_model,
-    job_id: str,
-):
-    """Reconcile every required vector projection (Fix #4, #5, Spec 07).
-
-    Vectors are stamped with ``building`` status and the durable
-    ``embedding_job_id``. They stay hidden during active jobs; after a terminal
-    partial outcome, only completed files may be exposed through the
-    source-scoped retrieval gate. Each file/knowledge collection
-    projection is reconciled transactionally: current target rows are upserted
-    by ``(admin_id, embedding_model_id, rag_chunk_id, collection_name)`` and
-    stale target rows for the same projection are deleted in the same
-    transaction. Rows for other models, files, and collections — including old
-    active-model vectors — are never touched, and shared ``rag_chunks`` rows
-    are never deleted.
-    """
-    if not chunks or not embeddings:
-        return
-    
-    # Extract collection info from snapshot
-    file_collection_name = file_snapshot.get("file_collection_name", f"file-{file_id}")
-    snapshot_knowledge_ids = file_snapshot.get("knowledge_collection_ids", [])
-    knowledge_collection_ids = _current_snapshot_knowledge_ids(
-        file_id=file_id,
-        knowledge_ids=snapshot_knowledge_ids,
-    )
-    
-    # Fix #5: Build items with full provenance using ModelAwareVectorRepository
-    texts = [chunk.content for chunk in chunks]
-    modalities = [chunk.modality for chunk in chunks]
-    
-    # Build items for file collection
-    try:
-        file_items = vector_repo.make_items(
-            texts=texts,
-            vectors=embeddings,
-            metadata=metadata,
-            rag_chunk_ids=rag_chunk_ids,
-            admin_id=admin_id,
-            model=target_model,
-            file_id=file_id,
-            knowledge_id=None,
-            modalities=modalities,
-            embedding_status=VECTOR_STATUS_BUILDING,
-            embedding_job_id=job_id,
-        )
-        
-        projections = [(file_collection_name, file_items)]
-        for knowledge_id in knowledge_collection_ids:
-            knowledge_items = vector_repo.make_items(
-                texts=texts,
-                vectors=embeddings,
-                metadata=metadata,
-                rag_chunk_ids=rag_chunk_ids,
-                admin_id=admin_id,
-                model=target_model,
-                file_id=file_id,
-                knowledge_id=knowledge_id,
-                modalities=modalities,
-                embedding_status=VECTOR_STATUS_BUILDING,
-                embedding_job_id=job_id,
-            )
-            projections.append((str(knowledge_id), knowledge_items))
-
-        vector_repo.reconcile_model_aware_many(
-            projections=projections,
-            model=target_model,
-        )
-
-        log.debug(
-            f"[EMBEDDING_WORKER] Reconcile wrote {len(file_items)} vectors to {1 + len(knowledge_collection_ids)} collections"
-        )
-    except Exception:
-        raise EmbeddingError(
-            FILE_ERROR_VECTOR_WRITE_FAILED,
-        ) from None
-
-
-def _current_snapshot_knowledge_ids(
-    *, file_id: str, knowledge_ids
-) -> list[str]:
-    """Filter a reindex snapshot through current file memberships."""
-    requested = {
-        str(value)
-        for value in (knowledge_ids if isinstance(knowledge_ids, list) else [])
-        if value
-    }
-    if not requested:
-        return []
-    current: list[str] = []
-    with get_db() as db:
-        rows = (
-            db.query(Knowledge.id, Knowledge.data)
-            .filter(Knowledge.id.in_(requested))
-            .all()
-        )
-        for row in rows:
-            data = row.data if isinstance(row.data, dict) else {}
-            file_ids = data.get("file_ids", [])
-            if isinstance(file_ids, list) and file_id in file_ids:
-                current.append(str(row.id))
-    return sorted(current)
 
 
 def _mark_file_completed_safe(job_id: str, file_id: str):
@@ -1118,224 +928,14 @@ def _mark_job_failed_safe(job_id: str, error_code: str, error_message: str):
 
 
 def _finalize_job_safe(job_id: str):
-    """Finalize job with full Spec 09 finalization (vector activation + model promotion).
-
-    On success (all files completed): atomically activates target vectors,
-    deactivates previous-model vectors, promotes the target model, and marks
-    the job completed — all in one transaction.
-
-    On partial/failure: delegates to the standard _finalize_job path which
-    sets terminal status without promoting any model.
-
-    Stale-operation errors (job no longer latest) are caught and recorded as
-    a job failure so the worker can still return a result. Unexpected errors
-    during finalization are logged but do not crash the worker.
-    """
-    # Load job to determine admin context and finalization path
-    with get_db() as db:
-        job_view = EmbeddingJobRepository.get_job(job_id, db=db)
-
-    if job_view is None:
-        log.warning(f"[EMBEDDING_WORKER] Cannot finalize job {job_id}: not found")
-        return
-
-    admin_id = job_view.admin_id
-    target_model_id = job_view.embedding_model_id
-    previous_model_id = job_view.previous_embedding_model_id
-
-    vector_repo = ModelAwareVectorRepository()
-
+    """Finalization reports attempt outcomes and never changes publications."""
     try:
         with get_db() as db:
-            # First, recompute counters
-            EmbeddingJobRepository.recompute_counters(job_id=job_id, db=db)
-
-            # Determine if this is an all-success finalization
-            refreshed = EmbeddingJobRepository.get_job(job_id, db=db)
-            if refreshed is None:
-                db.commit()
-                return
-
-            all_success = (
-                refreshed.total_files
-                == refreshed.processed_files
-                + refreshed.incompatible_files
-                and refreshed.total_files >= 0
-                and refreshed.failed_files == 0
-                and refreshed.error_message is None
-            )
-
-            if all_success:
-                # Full finalization: activate vectors + promote model + complete
-                # Load target model spec within the session
-                target_model_spec = get_model_spec_by_id(target_model_id)
-
-                _apply_staged_processing_summaries(
-                    job_id=job_id,
-                    db=db,
-                )
-
-                finalized = EmbeddingJobRepository.finalize_job_success(
-                    job_id=job_id,
-                    admin_id=admin_id,
-                    target_model_id=target_model_id,
-                    previous_model_id=previous_model_id,
-                    vector_repo=vector_repo,
-                    target_model_spec=target_model_spec,
-                    db=db,
-                )
-            else:
-                # Partial/failure finalization: set terminal status and restore
-                # compatibility config in the same transaction; no promotion.
-                finalized = EmbeddingJobRepository.finalize_job(job_id=job_id, db=db)
-
+            EmbeddingJobRepository.finalize_job(job_id=job_id, db=db)
             db.commit()
-
-        if finalized is not None and finalized.status in (
-            JOB_STATUS_FAILED,
-            JOB_STATUS_PARTIALLY_FAILED,
-        ):
-            log.info(
-                "[EMBEDDING_WORKER] Finalized without promotion | job_id=%s | status=%s",
-                job_id,
-                finalized.status,
-            )
-
-        log.info(f"[EMBEDDING_WORKER] Finalized job {job_id}")
-
-    except EmbeddingError as error:
-        # Promotion is retryable as an operation. Keep the completed file
-        # ledger and target state intact; a redelivered job revalidates every
-        # staged vector before promotion. Never persist exception detail.
-        log.error(
-            "Embedding job promotion failed | job_id=%s | code=%s",
-            job_id,
-            error.code,
-        )
-        _mark_promotion_retryable(job_id, error.code)
     except Exception as error:
         log.error(
-            "Embedding job promotion failed | job_id=%s | type=%s",
+            "Embedding job finalization failed job_id=%s type=%s",
             job_id,
             type(error).__name__,
         )
-        _mark_promotion_retryable(job_id, FILE_ERROR_PROCESSING_FAILED)
-
-
-def _mark_promotion_retryable(job_id: str, error_code: str) -> None:
-    """Mark a completed-ledger promotion failure as operation-retryable."""
-    with get_db() as db:
-        row = db.query(EmbeddingJob).filter(EmbeddingJob.id == job_id).first()
-        if row is None or row.status in (JOB_STATUS_COMPLETED,):
-            return
-        row.status = JOB_STATUS_FAILED
-        row.error_code = error_code
-        row.error_message = "Embedding model promotion could not be completed. Retry the operation."
-        row.completed_at = None
-        row.updated_at = int(time.time())
-        db.commit()
-
-
-def _apply_staged_processing_summaries(*, job_id: str, db) -> None:
-    """Publish staged file cache/status in the promotion transaction."""
-    now = int(time.time())
-    rows = (
-        db.query(EmbeddingJobFile)
-        .filter(
-            EmbeddingJobFile.job_id == job_id,
-            EmbeddingJobFile.status.in_((
-                FILE_STATUS_COMPLETED,
-                FILE_STATUS_INCOMPATIBLE,
-            )),
-        )
-        .all()
-    )
-    for job_file in rows:
-        snapshot = (
-            job_file.file_snapshot
-            if isinstance(job_file.file_snapshot, dict)
-            else {}
-        )
-        summary = snapshot.get("prepared_processing_summary")
-        if not isinstance(summary, dict):
-            if job_file.status == FILE_STATUS_INCOMPATIBLE:
-                continue
-            raise EmbeddingError(FILE_ERROR_PROCESSING_FAILED)
-        file_row = (
-            db.query(File)
-            .filter(File.id == job_file.file_id)
-            .with_for_update()
-            .first()
-        )
-        if file_row is None:
-            raise EmbeddingError(EMBEDDING_FILE_NOT_FOUND)
-        text_content = summary.get("text_content")
-        content_hash = summary.get("content_hash")
-        source_sha256 = summary.get("source_sha256")
-        manifest_id = summary.get("manifest_id")
-        if not isinstance(text_content, str):
-            raise EmbeddingError(FILE_ERROR_PROCESSING_FAILED)
-        for digest in (content_hash, source_sha256, manifest_id):
-            if (
-                not isinstance(digest, str)
-                or len(digest) != 64
-                or any(character not in "0123456789abcdef" for character in digest)
-            ):
-                raise EmbeddingError(FILE_ERROR_PROCESSING_FAILED)
-
-        # The worker validated this snapshot before provider calls, but another
-        # file in the same job may take minutes. Revalidate the locked source
-        # immediately before cache publication and vector activation so a
-        # concurrent edit can never promote stale vectors or overwrite newer
-        # extracted content.
-        expected_source_sha256 = snapshot.get("source_sha256")
-        if expected_source_sha256 != source_sha256:
-            raise EmbeddingError(EMBEDDING_REINDEX_SOURCE_CHANGED)
-        if source_sha256_for_file(file_row) != source_sha256:
-            raise EmbeddingError(EMBEDDING_REINDEX_SOURCE_CHANGED)
-        if file_row.hash != snapshot.get("content_hash"):
-            raise EmbeddingError(EMBEDDING_REINDEX_SOURCE_CHANGED)
-        expected_updated_at = snapshot.get("updated_at")
-        if (
-            expected_updated_at is not None
-            and file_row.updated_at != expected_updated_at
-        ):
-            raise EmbeddingError(EMBEDDING_REINDEX_SOURCE_CHANGED)
-        try:
-            current_provenance = read_stored_content_provenance(file_row)
-        except ValueError:
-            raise EmbeddingError(EMBEDDING_REINDEX_SOURCE_CHANGED) from None
-        if (
-            current_provenance.origin
-            != snapshot.get("content_origin", CONTENT_ORIGIN_STORED_SOURCE)
-            or current_provenance.content_override_sha256
-            != snapshot.get("content_override_sha256")
-        ):
-            raise EmbeddingError(EMBEDDING_REINDEX_SOURCE_CHANGED)
-
-        file_row.data = {**(file_row.data or {}), "content": text_content}
-        file_row.hash = content_hash
-        metadata = dict(file_row.meta or {})
-        metadata.pop("cache_video_audio_v1", None)
-        repair_state = summary.get("audio_repair_state")
-        if isinstance(repair_state, dict) and repair_state:
-            metadata[AUDIO_REPAIR_STATE_META_KEY] = repair_state
-        else:
-            metadata.pop(AUDIO_REPAIR_STATE_META_KEY, None)
-        file_row.meta = {
-            **metadata,
-            "collection_name": f"file-{file_row.id}",
-            "source_sha256": source_sha256,
-            "extraction_version": summary.get("extraction_version"),
-            "chunk_manifest_id": manifest_id,
-            "processing_warnings": list(
-                dict.fromkeys(summary.get("processing_warnings") or [])
-            ),
-            "visual_summary": dict(summary.get("visual_summary") or {}),
-            "audio_embedding": dict(summary.get("audio_embedding") or {}),
-            "processing_status": "completed",
-            "processing_completed_at": now,
-            "processing_error": None,
-            "processing_error_code": None,
-        }
-        file_row.updated_at = now

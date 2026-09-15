@@ -10,6 +10,7 @@ import math
 import os
 import shutil
 import subprocess
+import time
 import wave
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -18,7 +19,9 @@ import fitz
 
 from open_webui.models.files import Files
 from open_webui.retrieval.utils import AuthorizedAttachmentScope
+from open_webui.retrieval.reconstruction import ReconstructionControl
 from open_webui.storage.provider import Storage
+from open_webui.retrieval.reconstruction_storage import reconstruction_source_path
 from open_webui.utils.multimodal import (
     AUDIO_INPUT_FORMAT_GEMINI_DATA_URL,
     AUDIO_INPUT_FORMAT_OPENAI,
@@ -218,6 +221,27 @@ class _VisualCandidate:
     row_index: int
 
 
+@dataclass(frozen=True)
+class ReconstructionResult:
+    content_parts: list[dict]
+    sources: list[dict]
+    unavailable_evidence: list[dict]
+    timed_out: bool = False
+
+    @property
+    def has_usable_evidence(self) -> bool:
+        return bool(self.content_parts) or any(
+            isinstance(document, str) and document.strip()
+            for source in self.sources
+            for document in source.get("document", [])
+        )
+
+    def __iter__(self):
+        # Keep the existing internal two-value unpacking contract additive.
+        yield self.content_parts
+        yield self.sources
+
+
 def is_reconstructable_video_metadata(metadata: dict) -> bool:
     """Return whether one authorized hit can ground reconstructed video frames."""
     if not isinstance(metadata, dict):
@@ -267,7 +291,8 @@ def reconstruct_and_sanitize_sources(
     vision_enabled: bool,
     audio_input_format: str | None,
     limit: int = MAX_RECONSTRUCTED_VISUALS,
-) -> tuple[list[dict], list[dict]]:
+    control: ReconstructionControl | None = None,
+) -> ReconstructionResult:
     """Reconstruct authorized media hits and return frontend-safe sources.
 
     Authorization is inherited only from the canonical server-validated scope:
@@ -276,6 +301,18 @@ def reconstruct_and_sanitize_sources(
     transiently to the answer-model request. Storage paths, crop geometry,
     hashes, recipes, and Base64 are never returned in citation metadata.
     """
+    if control is None:
+        with ExitStack() as resources:
+            return reconstruct_and_sanitize_sources(
+                sources,
+                authorized_scope=authorized_scope,
+                vision_enabled=vision_enabled,
+                audio_input_format=audio_input_format,
+                limit=limit,
+                control=ReconstructionControl(
+                    time.monotonic() + 30, resources=resources
+                ),
+            )
     direct_file_ids = set(authorized_scope.file_ids)
     knowledge_ids = set(authorized_scope.knowledge_ids)
     audio_enabled = audio_input_format in SUPPORTED_AUDIO_INPUT_FORMATS
@@ -348,15 +385,86 @@ def reconstruct_and_sanitize_sources(
         audio_candidates_by_id.values(), key=_candidate_rank_key
     )[: min(selection_limit, MAX_RECONSTRUCTED_AUDIO_SEGMENTS)]
 
+    reconstructed_images = []
+    reconstructed_video_segments = []
+    reconstructed_audio_segments = []
+
+    def checkpoint():
+        # Publish immutable snapshots so a late audio read cannot discard frames.
+        control.partial_result = _reconstruction_result(
+            sources,
+            authorized_scope=authorized_scope,
+            vision_enabled=vision_enabled,
+            audio_input_format=audio_input_format,
+            selected_candidates=(
+                selected_image_candidates,
+                selected_video_candidates,
+                selected_audio_candidates,
+            ),
+            reconstructed=(
+                reconstructed_images,
+                reconstructed_video_segments,
+                reconstructed_audio_segments,
+            ),
+            control=control,
+        )
+        return control.partial_result
+
+    def images_ready(items):
+        nonlocal reconstructed_images
+        reconstructed_images = items
+        checkpoint()
+
+    def video_ready(items):
+        nonlocal reconstructed_video_segments
+        reconstructed_video_segments = items
+        checkpoint()
+
+    def audio_ready(items):
+        nonlocal reconstructed_audio_segments
+        reconstructed_audio_segments = items
+        checkpoint()
+
+    checkpoint()
     reconstructed_images = _reconstruct_candidates(
-        [candidate.metadata for candidate in selected_image_candidates]
+        [candidate.metadata for candidate in selected_image_candidates],
+        control=control,
+        on_progress=images_ready,
     )
+    checkpoint()
     reconstructed_video_segments = _reconstruct_video_candidates(
-        [candidate.metadata for candidate in selected_video_candidates]
+        [candidate.metadata for candidate in selected_video_candidates],
+        control=control,
+        on_progress=video_ready,
     )
+    checkpoint()
     reconstructed_audio_segments = _reconstruct_audio_candidates(
-        [candidate.metadata for candidate in selected_audio_candidates]
+        [candidate.metadata for candidate in selected_audio_candidates],
+        control=control,
+        on_progress=audio_ready,
     )
+    return checkpoint()
+
+
+def _reconstruction_result(
+    sources: list[dict],
+    *,
+    authorized_scope: AuthorizedAttachmentScope,
+    vision_enabled: bool,
+    audio_input_format: str | None,
+    selected_candidates: tuple,
+    reconstructed: tuple,
+    control: ReconstructionControl,
+) -> ReconstructionResult:
+    selected_image_candidates, selected_video_candidates, selected_audio_candidates = (
+        selected_candidates
+    )
+    reconstructed_images, reconstructed_video_segments, reconstructed_audio_segments = (
+        reconstructed
+    )
+    direct_file_ids = set(authorized_scope.file_ids)
+    knowledge_ids = set(authorized_scope.knowledge_ids)
+    audio_enabled = audio_input_format in SUPPORTED_AUDIO_INPUT_FORMATS
     reconstructed_image_ids = {
         visual.visual_asset_id for visual in reconstructed_images
     }
@@ -396,8 +504,57 @@ def reconstruct_and_sanitize_sources(
     if audio_enabled and audio_input_format is not None:
         for segment in reconstructed_audio_segments:
             content_parts.extend(segment.message_parts(audio_input_format))
-            add_metric_counter("retrieval.video.audio_attachments")
-    return content_parts, sanitized_sources
+    unavailable = []
+    selected_positions = {
+        (candidate.source_index, candidate.row_index)
+        for candidate in (
+            selected_image_candidates
+            + selected_video_candidates
+            + selected_audio_candidates
+        )
+    }
+    for source_index, source in enumerate(sources or []):
+        if not isinstance(source, dict):
+            continue
+        for row_index, metadata in enumerate(source.get("metadata") or []):
+            if not isinstance(metadata, dict) or not _metadata_is_authorized(
+                metadata, direct_file_ids, knowledge_ids
+            ):
+                continue
+            modality = metadata.get("modality")
+            if modality not in {"image", "video", "audio"}:
+                continue
+            position = (source_index, row_index)
+            supplied = (
+                position in selected_audio_positions
+                if modality == "audio"
+                else position in selected_image_positions
+                or position in selected_video_positions
+            )
+            if supplied:
+                continue
+            supported = audio_enabled if modality == "audio" else vision_enabled
+            if not supported:
+                reason = "answer_model_unsupported"
+            elif str(metadata.get("file_id")) in control.source_changed:
+                reason = "source_changed"
+            elif control.stopped:
+                reason = "reconstruction_timeout"
+            elif position in selected_positions or not selected_positions:
+                reason = "media_reconstruction_failed"
+            else:
+                reason = "evidence_limit"
+            item = {
+                "file_id": str(metadata.get("file_id") or ""),
+                "name": _safe_source_name(metadata),
+                "modality": modality,
+                "reason": reason,
+            }
+            if item not in unavailable:
+                unavailable.append(item)
+    return ReconstructionResult(
+        content_parts, sanitized_sources, unavailable, control.stopped
+    )
 
 
 def sanitize_text_sources(
@@ -463,10 +620,14 @@ def _sanitize_sources(
                     metadata, direct_file_ids, knowledge_ids
                 ):
                     continue
-                safe_document = _audio_context_text(
-                    metadata,
-                    attached=(source_index, row_index) in selected_audio_positions,
-                )
+                position = (source_index, row_index)
+                if position in selected_audio_positions:
+                    safe_document = _audio_context_text(metadata, attached=True)
+                elif position in selected_video_positions:
+                    safe_document = _video_context_text(metadata)
+                else:
+                    # A timestamp alone is not audio evidence.
+                    continue
                 safe_metadata = _sanitize_audio_metadata(metadata)
                 kept_file_backed_row = True
             elif is_video:
@@ -474,11 +635,9 @@ def _sanitize_sources(
                     metadata, direct_file_ids, knowledge_ids
                 ):
                     continue
-                safe_document = (
-                    _video_context_text(metadata)
-                    if (source_index, row_index) in selected_video_positions
-                    else ""
-                )
+                if (source_index, row_index) not in selected_video_positions:
+                    continue
+                safe_document = _video_context_text(metadata)
                 safe_metadata = _sanitize_visual_metadata(metadata)
                 kept_file_backed_row = True
             else:
@@ -591,7 +750,9 @@ def _metadata_is_authorized(
     )
 
 
-def _reconstruct_candidates(candidates: list[dict]) -> list[ReconstructedVisual]:
+def _reconstruct_candidates(
+    candidates: list[dict], *, control: ReconstructionControl, on_progress=None
+) -> list[ReconstructedVisual]:
     grouped: dict[str, list[dict]] = {}
     for metadata in candidates:
         grouped.setdefault(str(metadata.get("file_id")), []).append(metadata)
@@ -599,7 +760,9 @@ def _reconstruct_candidates(candidates: list[dict]) -> list[ReconstructedVisual]
     output: dict[str, ReconstructedVisual] = {}
     with ExitStack() as stack:
         for file_id, group in grouped.items():
-            stored_source = _load_stored_source(file_id)
+            if control.stopped:
+                break
+            stored_source = _load_stored_source(file_id, control=control)
             if stored_source is None:
                 continue
             _path, source_bytes = stored_source
@@ -612,13 +775,18 @@ def _reconstruct_candidates(candidates: list[dict]) -> list[ReconstructedVisual]
                 or not _is_sha256(next(iter(source_hashes), ""))
                 or not _hash_matches(source_bytes, next(iter(source_hashes)))
             ):
+                control.source_changed.add(file_id)
                 continue
 
             if all(item.get("content_kind") == "standalone_image" for item in group):
                 for metadata in group:
+                    if control.stopped:
+                        break
                     visual = _reconstruct_standalone(file_id, source_bytes, metadata)
                     if visual is not None:
                         output[visual.visual_asset_id] = visual
+                        if on_progress is not None:
+                            on_progress(list(output.values()))
                 continue
 
             try:
@@ -628,9 +796,13 @@ def _reconstruct_candidates(candidates: list[dict]) -> list[ReconstructedVisual]
             except Exception:
                 continue
             for metadata in group:
+                if control.stopped:
+                    break
                 visual = _reconstruct_pdf_crop(file_id, pdf, metadata)
                 if visual is not None:
                     output[visual.visual_asset_id] = visual
+                    if on_progress is not None:
+                        on_progress(list(output.values()))
 
     # Preserve dense-hit order across parent-file grouping.
     return [
@@ -642,6 +814,9 @@ def _reconstruct_candidates(candidates: list[dict]) -> list[ReconstructedVisual]
 
 def _reconstruct_video_candidates(
     candidates: list[dict],
+    *,
+    control: ReconstructionControl,
+    on_progress=None,
 ) -> list[ReconstructedVideoSegment]:
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
@@ -656,8 +831,16 @@ def _reconstruct_video_candidates(
         grouped.setdefault(str(metadata.get("file_id") or ""), []).append(metadata)
 
     output: dict[tuple[str, str, str, str], ReconstructedVideoSegment] = {}
+
+    def record_segment(segment):
+        output[segment.segment_id] = segment
+        if on_progress is not None:
+            on_progress(list(output.values()))
+
     for file_id, group in grouped.items():
-        stored_source = _load_stored_source(file_id)
+        if control.stopped:
+            break
+        stored_source = _load_stored_source(file_id, control=control)
         if stored_source is None:
             continue
         path, source_bytes = stored_source
@@ -669,18 +852,23 @@ def _reconstruct_video_candidates(
             or not _is_sha256(source_hash)
             or not _hash_matches(source_bytes, source_hash)
         ):
+            control.source_changed.add(file_id)
             continue
 
         for metadata in group:
+            if control.stopped:
+                break
             segment = _reconstruct_video_segment(
                 ffmpeg=ffmpeg,
                 path=path,
                 file_id=file_id,
                 source_hash=source_hash,
                 metadata=metadata,
+                control=control,
+                on_progress=record_segment,
             )
             if segment is not None:
-                output[segment.segment_id] = segment
+                record_segment(segment)
 
     return [
         output[segment_id]
@@ -691,6 +879,9 @@ def _reconstruct_video_candidates(
 
 def _reconstruct_audio_candidates(
     candidates: list[dict],
+    *,
+    control: ReconstructionControl,
+    on_progress=None,
 ) -> list[ReconstructedAudioSegment]:
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
@@ -710,7 +901,9 @@ def _reconstruct_audio_candidates(
 
     output: dict[tuple[str, str, str, str], ReconstructedAudioSegment] = {}
     for file_id, group in grouped.items():
-        stored_source = _load_stored_source(file_id)
+        if control.stopped:
+            break
+        stored_source = _load_stored_source(file_id, control=control)
         if stored_source is None:
             continue
         path, source_bytes = stored_source
@@ -722,14 +915,18 @@ def _reconstruct_audio_candidates(
             or not _is_sha256(source_hash)
             or not _hash_matches(source_bytes, source_hash)
         ):
+            control.source_changed.add(file_id)
             continue
 
         for metadata in group:
+            if control.stopped:
+                break
             segment = _reconstruct_audio_segment(
                 ffmpeg=ffmpeg,
                 path=path,
                 file_id=file_id,
                 metadata=metadata,
+                control=control,
             )
             if segment is None:
                 add_metric_counter(
@@ -742,6 +939,9 @@ def _reconstruct_audio_candidates(
                 )
                 continue
             output[segment.segment_id] = segment
+            add_metric_counter("retrieval.video.audio_attachments")
+            if on_progress is not None:
+                on_progress(list(output.values()))
 
     return [
         output[segment_id]
@@ -756,6 +956,7 @@ def _reconstruct_audio_segment(
     path: str,
     file_id: str,
     metadata: dict,
+    control: ReconstructionControl,
 ) -> ReconstructedAudioSegment | None:
     segment_id = _video_segment_id(metadata)
     timing = _video_segment_timing(metadata)
@@ -775,6 +976,7 @@ def _reconstruct_audio_segment(
         path,
         start_seconds=start_seconds,
         duration_seconds=duration_seconds,
+        control=control,
     )
     if pcm_bytes is None:
         return None
@@ -794,6 +996,7 @@ def _extract_audio_pcm(
     *,
     start_seconds: float,
     duration_seconds: float,
+    control: ReconstructionControl,
 ) -> bytes | None:
     try:
         result = subprocess.run(
@@ -823,9 +1026,9 @@ def _extract_audio_pcm(
                 "pipe:1",
             ],
             capture_output=True,
-            timeout=AUDIO_SEGMENT_EXTRACTION_TIMEOUT_SECONDS,
+            timeout=control.timeout(AUDIO_SEGMENT_EXTRACTION_TIMEOUT_SECONDS),
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, TimeoutError, subprocess.TimeoutExpired):
         return None
 
     pcm_bytes = result.stdout
@@ -852,9 +1055,13 @@ def _build_audio_wav(pcm_bytes: bytes) -> bytes:
     return output.getvalue()
 
 
-def _load_stored_source(file_id: str) -> tuple[str, bytes] | None:
-    if not file_id:
+def _load_stored_source(
+    file_id: str, *, control: ReconstructionControl
+) -> tuple[str, bytes] | None:
+    if not file_id or control.stopped:
         return None
+    if file_id in control.source_cache:
+        return control.source_cache[file_id]
     try:
         file = Files.get_file_by_id(file_id)
     except Exception:
@@ -862,16 +1069,26 @@ def _load_stored_source(file_id: str) -> tuple[str, bytes] | None:
         return None
     if file is None or not file.path:
         return None
+    if control.stopped:
+        return None
     try:
-        path = Storage.get_file(file.path)
+        path = reconstruction_source_path(Storage, file.path, control)
     except Exception:
         log.warning("Visual source storage read failed")
         return None
-    if not path or not os.path.isfile(path):
+    if control.stopped or not path or not os.path.isfile(path):
         return None
     try:
         with open(path, "rb") as source_handle:
-            return path, source_handle.read()
+            chunks = []
+            while not control.stopped:
+                chunk = source_handle.read(1024 * 1024)
+                if not chunk:
+                    source = path, b"".join(chunks)
+                    control.source_cache[file_id] = source
+                    return source
+                chunks.append(chunk)
+        return None
     except OSError:
         return None
 
@@ -883,6 +1100,8 @@ def _reconstruct_video_segment(
     file_id: str,
     source_hash: str,
     metadata: dict,
+    control: ReconstructionControl,
+    on_progress=None,
 ) -> ReconstructedVideoSegment | None:
     segment_id = _video_segment_id(metadata)
     timing = _video_segment_timing(metadata)
@@ -898,7 +1117,9 @@ def _reconstruct_video_segment(
     for frame_index, timestamp in enumerate(
         _sample_video_timestamps(start_seconds, end_seconds)
     ):
-        frame_data = _extract_video_frame(ffmpeg, path, timestamp)
+        if control.stopped:
+            break
+        frame_data = _extract_video_frame(ffmpeg, path, timestamp, control=control)
         if frame_data is None:
             continue
         frame_id = hashlib.sha256(
@@ -916,6 +1137,17 @@ def _reconstruct_video_segment(
                 data=frame_data,
             )
         )
+        if on_progress is not None:
+            on_progress(
+                ReconstructedVideoSegment(
+                    segment_id=segment_id,
+                    file_id=file_id,
+                    source_name=_safe_source_name(metadata),
+                    start_seconds=start_seconds,
+                    end_seconds=end_seconds,
+                    frames=tuple(frames),
+                )
+            )
     if not frames:
         return None
     return ReconstructedVideoSegment(
@@ -985,7 +1217,7 @@ def _sample_video_timestamps(
 
 
 def _extract_video_frame(
-    ffmpeg: str, path: str, timestamp_seconds: float
+    ffmpeg: str, path: str, timestamp_seconds: float, *, control: ReconstructionControl
 ) -> bytes | None:
     try:
         result = subprocess.run(
@@ -1018,9 +1250,9 @@ def _extract_video_frame(
                 "pipe:1",
             ],
             capture_output=True,
-            timeout=VIDEO_FRAME_EXTRACTION_TIMEOUT_SECONDS,
+            timeout=control.timeout(VIDEO_FRAME_EXTRACTION_TIMEOUT_SECONDS),
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, TimeoutError, subprocess.TimeoutExpired):
         return None
     frame_data = result.stdout
     if (
@@ -1045,6 +1277,8 @@ def _video_context_text(metadata: dict) -> str:
 
 
 def _audio_context_text(metadata: dict, *, attached: bool) -> str:
+    if not attached:
+        return ""
     timing = _video_segment_timing(metadata)
     if timing is None:
         return ""

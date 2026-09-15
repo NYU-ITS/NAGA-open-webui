@@ -111,6 +111,7 @@ class ReindexFile:
     content_origin: str = CONTENT_ORIGIN_STORED_SOURCE
     content_override_sha256: Optional[str] = None
     updated_at: Optional[int] = None
+    index_generation_id: str = ""
     reliability_policy: EmbeddingReliabilityPolicy = field(
         default_factory=EmbeddingReliabilityPolicy
     )
@@ -162,6 +163,7 @@ class ReindexFile:
             "content_origin": self.content_origin,
             "content_override_sha256": self.content_override_sha256,
             "updated_at": self.updated_at,
+            "index_generation_id": self.index_generation_id,
         }
         snapshot["preparation_recipe"] = self.preparation_recipe.to_dict()
         snapshot["preparation_recipe_sha256"] = self.preparation_recipe.sha256
@@ -185,6 +187,7 @@ class ReindexFile:
             ),
             content_override_sha256=data.get("content_override_sha256"),
             updated_at=data.get("updated_at"),
+            index_generation_id=data.get("index_generation_id", ""),
             preparation_recipe=preparation_recipe_from_snapshot(data),
             reliability_policy=EmbeddingReliabilityPolicy.from_dict(
                 data.get("reliability_policy")
@@ -223,6 +226,15 @@ class ReindexAdminResolver:
             self.user_group_ids,
         )
 
+    def resolve_user(self, user_id: str) -> str:
+        return _resolve_user_admin(
+            user_id,
+            self.roles,
+            self.group_admins,
+            self.user_group_ids,
+            "standalone file owner",
+        )
+
 
 def build_reindex_admin_resolver(db) -> ReindexAdminResolver:
     """Build the authoritative admin resolver from one database snapshot."""
@@ -241,6 +253,7 @@ def build_reindex_inventory(
     *,
     preparation_recipe: PreparationRecipe,
     reliability_policy: EmbeddingReliabilityPolicy | None = None,
+    file_ids: set[str] | None = None,
 ) -> list[ReindexFile]:
     """Build the deterministic reindex inventory for one admin.
 
@@ -269,6 +282,7 @@ def build_reindex_inventory(
                 admin_id,
                 preparation_recipe,
                 reliability_policy or EmbeddingReliabilityPolicy(),
+                file_ids,
             )
     _assert_admin(db, admin_id)
     return _build_inventory(
@@ -276,6 +290,7 @@ def build_reindex_inventory(
         admin_id,
         preparation_recipe,
         reliability_policy or EmbeddingReliabilityPolicy(),
+        file_ids,
     )
 
 
@@ -643,11 +658,49 @@ def _iter_chat_refs(chat: Chat):
 # ──────────────────────────────────────────────────────────────────────
 
 
+def _knowledge_references_requested_file(
+    knowledge: Knowledge, file_ids: set[str]
+) -> bool:
+    """Narrow retry discovery before applying strict source validation."""
+    data = knowledge.data
+    refs = data.get("file_ids") if isinstance(data, dict) else None
+    return isinstance(refs, list) and any(
+        isinstance(file_id, str) and file_id in file_ids for file_id in refs
+    )
+
+
+def _chat_references_requested_file(chat: Chat, file_ids: set[str]) -> bool:
+    payload = chat.chat
+    history = payload.get("history") if isinstance(payload, dict) else None
+    messages = history.get("messages") if isinstance(history, dict) else None
+    if isinstance(messages, dict):
+        messages = messages.values()
+    elif not isinstance(messages, list):
+        return False
+    for message in messages:
+        entries = message.get("files") if isinstance(message, dict) else None
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            file_id = entry.get("id")
+            entry_type = entry.get("type")
+            if (
+                not (isinstance(entry_type, str) and entry_type in _CHAT_NON_FILE_TYPES)
+                and isinstance(file_id, str)
+                and file_id in file_ids
+            ):
+                return True
+    return False
+
+
 def _build_inventory(
     db,
     admin_id: str,
     preparation_recipe: PreparationRecipe,
     reliability_policy: EmbeddingReliabilityPolicy,
+    file_ids: set[str] | None = None,
 ) -> list[ReindexFile]:
     admin_resolver = build_reindex_admin_resolver(db)
     files_by_id = _load_files(db)
@@ -667,7 +720,13 @@ def _build_inventory(
         file_contexts.setdefault(file_id, set()).add(context)
 
     for knowledge in _load_knowledge(db):
+        if file_ids is not None and not _knowledge_references_requested_file(
+            knowledge, file_ids
+        ):
+            continue
         refs = list(_iter_knowledge_refs(knowledge))  # may raise MALFORMED
+        if file_ids is not None:
+            refs = [file_id for file_id in refs if file_id in file_ids]
         if not refs:
             continue  # references no files; governs nothing in this inventory
         admin = admin_resolver.resolve_knowledge(knowledge)
@@ -677,7 +736,11 @@ def _build_inventory(
             file_knowledge.setdefault(file_id, set()).add(knowledge.id)
 
     for chat in _load_chats(db):
+        if file_ids is not None and not _chat_references_requested_file(chat, file_ids):
+            continue
         refs = list(_iter_chat_refs(chat))  # may raise MALFORMED
+        if file_ids is not None:
+            refs = [file_id for file_id in refs if file_id in file_ids]
         if not refs:
             continue  # no uploads; chat governance is irrelevant to this inventory
         admin = admin_resolver.resolve_chat(chat)

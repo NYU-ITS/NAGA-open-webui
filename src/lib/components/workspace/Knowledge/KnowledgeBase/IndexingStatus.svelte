@@ -26,6 +26,7 @@
 		((status === null && temporarilyUnavailable) ||
 			(status !== null &&
 			(!status.retrieval_available ||
+				status.availability === 'partial' ||
 				status.model_scope === 'staged' ||
 				status.failed_document_count > 0 ||
 				status.incompatible_document_count > 0)));
@@ -38,7 +39,8 @@
 	};
 
 	const hasActiveJob = () =>
-		status?.job_status === 'queued' || status?.job_status === 'processing';
+		status?.job_status === 'queued' || status?.job_status === 'processing' ||
+		(status !== null && (!status.retrieval_available || status.availability === 'partial'));
 
 	const schedulePolling = () => {
 		stopPolling();
@@ -104,43 +106,12 @@
 		progress.total > 0 ? Math.min(100, (progressValue(progress) / progress.total) * 100) : 0;
 
 	const impactMessage = (indexingStatus: KnowledgeIndexingStatus) => {
-		if (indexingStatus.retrieval_available && indexingStatus.model_scope === 'staged') {
-			return $i18n.t(
-				'Retrieval is available for completed documents using the staged target model; failed documents remain excluded.'
-			);
+		if (indexingStatus.retrieval_available) {
+			return indexingStatus.availability === 'partial'
+				? $i18n.t('Ready files are searchable. Pending, failed, or incompatible files are excluded.')
+				: $i18n.t('All indexed files in this knowledge base are available for retrieval.');
 		}
-		if (indexingStatus.retrieval_available && indexingStatus.failed_document_count > 0) {
-			return $i18n.t(
-				'The latest administrator-wide reindex has failures for documents in this knowledge base.'
-			);
-		}
-		if (indexingStatus.retrieval_available && indexingStatus.incompatible_document_count > 0) {
-			return $i18n.t(
-				'Some documents contain content incompatible with the current embedding model.'
-			);
-		}
-		if (
-			!indexingStatus.retrieval_available &&
-			indexingStatus.failed_document_count === 0 &&
-			(indexingStatus.job_status === 'failed' || indexingStatus.job_status === 'partially_failed')
-		) {
-			return $i18n.t(
-				'A file outside this knowledge base failed the administrator-wide reindex. Files in this knowledge base did not fail, but retrieval remains unavailable.'
-			);
-		}
-		if (indexingStatus.display_state === 'failed' || indexingStatus.display_state === 'partial') {
-			return $i18n.t(
-				'The administrator-wide reindex did not complete, so retrieval remains unavailable for this knowledge base.'
-			);
-		}
-		if (indexingStatus.job_status === 'queued' || indexingStatus.job_status === 'processing') {
-			return $i18n.t(
-				'Retrieval is temporarily unavailable for this knowledge base while its governing embedding index is being rebuilt.'
-			);
-		}
-		return $i18n.t(
-			'Retrieval is currently unavailable because the governing embedding index is not ready.'
-		);
+		return $i18n.t('No files in this knowledge base are published in the current index yet. Wait for indexing or review the failed files.');
 	};
 
 	onMount(() => {
@@ -189,7 +160,7 @@
 				<div class="mt-3 rounded-xl bg-gray-50 p-3 dark:bg-gray-850">
 					<div class="flex items-center justify-between gap-2 text-xs">
 						<span class="font-medium">
-							{$i18n.t('Files from this knowledge base in the current job')}
+							{$i18n.t('Current index coverage for this knowledge base')}
 						</span>
 						<span class="text-gray-500 dark:text-gray-400">
 							{progressValue(status.collection_progress)}/{status.collection_progress.total}

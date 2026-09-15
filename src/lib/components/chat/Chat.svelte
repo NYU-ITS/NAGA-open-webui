@@ -1689,10 +1689,14 @@
 			},
 			`${WEBUI_BASE_URL}/api`
 		).catch((error) => {
-			toast.error(`${error}`);
+			const detail = error?.detail ?? error;
+			const message = typeof detail === 'string' ? detail : detail?.message ?? `${error}`;
+			toast.error(message);
 
 			responseMessage.error = {
-				content: error
+				content: message,
+				error_code: detail?.error_code,
+				retryable: detail?.retryable
 			};
 			responseMessage.done = true;
 
@@ -1710,32 +1714,16 @@
 	};
 
 	const handleOpenAIError = async (error, responseMessage) => {
-		let errorMessage = '';
-		let innerError;
-
-		if (error) {
-			innerError = error;
-		}
-
-		console.error(innerError);
-		if ('detail' in innerError) {
-			toast.error(innerError.detail);
-			errorMessage = innerError.detail;
-		} else if ('error' in innerError) {
-			if ('message' in innerError.error) {
-				toast.error(innerError.error.message);
-				errorMessage = innerError.error.message;
-			} else {
-				toast.error(innerError.error);
-				errorMessage = innerError.error;
-			}
-		} else if ('message' in innerError) {
-			toast.error(innerError.message);
-			errorMessage = innerError.message;
-		}
+		const detail = error?.detail ?? error?.error ?? error;
+		const errorMessage = typeof detail === 'string'
+			? detail
+			: detail?.message ?? $i18n.t('The response could not be completed. Please retry.');
+		toast.error(errorMessage);
 
 		responseMessage.error = {
-			content: $i18n.t(`Uh-oh! There was an issue with the response.`) + '\n' + errorMessage
+			content: $i18n.t(`Uh-oh! There was an issue with the response.`) + '\n' + errorMessage,
+			error_code: detail?.error_code,
+			retryable: detail?.retryable
 		};
 		responseMessage.done = true;
 

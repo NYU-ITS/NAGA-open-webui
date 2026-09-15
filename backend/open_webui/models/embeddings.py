@@ -372,6 +372,7 @@ class EmbeddingJob(Base):
     __tablename__ = "embedding_jobs"
 
     id = Column(String, primary_key=True)
+    index_generation_id = Column(String, nullable=False)
     admin_id = Column(String, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
     embedding_model_id = Column(String, ForeignKey("embedding_models.id", ondelete="RESTRICT"), nullable=False)
     previous_embedding_model_id = Column(String, ForeignKey("embedding_models.id", ondelete="RESTRICT"))
@@ -423,6 +424,7 @@ class AdminEmbeddingModelState(Base):
     __tablename__ = "admin_embedding_model_state"
 
     admin_id = Column(String, ForeignKey("user.id", ondelete="CASCADE"), primary_key=True)
+    index_generation_id = Column(String, nullable=False)
     active_embedding_model_id = Column(
         String, ForeignKey("embedding_models.id", ondelete="RESTRICT"), nullable=False
     )

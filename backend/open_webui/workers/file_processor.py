@@ -1279,6 +1279,7 @@ def process_file_job(
     embedding_model_id: Optional[str] = None,
     reliability_policy: Optional[dict] = None,
     _otel_trace_context: Optional[dict] = None,
+    indexing_snapshot: Optional[dict] = None,
 ) -> dict:
     """Process an RQ file job through the shared mixed-modality pipeline."""
 
@@ -1309,6 +1310,10 @@ def process_file_job(
 
     started_at = time.time()
     try:
+        if not isinstance(indexing_snapshot, dict) or not indexing_snapshot.get(
+            "index_generation_id"
+        ):
+            raise EmbeddingError("embedding_job_stale_operation")
         result = process_stored_file_for_embedding(
             config=config,
             file_id=file_id,
@@ -1317,6 +1322,7 @@ def process_file_job(
             knowledge_id=knowledge_id,
             collection_name=collection_name,
             reliability_policy=reliability_policy,
+            indexing_snapshot=indexing_snapshot,
         )
         return {
             "status": "success",
@@ -1349,7 +1355,7 @@ def process_file_job(
 
 def repair_audio_embeddings_job(
     *,
-    knowledge_id: str,
+    knowledge_id: str | None,
     file_id: str,
     admin_id: str,
     embedding_model_id: str,

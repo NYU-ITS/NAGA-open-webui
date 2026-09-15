@@ -163,7 +163,7 @@
 	const hasProcessingFiles = () =>
 		knowledge?.files?.some(
 			(file) =>
-				file?.status === 'processing' || file?.audio_embedding?.status === 'repairing'
+				file?.status === 'processing' || ['queued', 'repairing'].includes(file?.audio_embedding?.status)
 		) ?? false;
 
 	const stopProcessingPolling = () => {

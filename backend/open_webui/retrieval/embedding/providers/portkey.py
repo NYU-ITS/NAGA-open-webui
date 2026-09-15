@@ -26,6 +26,7 @@ from ..errors import (
     EMBEDDING_CREDENTIALS_MISSING,
 )
 from ..reliability import EmbeddingReliabilityPolicy
+from ..execution_budget import budgeted_sleep, provider_timeout, remaining_seconds
 from open_webui.utils.otel_instrumentation import (
     add_metric_counter,
     record_metric_histogram,
@@ -320,6 +321,7 @@ class PortkeyEmbeddingProvider:
         last_request_id: str | None = None
 
         for attempt in range(1, self._policy.max_attempts + 1):
+            remaining_seconds()
             started_at = time.monotonic()
             response: requests.Response | None = None
             retryable = False
@@ -333,7 +335,7 @@ class PortkeyEmbeddingProvider:
                         "Content-Type": "application/json",
                     },
                     json=payload,
-                    timeout=(
+                    timeout=provider_timeout(
                         self._policy.connection_timeout_seconds,
                         self._policy.read_timeout_seconds,
                     ),
@@ -474,7 +476,7 @@ class PortkeyEmbeddingProvider:
                 delay,
                 last_request_id,
             )
-            time.sleep(delay)
+            budgeted_sleep(delay)
 
         raise AssertionError("embedding attempt loop did not terminate")
 

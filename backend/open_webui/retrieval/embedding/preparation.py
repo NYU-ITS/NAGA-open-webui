@@ -36,9 +36,11 @@ from open_webui.retrieval.embedding.inputs import (
     TextEmbeddingInput,
     VideoEmbeddingInput,
 )
+from open_webui.retrieval.embedding.execution_budget import capped_timeout
 from open_webui.retrieval.video_audio import (
     AUDIO_CHUNKING_VERSION,
     AUDIO_EXTRACTION_VERSION,
+    VideoAudioResult,
     VideoSegmentWindow,
     prepare_video_audio,
 )
@@ -750,14 +752,16 @@ def validate_video(
             result = subprocess.run(
                 [
                     "ffprobe",
-                    "-v", "quiet",
-                    "-print_format", "json",
+                    "-v",
+                    "quiet",
+                    "-print_format",
+                    "json",
                     "-show_format",
                     "-show_streams",
                     tmp_path,
                 ],
                 capture_output=True,
-                timeout=30,
+                timeout=capped_timeout(30),
             )
             if result.returncode != 0:
                 raise EmbeddingError(VIDEO_VALIDATION_FAILED)
@@ -1159,6 +1163,7 @@ def prepare_file_for_embedding(
     admin_email: str,
     content_override: Optional[str] = None,
     preparation_recipe: Optional[PreparationRecipe] = None,
+    defer_audio: bool = False,
 ) -> PreparedFile:
     """Prepare a stored file for one frozen admin/model embedding context."""
     if not isinstance(source_bytes, bytes):
@@ -1253,6 +1258,7 @@ def prepare_file_for_embedding(
             model=model,
             recipe=recipe,
             base_metadata=base_metadata,
+            defer_audio=defer_audio,
         )
 
     if source_kind == "pdf":
@@ -1463,6 +1469,7 @@ def _prepare_video(
     model: EmbeddingModelSpec,
     recipe: PreparationRecipe,
     base_metadata: dict,
+    defer_audio: bool = False,
 ) -> PreparedFile:
     """Prepare a video file for temporal embedding.
 
@@ -1487,18 +1494,22 @@ def _prepare_video(
     )
 
     content_sha256 = hashlib.sha256(source_bytes).hexdigest()
-    audio_result = prepare_video_audio(
-        source_bytes=source_bytes,
-        source_sha256=source_sha256,
-        mime_type=canonical_mime,
-        windows=tuple(
-            VideoSegmentWindow(
-                index=chunk.chunk_index,
-                start_seconds=chunk.start_offset_seconds,
-                end_seconds=chunk.end_offset_seconds,
-            )
-            for chunk in video_chunks
-        ),
+    audio_result = (
+        VideoAudioResult(segments=(), warnings=())
+        if defer_audio
+        else prepare_video_audio(
+            source_bytes=source_bytes,
+            source_sha256=source_sha256,
+            mime_type=canonical_mime,
+            windows=tuple(
+                VideoSegmentWindow(
+                    index=chunk.chunk_index,
+                    start_seconds=chunk.start_offset_seconds,
+                    end_seconds=chunk.end_offset_seconds,
+                )
+                for chunk in video_chunks
+            ),
+        )
     )
     audio_by_index = {segment.segment_index: segment for segment in audio_result.segments}
     chunks: list[PreparedChunk] = []
@@ -1587,6 +1598,26 @@ def _prepare_video(
         source_sha256=source_sha256,
         extraction_version=recipe.video_extraction_version,
         warnings=audio_result.warnings,
+        audio_repair_state=(
+            {
+                "failed_chunks": [
+                    {
+                        "chunk_index": chunk.chunk_index,
+                        "start_seconds": chunk.start_offset_seconds,
+                        "end_seconds": chunk.end_offset_seconds,
+                        "audio_sha256": None,
+                        "split_depth": 0,
+                        "split_path": "",
+                        "failure_reason": "pending",
+                    }
+                    for chunk in video_chunks
+                ],
+                "audio_extraction_version": AUDIO_EXTRACTION_VERSION,
+                "audio_chunking_version": AUDIO_CHUNKING_VERSION,
+            }
+            if defer_audio and "audio" in model.modalities
+            else {}
+        ),
         visual_summary=_visual_summary(
             figure_count=0,
             table_image_count=0,

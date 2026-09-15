@@ -72,6 +72,10 @@ export type KnowledgeIndexingStatus = {
 	current_file_count: number;
 	job_display_state: KnowledgeIndexingDisplayState;
 	retry_kind: 'indexing_operation' | 'failed_documents' | null;
+	retry_file_count?: number;
+	index_generation_id?: string | null;
+	availability?: 'ready' | 'partial' | 'unavailable';
+	selected_model?: EmbeddingModelSummary | null;
 	job_id: string | null;
 	job_type: string | null;
 	active_model: EmbeddingModelSummary | null;
@@ -80,6 +84,7 @@ export type KnowledgeIndexingStatus = {
 	model_scope: 'active' | 'staged' | 'legacy' | 'unavailable';
 	collection_progress: KnowledgeIndexingProgress;
 	job_progress: KnowledgeIndexingProgress;
+	generation_progress?: KnowledgeIndexingProgress;
 	failed_document_count: number;
 	job_failed_document_count: number;
 	job_failed_documents: KnowledgeIndexingFailure[];
