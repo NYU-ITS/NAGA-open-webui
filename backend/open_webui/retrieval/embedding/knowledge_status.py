@@ -59,6 +59,7 @@ class EmbeddingModelSummary(BaseModel):
     id: str
     provider: str
     display_name: str
+    model_name: str | None = None
     modalities: list[str] = Field(default_factory=list)
     status: str
 
@@ -94,6 +95,7 @@ class KnowledgeIndexingFailure(KnowledgeIndexingFileIssue):
 
 class KnowledgeIndexingStatusSummary(BaseModel):
     knowledge_id: str
+    governing_admin_id: str | None = None
     display_state: KnowledgeIndexingDisplayState
     job_status: str | None = None
     retrieval_available: bool
@@ -159,6 +161,7 @@ def _model_summary(row: EmbeddingModel | None) -> EmbeddingModelSummary | None:
         id=row.id,
         provider=row.provider,
         display_name=row.display_name,
+        model_name=row.model_name,
         modalities=[str(modality) for modality in modalities],
         status=row.status,
     )
@@ -683,6 +686,7 @@ def build_knowledge_indexing_statuses(
             KnowledgeIndexingStatusResponse(
                 knowledge_id=knowledge.id,
                 display_state=display_state,
+                governing_admin_id=admin_id,
                 job_display_state=job_display_state,
                 job_status=job.status if job else None,
                 retrieval_available=retrieval_available,

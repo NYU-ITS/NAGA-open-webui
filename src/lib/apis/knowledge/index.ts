@@ -27,6 +27,7 @@ export type EmbeddingModelSummary = {
 	id: string;
 	provider: string;
 	display_name: string;
+	model_name?: string | null;
 	modalities: string[];
 	status: string;
 };
@@ -66,6 +67,7 @@ export type KnowledgeIndexingKnowledgeReference = {
 
 export type KnowledgeIndexingStatus = {
 	knowledge_id: string;
+	governing_admin_id?: string | null;
 	display_state: KnowledgeIndexingDisplayState;
 	job_status: KnowledgeIndexingJobStatus | null;
 	retrieval_available: boolean;

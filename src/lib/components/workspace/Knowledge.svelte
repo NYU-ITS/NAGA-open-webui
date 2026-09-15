@@ -9,7 +9,7 @@
 	import { onMount, onDestroy, getContext } from 'svelte';
 	const i18n = getContext('i18n');
 
-	import { WEBUI_NAME, knowledge } from '$lib/stores';
+	import { WEBUI_NAME, knowledge, user } from '$lib/stores';
 	import {
 		getKnowledgeBases,
 		deleteKnowledgeById,
@@ -74,6 +74,7 @@
 	let fuse = null;
 
 	let knowledgeBases = [];
+	let indexSummaryKnowledgeBases: KnowledgeListItemSummary[] = [];
 	let filteredItems = [];
 	let indexingStatuses: Record<string, KnowledgeIndexingStatus> = {};
 	let indexingPollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -269,8 +270,15 @@
 			: knowledgeBases;
 	}
 
-	$: reindexJobGroups = buildReindexJobGroups(knowledgeBases, indexingStatuses);
-	$: readyWithoutJobSummary = buildReadyWithoutJobSummary(knowledgeBases, indexingStatuses);
+	// Administrators can browse collections governed by other administrators.
+	// Their index summary must describe their own model space.
+	$: indexSummaryKnowledgeBases = $user?.role === 'admin'
+		? knowledgeBases.filter(
+				(item) => indexingStatuses[item.id]?.governing_admin_id === $user.id
+			)
+		: knowledgeBases;
+	$: reindexJobGroups = buildReindexJobGroups(indexSummaryKnowledgeBases, indexingStatuses);
+	$: readyWithoutJobSummary = buildReadyWithoutJobSummary(indexSummaryKnowledgeBases, indexingStatuses);
 
 	const deleteHandler = async (item) => {
 		const res = await deleteKnowledgeById(localStorage.token, item.id).catch((e) => {

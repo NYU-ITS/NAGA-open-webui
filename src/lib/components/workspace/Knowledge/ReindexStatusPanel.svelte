@@ -169,14 +169,14 @@
 			</div>
 			{#if status.target_model}
 				<div class="mt-0.5 text-gray-500 dark:text-gray-400">
-					{status.target_model.display_name}
+					{status.target_model.model_name ?? status.target_model.display_name}
 				</div>
 				<div class="text-gray-500 dark:text-gray-400">
 					{$i18n.t('Modalities')}: {status.target_model.modalities.join(', ') || $i18n.t('None')}
 				</div>
 				{#if status.active_model && status.active_model.id !== status.target_model.id}
 					<div class="mt-1 text-gray-500 dark:text-gray-400">
-						{$i18n.t('Previous successful model')}: {status.active_model.display_name}
+						{$i18n.t('Previous successful model')}: {status.active_model.model_name ?? status.active_model.display_name}
 					</div>
 				{/if}
 				<p class="mt-1 text-gray-500 dark:text-gray-400">
@@ -184,7 +184,7 @@
 				</p>
 			{:else if status.active_model}
 				<div class="mt-0.5 text-gray-500 dark:text-gray-400">
-					{status.active_model.display_name}
+					{status.active_model.model_name ?? status.active_model.display_name}
 				</div>
 				<div class="text-gray-500 dark:text-gray-400">
 					{$i18n.t('Modalities')}: {status.active_model.modalities.join(', ') || $i18n.t('None')}
