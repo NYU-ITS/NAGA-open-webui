@@ -1015,6 +1015,20 @@ class PgvectorClient:
             log.exception(f"Error during delete: {e}")
             raise
 
+    def delete_file_rows(self, *, file_id: str, session) -> int:
+        """Remove all generations and legacy projections before deleting a file."""
+        return (
+            session.query(DocumentChunk)
+            .filter(
+                or_(
+                    DocumentChunk.file_id == file_id,
+                    DocumentChunk.vmetadata["file_id"].astext == file_id,
+                    DocumentChunk.collection_name == f"file-{file_id}",
+                )
+            )
+            .delete(synchronize_session=False)
+        )
+
     def delete_file_projection(
         self,
         *,

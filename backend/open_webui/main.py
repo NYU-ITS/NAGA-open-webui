@@ -628,9 +628,14 @@ async def lifespan(app: FastAPI):
 
     app.state.reconstruction_executor = ReconstructionExecutor()
     start_audio_repair_reconciliation(app.state.config)
+    from open_webui.utils.file_cleanup import periodic_file_cleanup
+
+    file_cleanup_task = asyncio.create_task(periodic_file_cleanup())
     try:
         yield
     finally:
+        file_cleanup_task.cancel()
+        await asyncio.gather(file_cleanup_task, return_exceptions=True)
         stop_audio_repair_reconciliation()
         await app.state.reconstruction_executor.shutdown()
 

@@ -1,17 +1,77 @@
 """Coordinated file, Knowledge-membership, vector, and storage cleanup."""
 
+import asyncio
 import logging
 import time
 from typing import Dict, Optional, Tuple
 
 from open_webui.internal.db import get_db
-from open_webui.models.files import File, Files
+from open_webui.models.files import File
+from open_webui.models.file_cleanup import FileCleanupTask, enqueue_file_cleanup
+from open_webui.models.embeddings import RagChunk
 from open_webui.models.knowledge import Knowledge, Knowledges
 from open_webui.retrieval.vector.connector import VECTOR_DB_CLIENT
 from open_webui.storage.provider import Storage
 
 
 log = logging.getLogger(__name__)
+
+
+def process_file_cleanup_task(task_id: str) -> bool:
+    """Retry a durable intent; a row lock prevents duplicate work across pods."""
+    with get_db() as db:
+        task = (
+            db.query(FileCleanupTask)
+            .filter(FileCleanupTask.id == task_id)
+            .with_for_update(skip_locked=True)
+            .first()
+        )
+        if task is None:
+            return False
+        try:
+            if task.kind != "storage":
+                raise ValueError("Unknown file cleanup task kind")
+            Storage.delete_file(task.storage_path)
+        except Exception as error:
+            log.exception("File cleanup deferred | file=%s", task.file_id)
+            task.attempts += 1
+            # Persist only the error type: provider errors can contain credentials.
+            task.last_error = type(error).__name__
+            task.next_attempt_at = int(time.time()) + min(
+                3600, 30 * 2 ** min(task.attempts - 1, 7)
+            )
+            db.commit()
+            return False
+        db.delete(task)
+        db.commit()
+        return True
+
+
+def retry_pending_file_cleanup() -> None:
+    with get_db() as db:
+        task_ids = [
+            row.id
+            for row in db.query(FileCleanupTask.id)
+            .filter(FileCleanupTask.next_attempt_at <= int(time.time()))
+            .order_by(FileCleanupTask.next_attempt_at, FileCleanupTask.id)
+            .limit(100)
+            .all()
+        ]
+    for task_id in task_ids:
+        try:
+            process_file_cleanup_task(task_id)
+        except Exception:
+            log.exception("Could not process file cleanup task | task=%s", task_id)
+
+
+async def periodic_file_cleanup() -> None:
+    """Run without Redis, including immediately after a process restart."""
+    while True:
+        try:
+            await asyncio.to_thread(retry_pending_file_cleanup)
+        except Exception:
+            log.exception("File cleanup reconciliation failed")
+        await asyncio.sleep(30)
 
 
 def _transactional_vector_delete(name: str):
@@ -90,7 +150,7 @@ def cleanup_file_completely(
     exclude_knowledge_id: Optional[str] = None,
     delete_physical_file: bool = True,
 ) -> Tuple[bool, Dict]:
-    """Remove one file and all non-excluded memberships and projections."""
+    """Remove content and commit a storage deletion intent with the File deletion."""
 
     details = {
         "knowledge_bases_updated": [],
@@ -98,145 +158,96 @@ def cleanup_file_completely(
         "file_collection_deleted": False,
         "sql_deleted": False,
         "physical_file_deleted": False,
+        "storage_cleanup_pending": False,
         "errors": [],
     }
-
-    delete_file_projection = _transactional_vector_delete(
-        "delete_file_projection"
-    )
-    if delete_file_projection is not None:
-        try:
-            with get_db() as db:
-                # File-first is the common lock order for deletion and ingestion.
-                file = (
-                    db.query(File)
-                    .filter(File.id == file_id)
-                    .with_for_update()
-                    .first()
-                )
-                if file is None:
-                    details["errors"].append("File not found")
-                    return False, details
-
-                storage_path = file.path
-                candidate_ids = {
-                    str(row.id)
-                    for row in db.query(Knowledge).all()
-                    if file_id in _file_ids(row.data)
-                }
-                # Adds use the same File-first lock order. Locking the current
-                # candidates is therefore sufficient and avoids a table-wide
-                # Knowledge lock during deletion.
-                knowledge_rows = (
-                    db.query(Knowledge)
-                    .filter(Knowledge.id.in_(sorted(candidate_ids)))
-                    .order_by(Knowledge.id)
-                    .with_for_update()
-                    .all()
-                    if candidate_ids
-                    else []
-                )
-                affected_rows = [
-                    row
-                    for row in knowledge_rows
-                    if row.id != exclude_knowledge_id
-                    and file_id in _file_ids(row.data)
-                ]
-                for knowledge in affected_rows:
-                    data = dict(knowledge.data or {})
-                    data["file_ids"] = [
-                        candidate
-                        for candidate in _file_ids(data)
-                        if candidate != file_id
-                    ]
-                    knowledge.data = data
-                    knowledge.updated_at = int(time.time())
-                    delete_file_projection(
-                        collection_name=knowledge.id,
-                        file_id=file_id,
-                        session=db,
-                    )
-                    details["knowledge_bases_updated"].append(knowledge.id)
-
-                delete_file_projection(
-                    collection_name=f"file-{file_id}",
-                    file_id=file_id,
-                    session=db,
-                )
-                db.delete(file)
-                db.commit()
-
-            details["vector_db_cleaned"] = True
-            details["file_collection_deleted"] = True
-            details["sql_deleted"] = True
-            if delete_physical_file and storage_path:
-                try:
-                    Storage.delete_file(storage_path)
-                    details["physical_file_deleted"] = True
-                except Exception:
-                    log.exception(
-                        "Physical file cleanup failed after database deletion | file=%s",
-                        file_id,
-                    )
-                    details["errors"].append("Physical file cleanup failed")
-            elif not delete_physical_file:
-                details["physical_file_deleted"] = None
-            else:
-                details["errors"].append("Physical file path is missing")
-            return True, details
-        except Exception:
-            log.exception("Atomic file cleanup failed | file=%s", file_id)
-            details["errors"].append("Database file cleanup failed")
-            return False, details
-
-    # Non-pgvector stores cannot participate in the primary transaction. Do not
-    # hide memberships or delete the File row unless every vector deletion wins.
-    file = Files.get_file_by_id(file_id)
-    if file is None:
-        details["errors"].append("File not found")
-        return False, details
-    knowledge_bases = [
-        knowledge
-        for knowledge in Knowledges.get_knowledge_bases_by_file_id(file_id)
-        if knowledge.id != exclude_knowledge_id
-    ]
+    delete_file_projection = _transactional_vector_delete("delete_file_projection")
+    storage_task_id = None
     try:
-        for knowledge in knowledge_bases:
-            VECTOR_DB_CLIENT.delete(
-                collection_name=knowledge.id,
-                filter={"file_id": file_id},
+        with get_db() as db:
+            # Ingestion and membership writers also lock File before Knowledge.
+            file = (
+                db.query(File)
+                .filter(File.id == file_id)
+                .with_for_update()
+                .first()
             )
-        VECTOR_DB_CLIENT.delete_collection(collection_name=f"file-{file_id}")
+            if file is None:
+                details["errors"].append("File not found")
+                return False, details
+
+            candidate_ids = {
+                row.id
+                for row in db.query(Knowledge).all()
+                if file_id in _file_ids(row.data)
+            }
+            knowledge_rows = (
+                db.query(Knowledge)
+                .filter(Knowledge.id.in_(sorted(candidate_ids)))
+                .order_by(Knowledge.id)
+                .populate_existing()
+                .with_for_update()
+                .all()
+                if candidate_ids
+                else []
+            )
+            for knowledge in knowledge_rows:
+                if knowledge.id == exclude_knowledge_id:
+                    continue
+                if delete_file_projection is not None:
+                    delete_file_projection(
+                        collection_name=knowledge.id, file_id=file_id, session=db
+                    )
+                else:
+                    # External vector stores must succeed before committing SQL.
+                    VECTOR_DB_CLIENT.delete(
+                        collection_name=knowledge.id, filter={"file_id": file_id}
+                    )
+                data = dict(knowledge.data or {})
+                data["file_ids"] = [
+                    candidate for candidate in _file_ids(data) if candidate != file_id
+                ]
+                knowledge.data = data
+                knowledge.updated_at = int(time.time())
+                details["knowledge_bases_updated"].append(knowledge.id)
+
+            if delete_file_projection is not None:
+                # Include old/staged projections that no longer have a membership.
+                VECTOR_DB_CLIENT.delete_file_rows(file_id=file_id, session=db)
+            else:
+                VECTOR_DB_CLIENT.delete_collection(collection_name=f"file-{file_id}")
+            db.query(RagChunk).filter(RagChunk.file_id == file_id).delete(
+                synchronize_session=False
+            )
+            if delete_physical_file and file.path:
+                storage_task_id = enqueue_file_cleanup(
+                    db, file_id, kind="storage", storage_path=file.path
+                )
+            db.delete(file)
+            db.commit()
+
+        details["vector_db_cleaned"] = True
+        details["file_collection_deleted"] = True
+        details["sql_deleted"] = True
     except Exception:
-        log.exception("Legacy vector cleanup failed | file=%s", file_id)
-        details["errors"].append("Vector database cleanup failed")
+        log.exception("File content cleanup failed | file=%s", file_id)
+        details["errors"].append("File content cleanup failed")
         return False, details
 
-    details["vector_db_cleaned"] = True
-    details["file_collection_deleted"] = True
-    for knowledge in knowledge_bases:
-        data = dict(knowledge.data or {})
-        data["file_ids"] = [
-            candidate for candidate in _file_ids(data) if candidate != file_id
-        ]
-        if not Knowledges.update_knowledge_data_by_id(knowledge.id, data):
-            details["errors"].append("Knowledge membership cleanup failed")
-            return False, details
-        details["knowledge_bases_updated"].append(knowledge.id)
-
-    if not Files.delete_file_by_id(file_id):
-        details["errors"].append("Database file cleanup failed")
-        return False, details
-    details["sql_deleted"] = True
-    if delete_physical_file and file.path:
+    if storage_task_id:
         try:
-            Storage.delete_file(file.path)
-            details["physical_file_deleted"] = True
+            details["physical_file_deleted"] = process_file_cleanup_task(storage_task_id)
         except Exception:
-            log.exception("Physical file cleanup failed | file=%s", file_id)
-            details["errors"].append("Physical file cleanup failed")
+            log.exception("Storage cleanup remains queued | file=%s", file_id)
+        if not details["physical_file_deleted"]:
+            details["storage_cleanup_pending"] = True
+            details["errors"].append("Storage deletion pending; automatic retry scheduled")
+            return False, details
     elif not delete_physical_file:
         details["physical_file_deleted"] = None
+    else:
+        # Text-only files have no original upload to remove.
+        details["physical_file_deleted"] = True
     return True, details
 
 

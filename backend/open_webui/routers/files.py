@@ -7,7 +7,7 @@ from typing import Optional
 from urllib.parse import quote
 import time 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Request, UploadFile, status
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.env import SRC_LOG_LEVELS
 from open_webui.models.files import (
@@ -785,27 +785,18 @@ async def delete_file_by_id(id: str, user=Depends(get_verified_user)):
     if success:
         log.info(f"Successfully deleted file {id} completely")
         return {"message": "File deleted successfully"}
-    else:
-        # Log errors but still return success if critical operations completed
-        # (SQL deletion and vector DB cleanup are critical)
-        errors = details.get("errors", [])
-        log.warning(
-            f"File {id} deletion completed with some errors: {errors}. "
-            f"Details: {details}"
+
+    if details.get("storage_cleanup_pending"):
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={
+                "message": "File content deleted; storage cleanup pending",
+                "storage_cleanup_pending": True,
+                "warnings": details["errors"],
+            },
         )
-        
-        # If critical operations failed, raise an error
-        if not details.get("sql_deleted") or not details.get("vector_db_cleaned"):
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=ERROR_MESSAGES.DEFAULT(
-                    f"Error deleting file: {', '.join(errors) if errors else 'Unknown error'}"
-                ),
-            )
-        
-        # If only non-critical operations failed (like physical file deletion),
-        # still return success but log the warnings
-        return {
-            "message": "File deleted successfully",
-            "warnings": errors if errors else None,
-        }
+
+    raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail=ERROR_MESSAGES.DEFAULT("Error deleting file"),
+    )

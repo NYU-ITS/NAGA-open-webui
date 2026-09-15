@@ -228,9 +228,11 @@ class GCSStorageProvider(StorageProvider):
         try:
             filename = file_path.removeprefix("gs://").split("/")[1]
             blob = self.bucket.get_blob(filename)
-            blob.delete()
-        except NotFound as e:
-            raise RuntimeError(f"Error deleting file from GCS: {e}")
+            if blob is not None:
+                blob.delete()
+        except NotFound:
+            # Retries may find the remote object already deleted.
+            pass
 
         # Always delete from local storage
         LocalStorageProvider.delete_file(file_path)
@@ -302,7 +304,8 @@ class AzureStorageProvider(StorageProvider):
             blob_client = self.container_client.get_blob_client(filename)
             blob_client.delete_blob()
         except ResourceNotFoundError as e:
-            raise RuntimeError(f"Error deleting file from Azure Blob Storage: {e}")
+            if e.error_code != "BlobNotFound":
+                raise RuntimeError(f"Error deleting file from Azure Blob Storage: {e}")
 
         # Always delete from local storage
         LocalStorageProvider.delete_file(file_path)
