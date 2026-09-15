@@ -46,6 +46,7 @@ fields plus the canonical preparation recipe and its digest (used by Spec 11's
 import hashlib
 import logging
 import os
+import stat
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -74,7 +75,11 @@ from open_webui.retrieval.embedding.preparation import (
     preparation_recipe_from_snapshot,
 )
 from open_webui.retrieval.embedding.reliability import EmbeddingReliabilityPolicy
-from open_webui.storage.provider import Storage
+from open_webui.storage.provider import (
+    LocalStorageProvider,
+    SourceFileNotFoundError,
+    Storage,
+)
 
 log = logging.getLogger(__name__)
 
@@ -254,6 +259,7 @@ def build_reindex_inventory(
     preparation_recipe: PreparationRecipe,
     reliability_policy: EmbeddingReliabilityPolicy | None = None,
     file_ids: set[str] | None = None,
+    missing_file_ids: set[str] | None = None,
 ) -> list[ReindexFile]:
     """Build the deterministic reindex inventory for one admin.
 
@@ -264,6 +270,8 @@ def build_reindex_inventory(
             is opened and closed here.
         preparation_recipe: Canonical admin-scoped extraction and chunking
             settings to persist identically on every file snapshot.
+        missing_file_ids: When supplied by retry creation, collect and skip
+            confirmed missing originals. Other storage failures still abort.
 
     Returns:
         Inventory items sorted by ``file_id``.
@@ -271,8 +279,8 @@ def build_reindex_inventory(
     Raises:
         EmbeddingError: On unresolvable or ambiguous source governance, on a
             file governed by more than one distinct admin, on a governed
-            reference to a missing ``file`` row, or on a malformed
-            knowledge/chat reference. No partial inventory is returned.
+            reference to a missing ``file`` row (unless collecting missing
+            files for a retry), or on a malformed knowledge/chat reference.
     """
     if db is None:
         with get_db() as session:
@@ -283,6 +291,7 @@ def build_reindex_inventory(
                 preparation_recipe,
                 reliability_policy or EmbeddingReliabilityPolicy(),
                 file_ids,
+                missing_file_ids,
             )
     _assert_admin(db, admin_id)
     return _build_inventory(
@@ -291,6 +300,7 @@ def build_reindex_inventory(
         preparation_recipe,
         reliability_policy or EmbeddingReliabilityPolicy(),
         file_ids,
+        missing_file_ids,
     )
 
 
@@ -701,6 +711,7 @@ def _build_inventory(
     preparation_recipe: PreparationRecipe,
     reliability_policy: EmbeddingReliabilityPolicy,
     file_ids: set[str] | None = None,
+    missing_file_ids: set[str] | None = None,
 ) -> list[ReindexFile]:
     admin_resolver = build_reindex_admin_resolver(db)
     files_by_id = _load_files(db)
@@ -760,6 +771,9 @@ def _build_inventory(
         # Rule 6: a governed reference to a missing file row is fatal because
         # embedding_job_files.file_id requires a valid file.
         if file_id not in files_by_id:
+            if missing_file_ids is not None:
+                missing_file_ids.add(file_id)
+                continue
             raise EmbeddingError(
                 EMBEDDING_INVENTORY_MISSING_FILE,
                 detail=(
@@ -786,7 +800,13 @@ def _build_inventory(
                 EMBEDDING_INVENTORY_MALFORMED_REFERENCE,
                 detail=f"File {file_id!r} has invalid content provenance.",
             ) from None
-        source_sha256 = source_sha256_for_file(file_row)
+        try:
+            source_sha256 = source_sha256_for_file(
+                file_row, report_missing=missing_file_ids is not None
+            )
+        except SourceFileNotFoundError:
+            missing_file_ids.add(file_id)
+            continue
         if source_sha256 is None:
             raise EmbeddingError(
                 EMBEDDING_INVENTORY_MISSING_FILE,
@@ -824,22 +844,37 @@ def _build_inventory(
     return items
 
 
-def source_sha256_for_file(file_row: File) -> Optional[str]:
+def source_sha256_for_file(
+    file_row: File, *, report_missing: bool = False
+) -> Optional[str]:
     """Hash the current original object addressed by a file row.
 
     Never trust cached file metadata for freshness checks. The path may still
     address different bytes even when ``meta.source_sha256`` has not changed.
+    Retry discovery can request a distinct exception for confirmed absence;
+    permissions, timeouts, and other read failures still return None.
     """
     if not file_row.path:
+        if report_missing:
+            raise SourceFileNotFoundError("Original document has no storage path.")
         return None
     try:
         source_path = Storage.get_file(file_row.path)
-        if not source_path or not os.path.isfile(source_path):
+        if not source_path or not stat.S_ISREG(os.stat(source_path).st_mode):
             return None
         digest = hashlib.sha256()
         with open(source_path, "rb") as source:
             for block in iter(lambda: source.read(1024 * 1024), b""):
                 digest.update(block)
         return digest.hexdigest()
+    except SourceFileNotFoundError:
+        if report_missing:
+            raise
+    except FileNotFoundError:
+        # A missing cloud download directory is an access failure, not proof
+        # that the remote original was deleted.
+        if report_missing and isinstance(Storage, LocalStorageProvider):
+            raise SourceFileNotFoundError("Original document not found.") from None
     except Exception:
-        return None
+        pass
+    return None

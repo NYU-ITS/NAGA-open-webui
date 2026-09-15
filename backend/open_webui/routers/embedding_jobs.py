@@ -561,7 +561,7 @@ def retry_failed_job(
             else (
                 dispatch_embedding_job(result_job.id, background_tasks)
                 if result_job.status in ("queued", "processing")
-                else "background"
+                else "none"
             )
         )
     except Exception as e:
@@ -595,5 +595,10 @@ def retry_failed_job(
         total_files=result_job.total_files,
         dispatch_mode=dispatch_mode,
         index_generation_id=result_job.index_generation_id,
-        message=f"Retrying {result_job.total_files} eligible files. Successful files remain available.",
+        nothing_to_retry=result_job.total_files == 0,
+        message=(
+            "Nothing to retry. Missing source files were skipped; successful files remain available."
+            if result_job.total_files == 0
+            else f"Retrying {result_job.total_files} eligible files. Successful files remain available."
+        ),
     )

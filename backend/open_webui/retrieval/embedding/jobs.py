@@ -98,6 +98,12 @@ _TERMINAL_JOB_STATUSES = frozenset({JOB_STATUS_COMPLETED, JOB_STATUS_FAILED, JOB
 _ACTIVE_JOB_STATUSES = frozenset({JOB_STATUS_QUEUED, JOB_STATUS_PROCESSING})
 
 
+def is_missing_source_skipped(row) -> bool:
+    """Keep a historical failure out of current coverage after retry skips it."""
+    snapshot = row.file_snapshot if isinstance(row.file_snapshot, dict) else {}
+    return snapshot.get("retry_skip_reason") == "source_missing"
+
+
 class _RetryableJob(Protocol):
     status: str
     embedding_model_id: str
@@ -537,7 +543,7 @@ def _create_retry_job(
     failed = {
         file_id: row
         for file_id, row in latest_rows.items()
-        if row.status == FILE_STATUS_FAILED
+        if row.status == FILE_STATUS_FAILED and not is_missing_source_skipped(row)
     }
     # Successful ordinary uploads/current-generation replacements supersede a
     # failed historical ledger row without changing the attempt's counters.
@@ -571,12 +577,14 @@ def _create_retry_job(
         existing_ids = {
             row[0] for row in db.query(File.id).filter(File.id.in_(list(failed))).all()
         }
+        missing_file_ids = set(failed) - existing_ids
         refreshed = build_reindex_inventory(
             admin_id,
             db=db,
             preparation_recipe=next(iter(frozen.values())).preparation_recipe,
             reliability_policy=policy,
             file_ids=existing_ids,
+            missing_file_ids=missing_file_ids,
         )
         retry_files = [
             replace(
@@ -591,10 +599,26 @@ def _create_retry_job(
             EMBEDDING_REINDEX_SOURCE_CHANGED,
             detail="A failed file has an invalid frozen preparation recipe.",
         ) from None
-    if not retry_files:
+    if not retry_files and not missing_file_ids:
         raise EmbeddingError(
             EMBEDDING_JOB_WRONG_STATUS,
             detail="Nothing to retry: failed files were deleted or are no longer in scope.",
+        )
+
+    # Preserve attempt counters/history, but retire these failures from the
+    # generation's current coverage. Persist with the new retry so an aborted
+    # transaction cannot hide files that were never successfully skipped.
+    for file_id in missing_file_ids:
+        row = failed[file_id]
+        row.file_snapshot = {
+            **row.file_snapshot,
+            "retry_skip_reason": "source_missing",
+        }
+        row.updated_at = now
+        log.info(
+            "embedding_retry_source_missing source_job_id=%s file_id=%s",
+            row.job_id,
+            file_id,
         )
 
     new_job_id = str(uuid.uuid4())
@@ -632,6 +656,16 @@ def _create_retry_job(
     state.latest_embedding_job_id = new_job_id
     state.updated_at = now
     db.flush()
+    if not file_rows:
+        _finalize_job_success(
+            db,
+            job_id=new_job_id,
+            admin_id=admin_id,
+            target_model_id=source.embedding_model_id,
+            previous_model_id=source.previous_embedding_model_id,
+            vector_repo=None,
+            target_model_spec=None,
+        )
     log.info(
         "embedding_retry_created admin_id=%s job_id=%s generation=%s files=%d",
         admin_id,

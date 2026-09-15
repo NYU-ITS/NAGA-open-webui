@@ -55,7 +55,9 @@
 			}
 			const result = await retryEmbeddingJob(localStorage.token, requestedJobId);
 			if (result.nothing_to_retry) {
-				toast.info($i18n.t('Nothing to retry. Successful files remain available.'));
+				toast.info(
+					$i18n.t(result.message ?? 'Nothing to retry. Successful files remain available.')
+				);
 			} else {
 				toast.success($i18n.t('Retry queued for {{count}} files. Successful files remain available.', { count: result.total_files }));
 			}

@@ -38,6 +38,10 @@ log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["MAIN"])
 
 
+class SourceFileNotFoundError(FileNotFoundError):
+    """The original object is absent, rather than temporarily inaccessible."""
+
+
 class StorageProvider(ABC):
     @abstractmethod
     def get_file(self, file_path: str) -> str:
@@ -138,6 +142,8 @@ class S3StorageProvider(StorageProvider):
             self.s3_client.download_file(self.bucket_name, s3_key, local_file_path)
             return local_file_path
         except ClientError as e:
+            if e.response.get("Error", {}).get("Code") in ("NoSuchKey", "404"):
+                raise SourceFileNotFoundError("Original document not found.") from e
             raise RuntimeError(f"Error downloading file from S3: {e}")
 
     def delete_file(self, file_path: str) -> None:
@@ -209,11 +215,13 @@ class GCSStorageProvider(StorageProvider):
             filename = file_path.removeprefix("gs://").split("/")[1]
             local_file_path = f"{UPLOAD_DIR}/{filename}"
             blob = self.bucket.get_blob(filename)
+            if blob is None:
+                raise SourceFileNotFoundError("Original document not found.")
             blob.download_to_filename(local_file_path)
 
             return local_file_path
         except NotFound as e:
-            raise RuntimeError(f"Error downloading file from GCS: {e}")
+            raise SourceFileNotFoundError("Original document not found.") from e
 
     def delete_file(self, file_path: str) -> None:
         """Handles deletion of the file from GCS storage."""
@@ -283,6 +291,8 @@ class AzureStorageProvider(StorageProvider):
                 download_file.write(blob_client.download_blob().readall())
             return local_file_path
         except ResourceNotFoundError as e:
+            if e.error_code == "BlobNotFound":
+                raise SourceFileNotFoundError("Original document not found.") from e
             raise RuntimeError(f"Error downloading file from Azure Blob Storage: {e}")
 
     def delete_file(self, file_path: str) -> None:

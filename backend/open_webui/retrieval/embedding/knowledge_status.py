@@ -29,6 +29,7 @@ from open_webui.retrieval.embedding.jobs import (
     JOB_STATUS_PARTIALLY_FAILED,
     JOB_STATUS_PROCESSING,
     JOB_STATUS_QUEUED,
+    is_missing_source_skipped,
     is_job_retry_eligible,
 )
 
@@ -424,6 +425,8 @@ def _generation_snapshot(db, state, resolver):
         ):
             statuses[file_id] = FILE_STATUS_COMPLETED
         elif file_id in outcomes:
+            if is_missing_source_skipped(outcomes[file_id]):
+                continue
             row_status = outcomes[file_id].status
             statuses[file_id] = (
                 FILE_STATUS_FAILED
@@ -560,6 +563,17 @@ def build_knowledge_indexing_statuses(
             for file_id in (knowledge.data or {}).get("file_ids", [])
             if isinstance(file_id, str) and file_id
         }
+        if state is not None:
+            current_ids = {
+                file_id
+                for file_id in current_ids
+                if file_id in files
+                and (
+                    file_id not in outcomes
+                    or not is_missing_source_skipped(outcomes[file_id])
+                    or file_id in statuses
+                )
+            }
         active_model = models.get(state.active_embedding_model_id) if state else None
         target_model = models.get(state.target_embedding_model_id) if state else None
         selected_model = target_model or active_model
