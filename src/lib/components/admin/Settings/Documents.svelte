@@ -46,6 +46,7 @@
 	import ResetUploadDirConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
 	import ResetVectorDBConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
 	import ReindexConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
+	import IndexingFailureList from '$lib/components/common/IndexingFailureList.svelte';
 	import SensitiveInput from '$lib/components/common/SensitiveInput.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import Switch from '$lib/components/common/Switch.svelte';
@@ -652,7 +653,26 @@
 						<p class="text-xs">{$i18n.t('{{processed}} / {{total}} files processed; {{failed}} failed; {{incompatible}} incompatible.', {
 							processed: job.processed_files, total: job.total_files, failed: job.failed_files, incompatible: job.incompatible_files
 						})}</p>
+						{#if job.own_index && job.failed_documents?.length}
+							<details class="mt-2 rounded-lg bg-gray-50 p-3 dark:bg-gray-850">
+								<summary class="cursor-pointer font-medium">
+									{$i18n.t('View failed files ({{count}})', { count: job.failed_documents.length })}
+								</summary>
+								<p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
+									{$i18n.t('Current failures across knowledge collections and chat uploads. Successfully retried files are removed from this list.')}
+								</p>
+								<IndexingFailureList failures={job.failed_documents} showChatUploads />
+								{#if job.failed_documents.some((file) => file.knowledge_bases.length > 0)}
+									<a class="mt-2 inline-block text-xs underline" href="/workspace/knowledge">
+										{$i18n.t('View knowledge collections')}
+									</a>
+								{/if}
+							</details>
+						{/if}
 						{#if job.can_retry}
+							<p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
+								{$i18n.t('Retry processes eligible failed files. Successful files remain available and are not reprocessed.')}
+							</p>
 							<button type="button" class="mt-1 underline disabled:opacity-50" disabled={saving || !!retryingJob} on:click={() => retryIndexing(job.job_id)}>
 								{$i18n.t(retryingJob === job.job_id ? 'Retrying...' : 'Retry failed indexing')}
 							</button>

@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { getContext, tick, onMount } from 'svelte';
 	import { toast } from 'svelte-sonner';
+	import { page } from '$app/stores';
 
 	import { config } from '$lib/stores';
 	import { getBackendConfig } from '$lib/apis';
@@ -39,6 +40,7 @@
 	let selectedTab = 'models';
 
 	onMount(async () => {
+		if ($page.url.searchParams.get('tab') === 'documents') selectedTab = 'documents';
 		const containerElement = document.getElementById('admin-settings-tabs-container');
 
 		if (containerElement) {

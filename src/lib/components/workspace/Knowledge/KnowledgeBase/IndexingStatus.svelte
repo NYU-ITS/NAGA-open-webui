@@ -7,6 +7,7 @@
 		type KnowledgeIndexingStatus
 	} from '$lib/apis/knowledge';
 	import IndexingStatusBadge from '../IndexingStatusBadge.svelte';
+	import IndexingFailureList from '$lib/components/common/IndexingFailureList.svelte';
 
 	const i18n = getContext('i18n');
 
@@ -210,22 +211,7 @@
 						})}
 					</summary>
 					{#if status.failed_documents?.length}
-						<ul class="mt-2 max-h-40 space-y-2 overflow-y-auto">
-							{#each status.failed_documents as failure}
-								<li class="rounded-lg border border-gray-100 p-2 dark:border-gray-700">
-									<div class="break-all font-medium">
-										{failure.filename ?? failure.file_id}
-									</div>
-									<div class="mt-1 text-gray-500 dark:text-gray-400">
-										{failure.error_message ??
-											$i18n.t('Indexing failed for this document.')}
-									</div>
-									<div class="mt-0.5 text-gray-500 dark:text-gray-400">
-										{$i18n.t('Attempts')}: {failure.attempt_count}
-									</div>
-								</li>
-							{/each}
-						</ul>
+						<IndexingFailureList failures={status.failed_documents} />
 					{/if}
 				</details>
 			{/if}

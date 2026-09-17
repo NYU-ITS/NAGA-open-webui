@@ -17,7 +17,10 @@ from open_webui.models.files import File
 from open_webui.models.knowledge import Knowledge
 from open_webui.models.chats import Chat
 from open_webui.retrieval.embedding.gate import file_publication_is_current
-from open_webui.retrieval.embedding.errors import EmbeddingError
+from open_webui.retrieval.embedding.errors import (
+    EmbeddingError,
+    safe_file_processing_error_message,
+)
 from open_webui.retrieval.embedding.inventory import build_reindex_admin_resolver
 from open_webui.retrieval.embedding.jobs import (
     FILE_STATUS_COMPLETED,
@@ -495,6 +498,69 @@ def get_generation_retry_files(admin_id: str, db=None) -> list:
     ]
 
 
+def get_generation_failure_details(db, admin_id: str) -> list[KnowledgeIndexingFailure]:
+    """Describe current failures for the owning admin, including chat-only files.
+
+    Follow retry ancestry and current source ownership so successful retries and
+    removed references do not linger in the failure list.
+    """
+    from open_webui.retrieval.embedding.inventory import (
+        _iter_chat_refs,
+        _iter_knowledge_refs,
+    )
+
+    failures = get_generation_retry_files(admin_id, db=db)
+    if not failures:
+        return []
+    resolver = build_reindex_admin_resolver(db)
+    file_ids = {row.file_id for row in failures}
+    filenames = {
+        file.id: file.filename
+        for file in db.query(File.id, File.filename).filter(File.id.in_(file_ids)).all()
+    }
+    collections = {file_id: [] for file_id in file_ids}
+    for knowledge in db.query(Knowledge).filter_by(user_id=admin_id).all():
+        try:
+            referenced_ids = set(_iter_knowledge_refs(knowledge))
+        except EmbeddingError:
+            continue
+        for file_id in referenced_ids:
+            if file_id in collections:
+                collections[file_id].append(
+                    KnowledgeIndexingKnowledgeReference(id=knowledge.id, name=knowledge.name)
+                )
+    chat_files = set()
+    for chat in db.query(Chat).all():
+        if resolver.chat_owned_by_admin(chat, admin_id):
+            try:
+                chat_files.update(file_ids.intersection(_iter_chat_refs(chat)))
+            except EmbeddingError:
+                continue
+    details = []
+    for row in failures:
+        references = collections[row.file_id]
+        contexts = (["knowledge"] if references else []) + (
+            ["chat_upload"] if row.file_id in chat_files else []
+        )
+        if not contexts:
+            continue
+        details.append(
+            KnowledgeIndexingFailure(
+                file_id=row.file_id,
+                filename=filenames.get(row.file_id),
+                knowledge_bases=references,
+                source_contexts=contexts,
+                error_code=row.error_code,
+                error_message=(
+                    _stored_message(row.error_message)
+                    or safe_file_processing_error_message(row.error_code)
+                ),
+                attempt_count=row.attempt_count,
+            )
+        )
+    return sorted(details, key=lambda detail: (detail.filename or detail.file_id).casefold())
+
+
 def build_knowledge_indexing_statuses(
     db,
     knowledge_rows: list[Knowledge],
@@ -734,7 +800,15 @@ def build_knowledge_indexing_statuses(
                     else []
                 ),
                 failed_documents=(
-                    [_failure_detail(row, **failure_kwargs) for row in local_failures]
+                    [
+                        _failure_detail(row, **failure_kwargs).model_copy(update={
+                            "knowledge_bases": [KnowledgeIndexingKnowledgeReference(
+                                id=knowledge.id, name=knowledge.name
+                            )],
+                            "source_contexts": ["knowledge"],
+                        })
+                        for row in local_failures
+                    ]
                     if include_failure_details
                     else []
                 ),

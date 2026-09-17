@@ -68,6 +68,8 @@ def prepare_settings_jobs(db, previous, proposed, user, *, embedding=None, force
 
 def settings_indexing_status(db, user):
     """Expose the caller's last settings operation and their own latest index."""
+    from open_webui.retrieval.embedding.knowledge_status import get_generation_failure_details
+
     row = db.query(Config).filter_by(email=user.email, version=0).first()
     data = row.data if row and isinstance(row.data, dict) else {}
     job_ids = list(data.get("rag", {}).get("settings_indexing_jobs", []))
@@ -99,6 +101,10 @@ def settings_indexing_status(db, user):
             "error_code": job.error_code,
             "own_index": job.admin_id == user.id,
             "can_retry": job.admin_id == user.id and job.status in {"failed", "partially_failed"},
+            "failed_documents": (
+                [detail.model_dump() for detail in get_generation_failure_details(db, user.id)]
+                if job.admin_id == user.id else []
+            ),
         })
     statuses = {job["status"] for job in jobs}
     if statuses & {"failed", "partially_failed"}:

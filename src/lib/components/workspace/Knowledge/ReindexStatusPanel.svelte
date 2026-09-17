@@ -1,10 +1,12 @@
 <script lang="ts">
 	import { getContext, tick } from 'svelte';
 	import { toast } from 'svelte-sonner';
+	import { user } from '$lib/stores';
 
 	import { retryEmbeddingJob } from '$lib/apis/embedding';
 	import type { KnowledgeIndexingProgress, KnowledgeIndexingStatus } from '$lib/apis/knowledge';
 	import ConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
+	import IndexingFailureList from '$lib/components/common/IndexingFailureList.svelte';
 	import IndexingStatusBadge from './IndexingStatusBadge.svelte';
 
 	const i18n = getContext('i18n');
@@ -24,6 +26,10 @@
 
 	let showRetryConfirm = false;
 	let retrying = false;
+
+	$: collectionFailures = (status.job_failed_documents ?? []).filter(
+		(failure) => failure.knowledge_bases.length > 0
+	);
 
 	$: affectedKnowledgeBases = knowledgeBases.filter(
 		(knowledgeBase) => knowledgeBase.currentFileCount > 0 && knowledgeBase.failedDocumentCount > 0
@@ -269,48 +275,18 @@
 		</div>
 	{/if}
 
-	{#if status.job_failed_document_count > 0}
+	{#if collectionFailures.length > 0 || affectedKnowledgeBases.length > 0}
 		<div class="mt-3 rounded-xl bg-gray-50 px-3 py-2 text-xs dark:bg-gray-850">
 			<p class="font-medium">
-				{$i18n.t('{{count}} documents failed in this reindex job', {
-					count: status.job_failed_document_count
-				})}
+				{$i18n.t('Failed knowledge files')}
 			</p>
-			{#if status.job_failed_documents?.length > 0}
-				<ul class="mt-2 space-y-2">
-					{#each status.job_failed_documents as failure}
-						<li class="rounded-lg border border-gray-200 bg-white p-2 dark:border-gray-700 dark:bg-gray-900">
-							<div class="font-medium">
-								{failure.filename ?? failure.file_id}
-							</div>
-							<div class="mt-1 space-y-0.5 text-gray-500 dark:text-gray-400">
-								{#if failure.knowledge_bases.length > 0}
-									<div>
-										{$i18n.t('Knowledge base')}:
-										{#each failure.knowledge_bases as knowledgeBase, index}
-											{#if index > 0}, {/if}<a
-												class="font-medium underline underline-offset-2"
-												href={`/workspace/knowledge/${knowledgeBase.id}`}
-											>
-												{knowledgeBase.name}
-											</a>
-										{/each}
-									</div>
-								{/if}
-								{#if failure.source_contexts.includes('chat_upload')}
-									<div>
-										{$i18n.t('Source')}: {$i18n.t(
-											'Direct upload in a chat (not a knowledge base)'
-										)}
-									</div>
-								{/if}
-								<div>
-									{failure.error_message ?? $i18n.t('Indexing failed for this file.')}
-								</div>
-							</div>
-						</li>
-					{/each}
-				</ul>
+			{#if collectionFailures.length > 0}
+				<details class="mt-2">
+					<summary class="cursor-pointer font-medium">
+						{$i18n.t('View failed knowledge files ({{count}})', { count: collectionFailures.length })}
+					</summary>
+					<IndexingFailureList failures={collectionFailures} />
+				</details>
 			{:else if affectedKnowledgeBases.length > 0}
 				<p class="mt-1 text-gray-500 dark:text-gray-400">
 					{$i18n.t('Open an affected knowledge base to view its scoped failure details.')}
@@ -325,14 +301,14 @@
 						</a>
 					{/each}
 				</div>
-			{:else}
-				<p class="mt-1 text-gray-500 dark:text-gray-400">
-					{$i18n.t(
-						'The failed file is outside the knowledge bases shown here. The governing administrator can view its details.'
-					)}
-				</p>
 			{/if}
 		</div>
+	{/if}
+
+	{#if status.job_failed_document_count > 0 && $user?.id === status.governing_admin_id}
+		<a class="mt-3 inline-block text-xs underline underline-offset-2" href="/admin/settings?tab=documents">
+			{$i18n.t('View all failures, including chat uploads, in Documents settings')}
+		</a>
 	{/if}
 
 	<details class="mt-3 text-xs">

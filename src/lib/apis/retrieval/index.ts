@@ -1,5 +1,6 @@
 import { RETRIEVAL_API_BASE_URL } from '$lib/constants';
 import { v4 as uuidv4 } from 'uuid';
+import type { KnowledgeIndexingFailure } from '$lib/apis/knowledge';
 
 export const getRAGConfig = async (token: string,email: string) => {
 	let error = null;
@@ -143,6 +144,7 @@ export type SettingsIndexingStatus = {
 		incompatible_files: number;
 		own_index: boolean;
 		can_retry: boolean;
+		failed_documents?: KnowledgeIndexingFailure[];
 	}[];
 };
 
