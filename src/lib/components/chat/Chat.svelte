@@ -135,7 +135,9 @@
 	// Chat Input
 	let prompt = '';
 	let chatFiles = [];
+	let removingChatSource = false;
 	let files = [];
+	$: unavailableKnowledgeSources = getUnavailableKnowledgeSources(history, chatFiles, files);
 	let params = {};
 	const PRACTICE_CHAT_SEQUENCE_KEY = 'aiTutorPracticeChatSequence';
 
@@ -1235,6 +1237,72 @@
 			.filter(Boolean);
 	}
 
+	function getUnavailableKnowledgeSources(chatHistory, activeFiles, pendingFiles) {
+		const sources = new Map();
+		for (const message of Object.values(chatHistory.messages) as any[]) {
+			if (message.error?.error_code !== 'knowledge_unavailable') continue;
+			const id = message.error.knowledge_id;
+			const attachments = [
+				...activeFiles,
+				...pendingFiles,
+				...(chatHistory.messages[message.parentId]?.files ?? [])
+			];
+			const source = attachments.find(
+				(item) => item.type === 'collection' && item.id === id && !item.retrieval_disabled
+			);
+			if (source) sources.set(id, source);
+		}
+		return [...sources.values()];
+	}
+
+	const removeChatSource = async (source, replace = false) => {
+		if (removingChatSource) return;
+		removingChatSource = true;
+		const previous = { chatFiles, files, history };
+		const matches = (item) => source.id
+			? item.type === source.type && item.id === source.id
+			: item === source;
+		chatFiles = chatFiles.filter((item) => !matches(item));
+		files = files.filter((item) => !matches(item));
+		if (source.type === 'collection') {
+			// Keep historical attachments and citations, but do not reattach this KB
+			// when an old message is regenerated. New selections remain usable.
+			history = {
+				...history,
+				messages: Object.fromEntries(
+					Object.entries(history.messages).map(([id, message]: [string, any]) => [
+						id,
+						{
+							...message,
+							...(message.files
+								? {
+									files: message.files.map((item) =>
+										matches(item) ? { ...item, retrieval_disabled: true } : item
+									)
+								}
+								: {})
+						}
+					])
+				)
+			};
+		}
+		try {
+			await saveChatHandler($chatId, history);
+			if (replace) {
+				prompt = `${prompt}${prompt && !prompt.endsWith(' ') ? ' ' : ''}#`;
+				await tick();
+				document.getElementById('chat-input')?.focus();
+			}
+		} catch (error) {
+			chatFiles = previous.chatFiles;
+			files = previous.files;
+			history = previous.history;
+			toast.error($i18n.t('Could not remove the source. Please try again.'));
+		} finally {
+			removingChatSource = false;
+		}
+	};
+
 	function serializeMessageAttachment(attachment) {
 		if (!attachment) {
 			return null;
@@ -1331,7 +1399,10 @@
 			// Response not done
 			return;
 		}
-		if (messages.length != 0 && messages.at(-1).error && !messages.at(-1).content) {
+		if (
+			messages.length != 0 && messages.at(-1).error && !messages.at(-1).content &&
+			messages.at(-1).error.error_code !== 'knowledge_unavailable'
+		) {
 			// Error in response
 			toast.error($i18n.t(`Oops! There was an error in the previous response.`));
 			return;
@@ -1556,6 +1627,7 @@
 		// Remove duplicates
 		files = files.filter(
 			(item, index, array) =>
+				!item.retrieval_disabled &&
 				array.findIndex((i) => JSON.stringify(i) === JSON.stringify(item)) === index
 		);
 
@@ -1696,6 +1768,7 @@
 			responseMessage.error = {
 				content: message,
 				error_code: detail?.error_code,
+				knowledge_id: detail?.knowledge_id,
 				retryable: detail?.retryable
 			};
 			responseMessage.done = true;
@@ -1723,6 +1796,7 @@
 		responseMessage.error = {
 			content: $i18n.t(`Uh-oh! There was an issue with the response.`) + '\n' + errorMessage,
 			error_code: detail?.error_code,
+			knowledge_id: detail?.knowledge_id,
 			retryable: detail?.retryable
 		};
 		responseMessage.done = true;
@@ -2057,6 +2131,19 @@
 						</div>
 
 						<div class=" pb-[1rem]">
+							{#each unavailableKnowledgeSources as source (source.id)}
+								<div role="alert" class="mx-auto mb-3 max-w-3xl rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm">
+									<p>{$i18n.t('Knowledge base "{{name}}" is no longer available.', { name: source.name })}</p>
+									<div class="mt-2 flex flex-wrap gap-3">
+										<button type="button" class="underline disabled:opacity-50" disabled={removingChatSource} on:click={() => removeChatSource(source)}>
+											{$i18n.t('Remove from this chat')}
+										</button>
+										<button type="button" class="underline disabled:opacity-50" disabled={removingChatSource} on:click={() => removeChatSource(source, true)}>
+											{$i18n.t('Choose another knowledge base')}
+										</button>
+									</div>
+								</div>
+							{/each}
 							<MessageInput
 								{history}
 								{selectedModels}
@@ -2177,6 +2264,7 @@
 				{initChatHandler}
 				{addMessages}
 				{saveChatHandler}
+				{removeChatSource}
 				bind:webSearchEnabled
 				bind:prompt
 			/>

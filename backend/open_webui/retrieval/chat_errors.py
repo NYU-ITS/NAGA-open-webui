@@ -2,7 +2,7 @@
 
 from fastapi import HTTPException
 
-from open_webui.retrieval.embedding.errors import EmbeddingError
+from open_webui.retrieval.embedding.errors import EmbeddingError, KnowledgeUnavailableError
 
 
 def evidence_error(status: int, code: str, message: str, *, retryable: bool):
@@ -13,6 +13,17 @@ def evidence_error(status: int, code: str, message: str, *, retryable: bool):
 
 
 def retrieval_error(error: EmbeddingError) -> HTTPException:
+    if isinstance(error, KnowledgeUnavailableError):
+        response = evidence_error(
+            409,
+            error.code,
+            "This knowledge base is no longer available. Remove it or select "
+            "another knowledge base to continue. If it belongs to the selected "
+            "model, choose another model or ask its owner to update it.",
+            retryable=False,
+        )
+        response.detail["knowledge_id"] = error.knowledge_id
+        return response
     if error.code in {
         "embedding_reindex_not_ready",
         "embedding_reindex_source_changed",
@@ -58,11 +69,17 @@ def safe_stream_error(error: Exception) -> dict:
                 "reconstruction_timeout",
                 "answer_model_evidence_unsupported",
                 "requested_evidence_unavailable",
+                "knowledge_unavailable",
             }
             and isinstance(detail.get("message"), str)
             and isinstance(detail.get("retryable"), bool)
         ):
-            return {key: detail[key] for key in ("error_code", "message", "retryable")}
+            result = {key: detail[key] for key in ("error_code", "message", "retryable")}
+            if detail["error_code"] == "knowledge_unavailable" and isinstance(
+                detail.get("knowledge_id"), str
+            ):
+                result["knowledge_id"] = detail["knowledge_id"]
+            return result
     return {
         "error_code": "chat_stream_failed",
         "message": "The response could not be completed. Please retry your message.",

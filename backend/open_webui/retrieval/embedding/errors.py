@@ -37,6 +37,14 @@ class EmbeddingError(Exception):
         return f"EmbeddingError(code={self.code!r})"
 
 
+class KnowledgeUnavailableError(EmbeddingError):
+    """A requested KB is missing or inaccessible; its supplied ID is safe to echo."""
+
+    def __init__(self, knowledge_id: str):
+        super().__init__("knowledge_unavailable", retryable=False, http_status=409)
+        self.knowledge_id = knowledge_id
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Stable error codes for Phase 2
 # ──────────────────────────────────────────────────────────────────────

@@ -1161,12 +1161,15 @@ def get_sources_from_files(
             knowledge_id = str(attached_file.get("id") or "").strip()
             if knowledge_id:
                 knowledge = Knowledges.get_knowledge_by_id(knowledge_id)
-                if knowledge is not None:
-                    knowledge_ids_in_scope.append(knowledge_id)
-                    pending_knowledge_attachments.setdefault(
-                        knowledge_id, (attached_file, knowledge)
-                    )
-                    continue
+                if knowledge is None:
+                    from open_webui.retrieval.embedding.errors import KnowledgeUnavailableError
+
+                    raise KnowledgeUnavailableError(knowledge_id)
+                knowledge_ids_in_scope.append(knowledge_id)
+                pending_knowledge_attachments.setdefault(
+                    knowledge_id, (attached_file, knowledge)
+                )
+                continue
 
             requested_legacy_names = attached_file.get("collection_names") or []
             if not isinstance(requested_legacy_names, list):

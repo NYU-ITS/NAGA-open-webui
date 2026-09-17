@@ -8,6 +8,7 @@ from open_webui.models.groups import Groups
 from .inputs import EmbeddingModelSpec
 from .errors import (
     EmbeddingError,
+    KnowledgeUnavailableError,
     EMBEDDING_MODEL_NOT_CONFIGURED,
     EMBEDDING_ADMIN_UNRESOLVED,
     EMBEDDING_ADMIN_AMBIGUOUS,
@@ -385,10 +386,7 @@ def _assert_knowledge_read_access(knowledge_id: str, requesting_user_id: str) ->
     knowledge = Knowledges.get_knowledge_by_id(knowledge_id)
     requesting_user = Users.get_user_by_id(requesting_user_id)
     if knowledge is None or requesting_user is None:
-        raise EmbeddingError(
-            EMBEDDING_ADMIN_UNRESOLVED,
-            detail=f"Knowledge {knowledge_id} not found or inaccessible.",
-        )
+        raise KnowledgeUnavailableError(knowledge_id)
 
     if (
         requesting_user.role == "admin"
@@ -398,10 +396,7 @@ def _assert_knowledge_read_access(knowledge_id: str, requesting_user_id: str) ->
     ):
         return
 
-    raise EmbeddingError(
-        EMBEDDING_ADMIN_UNRESOLVED,
-        detail=f"Knowledge {knowledge_id} not found or inaccessible.",
-    )
+    raise KnowledgeUnavailableError(knowledge_id)
 
 
 def assert_single_model_space(

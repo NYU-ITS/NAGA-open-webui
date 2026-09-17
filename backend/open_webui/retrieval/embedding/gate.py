@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from open_webui.retrieval.embedding.errors import (
     EmbeddingError,
+    KnowledgeUnavailableError,
     EMBEDDING_FILE_NOT_FOUND,
     EMBEDDING_INVENTORY_UNRESOLVED_SOURCE,
     EMBEDDING_MODEL_SPACE_MIXED,
@@ -109,11 +110,9 @@ def assert_embedding_retrieval_ready(
         projections.setdefault(file_id, set()).add(f"file-{file_id}")
     for knowledge_id in knowledge_ids or []:
         knowledge = Knowledges.get_knowledge_by_id(knowledge_id)
-        data = (
-            knowledge.data
-            if knowledge is not None and isinstance(knowledge.data, dict)
-            else {}
-        )
+        if knowledge is None:
+            raise KnowledgeUnavailableError(knowledge_id)
+        data = knowledge.data if isinstance(knowledge.data, dict) else {}
         for file_id in data.get("file_ids", []):
             if isinstance(file_id, str) and file_id:
                 projections.setdefault(file_id, set()).add(knowledge_id)

@@ -31,6 +31,7 @@
 	export let showMessage: Function;
 	export let addMessages: Function;
 	export let saveChatHandler: Function;
+	export let removeChatSource: Function;
 	export let files;
 	export let modelId;
 	export let webSearchEnabled = false;
@@ -218,6 +219,7 @@
 							}}
 							{models}
 							bind:chatFiles
+							{removeChatSource}
 							bind:params
 						/>
 					{/if}
@@ -350,6 +352,7 @@
 								}}
 								{models}
 								bind:chatFiles
+								{removeChatSource}
 								bind:params
 							/>
 						{/if}

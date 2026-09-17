@@ -33,11 +33,8 @@ def chat_file_ids(payload) -> set[str]:
             if attachment.get("type") in (
                 "collection", "web_search", "text", "web", "youtube"
             ):
-                # Some collection descriptors persist a snapshot of their files.
-                data = attachment.get("data")
-                values = data.get("file_ids") if isinstance(data, dict) else None
-                if isinstance(values, list):
-                    ids.update(value for value in values if isinstance(value, str) and value)
+                # KB snapshots are historical metadata, not independent file
+                # attachments. Live KB membership is read from Knowledge.data.
                 continue
             file_id = attachment.get("id") or attachment.get("file_id")
             if isinstance(file_id, str) and file_id:
