@@ -291,6 +291,7 @@ def reconstruct_and_sanitize_sources(
     vision_enabled: bool,
     audio_input_format: str | None,
     limit: int = MAX_RECONSTRUCTED_VISUALS,
+    audio_limit: int = MAX_RECONSTRUCTED_AUDIO_SEGMENTS,
     control: ReconstructionControl | None = None,
 ) -> ReconstructionResult:
     """Reconstruct authorized media hits and return frontend-safe sources.
@@ -309,6 +310,7 @@ def reconstruct_and_sanitize_sources(
                 vision_enabled=vision_enabled,
                 audio_input_format=audio_input_format,
                 limit=limit,
+                audio_limit=audio_limit,
                 control=ReconstructionControl(
                     time.monotonic() + 30, resources=resources
                 ),
@@ -383,7 +385,7 @@ def reconstruct_and_sanitize_sources(
     )[: min(selection_limit, MAX_RECONSTRUCTED_VIDEO_SEGMENTS)]
     selected_audio_candidates = sorted(
         audio_candidates_by_id.values(), key=_candidate_rank_key
-    )[: min(selection_limit, MAX_RECONSTRUCTED_AUDIO_SEGMENTS)]
+    )[: min(selection_limit, max(0, int(audio_limit)))]
 
     reconstructed_images = []
     reconstructed_video_segments = []

@@ -514,9 +514,12 @@ when the answer model cannot receive audio.
 ### Audio reconstruction
 
 For each selected audio hit, FFmpeg re-extracts the authorized time range from
-the original video and rebuilds mono, 16 kHz, signed 16-bit PCM WAV. At most
-four audio segments are reconstructed, further bounded by the user's retrieval
-limit.
+the original video and rebuilds mono, 16 kHz, signed 16-bit PCM WAV. The number of
+clips is bounded by both the administrator's configured maximum audio clips per
+answer and the user's Top K retrieval limit. The setting is under Admin
+Settings → Documents → Retrieval, defaults to four, and applies to new answers
+without reindexing. It uses the same administrator scope as other retrieval
+settings (`rag.audio_max_clips`; environment default `RAG_AUDIO_MAX_CLIPS`).
 
 The WAV bytes are attached only when a concrete answer-model request format is
 known:

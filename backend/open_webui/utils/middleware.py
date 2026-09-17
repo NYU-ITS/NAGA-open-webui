@@ -986,6 +986,7 @@ async def process_chat_payload(request, form_data, metadata, user, model):
                     vision_enabled=vision_enabled,
                     audio_input_format=audio_input_format,
                     limit=max(0, int(request.app.state.config.TOP_K.get(user.email))),
+                    audio_limit=request.app.state.config.RAG_AUDIO_MAX_CLIPS.get(user.email),
                 )
             )
         else:

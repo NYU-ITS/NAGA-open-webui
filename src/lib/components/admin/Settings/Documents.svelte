@@ -119,6 +119,7 @@
 
 	let fileMaxSize = null;
 	let fileMaxCount = null;
+	let audioMaxClips = 4;
 
 	let videoMaxFileSizeMb = 20;
 	let videoEffectiveMaxFileSizeMb = 20;
@@ -334,6 +335,10 @@
 	};
 
 	const saveSettings = async () => {
+		if (!Number.isInteger(audioMaxClips) || audioMaxClips < 1) {
+			toast.error($i18n.t('Maximum audio clips per answer must be a whole number of at least 1.'));
+			return;
+		}
 		if (contentExtractionEngine === 'tika' && tikaServerUrl === '') {
 			toast.error($i18n.t('Tika Server URL required.'));
 			return;
@@ -350,6 +355,7 @@
 		
 		const res = await updateRAGConfig(localStorage.token, {
 			email: $user.email,
+			audio_max_clips: audioMaxClips,
 			...(!BYPASS_EMBEDDING_AND_RETRIEVAL ? { embedding: embeddingPayload() } : {}),
 			pdf_extract_images: pdfExtractImages,
 			enable_google_drive_integration: enableGoogleDriveIntegration,
@@ -389,6 +395,7 @@
 			throw new Error($i18n.t('The document settings update did not complete.'));
 		}
 		documentSettingsSaved = true;
+		audioMaxClips = res.audio_max_clips ?? audioMaxClips;
 		trackIndexing(res.indexing);
 
 		console.log('AFTER SAVE - Response:', res);
@@ -541,6 +548,7 @@
 
 			fileMaxSize = res?.file.max_size ?? 5;
 			fileMaxCount = res?.file.max_count ?? 2;
+			audioMaxClips = res.audio_max_clips ?? 4;
 
 			if (res?.video) {
 				videoMaxFileSizeMb = res.video.max_file_size_mb ?? 20;
@@ -1111,6 +1119,26 @@
 								min="0"
 							/>
 						</div>
+					</div>
+
+					<div class="mb-3">
+						<div class="mb-1 flex w-full items-center justify-between gap-3">
+							<label for="audio-max-clips" class="text-xs font-medium">
+								{$i18n.t('Maximum audio clips per answer')}
+							</label>
+							<input
+								id="audio-max-clips"
+								class="w-24 rounded-lg text-sm bg-transparent outline-hidden"
+								type="number"
+								bind:value={audioMaxClips}
+								min="1"
+								step="1"
+								required
+							/>
+						</div>
+						<p class="text-xs text-gray-600 dark:text-gray-400">
+							{$i18n.t('Maximum retrieved audio clips included across all sources in one answer. Also limited by Top K. Default: 4. Applies to new answers without reindexing.')}
+						</p>
 					</div>
 
 					{#if querySettings.hybrid === true}

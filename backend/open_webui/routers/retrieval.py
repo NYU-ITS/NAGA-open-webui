@@ -493,6 +493,7 @@ def _effective_video_max_size_mb(request: Request) -> int:
 async def get_rag_config(request: Request, user=Depends(get_verified_user)):
     return {
         "status": True,
+        "audio_max_clips": request.app.state.config.RAG_AUDIO_MAX_CLIPS.get(user.email),
         "pdf_extract_images": request.app.state.config.PDF_EXTRACT_IMAGES,
         "RAG_FULL_CONTEXT": request.app.state.config.RAG_FULL_CONTEXT.get(user.email),
         "BYPASS_EMBEDDING_AND_RETRIEVAL": request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL,
@@ -640,6 +641,7 @@ class VideoConfig(BaseModel):
 
 class ConfigUpdateForm(BaseModel):
     save_id: Optional[UUID] = None
+    audio_max_clips: Optional[int] = Field(default=None, ge=1, strict=True)
     # Accepted for old clients; indexing settings can no longer defer job creation.
     defer_embedding_reindex: bool = False
     embedding: Optional[EmbeddingModelUpdateForm] = None
@@ -731,6 +733,8 @@ def _update_video_settings(config, video_config, user):
 
 
 def _stage_rag_settings(config, form_data, user):
+    if form_data.audio_max_clips is not None:
+        config.RAG_AUDIO_MAX_CLIPS.set(user.email, form_data.audio_max_clips)
     if form_data.video is not None:
         _update_video_settings(config, form_data.video, user)
 
@@ -1057,6 +1061,7 @@ async def update_rag_config(
 
     return {
         "settings_saved": True,
+        "audio_max_clips": request.app.state.config.RAG_AUDIO_MAX_CLIPS.get(user.email),
         "indexing": indexing,
         "status": True,
         "embedding_recipe_changed": recipe_changed,

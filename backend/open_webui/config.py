@@ -2136,6 +2136,11 @@ BYPASS_EMBEDDING_AND_RETRIEVAL = PersistentConfig(
 )
 RAG_TOP_K = UserScopedConfig( "rag.top_k", int(os.environ.get("RAG_TOP_K", "10")))
 
+# Answer-time audio selection does not change the indexed preparation recipe.
+RAG_AUDIO_MAX_CLIPS = UserScopedConfig(
+    "rag.audio_max_clips", max(1, int(os.environ.get("RAG_AUDIO_MAX_CLIPS", "4")))
+)
+
 # RAG_TOP_K = PersistentConfig(
 #     "RAG_TOP_K", "rag.top_k", int(os.environ.get("RAG_TOP_K", "3"))
 #)

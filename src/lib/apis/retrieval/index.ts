@@ -59,6 +59,7 @@ type VideoConfigForm = {
 
 type RAGConfigForm = {
 	email: string;
+	audio_max_clips?: number;
 	defer_embedding_reindex?: boolean;
 	embedding?: EmbeddingModelUpdateForm;
 	force_reindex?: boolean;
