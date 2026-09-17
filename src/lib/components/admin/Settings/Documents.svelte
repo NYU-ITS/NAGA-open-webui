@@ -52,6 +52,10 @@
 	let scanDirLoading = false;
 	let updateEmbeddingModelLoading = false;
 	let updateRerankingModelLoading = false;
+	let saving = false;
+	let documentSettingsSaved = false;
+	let saveStep = '';
+	let embeddingReindexPending = false;
 
 	let showResetConfirm = false;
 	let showResetUploadDirConfirm = false;
@@ -107,22 +111,32 @@
 		hybrid: false
 	};
 
-	const embeddingModelUpdateHandler = async (forceReindex = false) => {
+	const errorMessage = (error) => {
+		const detail = error?.detail ?? error;
+		return typeof detail === 'string'
+			? detail
+			: detail?.message ?? $i18n.t('Please try again.');
+	};
+
+	const embeddingModelUpdateHandler = async (forceReindex = false, notify = true) => {
+		const fail = (message: string) => {
+			if (!notify) throw new Error(message);
+			toast.error(message);
+			return false;
+		};
 		if (embeddingEngine === '' && embeddingModel.split('/').length - 1 > 1) {
-			toast.error(
+			return fail(
 				$i18n.t(
 					'Model filesystem path detected. Model shortname is required for update, cannot continue.'
 				)
 			);
-			return false;
 		}
 		if (embeddingEngine === 'ollama' && embeddingModel === '') {
-			toast.error(
+			return fail(
 				$i18n.t(
 					'Model filesystem path detected. Model shortname is required for update, cannot continue.'
 				)
 			);
-			return false;
 		}
 
 		// Embedding model is mandatory for OpenAI/Portkey engines
@@ -130,18 +144,15 @@
 			(embeddingEngine === 'openai' || embeddingEngine === 'portkey') &&
 			(embeddingModel === '' || embeddingModel.trim() === '')
 		) {
-			toast.error($i18n.t('Embedding model required.'));
-			return false;
+			return fail($i18n.t('Embedding model required.'));
 		}
 
 		// API key is mandatory for OpenAI/Portkey engines (URL may fall back on backend)
 		if (embeddingEngine === 'openai' && OpenAIKey === '') {
-			toast.error($i18n.t('OpenAI API key required.'));
-			return false;
+			return fail($i18n.t('OpenAI API key required.'));
 		}
 		if (embeddingEngine === 'portkey' && PortkeyKey === '') {
-			toast.error($i18n.t('PORTKEY API key required.'));
-			return false;
+			return fail($i18n.t('PORTKEY API key required.'));
 		}
 
 		console.log('Update embedding model attempt:', embeddingModel);
@@ -167,14 +178,17 @@
 				url: embeddingEngine === 'portkey' ? PortkeyUrl : OpenAIUrl
 			}
 		}).catch(async (error) => {
-			toast.error(`${error}`);
-			await setEmbeddingConfig();
+			if (!notify) throw error;
+			toast.error(errorMessage(error));
+			await setEmbeddingConfig().catch(() => {
+				console.warn('Could not refresh embedding configuration.');
+			});
 			return null;
+		}).finally(() => {
+			updateEmbeddingModelLoading = false;
 		});
-		updateEmbeddingModelLoading = false;
 
 		if (res) {
-			console.log('[RBAC_UI] embeddingModelUpdateHandler response:', res);
 			if (res.status === true) {
 				// CRITICAL RBAC: Update UI state from backend response to ensure we show the correct per-admin values
 				// This prevents one admin from seeing another admin's values on the same pod
@@ -191,16 +205,23 @@
 					console.log('[RBAC_UI] Updated API key from response (masked)');
 				}
 				// Re-fetch config to ensure we have the latest values
-				await setEmbeddingConfig();
-				toast.success($i18n.t('Embedding model set to "{{embedding_model}}"', res), {
-					duration: 1000 * 10
+				await setEmbeddingConfig().catch(() => {
+					console.warn('Could not refresh embedding configuration.');
 				});
+				if (notify) {
+					toast.success($i18n.t('Embedding model set to "{{embedding_model}}"', res), {
+						duration: 1000 * 10
+					});
+				}
 			}
 		}
-		return Boolean(res);
+		if (!notify && res?.status !== true) {
+			throw new Error($i18n.t('The embedding update did not complete.'));
+		}
+		return res?.status === true;
 	};
 
-	const rerankingModelUpdateHandler = async () => {
+	const rerankingModelUpdateHandler = async (notify = true) => {
 		console.log('Update reranking model attempt:', rerankingModel);
 
 		updateRerankingModelLoading = true;
@@ -208,14 +229,17 @@
 			email: $user.email,
 			reranking_model: rerankingModel
 		}).catch(async (error) => {
-			toast.error(`${error}`);
-			await setRerankingConfig();
+			if (!notify) throw error;
+			toast.error(errorMessage(error));
+			await setRerankingConfig().catch(() => {
+				console.warn('Could not refresh reranking configuration.');
+			});
 			return null;
+		}).finally(() => {
+			updateRerankingModelLoading = false;
 		});
-		updateRerankingModelLoading = false;
 
-		if (res) {
-			console.log('rerankingModelUpdateHandler:', res);
+		if (res && notify) {
 			if (res.status === true) {
 				if (rerankingModel === '') {
 					toast.success($i18n.t('Reranking model disabled', res), {
@@ -228,9 +252,40 @@
 				}
 			}
 		}
+		if (!notify && res?.status !== true) {
+			throw new Error($i18n.t('The reranking update did not complete.'));
+		}
 	};
 
 	const submitHandler = async () => {
+		if (saving || updateEmbeddingModelLoading || updateRerankingModelLoading) return;
+		saving = true;
+		documentSettingsSaved = false;
+		saveStep = $i18n.t('the remaining settings');
+		try {
+			await saveSettings();
+		} catch (error) {
+			const detail = errorMessage(error);
+			let message = $i18n.t('Could not complete saving settings. {{error}}', { error: detail });
+			if (documentSettingsSaved) {
+				message = $i18n.t('Document settings saved, but {{step}} did not complete. {{error}}', {
+					step: saveStep === 'embedding' ? $i18n.t('the embedding update or reindex') : saveStep,
+					error: detail
+				});
+				const code = error?.detail?.error_code ?? error?.error_code;
+				if (saveStep === 'embedding' && (
+					code === 'embedding_inventory_missing_file' || detail.includes('embedding_inventory_missing_file')
+				)) {
+					message = $i18n.t('Document settings saved, but reindexing could not start because a referenced source file is missing or unreadable. Restore the file before retrying reindexing.');
+				}
+			}
+			dispatch('save', { success: false, partial: documentSettingsSaved, message });
+		} finally {
+			saving = false;
+		}
+	};
+
+	const saveSettings = async () => {
 		if (contentExtractionEngine === 'tika' && tikaServerUrl === '') {
 			toast.error($i18n.t('Tika Server URL required.'));
 			return;
@@ -282,12 +337,12 @@
 			}
 		});
 
+		if (res?.status !== true) {
+			throw new Error($i18n.t('The document settings update did not complete.'));
+		}
+		documentSettingsSaved = true;
 		if (!BYPASS_EMBEDDING_AND_RETRIEVAL) {
-			await embeddingModelUpdateHandler(Boolean(res?.embedding_recipe_changed));
-
-			if (querySettings.hybrid) {
-				await rerankingModelUpdateHandler();
-			}
+			embeddingReindexPending = embeddingReindexPending || Boolean(res.embedding_recipe_changed);
 		}
 
 		console.log('AFTER SAVE - Response:', res);
@@ -322,7 +377,19 @@
 			videoMaxDurationSeconds = res.video.max_duration_seconds ?? 120;
 		}
 
-		await updateQuerySettings(localStorage.token, {email: $user.email, ...querySettings});
+		saveStep = $i18n.t('query settings');
+		const queryResult = await updateQuerySettings(localStorage.token, {email: $user.email, ...querySettings});
+		if (queryResult?.status !== true) throw new Error($i18n.t('The query settings update did not complete.'));
+
+		if (!BYPASS_EMBEDDING_AND_RETRIEVAL) {
+			saveStep = 'embedding';
+			await embeddingModelUpdateHandler(embeddingReindexPending, false);
+			embeddingReindexPending = false;
+			if (querySettings.hybrid) {
+				saveStep = $i18n.t('reranking');
+				await rerankingModelUpdateHandler(false);
+			}
+		}
 
 		if (fileMaxSize === '' || fileMaxSize === null) {
 			fileMaxSize = 5;
@@ -331,7 +398,7 @@
 			fileMaxCount = 2;
 		}
 
-		dispatch('save');
+		dispatch('save', { success: true });
 	};
 
 	const setEmbeddingConfig = async () => {
@@ -722,7 +789,7 @@
 											on:click={() => {
 												embeddingModelUpdateHandler();
 											}}
-											disabled={updateEmbeddingModelLoading}
+											disabled={saving || updateEmbeddingModelLoading}
 										>
 											{#if updateEmbeddingModelLoading}
 												<div class="self-center">
@@ -878,7 +945,7 @@
 										on:click={() => {
 											rerankingModelUpdateHandler();
 										}}
-										disabled={updateRerankingModelLoading}
+										disabled={saving || updateRerankingModelLoading}
 									>
 										{#if updateRerankingModelLoading}
 											<div class="self-center">
@@ -1197,8 +1264,9 @@
 		<button
 			class="px-3.5 py-1.5 text-sm font-medium bg-black hover:bg-gray-900 text-white dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-full"
 			type="submit"
+			disabled={saving || updateEmbeddingModelLoading || updateRerankingModelLoading}
 		>
-			{$i18n.t('Save')}
+			{$i18n.t(saving ? 'Saving...' : 'Save')}
 		</button>
 	</div>
 </form>

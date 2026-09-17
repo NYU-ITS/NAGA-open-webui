@@ -418,11 +418,21 @@
 			<Evaluations />
 		{:else if selectedTab === 'documents'}
 			<Documents
-				on:save={async () => {
-					toast.success($i18n.t('Settings saved successfully!'));
+				on:save={async (event) => {
+					if (event.detail.success) {
+						toast.success($i18n.t('Settings saved successfully!'));
+					} else if (event.detail.partial) {
+						toast.warning(event.detail.message);
+					} else {
+						toast.error(event.detail.message);
+					}
 
 					await tick();
-					await config.set(await getBackendConfig());
+					try {
+						await config.set(await getBackendConfig());
+					} catch (error) {
+						console.warn('Could not refresh backend configuration after saving settings.');
+					}
 				}}
 			/>
 		{:else if selectedTab === 'web'}
