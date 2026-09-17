@@ -344,18 +344,6 @@ def process_embedding_job(embedding_job_id: str) -> dict:
                 if completed:
                     processed_count += 1
             except Exception as file_error:
-                if _is_incompatible_outcome(file_error):
-                    error_code = file_error.code
-                    log.info(
-                        "[EMBEDDING_WORKER] File %s skipped as incompatible | code=%s",
-                        file_view.file_id,
-                        error_code,
-                    )
-                    _mark_file_incompatible_safe(
-                        embedding_job_id, file_view.file_id, error_code
-                    )
-                    continue
-
                 # File-local error: mark file failed and continue. Record a
                 # stable stage code and safe operation+cause message.
                 error_code = _get_stable_error_code(file_error)
@@ -639,6 +627,7 @@ def _process_file(
 
     from open_webui.retrieval.embedding.publication import (
         claim_required_indexing,
+        publish_file_incompatibility,
         publish_prepared_file,
         release_required_indexing,
     )
@@ -709,6 +698,25 @@ def _process_file(
             job_id=job_id,
             incompatible_code=incompatible_code,
         )
+    except EmbeddingError as error:
+        if error.code != EMBEDDING_MODALITY_UNSUPPORTED:
+            raise
+        # Persist the rejection while this invocation still owns the file.
+        # Partial PDF visual incompatibility publishes usable text above.
+        publish_file_incompatibility(
+            admin_id=admin.id,
+            model_id=target_model.id,
+            snapshot=file_snapshot,
+            owner_token=token,
+            job_id=job_id,
+            error_code=error.code,
+        )
+        log.info(
+            "[EMBEDDING_WORKER] File %s skipped as incompatible | code=%s",
+            file_id,
+            error.code,
+        )
+        return False
     finally:
         release_required_indexing(file_id, token)
     try:
@@ -872,24 +880,6 @@ def _mark_file_failed_safe(job_id: str, file_id: str, error_code: str, error_mes
             db=db,
         )
         db.commit()
-
-
-def _mark_file_incompatible_safe(
-    job_id: str, file_id: str, error_code: str
-):
-    """Mark file as an allowlisted incompatibility without retry semantics."""
-    with get_db() as db:
-        EmbeddingJobRepository.mark_file_incompatible(
-            job_id=job_id,
-            file_id=file_id,
-            error_code=error_code,
-            db=db,
-        )
-        db.commit()
-
-
-def _is_incompatible_outcome(error: Exception) -> bool:
-    return isinstance(error, EmbeddingError) and error.code == EMBEDDING_MODALITY_UNSUPPORTED
 
 
 def _fail_job_files_safe(job_id: str, error: EmbeddingError) -> None:

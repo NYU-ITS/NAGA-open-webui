@@ -20,6 +20,8 @@ from open_webui.retrieval.embedding.errors import (
     EMBEDDING_REINDEX_SOURCE_CHANGED,
     EMBEDDING_FILE_NOT_FOUND,
     EMBEDDING_MODEL_STATE_CONFLICT,
+    EMBEDDING_MODALITY_UNSUPPORTED,
+    safe_file_processing_error_message,
 )
 from open_webui.retrieval.embedding.metrics import record_index_event
 
@@ -410,6 +412,91 @@ def publish_prepared_file(
         activated,
     )
     return tuple(projection_ids)
+
+
+def publish_file_incompatibility(
+    *, admin_id, model_id, snapshot, owner_token, job_id, error_code
+):
+    """Commit a complete modality rejection with the same fences as publication."""
+    from open_webui.retrieval.embedding.file_processing import (
+        _resolve_knowledge_projection_ids,
+    )
+    from open_webui.retrieval.embedding.inventory import build_reindex_inventory
+    from open_webui.retrieval.embedding.jobs import EmbeddingJobRepository
+    from open_webui.retrieval.embedding.preparation import (
+        preparation_recipe_from_snapshot,
+    )
+
+    # PDF visual warnings belong to successful text publication, never here.
+    if error_code != EMBEDDING_MODALITY_UNSUPPORTED:
+        raise ValueError("only complete modality rejection can fail file processing")
+    file_id = snapshot["file_id"]
+    generation = snapshot.get("index_generation_id")
+    recipe = preparation_recipe_from_snapshot(snapshot)
+    with get_db() as db:
+        lock_generation(db, admin_id, model_id, generation)
+        job = (
+            db.query(EmbeddingJob)
+            .filter_by(id=job_id, admin_id=admin_id)
+            .with_for_update()
+            .first()
+        )
+        if (
+            job is None
+            or job.status != "processing"
+            or job.index_generation_id != generation
+            or job.embedding_model_id != model_id
+        ):
+            raise EmbeddingError(EMBEDDING_JOB_STALE_OPERATION)
+        job_file = (
+            db.query(EmbeddingJobFile)
+            .filter_by(job_id=job_id, file_id=file_id)
+            .with_for_update()
+            .first()
+        )
+        if job_file is None or job_file.status != "processing":
+            raise EmbeddingError(EMBEDDING_JOB_STALE_OPERATION)
+        if (
+            preparation_recipe_from_snapshot(job_file.file_snapshot).sha256
+            != recipe.sha256
+        ):
+            raise EmbeddingError(EMBEDDING_REINDEX_SOURCE_CHANGED)
+        file = db.query(File).filter_by(id=file_id).with_for_update().first()
+        if file is None:
+            raise EmbeddingError(EMBEDDING_FILE_NOT_FOUND)
+        meta = dict(file.meta or {})
+        owner = meta.get("required_indexing") or {}
+        if (
+            not owner_token
+            or owner.get("token") != owner_token
+            or owner.get("index_generation_id") != generation
+        ):
+            raise EmbeddingError(EMBEDDING_JOB_STALE_OPERATION)
+        validate_source(file, snapshot)
+        _resolve_knowledge_projection_ids(
+            file_id=file_id,
+            admin_id=admin_id,
+            requested_knowledge_id=None,
+            db=db,
+        )
+        if not build_reindex_inventory(
+            admin_id, db=db, preparation_recipe=recipe, file_ids={file_id}
+        ):
+            raise EmbeddingError(EMBEDDING_REINDEX_SOURCE_CHANGED)
+        EmbeddingJobRepository.mark_file_incompatible(
+            job_id, file_id, error_code, db=db
+        )
+        now = int(time.time())
+        meta.pop("required_indexing", None)
+        meta.update(
+            processing_status="error",
+            processing_completed_at=now,
+            processing_error_code=error_code,
+            processing_error=safe_file_processing_error_message(error_code),
+        )
+        file.meta = meta
+        file.updated_at = now
+        db.commit()
 
 
 def reuse_current_publication(job_id, file_id):
