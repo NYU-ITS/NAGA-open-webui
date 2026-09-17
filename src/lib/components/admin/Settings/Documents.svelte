@@ -178,7 +178,6 @@
 				connection_timeout_seconds: embeddingConnectionTimeoutSeconds,
 				read_timeout_seconds: embeddingReadTimeoutSeconds
 			},
-			force_reindex: false,
 			ollama_config: {
 				key: OllamaKey,
 				url: OllamaUrl
@@ -189,7 +188,7 @@
 			}
 		});
 
-	const embeddingModelUpdateHandler = async (forceReindex = false, notify = true) => {
+	const embeddingModelUpdateHandler = async (notify = true) => {
 		const fail = (message: string) => {
 			if (!notify) throw new Error(message);
 			toast.error(message);
@@ -229,16 +228,11 @@
 		console.log('Update embedding model attempt:', embeddingModel);
 
 		updateEmbeddingModelLoading = true;
-		const res = await updateEmbeddingConfig(localStorage.token, { ...embeddingPayload(), force_reindex: forceReindex }).catch(async (error) => {
+		const res = await updateEmbeddingConfig(localStorage.token, embeddingPayload()).catch((error) => {
 			if (!notify) throw error;
-			const message = error?.settings_saved === false
-				? errorMessage(error)
-				: $i18n.t('Could not confirm whether settings were saved. Reload the page to check before retrying.');
+			const message = errorMessage(error);
 			saveFailure = { ...error, message };
 			toast.error(message);
-			await setEmbeddingConfig().catch(() => {
-				console.warn('Could not refresh embedding configuration.');
-			});
 			return null;
 		}).finally(() => {
 			updateEmbeddingModelLoading = false;
@@ -313,20 +307,18 @@
 		}
 	};
 
-	const submitHandler = async (forceReindex = false) => {
+	const submitHandler = async () => {
 		if (saving || updateEmbeddingModelLoading || updateRerankingModelLoading) return;
 		saving = true;
 		documentSettingsSaved = false;
 		saveFailure = null;
 		saveStep = $i18n.t('the remaining settings');
 		try {
-			await saveSettings(forceReindex);
+			await saveSettings();
 		} catch (error) {
 			const detail = errorMessage(error);
 			const response = error?.detail ?? error;
-			let message = response?.settings_saved === false
-				? detail
-				: $i18n.t('Could not confirm whether settings were saved. Reload the page to check before retrying.');
+			let message = detail;
 			if (documentSettingsSaved) {
 				message = $i18n.t('Document settings saved, but {{step}} did not complete. {{error}}', {
 					step: saveStep === 'embedding' ? $i18n.t('the embedding update or reindex') : saveStep,
@@ -341,7 +333,7 @@
 		}
 	};
 
-	const saveSettings = async (forceReindex = false) => {
+	const saveSettings = async () => {
 		if (contentExtractionEngine === 'tika' && tikaServerUrl === '') {
 			toast.error($i18n.t('Tika Server URL required.'));
 			return;
@@ -358,7 +350,6 @@
 		
 		const res = await updateRAGConfig(localStorage.token, {
 			email: $user.email,
-			force_reindex: forceReindex,
 			...(!BYPASS_EMBEDDING_AND_RETRIEVAL ? { embedding: embeddingPayload() } : {}),
 			pdf_extract_images: pdfExtractImages,
 			enable_google_drive_integration: enableGoogleDriveIntegration,
@@ -1365,11 +1356,6 @@
 		</div>
 	</div>
 	<div class="flex justify-end gap-3 pt-3 text-sm font-medium">
-		{#if !BYPASS_EMBEDDING_AND_RETRIEVAL}
-			<button type="button" class="text-sm underline disabled:opacity-50" disabled={saving || !!retryingJob || indexing?.in_progress || updateEmbeddingModelLoading || updateRerankingModelLoading} on:click={() => submitHandler(true)}>
-				{$i18n.t('Save and reindex my files')}
-			</button>
-		{/if}
 		<button
 			class="px-3.5 py-1.5 text-sm font-medium bg-black hover:bg-gray-900 text-white dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-full"
 			type="submit"

@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 import tiktoken
 from sqlalchemy import cast, func
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.exc import IntegrityError
 
 
 from langchain.text_splitter import RecursiveCharacterTextSplitter, TokenTextSplitter
@@ -384,6 +385,7 @@ class EmbeddingReliabilityForm(BaseModel):
 
 
 class EmbeddingModelUpdateForm(BaseModel):
+    save_id: Optional[UUID] = None
     openai_config: Optional[OpenAIConfigForm] = None
     ollama_config: Optional[OllamaConfigForm] = None
     embedding_engine: str
@@ -402,7 +404,10 @@ async def update_embedding_config(
     # updates. Validation failures must not persist credentials or reliability edits.
     result = await update_rag_config(
         request,
-        ConfigUpdateForm(embedding=form_data, force_reindex=form_data.force_reindex),
+        ConfigUpdateForm(
+            embedding=form_data, force_reindex=form_data.force_reindex,
+            save_id=form_data.save_id,
+        ),
         background_tasks,
         user,
     )
@@ -634,6 +639,7 @@ class VideoConfig(BaseModel):
 
 
 class ConfigUpdateForm(BaseModel):
+    save_id: Optional[UUID] = None
     # Accepted for old clients; indexing settings can no longer defer job creation.
     defer_embedding_reindex: bool = False
     embedding: Optional[EmbeddingModelUpdateForm] = None
@@ -900,6 +906,30 @@ async def get_settings_indexing(user=Depends(get_admin_user)):
         return settings_indexing_status(db, user)
 
 
+@router.get("/config/saves/{save_id}")
+async def get_settings_save(save_id: UUID, user=Depends(get_admin_user)):
+    """Confirm a committed save when its HTTP response did not reach the client."""
+    from open_webui.config import Config
+    from open_webui.retrieval.embedding.settings import settings_indexing_status
+
+    with get_db() as db:
+        row = db.query(Config).filter_by(email=user.email, version=0).first()
+        data = row.data if row and isinstance(row.data, dict) else {}
+        if str(save_id) not in data.get("rag", {}).get("settings_save_ids", []):
+            # Absence is not a rejection: the original request may still be running.
+            return {"status": "unconfirmed"}
+        try:
+            indexing = settings_indexing_status(db, user)
+        except Exception:
+            log.warning("Could not read indexing status for confirmed save | admin=%s", user.id)
+            indexing = {"status": "unknown", "jobs": [], "in_progress": True}
+        return {
+            "status": True,
+            "settings_saved": True,
+            "indexing": indexing,
+        }
+
+
 @router.post("/config/update")
 async def update_rag_config(
     request: Request,
@@ -917,6 +947,7 @@ async def update_rag_config(
 
     # Nothing touches live config or caches until every inventory and job has
     # been prepared and the encompassing database transaction has committed.
+    commit_started = False
     try:
         with get_db() as db:
             previous = ConfigTransaction(request.app.state.config, db)
@@ -934,7 +965,14 @@ async def update_rag_config(
                     form_data.embedding and form_data.embedding.force_reindex
                 ),
             )
+            if form_data.save_id is not None:
+                save_ids = proposed.get_value(user.email, "rag.settings_save_ids", [])
+                proposed.set_value(
+                    user.email, "rag.settings_save_ids",
+                    [*save_ids[-19:], str(form_data.save_id)],
+                )
             proposed.persist()
+            commit_started = True
             db.commit()
     except HTTPException as error:
         message = error.detail
@@ -973,6 +1011,25 @@ async def update_rag_config(
         raise HTTPException(status_code=409, detail={
             "error_code": code, "message": message, "settings_saved": False,
         }) from None
+    except Exception as error:
+        # Do not expose SQL parameters (which may include credentials). A
+        # constraint rejection or failure before commit definitely rolled back;
+        # a lost connection during commit needs the durable receipt check.
+        rolled_back = not commit_started or isinstance(error, IntegrityError)
+        diagnostic = getattr(getattr(error, "orig", None), "diag", None)
+        constraint = getattr(diagnostic, "constraint_name", None)
+        log.error(
+            "Settings transaction failed | admin=%s type=%s constraint=%s rolled_back=%s",
+            user.id, type(error).__name__, constraint, rolled_back,
+        )
+        detail = {
+            "error_code": "settings_save_failed",
+            "message": "Settings were not saved because the server could not prepare or store the update. Please try again."
+            if rolled_back else "The database connection was interrupted while saving settings.",
+        }
+        if rolled_back:
+            detail["settings_saved"] = False
+        raise HTTPException(status_code=500, detail=detail) from None
 
     proposed.publish()
     if form_data.youtube is not None:

@@ -1,4 +1,5 @@
 import { RETRIEVAL_API_BASE_URL } from '$lib/constants';
+import { v4 as uuidv4 } from 'uuid';
 
 export const getRAGConfig = async (token: string,email: string) => {
 	let error = null;
@@ -73,25 +74,55 @@ type RAGConfigForm = {
 	youtube?: YoutubeConfigForm;
 };
 
-const saveRetrievalSettings = async (token: string, path: string, payload: unknown) => {
-	const response = await fetch(`${RETRIEVAL_API_BASE_URL}/${path}`, {
-		method: 'POST',
-		headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-		body: JSON.stringify(payload)
-	});
-	if (!response.ok) {
+const saveRetrievalSettings = async (token: string, path: string, payload: object) => {
+	const saveId = uuidv4();
+	let failure;
+	try {
+		const response = await fetch(`${RETRIEVAL_API_BASE_URL}/${path}`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+			body: JSON.stringify({ ...payload, save_id: saveId })
+		});
 		const body = await response.json().catch(() => null);
+		if (response.ok && body?.status === true) return body;
 		const detail = body?.detail ?? body;
 		const message = Array.isArray(detail)
 			? detail.map((item) => item.msg).filter(Boolean).join(' ')
 			: typeof detail === 'string' ? detail : detail?.message;
-		throw {
+		const fallback = response.ok
+			? 'The server returned an invalid save response. Your edits are preserved.'
+			: `The server returned an error while saving settings (HTTP ${response.status}). Your edits are preserved.`;
+		failure = {
 			...(detail && typeof detail === 'object' && !Array.isArray(detail) ? detail : {}),
-			message: message ?? 'The settings request failed.',
-			settings_saved: detail?.settings_saved ?? (response.status < 500 ? false : undefined)
+			message: message || fallback,
+			settings_saved: detail?.settings_saved ??
+				(response.status >= 400 && response.status < 500 && response.status !== 408 ? false : undefined)
+		};
+	} catch {
+		failure = {
+			message: 'The connection was interrupted while saving. Your edits are preserved. Check your connection and try again.'
 		};
 	}
-	return response.json();
+	if (failure.settings_saved === false) throw failure;
+
+	// A lost response does not imply rollback. Confirm the exact save from its
+	// transactionally stored receipt; never resend the mutation automatically.
+	for (const delay of [0, 500, 1500]) {
+		if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+		try {
+			const response = await fetch(`${RETRIEVAL_API_BASE_URL}/config/saves/${saveId}`, {
+				headers: { Authorization: `Bearer ${token}` },
+				cache: 'no-store',
+				signal: AbortSignal.timeout(5000)
+			});
+			if (!response.ok) continue;
+			const result = await response.json();
+			if (result.settings_saved === true) return result;
+		} catch {
+			// Keep the original error if the server remains unreachable.
+		}
+	}
+	throw failure;
 };
 
 export const updateRAGConfig = async (token: string, payload: RAGConfigForm) =>
