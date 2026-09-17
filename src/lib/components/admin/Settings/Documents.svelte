@@ -45,6 +45,7 @@
 
 	import ResetUploadDirConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
 	import ResetVectorDBConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
+	import ReindexConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
 	import SensitiveInput from '$lib/components/common/SensitiveInput.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import Switch from '$lib/components/common/Switch.svelte';
@@ -56,6 +57,7 @@
 	let updateEmbeddingModelLoading = false;
 	let updateRerankingModelLoading = false;
 	let saving = false;
+	let showReindexConfirm = false;
 	let documentSettingsSaved = false;
 	let saveStep = '';
 	let indexing: SettingsIndexingStatus | null = null;
@@ -308,15 +310,19 @@
 		}
 	};
 
-	const submitHandler = async () => {
-		if (saving || updateEmbeddingModelLoading || updateRerankingModelLoading) return;
+	const submitHandler = async (reindexConfirmed = false) => {
+		if (saving || showReindexConfirm || updateEmbeddingModelLoading || updateRerankingModelLoading) return;
 		saving = true;
 		documentSettingsSaved = false;
 		saveFailure = null;
 		saveStep = $i18n.t('the remaining settings');
 		try {
-			await saveSettings();
+			await saveSettings(reindexConfirmed);
 		} catch (error) {
+			if (error?.error_code === 'reindex_confirmation_required') {
+				showReindexConfirm = true;
+				return;
+			}
 			const detail = errorMessage(error);
 			const response = error?.detail ?? error;
 			let message = detail;
@@ -334,7 +340,7 @@
 		}
 	};
 
-	const saveSettings = async () => {
+	const saveSettings = async (reindexConfirmed = false) => {
 		if (!Number.isInteger(audioMaxClips) || audioMaxClips < 1) {
 			toast.error($i18n.t('Maximum audio clips per answer must be a whole number of at least 1.'));
 			return;
@@ -355,6 +361,7 @@
 		
 		const res = await updateRAGConfig(localStorage.token, {
 			email: $user.email,
+			reindex_confirmed: reindexConfirmed,
 			audio_max_clips: audioMaxClips,
 			...(!BYPASS_EMBEDDING_AND_RETRIEVAL ? { embedding: embeddingPayload() } : {}),
 			pdf_extract_images: pdfExtractImages,
@@ -497,10 +504,6 @@
 		}
 	};
 
-	const toggleHybridSearch = async () => {
-		querySettings = await updateQuerySettings(localStorage.token, querySettings);
-	};
-
 	onMount(async () => {
 		void refreshIndexingStatus();
 		// Fetch super admin emails from API
@@ -563,6 +566,16 @@
 		}
 	});
 </script>
+
+<ReindexConfirmDialog
+	bind:show={showReindexConfirm}
+	requireExplicitChoice
+	title={$i18n.t('Reindex all knowledge collections?')}
+	message={$i18n.t('Applying these changes will reindex all affected knowledge collections and chat uploads. Cancel keeps your current settings. Proceed saves these changes and starts reindexing.')}
+	cancelLabel={$i18n.t('Cancel')}
+	confirmLabel={$i18n.t('Proceed')}
+	on:confirm={() => submitHandler(true)}
+/>
 
 <ResetUploadDirConfirmDialog
 	bind:show={showResetUploadDirConfirm}
@@ -1019,12 +1032,7 @@
 					<div class="  mb-2.5 flex w-full justify-between">
 						<div class=" self-center text-xs font-medium">{$i18n.t('Hybrid Search')}</div>
 						<div class="flex items-center relative">
-							<Switch
-								bind:state={querySettings.hybrid}
-								on:change={() => {
-									toggleHybridSearch();
-								}}
-							/>
+							<Switch bind:state={querySettings.hybrid} />
 						</div>
 					</div>
 
@@ -1387,7 +1395,7 @@
 		<button
 			class="px-3.5 py-1.5 text-sm font-medium bg-black hover:bg-gray-900 text-white dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-full"
 			type="submit"
-			disabled={saving || updateEmbeddingModelLoading || updateRerankingModelLoading}
+			disabled={saving || showReindexConfirm || updateEmbeddingModelLoading || updateRerankingModelLoading}
 		>
 			{$i18n.t(saving ? 'Saving...' : 'Save')}
 		</button>

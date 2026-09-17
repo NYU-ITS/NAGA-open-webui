@@ -641,6 +641,7 @@ class VideoConfig(BaseModel):
 
 class ConfigUpdateForm(BaseModel):
     save_id: Optional[UUID] = None
+    reindex_confirmed: bool = False
     audio_max_clips: Optional[int] = Field(default=None, ge=1, strict=True)
     # Accepted for old clients; indexing settings can no longer defer job creation.
     defer_embedding_reindex: bool = False
@@ -969,6 +970,15 @@ async def update_rag_config(
                     form_data.embedding and form_data.embedding.force_reindex
                 ),
             )
+            if jobs and not form_data.reindex_confirmed:
+                # Preparation only flushes into this transaction. Roll back all
+                # settings, jobs and projection changes before asking the user.
+                db.rollback()
+                raise HTTPException(status_code=409, detail={
+                    "error_code": "reindex_confirmation_required",
+                    "message": "Applying these changes will reindex all affected knowledge collections and chat uploads. Proceed?",
+                    "settings_saved": False,
+                })
             if form_data.save_id is not None:
                 save_ids = proposed.get_value(user.email, "rag.settings_save_ids", [])
                 proposed.set_value(
@@ -979,6 +989,8 @@ async def update_rag_config(
             commit_started = True
             db.commit()
     except HTTPException as error:
+        if isinstance(error.detail, dict) and error.detail.get("error_code") == "reindex_confirmation_required":
+            raise
         message = error.detail
         if isinstance(message, dict):
             message = "; ".join(f"{key}: {value}" for key, value in message.items())
