@@ -53,10 +53,17 @@
 		item?.processing_error_code ?? item?.meta?.processing_error_code ?? null;
 	$: processingError = item?.error ?? item?.processing_error ?? item?.meta?.processing_error ?? '';
 
+	const PROCESSING_MESSAGE_LABELS: Record<string, string> = {
+		embedding_modality_unsupported: 'Embedding Modality Unsupported',
+		pdf_visuals_require_multimodal_model: 'PDF Visuals Require Multimodal Model'
+	};
+
 	const formatProcessingWarning = (warning: string) =>
-		warning.includes('_')
-			? warning.replaceAll('_', ' ').replace(/^./, (character) => character.toUpperCase())
-			: warning;
+		PROCESSING_MESSAGE_LABELS[warning]
+			? $i18n.t(PROCESSING_MESSAGE_LABELS[warning])
+			: warning.includes('_')
+				? warning.replaceAll('_', ' ').replace(/^./, (character) => character.toUpperCase())
+				: warning;
 </script>
 
 {#if item}
@@ -135,12 +142,16 @@
 
 			{#if showProcessingDetails && processingFailed}
 				<div class="mt-1 break-words text-xs text-red-600 dark:text-red-400">
-					<div class="font-medium">{$i18n.t('File processing failed')}</div>
-					{#if processingErrorCode}
+					{#if processingErrorCode === 'embedding_modality_unsupported'}
 						<div>{formatProcessingWarning(processingErrorCode)}</div>
-					{/if}
-					{#if processingError}
-						<div>{processingError}</div>
+					{:else}
+						<div class="font-medium">{$i18n.t('File processing failed')}</div>
+						{#if processingErrorCode}
+							<div>{formatProcessingWarning(processingErrorCode)}</div>
+						{/if}
+						{#if processingError}
+							<div>{processingError}</div>
+						{/if}
 					{/if}
 				</div>
 			{/if}
@@ -189,12 +200,16 @@
 
 				{#if showProcessingDetails && processingFailed}
 					<div class="mt-1 break-words text-xs text-red-600 dark:text-red-400">
-						<div class="font-medium">{$i18n.t('File processing failed')}</div>
-						{#if processingErrorCode}
+						{#if processingErrorCode === 'embedding_modality_unsupported'}
 							<div>{formatProcessingWarning(processingErrorCode)}</div>
-						{/if}
-						{#if processingError}
-							<div>{processingError}</div>
+						{:else}
+							<div class="font-medium">{$i18n.t('File processing failed')}</div>
+							{#if processingErrorCode}
+								<div>{formatProcessingWarning(processingErrorCode)}</div>
+							{/if}
+							{#if processingError}
+								<div>{processingError}</div>
+							{/if}
 						{/if}
 					</div>
 				{/if}
