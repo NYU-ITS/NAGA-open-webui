@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { toast } from 'svelte-sonner';
 
-	import { onMount, getContext, createEventDispatcher } from 'svelte';
+	import { onMount, onDestroy, getContext, createEventDispatcher } from 'svelte';
 
 	import { user } from '$lib/stores';
 	import { getSuperAdminEmails } from '$lib/apis/users';
@@ -33,8 +33,11 @@
 		updateRerankingConfig,
 		resetUploadDir,
 		getRAGConfig,
-		updateRAGConfig
+		updateRAGConfig,
+		getSettingsIndexingStatus,
+		type SettingsIndexingStatus
 	} from '$lib/apis/retrieval';
+	import { retryEmbeddingJob } from '$lib/apis/embedding';
 
 	import { knowledge, models } from '$lib/stores';
 	import { getKnowledgeBases } from '$lib/apis/knowledge';
@@ -55,7 +58,53 @@
 	let saving = false;
 	let documentSettingsSaved = false;
 	let saveStep = '';
-	let embeddingReindexPending = false;
+	let indexing: SettingsIndexingStatus | null = null;
+	let indexingStatusUnavailable = false;
+	let retryingJob = '';
+	let saveFailure = null;
+	let statusTimer: ReturnType<typeof setTimeout>;
+	let destroyed = false;
+
+	const trackIndexing = (status: SettingsIndexingStatus) => {
+		if (destroyed) return;
+		indexing = status;
+		clearTimeout(statusTimer);
+		if (status.in_progress || status.status === 'pending' || status.status === 'unknown') {
+			statusTimer = setTimeout(refreshIndexingStatus, 5000);
+		}
+	};
+
+	const refreshIndexingStatus = async () => {
+		try {
+			const status = await getSettingsIndexingStatus(localStorage.token);
+			if (destroyed) return;
+			indexingStatusUnavailable = false;
+			trackIndexing(status);
+		} catch {
+			if (destroyed) return;
+			indexingStatusUnavailable = true;
+			clearTimeout(statusTimer);
+			statusTimer = setTimeout(refreshIndexingStatus, 10000);
+		}
+	};
+
+	const retryIndexing = async (jobId: string) => {
+		retryingJob = jobId;
+		try {
+			const result = await retryEmbeddingJob(localStorage.token, jobId);
+			toast.info(result.message ?? $i18n.t('Indexing retry queued.'));
+			await refreshIndexingStatus();
+		} catch (error) {
+			toast.error(errorMessage(error));
+		} finally {
+			retryingJob = '';
+		}
+	};
+
+	onDestroy(() => {
+		destroyed = true;
+		clearTimeout(statusTimer);
+	});
 
 	let showResetConfirm = false;
 	let showResetUploadDirConfirm = false;
@@ -113,10 +162,32 @@
 
 	const errorMessage = (error) => {
 		const detail = error?.detail ?? error;
+		if (Array.isArray(detail)) return detail.map((item) => item.msg).filter(Boolean).join(' ');
 		return typeof detail === 'string'
 			? detail
 			: detail?.message ?? $i18n.t('Please try again.');
 	};
+
+	const embeddingPayload = () => ({
+			email: $user.email,
+			embedding_engine: embeddingEngine,
+			embedding_model: embeddingModel,
+			embedding_batch_size: embeddingBatchSize,
+			reliability: {
+				max_attempts: embeddingMaxAttempts,
+				connection_timeout_seconds: embeddingConnectionTimeoutSeconds,
+				read_timeout_seconds: embeddingReadTimeoutSeconds
+			},
+			force_reindex: false,
+			ollama_config: {
+				key: OllamaKey,
+				url: OllamaUrl
+			},
+			openai_config: {
+				key: embeddingEngine === 'portkey' ? PortkeyKey : OpenAIKey,
+				url: embeddingEngine === 'portkey' ? PortkeyUrl : OpenAIUrl
+			}
+		});
 
 	const embeddingModelUpdateHandler = async (forceReindex = false, notify = true) => {
 		const fail = (message: string) => {
@@ -158,28 +229,13 @@
 		console.log('Update embedding model attempt:', embeddingModel);
 
 		updateEmbeddingModelLoading = true;
-		const res = await updateEmbeddingConfig(localStorage.token, {
-			email: $user.email,
-			embedding_engine: embeddingEngine,
-			embedding_model: embeddingModel,
-			embedding_batch_size: embeddingBatchSize,
-			reliability: {
-				max_attempts: embeddingMaxAttempts,
-				connection_timeout_seconds: embeddingConnectionTimeoutSeconds,
-				read_timeout_seconds: embeddingReadTimeoutSeconds
-			},
-			force_reindex: forceReindex,
-			ollama_config: {
-				key: OllamaKey,
-				url: OllamaUrl
-			},
-			openai_config: {
-				key: embeddingEngine === 'portkey' ? PortkeyKey : OpenAIKey,
-				url: embeddingEngine === 'portkey' ? PortkeyUrl : OpenAIUrl
-			}
-		}).catch(async (error) => {
+		const res = await updateEmbeddingConfig(localStorage.token, { ...embeddingPayload(), force_reindex: forceReindex }).catch(async (error) => {
 			if (!notify) throw error;
-			toast.error(errorMessage(error));
+			const message = error?.settings_saved === false
+				? errorMessage(error)
+				: $i18n.t('Could not confirm whether settings were saved. Reload the page to check before retrying.');
+			saveFailure = { ...error, message };
+			toast.error(message);
 			await setEmbeddingConfig().catch(() => {
 				console.warn('Could not refresh embedding configuration.');
 			});
@@ -189,6 +245,8 @@
 		});
 
 		if (res) {
+			saveFailure = null;
+			if (res.indexing) trackIndexing(res.indexing);
 			if (res.status === true) {
 				// CRITICAL RBAC: Update UI state from backend response to ensure we show the correct per-admin values
 				// This prevents one admin from seeing another admin's values on the same pod
@@ -209,9 +267,7 @@
 					console.warn('Could not refresh embedding configuration.');
 				});
 				if (notify) {
-					toast.success($i18n.t('Embedding model set to "{{embedding_model}}"', res), {
-						duration: 1000 * 10
-					});
+					dispatch('save', { success: true, indexing: res.indexing });
 				}
 			}
 		}
@@ -257,35 +313,35 @@
 		}
 	};
 
-	const submitHandler = async () => {
+	const submitHandler = async (forceReindex = false) => {
 		if (saving || updateEmbeddingModelLoading || updateRerankingModelLoading) return;
 		saving = true;
 		documentSettingsSaved = false;
+		saveFailure = null;
 		saveStep = $i18n.t('the remaining settings');
 		try {
-			await saveSettings();
+			await saveSettings(forceReindex);
 		} catch (error) {
 			const detail = errorMessage(error);
-			let message = $i18n.t('Could not complete saving settings. {{error}}', { error: detail });
+			const response = error?.detail ?? error;
+			let message = response?.settings_saved === false
+				? detail
+				: $i18n.t('Could not confirm whether settings were saved. Reload the page to check before retrying.');
 			if (documentSettingsSaved) {
 				message = $i18n.t('Document settings saved, but {{step}} did not complete. {{error}}', {
 					step: saveStep === 'embedding' ? $i18n.t('the embedding update or reindex') : saveStep,
 					error: detail
 				});
-				const code = error?.detail?.error_code ?? error?.error_code;
-				if (saveStep === 'embedding' && (
-					code === 'embedding_inventory_missing_file' || detail.includes('embedding_inventory_missing_file')
-				)) {
-					message = $i18n.t('Document settings saved, but reindexing could not start because a referenced source file is missing or unreadable. Restore the file before retrying reindexing.');
-				}
 			}
+			saveFailure = { message, file: response?.file, error_code: response?.error_code, settings_saved: response?.settings_saved };
 			dispatch('save', { success: false, partial: documentSettingsSaved, message });
+			await refreshIndexingStatus();
 		} finally {
 			saving = false;
 		}
 	};
 
-	const saveSettings = async () => {
+	const saveSettings = async (forceReindex = false) => {
 		if (contentExtractionEngine === 'tika' && tikaServerUrl === '') {
 			toast.error($i18n.t('Tika Server URL required.'));
 			return;
@@ -302,7 +358,8 @@
 		
 		const res = await updateRAGConfig(localStorage.token, {
 			email: $user.email,
-			defer_embedding_reindex: !BYPASS_EMBEDDING_AND_RETRIEVAL,
+			force_reindex: forceReindex,
+			...(!BYPASS_EMBEDDING_AND_RETRIEVAL ? { embedding: embeddingPayload() } : {}),
 			pdf_extract_images: pdfExtractImages,
 			enable_google_drive_integration: enableGoogleDriveIntegration,
 			enable_onedrive_integration: enableOneDriveIntegration,
@@ -341,9 +398,7 @@
 			throw new Error($i18n.t('The document settings update did not complete.'));
 		}
 		documentSettingsSaved = true;
-		if (!BYPASS_EMBEDDING_AND_RETRIEVAL) {
-			embeddingReindexPending = embeddingReindexPending || Boolean(res.embedding_recipe_changed);
-		}
+		trackIndexing(res.indexing);
 
 		console.log('AFTER SAVE - Response:', res);
 		console.log('AFTER SAVE - res.chunk:', res?.chunk);
@@ -382,9 +437,6 @@
 		if (queryResult?.status !== true) throw new Error($i18n.t('The query settings update did not complete.'));
 
 		if (!BYPASS_EMBEDDING_AND_RETRIEVAL) {
-			saveStep = 'embedding';
-			await embeddingModelUpdateHandler(embeddingReindexPending, false);
-			embeddingReindexPending = false;
 			if (querySettings.hybrid) {
 				saveStep = $i18n.t('reranking');
 				await rerankingModelUpdateHandler(false);
@@ -398,7 +450,7 @@
 			fileMaxCount = 2;
 		}
 
-		dispatch('save', { success: true });
+		dispatch('save', { success: true, indexing });
 	};
 
 	const setEmbeddingConfig = async () => {
@@ -452,6 +504,7 @@
 	};
 
 	onMount(async () => {
+		void refreshIndexingStatus();
 		// Fetch super admin emails from API
 		try {
 			if (localStorage.token) {
@@ -547,6 +600,57 @@
 	}}
 >
 	<div class=" space-y-2.5 overflow-y-scroll scrollbar-hidden h-full pr-1.5">
+		{#if saveFailure}
+			<div role="alert" class="rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm">
+				<p>{saveFailure.message}</p>
+				{#if saveFailure.settings_saved === false}
+					<p class="mt-1">{$i18n.t('Your previous settings remain in effect. The form shows your unsaved changes.')}</p>
+				{/if}
+				{#if saveFailure.file}
+					<p class="mt-2 break-all">{saveFailure.file.name ?? $i18n.t('Missing file record')}</p>
+					<p class="font-mono text-xs break-all">{saveFailure.file.id}</p>
+					<p class="mt-1">
+						{saveFailure.file.reason === 'missing_record'
+							? $i18n.t('A chat or knowledge base references a deleted file record.')
+							: saveFailure.file.reason === 'missing_source'
+								? $i18n.t('The original upload is missing from storage.')
+								: $i18n.t('The original upload could not be read. Check storage access.')}
+					</p>
+				{/if}
+			</div>
+		{/if}
+		{#if indexing && indexing.status !== 'not_required' || indexingStatusUnavailable}
+			<div role="status" class="rounded-lg border border-gray-200 dark:border-gray-700 p-3 text-sm space-y-2">
+				<div class="flex items-center justify-between gap-3">
+					<span class="font-medium">{$i18n.t('Indexing status for saved settings')}</span>
+					<button type="button" class="text-xs underline" on:click={refreshIndexingStatus}>{$i18n.t('Refresh')}</button>
+				</div>
+				{#if indexingStatusUnavailable || indexing?.status === 'unknown'}
+					<p>{$i18n.t('Indexing status is unavailable. Refresh to check progress.')}</p>
+				{:else if indexing?.status === 'pending'}
+					<p>{$i18n.t('Settings are saved. Indexing is in progress; the updated index is not fully ready.')}</p>
+				{:else if indexing?.status === 'failed'}
+					<p>{$i18n.t('Settings are saved, but indexing failed or only partially completed. Failed sources remain unavailable until indexing succeeds.')}</p>
+				{:else if indexing?.status === 'ready'}
+					<p>{$i18n.t('Indexing completed for the saved settings.')}</p>
+				{/if}
+				{#each indexing?.jobs ?? [] as job (job.job_id)}
+					<div class="border-t border-gray-200 dark:border-gray-700 pt-2">
+						<p>{job.own_index ? $i18n.t('Your index') : $i18n.t('Another administrator’s index')}: {$i18n.t(job.status)}</p>
+						<p class="text-xs">{$i18n.t('{{processed}} / {{total}} files processed; {{failed}} failed; {{incompatible}} incompatible.', {
+							processed: job.processed_files, total: job.total_files, failed: job.failed_files, incompatible: job.incompatible_files
+						})}</p>
+						{#if job.can_retry}
+							<button type="button" class="mt-1 underline disabled:opacity-50" disabled={saving || !!retryingJob} on:click={() => retryIndexing(job.job_id)}>
+								{$i18n.t(retryingJob === job.job_id ? 'Retrying...' : 'Retry failed indexing')}
+							</button>
+						{:else if !job.own_index && ['failed', 'partially_failed'].includes(job.status)}
+							<p class="text-xs">{$i18n.t('Ask the owning administrator to retry this index.')}</p>
+						{/if}
+					</div>
+				{/each}
+			</div>
+		{/if}
 		<div class="">
 			<div class="mb-3">
 				<div class=" mb-2.5 text-base font-medium">{$i18n.t('General')}</div>
@@ -1260,7 +1364,12 @@
 			</div> -->
 		</div>
 	</div>
-	<div class="flex justify-end pt-3 text-sm font-medium">
+	<div class="flex justify-end gap-3 pt-3 text-sm font-medium">
+		{#if !BYPASS_EMBEDDING_AND_RETRIEVAL}
+			<button type="button" class="text-sm underline disabled:opacity-50" disabled={saving || !!retryingJob || indexing?.in_progress || updateEmbeddingModelLoading || updateRerankingModelLoading} on:click={() => submitHandler(true)}>
+				{$i18n.t('Save and reindex my files')}
+			</button>
+		{/if}
 		<button
 			class="px-3.5 py-1.5 text-sm font-medium bg-black hover:bg-gray-900 text-white dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-full"
 			type="submit"

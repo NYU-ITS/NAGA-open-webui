@@ -59,6 +59,8 @@ type VideoConfigForm = {
 type RAGConfigForm = {
 	email: string;
 	defer_embedding_reindex?: boolean;
+	embedding?: EmbeddingModelUpdateForm;
+	force_reindex?: boolean;
 	RAG_FULL_CONTEXT?: boolean;
 	BYPASS_EMBEDDING_AND_RETRIEVAL?: boolean;
 	pdf_extract_images?: boolean;
@@ -71,34 +73,52 @@ type RAGConfigForm = {
 	youtube?: YoutubeConfigForm;
 };
 
-export const updateRAGConfig = async (token: string, payload: RAGConfigForm) => {
-	let error = null;
-
-	const res = await fetch(`${RETRIEVAL_API_BASE_URL}/config/update`, {
+const saveRetrievalSettings = async (token: string, path: string, payload: unknown) => {
+	const response = await fetch(`${RETRIEVAL_API_BASE_URL}/${path}`, {
 		method: 'POST',
-		headers: {
-			'Content-Type': 'application/json',
-			Authorization: `Bearer ${token}`
-		},
-		body: JSON.stringify({
-			...payload
-		})
-	})
-		.then(async (res) => {
-			if (!res.ok) throw await res.json();
-			return res.json();
-		})
-		.catch((err) => {
-			console.log(err);
-			error = err.detail;
-			return null;
-		});
-
-	if (error) {
-		throw error;
+		headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+		body: JSON.stringify(payload)
+	});
+	if (!response.ok) {
+		const body = await response.json().catch(() => null);
+		const detail = body?.detail ?? body;
+		const message = Array.isArray(detail)
+			? detail.map((item) => item.msg).filter(Boolean).join(' ')
+			: typeof detail === 'string' ? detail : detail?.message;
+		throw {
+			...(detail && typeof detail === 'object' && !Array.isArray(detail) ? detail : {}),
+			message: message ?? 'The settings request failed.',
+			settings_saved: detail?.settings_saved ?? (response.status < 500 ? false : undefined)
+		};
 	}
+	return response.json();
+};
 
-	return res;
+export const updateRAGConfig = async (token: string, payload: RAGConfigForm) =>
+	saveRetrievalSettings(token, 'config/update', payload);
+
+export type SettingsIndexingStatus = {
+	status: 'not_required' | 'pending' | 'failed' | 'ready' | 'unknown';
+	in_progress?: boolean;
+	dispatch_failed?: boolean;
+	jobs: {
+		job_id: string;
+		status: string;
+		total_files: number;
+		processed_files: number;
+		failed_files: number;
+		incompatible_files: number;
+		own_index: boolean;
+		can_retry: boolean;
+	}[];
+};
+
+export const getSettingsIndexingStatus = async (token: string): Promise<SettingsIndexingStatus> => {
+	const response = await fetch(`${RETRIEVAL_API_BASE_URL}/config/indexing`, {
+		headers: { Authorization: `Bearer ${token}` }
+	});
+	if (!response.ok) throw new Error('Could not load indexing status.');
+	return response.json();
 };
 
 export const getRAGTemplate = async (token: string, email: string) => {
@@ -238,35 +258,8 @@ type EmbeddingModelUpdateForm = {
 	force_reindex?: boolean;
 };
 
-export const updateEmbeddingConfig = async (token: string, payload: EmbeddingModelUpdateForm) => {
-	let error = null;
-
-	const res = await fetch(`${RETRIEVAL_API_BASE_URL}/embedding/update`, {
-		method: 'POST',
-		headers: {
-			'Content-Type': 'application/json',
-			Authorization: `Bearer ${token}`
-		},
-		body: JSON.stringify({
-			...payload
-		})
-	})
-		.then(async (res) => {
-			if (!res.ok) throw await res.json();
-			return res.json();
-		})
-		.catch((err) => {
-			console.log(err);
-			error = err.detail;
-			return null;
-		});
-
-	if (error) {
-		throw error;
-	}
-
-	return res;
-};
+export const updateEmbeddingConfig = async (token: string, payload: EmbeddingModelUpdateForm) =>
+	saveRetrievalSettings(token, 'embedding/update', payload);
 
 export const getRerankingConfig = async (token: string, email: string) => {
 	let error = null;

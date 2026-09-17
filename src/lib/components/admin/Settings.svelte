@@ -419,7 +419,14 @@
 		{:else if selectedTab === 'documents'}
 			<Documents
 				on:save={async (event) => {
-					if (event.detail.success) {
+					const indexing = event.detail.indexing;
+					if (event.detail.success && (indexing?.status === 'failed' || indexing?.dispatch_failed)) {
+						toast.warning($i18n.t('Settings saved, but indexing needs attention. See indexing status below.'));
+					} else if (event.detail.success && indexing?.status === 'pending') {
+						toast.info($i18n.t('Settings saved. Indexing is in progress.'));
+					} else if (event.detail.success && indexing?.status === 'unknown') {
+						toast.warning($i18n.t('Settings saved. Indexing status is currently unavailable.'));
+					} else if (event.detail.success) {
 						toast.success($i18n.t('Settings saved successfully!'));
 					} else if (event.detail.partial) {
 						toast.warning(event.detail.message);
