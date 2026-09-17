@@ -58,8 +58,8 @@ def prepare_settings_jobs(db, previous, proposed, user, *, embedding=None, force
             global_settings_change=recipe_changed,
         )
         if isinstance(result, ModelChangeResult):
-            job = db.query(EmbeddingJob).filter_by(id=result.job_id).one()
-            job.job_type = "reindex_settings"
+            # Keep the supported reindex_model_change type assigned by the
+            # model-change workflow, including same-model recipe rebuilds.
             jobs.append(result)
     if jobs:
         proposed.set_value(user.email, "rag.settings_indexing_jobs", [job.job_id for job in jobs])
