@@ -58,6 +58,7 @@ from open_webui.models.knowledge import Knowledge
 from open_webui.models.users import User
 from open_webui.retrieval.embedding.errors import (
     EmbeddingError,
+    InventorySourceUnavailableError,
     EMBEDDING_ADMIN_UNRESOLVED,
     EMBEDDING_INVENTORY_UNRESOLVED_SOURCE,
     EMBEDDING_INVENTORY_AMBIGUOUS_SOURCE,
@@ -768,19 +769,15 @@ def _build_inventory(
         if admin_id not in governing:
             continue  # governed by another admin; never part of this job
 
-        # Rule 6: a governed reference to a missing file row is fatal because
-        # embedding_job_files.file_id requires a valid file.
+        # Missing live sources block a new inventory. Retry discovery may
+        # explicitly collect confirmed deletions instead.
         if file_id not in files_by_id:
             if missing_file_ids is not None:
                 missing_file_ids.add(file_id)
                 continue
-            raise EmbeddingError(
-                EMBEDDING_INVENTORY_MISSING_FILE,
-                detail=(
-                    f"Referenced file {file_id!r} not found in the file table "
-                    f"(referenced by {sorted(file_sources[file_id])})."
-                ),
-            )
+            log.warning("Reindex source missing | admin=%s file=%s reason=missing_record sources=%s",
+                        admin_id, file_id, sorted(file_sources[file_id]))
+            raise InventorySourceUnavailableError(admin_id, file_id, None, "missing_record")
 
         # Rule 8: a file governed by more than one distinct admin is ambiguous.
         if len(governing) != 1:
@@ -802,18 +799,22 @@ def _build_inventory(
             ) from None
         try:
             source_sha256 = source_sha256_for_file(
-                file_row, report_missing=missing_file_ids is not None
+                file_row, report_missing=True
             )
         except SourceFileNotFoundError:
-            missing_file_ids.add(file_id)
-            continue
+            if missing_file_ids is not None:
+                missing_file_ids.add(file_id)
+                continue
+            log.warning("Reindex source missing | admin=%s file=%s reason=missing_source sources=%s",
+                        admin_id, file_id, sorted(file_sources[file_id]))
+            raise InventorySourceUnavailableError(
+                admin_id, file_id, file_row.filename, "missing_source"
+            ) from None
         if source_sha256 is None:
-            raise EmbeddingError(
-                EMBEDDING_INVENTORY_MISSING_FILE,
-                detail=(
-                    f"Referenced file {file_id!r} could not be read from storage "
-                    "while freezing the reindex inventory."
-                ),
+            log.warning("Reindex source unreadable | admin=%s file=%s sources=%s",
+                        admin_id, file_id, sorted(file_sources[file_id]))
+            raise InventorySourceUnavailableError(
+                admin_id, file_id, file_row.filename, "unreadable_source"
             )
         items.append(
             ReindexFile(

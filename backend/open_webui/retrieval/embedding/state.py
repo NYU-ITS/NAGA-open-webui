@@ -117,12 +117,14 @@ def _ensure_state(db, admin_id: str, config) -> AdminEmbeddingModelStateView:
     if row is not None:
         return _to_view(row)
     try:
-        row = _seed_row(db, admin_id, config, now)
-        db.flush()
+        with db.begin_nested():
+            row = _seed_row(db, admin_id, config, now)
+            db.flush()
     except IntegrityError:
-        # A concurrent ensure_state won the race; reuse its committed row.
-        db.rollback()
-        existing = _get_row(db, admin_id)
+        # Roll back only the savepoint, preserving a caller's settings/jobs.
+        existing = db.query(AdminEmbeddingModelState).filter_by(
+            admin_id=admin_id
+        ).with_for_update().first()
         if existing is None:
             raise
         return _to_view(existing)

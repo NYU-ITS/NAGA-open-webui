@@ -45,6 +45,20 @@ class KnowledgeUnavailableError(EmbeddingError):
         self.knowledge_id = knowledge_id
 
 
+class InventorySourceUnavailableError(EmbeddingError):
+    """Bounded source diagnostics for admin settings validation and logs."""
+
+    def __init__(self, admin_id: str, file_id: str, filename: str | None, reason: str):
+        super().__init__(
+            "embedding_inventory_missing_file",
+            detail=f"File {file_id!r} is unavailable ({reason}).",
+        )
+        self.admin_id = admin_id
+        self.file_id = file_id
+        self.filename = filename
+        self.reason = reason
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Stable error codes for Phase 2
 # ──────────────────────────────────────────────────────────────────────

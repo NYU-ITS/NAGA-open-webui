@@ -270,7 +270,7 @@ async def get_worker_status(request: Request, user=Depends(get_verified_user)):
         is_job_queue_available,
     )
     from rq import Worker
-    
+
     status = {
         "job_queue_enabled": ENABLE_JOB_QUEUE,
         "job_queue_available": False,
@@ -279,7 +279,7 @@ async def get_worker_status(request: Request, user=Depends(get_verified_user)):
         "workers": [],
         "redis_connected": False,
     }
-    
+
     try:
         if is_job_queue_available():
             status["job_queue_available"] = True
@@ -287,7 +287,7 @@ async def get_worker_status(request: Request, user=Depends(get_verified_user)):
             if queue:
                 status["queue_length"] = len(queue)
                 status["redis_connected"] = True
-                
+
                 # Get active workers
                 try:
                     workers = Worker.all(queue=queue)
@@ -305,7 +305,7 @@ async def get_worker_status(request: Request, user=Depends(get_verified_user)):
     except Exception as e:
         log.error(f"Error checking worker status: {e}", exc_info=True)
         status["error"] = str(e)
-    
+
     return status
 
 
@@ -322,7 +322,7 @@ async def get_status(request: Request, user=Depends(get_verified_user)):
 
     return {
         "status": True,
-        
+
         "chunk_size": chunk_size if chunk_size and chunk_size > 0 else 1000,
         "chunk_overlap": chunk_overlap if chunk_overlap is not None and chunk_overlap > 0 else 200,
         "template": request.app.state.config.RAG_TEMPLATE.get(user.email),
@@ -341,7 +341,7 @@ async def get_embedding_config(request: Request, user=Depends(get_admin_user)):
     """
     requesting_email = user.email
     embedding_model = request.app.state.config.RAG_EMBEDDING_MODEL_USER.get(requesting_email) or ""
-    
+
     return {
         "status": True,
         "embedding_engine": request.app.state.config.RAG_EMBEDDING_ENGINE,
@@ -398,205 +398,34 @@ async def update_embedding_config(
     request: Request, form_data: EmbeddingModelUpdateForm,
     background_tasks: BackgroundTasks, user=Depends(get_admin_user)
 ):
-    log.info(
-        f"Embedding config update: admin='{user.email}' engine='{form_data.embedding_engine}' "
-        f"model='{form_data.embedding_model}' batch_size={form_data.embedding_batch_size}"
+    # Use the same transaction as document settings, including standalone model
+    # updates. Validation failures must not persist credentials or reliability edits.
+    result = await update_rag_config(
+        request,
+        ConfigUpdateForm(embedding=form_data, force_reindex=form_data.force_reindex),
+        background_tasks,
+        user,
     )
-
-    # Basic validation: model and API key are mandatory for OpenAI/Portkey engines
-    if form_data.embedding_engine in ["openai", "portkey"]:
-        if not form_data.embedding_model or not form_data.embedding_model.strip():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Embedding model is required for OpenAI/Portkey engines.",
-            )
-        if form_data.openai_config is None or not form_data.openai_config.key.strip():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Embedding API key is required for OpenAI/Portkey engines.",
-            )
-
-    admin_email = user.email
-    try:
-        if form_data.reliability is not None:
-            from open_webui.config import (
-                RAG_EMBEDDING_CONNECTION_TIMEOUT,
-                RAG_EMBEDDING_MAX_ATTEMPTS,
-                RAG_EMBEDDING_READ_TIMEOUT,
-                save_persistent_config_values,
-            )
-
-            save_persistent_config_values(
-                {
-                    "rag.embedding_reliability.max_attempts": (
-                        RAG_EMBEDDING_MAX_ATTEMPTS,
-                        form_data.reliability.max_attempts,
-                    ),
-                    "rag.embedding_reliability.connection_timeout_seconds": (
-                        RAG_EMBEDDING_CONNECTION_TIMEOUT,
-                        form_data.reliability.connection_timeout_seconds,
-                    ),
-                    "rag.embedding_reliability.read_timeout_seconds": (
-                        RAG_EMBEDDING_READ_TIMEOUT,
-                        form_data.reliability.read_timeout_seconds,
-                    ),
-                }
-            )
-
-        request.app.state.config.RAG_EMBEDDING_ENGINE = form_data.embedding_engine
-        # NOTE: RAG_EMBEDDING_MODEL_USER is NOT written here.  It is persisted
-        # atomically inside request_model_change() so a validation or inventory
-        # failure rolls config back together with durable state.
-
-        if request.app.state.config.RAG_EMBEDDING_ENGINE in [
-            "ollama",
-            "openai",
-            "portkey",
-        ]:
-            if form_data.openai_config is not None:
-                request.app.state.config.RAG_OPENAI_API_BASE_URL = (
-                    form_data.openai_config.url
-                )
-                request.app.state.config.RAG_OPENAI_API_KEY.set(
-                    admin_email, form_data.openai_config.key
-                )
-
-            if form_data.ollama_config is not None:
-                request.app.state.config.RAG_OLLAMA_BASE_URL = (
-                    form_data.ollama_config.url
-                )
-                request.app.state.config.RAG_OLLAMA_API_KEY = (
-                    form_data.ollama_config.key
-                )
-
-            request.app.state.config.RAG_EMBEDDING_BATCH_SIZE = (
-                form_data.embedding_batch_size
-            )
-
-        request.app.state.ef = get_ef(
-            request.app.state.config.RAG_EMBEDDING_ENGINE,
-            request.app.state.config.RAG_EMBEDDING_MODEL,
-        )
-
-        # Credential-safe: Do not rebuild global EMBEDDING_FUNCTION
-        # Embedding service is created per-request with user-specific credentials
-
-        # Phase 4: Create durable reindex job via model-change transaction.
-        # RAG_EMBEDDING_MODEL_USER is written atomically inside the transaction
-        # so a validation or inventory failure rolls config back together with
-        # durable state.
-        reindex_job = None
-        change_result = None
-        if form_data.embedding_model and form_data.embedding_model.strip():
-            try:
-                change_result, _admin_email = request_model_change(
-                    admin_id=user.id,
-                    target_model_id=form_data.embedding_model,
-                    authenticated_user_id=user.id,
-                    config=request.app.state.config,
-                    force_reindex=form_data.force_reindex,
-                )
-                # Config was written atomically inside the transaction.
-                # Invalidate caches now that the transaction has committed.
-                from open_webui.config import invalidate_user_scoped_config_cache
-                invalidate_user_scoped_config_cache(
-                    admin_email, "rag.embedding_model_user"
-                )
-                if isinstance(change_result, ModelChangeResult) and change_result.status in ("queued", "processing"):
-                    try:
-                        dispatch_mode = dispatch_embedding_job(change_result.job_id, background_tasks)
-                    except Exception as enqueue_err:
-                        log.error(
-                            "[EMBEDDING_UPDATE] Failed to enqueue job %s: %s",
-                            change_result.job_id,
-                            enqueue_err,
-                            exc_info=True,
-                        )
-                        raise HTTPException(
-                            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                            detail={
-                                "error_code": "RQ_DISPATCH_FAILED",
-                                "message": "Model config saved, but the indexing job could not be queued. Retry from the embedding jobs page.",
-                            },
-                        )
-                    reindex_job = {
-                        "job_id": change_result.job_id,
-                        "status": change_result.status,
-                        "target_model_id": change_result.target_model_id,
-                        "total_files": change_result.total_files,
-                        "dispatch_mode": dispatch_mode,
-                    }
-                elif isinstance(change_result, ModelChangeResult):
-                    reindex_job = {
-                        "job_id": change_result.job_id,
-                        "status": change_result.status,
-                        "target_model_id": change_result.target_model_id,
-                        "total_files": change_result.total_files,
-                        "dispatch_mode": "background",
-                    }
-            except HTTPException:
-                raise
-            except EmbeddingError as e:
-                if e.code in (EMBEDDING_JOB_ACTIVE_EXISTS, EMBEDDING_MODEL_STATE_CONFLICT):
-                    raise HTTPException(
-                        status_code=status.HTTP_409_CONFLICT,
-                        detail={"error_code": e.code, "message": str(e.detail)},
-                    )
-                if e.code in (EMBEDDING_MODEL_NOT_CONFIGURED, EMBEDDING_MODEL_DISABLED):
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail={"error_code": e.code, "message": str(e.detail)},
-                    )
-                if e.code in (
-                    EMBEDDING_ADMIN_UNRESOLVED,
-                    EMBEDDING_CREDENTIALS_MISSING,
-                    EMBEDDING_PROVIDER_UNSUPPORTED,
-                    EMBEDDING_STORAGE_DIMENSION_UNSUPPORTED,
-                ):
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail={"error_code": e.code, "message": str(e.detail)},
-                    )
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=ERROR_MESSAGES.DEFAULT(e),
-                )
-
-        # Derive the authoritative model name from the transaction result
-        # (falls back to the form value when no model change was attempted).
-        if change_result is not None:
-            saved_model = change_result.target_model_id
-        else:
-            saved_model = form_data.embedding_model or ""
-
-        return {
-            "status": True,
-            "embedding_engine": request.app.state.config.RAG_EMBEDDING_ENGINE,
-            "embedding_model": saved_model,
-            "embedding_batch_size": request.app.state.config.RAG_EMBEDDING_BATCH_SIZE,
-            "reliability": {
-                "max_attempts": request.app.state.config.RAG_EMBEDDING_MAX_ATTEMPTS,
-                "connection_timeout_seconds": request.app.state.config.RAG_EMBEDDING_CONNECTION_TIMEOUT,
-                "read_timeout_seconds": request.app.state.config.RAG_EMBEDDING_READ_TIMEOUT,
-            },
-            "openai_config": {
-                "url": request.app.state.config.RAG_OPENAI_API_BASE_URL,
-                "key": request.app.state.config.RAG_OPENAI_API_KEY.get(user.email) or "",
-            },
-            "ollama_config": {
-                "url": request.app.state.config.RAG_OLLAMA_BASE_URL,
-                "key": request.app.state.config.RAG_OLLAMA_API_KEY,
-            },
-            **({"reindex_job": reindex_job} if reindex_job else {}),
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        log.exception(f"Problem updating embedding model: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=ERROR_MESSAGES.DEFAULT(e),
-        )
+    config = request.app.state.config
+    return {
+        **result,
+        "embedding_engine": config.RAG_EMBEDDING_ENGINE,
+        "embedding_model": config.RAG_EMBEDDING_MODEL_USER.get(user.email),
+        "embedding_batch_size": config.RAG_EMBEDDING_BATCH_SIZE,
+        "reliability": {
+            "max_attempts": config.RAG_EMBEDDING_MAX_ATTEMPTS,
+            "connection_timeout_seconds": config.RAG_EMBEDDING_CONNECTION_TIMEOUT,
+            "read_timeout_seconds": config.RAG_EMBEDDING_READ_TIMEOUT,
+        },
+        "openai_config": {
+            "url": config.RAG_OPENAI_API_BASE_URL,
+            "key": config.RAG_OPENAI_API_KEY.get(user.email),
+        },
+        "ollama_config": {
+            "url": config.RAG_OLLAMA_BASE_URL,
+            "key": config.RAG_OLLAMA_API_KEY,
+        },
+    }
 
 
 class RerankingModelUpdateForm(BaseModel):
@@ -805,7 +634,10 @@ class VideoConfig(BaseModel):
 
 
 class ConfigUpdateForm(BaseModel):
+    # Accepted for old clients; indexing settings can no longer defer job creation.
     defer_embedding_reindex: bool = False
+    embedding: Optional[EmbeddingModelUpdateForm] = None
+    force_reindex: bool = False
     RAG_FULL_CONTEXT: Optional[bool] = None
     BYPASS_EMBEDDING_AND_RETRIEVAL: Optional[bool] = None
     pdf_extract_images: Optional[bool] = None
@@ -819,16 +651,8 @@ class ConfigUpdateForm(BaseModel):
     web: Optional[WebConfig] = None
 
 
-def _update_video_settings(request, video_config, user):
-    """Atomically validate, persist, and audit video settings.
-
-    Authorizes the caller, resolves omitted fields from current persisted values,
-    validates the complete configuration, persists all changes, updates active
-    PersistentConfig objects, and emits an audit log entry.
-
-    Raises HTTPException on authorization failure or validation errors.
-    Returns the complete configured and effective video configuration dict.
-    """
+def _update_video_settings(config, video_config, user):
+    """Validate and stage video settings on a transaction-local config view."""
     from open_webui.utils.super_admin import is_super_admin
 
     if not is_super_admin(user):
@@ -837,7 +661,6 @@ def _update_video_settings(request, video_config, user):
             detail="Only super administrators can update video settings.",
         )
 
-    config = request.app.state.config
     v = video_config
 
     # Resolve omitted fields from current persisted values
@@ -887,131 +710,70 @@ def _update_video_settings(request, video_config, user):
     if errors:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=errors)
 
-    # Capture old values for audit
-    old_values = {
-        "max_file_size_mb": int(_current("RAG_VIDEO_MAX_FILE_SIZE_MB", 20)),
-        "chunk_duration": int(_current("RAG_VIDEO_CHUNK_DURATION", 16)),
-        "min_chunk_duration": int(_current("RAG_VIDEO_MIN_CHUNK_DURATION", 4)),
-        "max_duration": int(_current("RAG_VIDEO_MAX_DURATION", 120)),
-    }
-
-    from open_webui.config import (
-        RAG_VIDEO_CHUNK_DURATION,
-        RAG_VIDEO_MAX_DURATION,
-        RAG_VIDEO_MAX_FILE_SIZE_MB,
-        RAG_VIDEO_MIN_CHUNK_DURATION,
-        save_persistent_config_values,
-    )
-
-    save_persistent_config_values(
-        {
-            "rag.video.max_file_size_mb": (
-                RAG_VIDEO_MAX_FILE_SIZE_MB,
-                resolved_max_size,
-            ),
-            "rag.video_chunk_duration": (
-                RAG_VIDEO_CHUNK_DURATION,
-                resolved_chunk,
-            ),
-            "rag.video_min_chunk_duration": (
-                RAG_VIDEO_MIN_CHUNK_DURATION,
-                resolved_min,
-            ),
-            "rag.video_max_duration": (
-                RAG_VIDEO_MAX_DURATION,
-                resolved_max_dur,
-            ),
-        }
-    )
-
-    new_values = {
-        "max_file_size_mb": resolved_max_size,
-        "chunk_duration": resolved_chunk,
-        "min_chunk_duration": resolved_min,
-        "max_duration": resolved_max_dur,
-    }
-
-    # Audit event
-    log.info(
-        "video_settings_updated",
-        extra={
-            "audit": True,
-            "actor": user.email,
-            "old_values": old_values,
-            "new_values": new_values,
-            "result": "success",
-        },
-    )
+    config.RAG_VIDEO_MAX_FILE_SIZE_MB = resolved_max_size
+    config.RAG_VIDEO_CHUNK_DURATION = resolved_chunk
+    config.RAG_VIDEO_MIN_CHUNK_DURATION = resolved_min
+    config.RAG_VIDEO_MAX_DURATION = resolved_max_dur
 
     return {
         "max_file_size_mb": resolved_max_size,
-        "effective_max_file_size_mb": _effective_video_max_size_mb(request),
+        "effective_max_file_size_mb": min(resolved_max_size, config.FILE_MAX_SIZE or resolved_max_size),
         "chunk_duration_seconds": resolved_chunk,
         "min_chunk_duration_seconds": resolved_min,
         "max_duration_seconds": resolved_max_dur,
     }
 
 
-@router.post("/config/update")
-async def update_rag_config(
-    request: Request,
-    form_data: ConfigUpdateForm,
-    background_tasks: BackgroundTasks,
-    user=Depends(get_admin_user),
-):
-    from open_webui.retrieval.embedding.preparation import build_preparation_recipe
-
-    previous_recipe = build_preparation_recipe(request.app.state.config, user.email)
-    # Authorize and validate the video block before mutating any other settings.
+def _stage_rag_settings(config, form_data, user):
     if form_data.video is not None:
-        _update_video_settings(request, form_data.video, user)
+        _update_video_settings(config, form_data.video, user)
 
-    request.app.state.config.PDF_EXTRACT_IMAGES = (
+    config.PDF_EXTRACT_IMAGES = (
         form_data.pdf_extract_images
         if form_data.pdf_extract_images is not None
-        else request.app.state.config.PDF_EXTRACT_IMAGES
+        else config.PDF_EXTRACT_IMAGES
     )
 
     if form_data.RAG_FULL_CONTEXT is not None:
-        request.app.state.config.RAG_FULL_CONTEXT.set(user.email, form_data.RAG_FULL_CONTEXT)
+        config.RAG_FULL_CONTEXT.set(user.email, form_data.RAG_FULL_CONTEXT)
 
-    request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL = (
+    config.BYPASS_EMBEDDING_AND_RETRIEVAL = (
         form_data.BYPASS_EMBEDDING_AND_RETRIEVAL
         if form_data.BYPASS_EMBEDDING_AND_RETRIEVAL is not None
-        else request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL
+        else config.BYPASS_EMBEDDING_AND_RETRIEVAL
     )
 
-    request.app.state.config.ENABLE_GOOGLE_DRIVE_INTEGRATION = (
+    config.ENABLE_GOOGLE_DRIVE_INTEGRATION = (
         form_data.enable_google_drive_integration
         if form_data.enable_google_drive_integration is not None
-        else request.app.state.config.ENABLE_GOOGLE_DRIVE_INTEGRATION
+        else config.ENABLE_GOOGLE_DRIVE_INTEGRATION
     )
 
-    request.app.state.config.ENABLE_ONEDRIVE_INTEGRATION = (
+    config.ENABLE_ONEDRIVE_INTEGRATION = (
         form_data.enable_onedrive_integration
         if form_data.enable_onedrive_integration is not None
-        else request.app.state.config.ENABLE_ONEDRIVE_INTEGRATION
+        else config.ENABLE_ONEDRIVE_INTEGRATION
     )
 
     if form_data.file is not None:
-        request.app.state.config.FILE_MAX_SIZE = form_data.file.max_size
-        request.app.state.config.FILE_MAX_COUNT = form_data.file.max_count
+        config.FILE_MAX_SIZE = form_data.file.max_size
+        config.FILE_MAX_COUNT = form_data.file.max_count
 
     if form_data.content_extraction is not None:
         log.info(
-            f"Updating content extraction: {request.app.state.config.CONTENT_EXTRACTION_ENGINE} to {form_data.content_extraction.engine}"
+            f"Updating content extraction: {config.CONTENT_EXTRACTION_ENGINE} to {form_data.content_extraction.engine}"
         )
-        request.app.state.config.CONTENT_EXTRACTION_ENGINE = (
+        config.CONTENT_EXTRACTION_ENGINE = (
             form_data.content_extraction.engine
         )
-        request.app.state.config.TIKA_SERVER_URL = (
+        config.TIKA_SERVER_URL = (
             form_data.content_extraction.tika_server_url
         )
         if form_data.content_extraction.document_intelligence_config is not None:
-            request.app.state.config.DOCUMENT_INTELLIGENCE_ENDPOINT = (
+            config.DOCUMENT_INTELLIGENCE_ENDPOINT = (
                 form_data.content_extraction.document_intelligence_config.endpoint
             )
-            request.app.state.config.DOCUMENT_INTELLIGENCE_KEY = (
+            config.DOCUMENT_INTELLIGENCE_KEY = (
                 form_data.content_extraction.document_intelligence_config.key
             )
 
@@ -1026,137 +788,219 @@ async def update_rag_config(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Text splitter must be character or token.",
             )
-        request.app.state.config.TEXT_SPLITTER = requested_splitter
+        config.TEXT_SPLITTER = requested_splitter
         # Validate and set chunk_size (must be > 0, default 1000)
         log.info(f"[CHUNK_UPDATE] Received chunk_size={form_data.chunk.chunk_size}, chunk_overlap={form_data.chunk.chunk_overlap} from user={user.email}")
         chunk_size = form_data.chunk.chunk_size if form_data.chunk.chunk_size and form_data.chunk.chunk_size > 0 else 1000
         # Validate and set chunk_overlap (must be > 0, default 200) - treat 0 as invalid
         chunk_overlap = form_data.chunk.chunk_overlap if form_data.chunk.chunk_overlap is not None and form_data.chunk.chunk_overlap > 0 else 200
         log.info(f"[CHUNK_UPDATE] Validated and saving chunk_size={chunk_size}, chunk_overlap={chunk_overlap} for user={user.email}")
-        request.app.state.config.CHUNK_SIZE.set(user.email, chunk_size)
-        request.app.state.config.CHUNK_OVERLAP.set(user.email, chunk_overlap)
+        config.CHUNK_SIZE.set(user.email, chunk_size)
+        config.CHUNK_OVERLAP.set(user.email, chunk_overlap)
 
     if form_data.youtube is not None:
-        request.app.state.config.YOUTUBE_LOADER_LANGUAGE = form_data.youtube.language
-        request.app.state.config.YOUTUBE_LOADER_PROXY_URL = form_data.youtube.proxy_url
-        request.app.state.YOUTUBE_LOADER_TRANSLATION = form_data.youtube.translation
+        config.YOUTUBE_LOADER_LANGUAGE = form_data.youtube.language
+        config.YOUTUBE_LOADER_PROXY_URL = form_data.youtube.proxy_url
 
     if form_data.web is not None:
-        request.app.state.config.ENABLE_RAG_WEB_LOADER_SSL_VERIFICATION = (
+        config.ENABLE_RAG_WEB_LOADER_SSL_VERIFICATION = (
             # Note: When UI "Bypass SSL verification for Websites"=True then ENABLE_RAG_WEB_LOADER_SSL_VERIFICATION=False
             form_data.web.ENABLE_RAG_WEB_LOADER_SSL_VERIFICATION
         )
 
-        # request.app.state.config.ENABLE_RAG_WEB_SEARCH = form_data.web.search.enabled
-        # request.app.state.config.RAG_WEB_SEARCH_ENGINE = form_data.web.search.engine
+        # config.ENABLE_RAG_WEB_SEARCH = form_data.web.search.enabled
+        # config.RAG_WEB_SEARCH_ENGINE = form_data.web.search.engine
 
-        request.app.state.config.ENABLE_RAG_WEB_SEARCH.set(user.email,form_data.web.search.enabled)
-        request.app.state.config.RAG_WEB_SEARCH_ENGINE.set(user.email,form_data.web.search.engine) 
+        config.ENABLE_RAG_WEB_SEARCH.set(user.email,form_data.web.search.enabled)
+        config.RAG_WEB_SEARCH_ENGINE.set(user.email,form_data.web.search.engine)
 
-        # request.app.state.config.BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL = (
+        # config.BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL = (
         #     form_data.web.BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL
         # )
 
-        request.app.state.config.BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL.set(user.email,
+        config.BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL.set(user.email,
             form_data.web.BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL
         )
 
-        request.app.state.config.SEARXNG_QUERY_URL.set(user.email,
+        config.SEARXNG_QUERY_URL.set(user.email,
             form_data.web.search.searxng_query_url
         )
-        request.app.state.config.GOOGLE_PSE_API_KEY.set(user.email,
+        config.GOOGLE_PSE_API_KEY.set(user.email,
             form_data.web.search.google_pse_api_key
         )
-        request.app.state.config.GOOGLE_PSE_ENGINE_ID.set(user.email,
+        config.GOOGLE_PSE_ENGINE_ID.set(user.email,
             form_data.web.search.google_pse_engine_id
         )
-        request.app.state.config.BRAVE_SEARCH_API_KEY.set(user.email,
+        config.BRAVE_SEARCH_API_KEY.set(user.email,
             form_data.web.search.brave_search_api_key
         )
-        request.app.state.config.KAGI_SEARCH_API_KEY.set(user.email,
+        config.KAGI_SEARCH_API_KEY.set(user.email,
             form_data.web.search.kagi_search_api_key
         )
-        request.app.state.config.MOJEEK_SEARCH_API_KEY.set(user.email,
+        config.MOJEEK_SEARCH_API_KEY.set(user.email,
             form_data.web.search.mojeek_search_api_key
         )
-        request.app.state.config.BOCHA_SEARCH_API_KEY.set(user.email,
+        config.BOCHA_SEARCH_API_KEY.set(user.email,
             form_data.web.search.bocha_search_api_key
         )
-        request.app.state.config.SERPSTACK_API_KEY.set(user.email,
+        config.SERPSTACK_API_KEY.set(user.email,
             form_data.web.search.serpstack_api_key
         )
-        request.app.state.config.SERPSTACK_HTTPS.set(user.email,form_data.web.search.serpstack_https)
-        request.app.state.config.SERPER_API_KEY.set(user.email,form_data.web.search.serper_api_key)
-        request.app.state.config.SERPLY_API_KEY.set(user.email, form_data.web.search.serply_api_key)
-        request.app.state.config.TAVILY_API_KEY.set(user.email,form_data.web.search.tavily_api_key)
-        request.app.state.config.SEARCHAPI_API_KEY.set(user.email,
+        config.SERPSTACK_HTTPS.set(user.email,form_data.web.search.serpstack_https)
+        config.SERPER_API_KEY.set(user.email,form_data.web.search.serper_api_key)
+        config.SERPLY_API_KEY.set(user.email, form_data.web.search.serply_api_key)
+        config.TAVILY_API_KEY.set(user.email,form_data.web.search.tavily_api_key)
+        config.SEARCHAPI_API_KEY.set(user.email,
             form_data.web.search.searchapi_api_key
         )
-        request.app.state.config.SEARCHAPI_ENGINE.set(user.email,
+        config.SEARCHAPI_ENGINE.set(user.email,
             form_data.web.search.searchapi_engine
         )
 
-        request.app.state.config.SERPAPI_API_KEY.set(user.email,form_data.web.search.serpapi_api_key)
-        request.app.state.config.SERPAPI_ENGINE.set(user.email,form_data.web.search.serpapi_engine)
+        config.SERPAPI_API_KEY.set(user.email,form_data.web.search.serpapi_api_key)
+        config.SERPAPI_ENGINE.set(user.email,form_data.web.search.serpapi_engine)
 
-        request.app.state.config.JINA_API_KEY.set(user.email,form_data.web.search.jina_api_key)
-        request.app.state.config.BING_SEARCH_V7_ENDPOINT.set(user.email,
+        config.JINA_API_KEY.set(user.email,form_data.web.search.jina_api_key)
+        config.BING_SEARCH_V7_ENDPOINT.set(user.email,
             form_data.web.search.bing_search_v7_endpoint
         )
-        request.app.state.config.BING_SEARCH_V7_SUBSCRIPTION_KEY.set(user.email,
+        config.BING_SEARCH_V7_SUBSCRIPTION_KEY.set(user.email,
             form_data.web.search.bing_search_v7_subscription_key
         )
 
-        request.app.state.config.EXA_API_KEY.set(user.email,form_data.web.search.exa_api_key)
+        config.EXA_API_KEY.set(user.email,form_data.web.search.exa_api_key)
 
-        request.app.state.config.RAG_WEB_SEARCH_RESULT_COUNT.set(user.email,
+        config.RAG_WEB_SEARCH_RESULT_COUNT.set(user.email,
             form_data.web.search.result_count
         )
-        request.app.state.config.RAG_WEB_SEARCH_CONCURRENT_REQUESTS.set(user.email,
+        config.RAG_WEB_SEARCH_CONCURRENT_REQUESTS.set(user.email,
             form_data.web.search.concurrent_requests
         )
-        request.app.state.config.RAG_WEB_SEARCH_TRUST_ENV.set(user.email,
+        config.RAG_WEB_SEARCH_TRUST_ENV.set(user.email,
             form_data.web.search.trust_env
         )
-        request.app.state.config.RAG_WEB_SEARCH_DOMAIN_FILTER_LIST.set(user.email,
+        config.RAG_WEB_SEARCH_DOMAIN_FILTER_LIST.set(user.email,
             form_data.web.search.domain_filter_list
         )
-        request.app.state.config.RAG_WEB_SEARCH_WEBSITE_BLOCKLIST.set(user.email,
+        config.RAG_WEB_SEARCH_WEBSITE_BLOCKLIST.set(user.email,
             form_data.web.search.website_blocklist
         )
-        request.app.state.config.RAG_WEB_SEARCH_INTERNAL_FACILITIES_SITES.set(user.email,
+        config.RAG_WEB_SEARCH_INTERNAL_FACILITIES_SITES.set(user.email,
             form_data.web.search.internal_facilities_sites
         )
 
-    current_recipe = build_preparation_recipe(request.app.state.config, user.email)
-    recipe_changed = current_recipe.sha256 != previous_recipe.sha256
-    reindex_job = None
-    if recipe_changed and not form_data.defer_embedding_reindex:
-        selected_model = request.app.state.config.RAG_EMBEDDING_MODEL_USER.get(
-            user.email
-        )
-        if selected_model:
-            change_result, _ = request_model_change(
-                admin_id=user.id,
-                target_model_id=selected_model,
-                authenticated_user_id=user.id,
-                config=request.app.state.config,
-                force_reindex=True,
+
+
+@router.get("/config/indexing")
+async def get_settings_indexing(user=Depends(get_admin_user)):
+    from open_webui.internal.db import get_db
+    from open_webui.retrieval.embedding.settings import settings_indexing_status
+
+    with get_db() as db:
+        return settings_indexing_status(db, user)
+
+
+@router.post("/config/update")
+async def update_rag_config(
+    request: Request,
+    form_data: ConfigUpdateForm,
+    background_tasks: BackgroundTasks,
+    user=Depends(get_admin_user),
+):
+    from open_webui.internal.db import get_db
+    from open_webui.utils.config_transaction import ConfigTransaction, ConfigUpdateConflict
+    from open_webui.retrieval.embedding.errors import InventorySourceUnavailableError
+    from open_webui.retrieval.embedding.preparation import build_preparation_recipe
+    from open_webui.retrieval.embedding.settings import (
+        prepare_settings_jobs, stage_embedding_settings, settings_indexing_status,
+    )
+
+    # Nothing touches live config or caches until every inventory and job has
+    # been prepared and the encompassing database transaction has committed.
+    try:
+        with get_db() as db:
+            previous = ConfigTransaction(request.app.state.config, db)
+            proposed = ConfigTransaction(request.app.state.config, db)
+            old_recipe = build_preparation_recipe(previous, user.email)
+            _stage_rag_settings(proposed, form_data, user)
+            if form_data.embedding is not None:
+                stage_embedding_settings(proposed, form_data.embedding, user.email)
+            new_recipe = build_preparation_recipe(proposed, user.email)
+            recipe_changed = old_recipe.sha256 != new_recipe.sha256
+            jobs = prepare_settings_jobs(
+                db, previous, proposed, user,
+                embedding=form_data.embedding,
+                force_reindex=form_data.force_reindex or bool(
+                    form_data.embedding and form_data.embedding.force_reindex
+                ),
             )
-            if isinstance(change_result, ModelChangeResult):
-                dispatch_mode = dispatch_embedding_job(
-                    change_result.job_id,
-                    background_tasks,
-                )
-                reindex_job = {
-                    "job_id": change_result.job_id,
-                    "status": change_result.status,
-                    "target_model_id": change_result.target_model_id,
-                    "total_files": change_result.total_files,
-                    "dispatch_mode": dispatch_mode,
-                }
+            proposed.persist()
+            db.commit()
+    except HTTPException as error:
+        message = error.detail
+        if isinstance(message, dict):
+            message = "; ".join(f"{key}: {value}" for key, value in message.items())
+        raise HTTPException(status_code=error.status_code, detail={
+            "message": f"Settings were not saved. {message}", "settings_saved": False,
+        }) from None
+    except InventorySourceUnavailableError as error:
+        from open_webui.utils.super_admin import is_super_admin
+
+        detail = {
+            "error_code": error.code,
+            "settings_saved": False,
+            "message": "Settings were not saved because a referenced source file is missing "
+                       "or unreadable. Restore the source or remove its live references, then save again.",
+        }
+        if error.admin_id == user.id or is_super_admin(user):
+            detail["file"] = {
+                "id": error.file_id, "name": error.filename, "reason": error.reason,
+            }
+        else:
+            detail["message"] = "Settings were not saved because another administrator's " \
+                                "index has a missing or unreadable source. Ask its owner to repair it."
+        raise HTTPException(status_code=409, detail=detail) from None
+    except (EmbeddingError, ConfigUpdateConflict, ValueError) as error:
+        code = error.code if isinstance(error, EmbeddingError) else "settings_validation_failed"
+        message = "Settings were not saved. Resolve the indexing error and try again."
+        if isinstance(error, ConfigUpdateConflict):
+            message = "Settings changed during this save. Reload the page and try again."
+        elif isinstance(error, ValueError):
+            message = str(error)
+        elif code in {EMBEDDING_JOB_ACTIVE_EXISTS, EMBEDDING_MODEL_STATE_CONFLICT}:
+            message = "Settings were not saved because indexing is already in progress or awaiting recovery."
+        log.warning("Indexing settings rejected | admin=%s code=%s", user.id, code)
+        raise HTTPException(status_code=409, detail={
+            "error_code": code, "message": message, "settings_saved": False,
+        }) from None
+
+    proposed.publish()
+    if form_data.youtube is not None:
+        request.app.state.YOUTUBE_LOADER_TRANSLATION = form_data.youtube.translation
+    log.info("Indexing settings committed | actor=%s jobs=%s", user.id, [job.job_id for job in jobs])
+    dispatch_failed = False
+    for job in jobs:
+        if job.status not in {"queued", "processing"}:
+            continue
+        try:
+            dispatch_embedding_job(job.job_id, background_tasks)
+        except Exception:
+            # The committed job is durable and retryable. Never claim rollback
+            # after commit, and do not lose background tasks for other jobs.
+            dispatch_failed = True
+            log.exception("Settings indexing dispatch failed | job=%s", job.job_id)
+    try:
+        with get_db() as db:
+            indexing = settings_indexing_status(db, user)
+    except Exception:
+        log.exception("Could not read committed settings indexing status | actor=%s", user.id)
+        indexing = {"status": "unknown", "jobs": [], "in_progress": True}
+    indexing["dispatch_failed"] = dispatch_failed
+    reindex_job = next((job for job in indexing["jobs"] if job["own_index"]), None)
 
     return {
+        "settings_saved": True,
+        "indexing": indexing,
         "status": True,
         "embedding_recipe_changed": recipe_changed,
         **({"reindex_job": reindex_job} if reindex_job else {}),
@@ -1420,11 +1264,11 @@ def save_docs_to_vector_db(
                     )
                     log.error(error_msg)
                     raise ValueError(error_msg)
-                
+
                 if chunk_overlap < 0:
                     log.warning(f"chunk_overlap={chunk_overlap} is negative, setting to 0")
                     chunk_overlap = 0
-                
+
                 if chunk_overlap >= chunk_size:
                     log.warning(
                         f"chunk_overlap={chunk_overlap} >= chunk_size={chunk_size}, "
@@ -1521,30 +1365,30 @@ def save_docs_to_vector_db(
                         return True
 
                 log.info(f"adding to collection {collection_name}")
-                
+
                 # Credential-safe: Use the provided embedding_function
                 if embedding_function is None:
                     raise ValueError("No embedding function provided. Cannot generate embeddings.")
-                
+
                 # Generate embeddings using the provided function
                 embed_api_start = time.time()
                 log.info(f"Generating embeddings for {len(texts)} chunks")
-                
+
                 safe_add_span_event("embedding.generation.started", {"text.count": len(texts)})
-                
+
                 try:
                     embeddings = embedding_function(
                         list(map(lambda x: x.replace("\n", " "), texts)), user=user
                     )
                     embed_api_end = time.time()
                     log.info(f"[EMBED_API] COMPLETE | chunks={len(texts)} | duration={embed_api_end - embed_api_start:.2f}s")
-                    
+
                     if not embeddings or len(embeddings) == 0:
                         raise ValueError("Embedding generation returned empty result")
-                    
+
                     if len(embeddings) != len(texts):
                         raise ValueError(f"Embedding count mismatch: expected {len(texts)}, got {len(embeddings)}")
-                    
+
                     safe_add_span_event("embedding.generation.completed", {"embedding.count": len(embeddings)})
                 except EmbeddingError as e:
                     safe_add_span_event("embedding.generation.failed", {"error.code": e.code})
@@ -1560,7 +1404,7 @@ def save_docs_to_vector_db(
                 print(f"    items count: {len(texts)}", flush=True)
                 log.info(f"  [STEP 7] Preparing items for vector DB insertion:")
                 log.info(f"    collection_name: {collection_name}, items count: {len(texts)}")
-                
+
                 if rag_chunk_ids is not None:
                     from open_webui.retrieval.vector.model_aware import (
                         ModelAwareVectorRepository,
@@ -1587,7 +1431,7 @@ def save_docs_to_vector_db(
                         }
                         for idx, text in enumerate(texts)
                     ]
-                
+
                 print(f"  [STEP 7.1] Items prepared, inserting into vector DB...", flush=True)
                 log.info(f"  [STEP 7.1] Items prepared, inserting into vector DB...")
 
@@ -1678,7 +1522,7 @@ def get_embeddings_with_fallback(
             # First, try single batch embedding function
             logging.info(f"Generating embeddings for {len(texts)} chunks in a single batch")
             safe_add_span_event("embedding.api.request", {"method": "single_batch"})
-            
+
             single_batch_func = get_single_batch_embedding_function(
                 embedding_engine,
                 embedding_model,
@@ -1702,7 +1546,7 @@ def get_embeddings_with_fallback(
             # Log the specific error from single batch attempt
             logging.warning(f"Single batch embedding failed. Error: {str(e)}")
             logging.warning(f"Falling back to batched embedding function")
-            
+
             # Set fallback attribute
             safe_set_span_attribute(span, "embedding.fallback_used", True)
             safe_add_span_event("embedding.api.fallback", {
@@ -1843,7 +1687,7 @@ def save_docs_to_multiple_collections(
     # Credential-safe: Validate embedding_function is provided
     if embedding_function is None:
         raise ValueError("No embedding function provided. Cannot generate embeddings.")
-    
+
     texts = [doc.page_content for doc in docs]
     metadatas = [
         {
@@ -1886,18 +1730,18 @@ def save_docs_to_multiple_collections(
 
         # Credential-safe: Use the provided embedding_function
         log.info(f"Generating embeddings for {len(texts)} chunks")
-        
+
         try:
             embeddings = embedding_function(
                 list(map(lambda x: x.replace("\n", " "), texts)), user=user
             )
-            
+
             if not embeddings or len(embeddings) == 0:
                 raise ValueError("Embedding generation returned empty result")
-            
+
             if len(embeddings) != len(texts):
                 raise ValueError(f"Embedding count mismatch: expected {len(texts)}, got {len(embeddings)}")
-            
+
             log.info(f"Embeddings generated successfully: {len(embeddings)} vectors")
         except EmbeddingError as e:
             log.error(f"Embedding failed: {e.code}")
@@ -1909,11 +1753,11 @@ def save_docs_to_multiple_collections(
         # Insert embeddings into all collections
         print(f"  [STEP 7] Inserting embeddings into {len(collections)} collection(s): {collections}", flush=True)
         log.info(f"  [STEP 7] Inserting embeddings into {len(collections)} collection(s): {collections}")
-        
+
         for col_idx, collection_name in enumerate(collections):
             print(f"  [STEP 7.{col_idx+1}] Processing collection: {collection_name}", flush=True)
             log.info(f"  [STEP 7.{col_idx+1}] Processing collection: {collection_name}")
-            
+
             if rag_chunk_ids is not None:
                 from open_webui.retrieval.vector.model_aware import (
                     ModelAwareVectorRepository,
@@ -1940,7 +1784,7 @@ def save_docs_to_multiple_collections(
                     }
                     for text_idx, text in enumerate(texts)
                 ]
-            
+
             print(f"    Preparing {len(items)} items for insertion", flush=True)
             log.info(f"    Preparing {len(items)} items for insertion")
 
@@ -1975,7 +1819,7 @@ def save_docs_to_multiple_collections(
         log.info(f"[EMBEDDING] ✅ All embeddings saved successfully")
         print("=" * 80, flush=True)
         log.info("=" * 80)
-        
+
         return True
     except Exception as e:
         log.exception(e)
@@ -2178,7 +2022,7 @@ def _process_file_sync_legacy(
     """
     Core file processing logic that runs synchronously.
     This is called from background tasks to process files.
-    
+
     Args:
         request: FastAPI Request object
         file_id: ID of the file to process
@@ -2190,7 +2034,7 @@ def _process_file_sync_legacy(
         embedding_model_id: Frozen embedding model ID for credential-safe resolution
     """
     log.info(f"[BACKGROUND TASK] Starting _process_file_sync file_id={file_id} user_id={user_id} admin_id={admin_id}")
-    
+
     try:
         # Get user object if user_id is provided
         print(f"  [STEP 1] Retrieving user object...", flush=True)
@@ -2219,18 +2063,18 @@ def _process_file_sync_legacy(
         else:
             print(f"  [STEP 1] ⚠️  No user_id provided, processing without user context", flush=True)
             log.warning(f"  [STEP 1] No user_id provided, processing without user context")
-        
+
         # Credential-safe: Create embedding function from frozen IDs
         embedding_function = None
         if admin_id and embedding_model_id and not request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL:
             from open_webui.retrieval.embedding.service import EmbeddingService
             from open_webui.retrieval.embedding.compatibility import make_embedding_function_with_storage_guard
-            
+
             service = EmbeddingService(request.app.state.config)
             embedding_function = make_embedding_function_with_storage_guard(
                 service, admin_id=admin_id, embedding_model_id=embedding_model_id
             )
-        
+
         # Update status to processing
         print(f"  [STEP 2] Updating file status to 'processing'...", flush=True)
         log.info(f"  [STEP 2] Updating file status to 'processing'...")
@@ -2243,7 +2087,7 @@ def _process_file_sync_legacy(
         )
         print(f"  [STEP 2] ✅ File status updated", flush=True)
         log.info(f"  [STEP 2] ✅ File status updated")
-        
+
         print(f"  [STEP 3] Retrieving file object...", flush=True)
         log.info(f"  [STEP 3] Retrieving file object...")
         file = Files.get_file_by_id(file_id)
@@ -2291,7 +2135,7 @@ def _process_file_sync_legacy(
             # No content provided - need to extract from file or use cached
             docs = None
             text_content = None
-            
+
             # First, check if file has already been processed and exists in vector DB
             if collection_name:
                 print(f"  [CACHE CHECK] collection_name provided: {collection_name}", flush=True)
@@ -2304,7 +2148,7 @@ def _process_file_sync_legacy(
                     result = VECTOR_DB_CLIENT.query(
                         collection_name=cache_collection, filter={"file_id": file.id}
                     )
-                    
+
                     if result is not None and result.ids and len(result.ids) > 0 and len(result.ids[0]) > 0:
                         # File already processed - use existing documents
                         docs = [
@@ -2319,7 +2163,7 @@ def _process_file_sync_legacy(
                 except Exception as query_error:
                     log.debug(f"Vector DB query failed for file_id={file.id}: {query_error}")
                     # Fall through to extraction
-            
+
             # Also check if file.data already has content
             if docs is None and file.data.get("content", "").strip():
                 existing_content = file.data.get("content", "")
@@ -2337,21 +2181,21 @@ def _process_file_sync_legacy(
                 ]
                 text_content = existing_content
                 log.info(f"[Content Cache Hit] file_id={file.id} | Using existing content from file.data ({len(existing_content)} chars)")
-            
+
             # If still no docs, extract from the actual file
             if docs is None:
                 # Process the file and save the content
                 file_path = file.path
                 if file_path:
                     file_path = Storage.get_file(file_path)
-                    
+
                     # Log extraction engine being used
                     extraction_engine = request.app.state.config.CONTENT_EXTRACTION_ENGINE or "default (PyPDF)"
                     log.info(
                         f"[Content Extraction] file_id={file.id} | filename={file.filename} | "
                         f"content_type={file.meta.get('content_type')} | engine={extraction_engine}"
                     )
-                    
+
                     # CRITICAL: Force PDF_EXTRACT_IMAGES=False to prevent hangs (image extraction causes 2+ minute slowdowns)
                     loader = Loader(
                         engine=request.app.state.config.CONTENT_EXTRACTION_ENGINE,
@@ -2363,7 +2207,7 @@ def _process_file_sync_legacy(
                     docs = loader.load(
                         file.filename, file.meta.get("content_type"), file_path
                     )
-                    
+
                     # Log extraction results for debugging
                     total_chars = sum(len(doc.page_content) for doc in docs)
                     non_empty_docs = [doc for doc in docs if doc.page_content.strip()]
@@ -2372,7 +2216,7 @@ def _process_file_sync_legacy(
                         f"pages_extracted={len(docs)} | non_empty_pages={len(non_empty_docs)} | "
                         f"total_chars={total_chars}"
                     )
-                    
+
                     # Fail early if extraction returned empty content (BUG #15 fix)
                     if total_chars == 0:
                         file_ext = file.filename.split(".")[-1].lower() if "." in file.filename else "unknown"
@@ -2428,7 +2272,7 @@ def _process_file_sync_legacy(
 
         hash = calculate_sha256_string(text_content)
         Files.update_file_hash_by_id(file.id, hash)
-        
+
         print(f"  [STEP 4] Checking BYPASS_EMBEDDING_AND_RETRIEVAL flag...", flush=True)
         log.info(f"  [STEP 4] Checking BYPASS_EMBEDDING_AND_RETRIEVAL flag...")
         print(f"    BYPASS_EMBEDDING_AND_RETRIEVAL: {request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL}", flush=True)
@@ -2442,7 +2286,7 @@ def _process_file_sync_legacy(
                 if knowledge_id:
                     file_collection = f"file-{file.id}"
                     collections = [file_collection, knowledge_id]
-                    
+
                     print(f"  [STEP 5] Knowledge ID provided, saving to multiple collections:", flush=True)
                     print(f"    collections: {collections}", flush=True)
                     log.info(
@@ -2471,7 +2315,7 @@ def _process_file_sync_legacy(
                     # Use file collection name for file metadata
                     print(f"  [STEP 6] Embedding save result: {result}", flush=True)
                     log.info(f"  [STEP 6] Embedding save result: {result}")
-                    
+
                     if result:
                         print(f"  [STEP 6] ✅ Embeddings saved successfully, updating file status to 'completed'", flush=True)
                         log.info(f"  [STEP 6] ✅ Embeddings saved successfully, updating file status to 'completed'")
@@ -2502,7 +2346,7 @@ def _process_file_sync_legacy(
                     print(f"  [STEP 5] No knowledge ID, saving to single collection:", flush=True)
                     print(f"    collection_name: {collection_name}", flush=True)
                     log.info(f"  [STEP 5] No knowledge ID, saving to single collection: {collection_name}")
-                    
+
                     # Credential-safe: Pass embedding_function
                     result = save_docs_to_vector_db(
                         request,
@@ -2520,7 +2364,7 @@ def _process_file_sync_legacy(
                         knowledge_id=knowledge_id,
                         user=user,
                     )
-                    
+
                     print(f"  [STEP 6] Embedding save result: {result}", flush=True)
                     log.info(f"  [STEP 6] Embedding save result: {result}")
 
@@ -2573,7 +2417,7 @@ def _process_file_sync_legacy(
             )
             print(f"  [STEP 4.1] ✅ File status updated to 'completed' (bypassed)", flush=True)
             log.info(f"  [STEP 4.1] File status updated to 'completed' (bypassed)")
-        
+
         print(f"[BACKGROUND TASK] ✅ File processing completed successfully", flush=True)
         log.info(f"[BACKGROUND TASK] ✅ File processing completed successfully")
         print("=" * 80, flush=True)
@@ -2587,7 +2431,7 @@ def _process_file_sync_legacy(
             f"user_id={user_id}, error={error_msg}"
         )
         log.exception(e)
-        
+
         # Update file status to error
         try:
             Files.update_file_metadata_by_id(
@@ -2684,7 +2528,7 @@ def process_file(
 ):
     """
     Process a file and generate embeddings.
-    
+
     Processing runs in the background and the endpoint returns immediately
     with status "processing". The file metadata will be updated with processing status.
     """

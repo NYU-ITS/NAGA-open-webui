@@ -35,6 +35,7 @@ Non-goals:
 """
 
 import logging
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 from open_webui.internal.db import get_db
@@ -106,11 +107,14 @@ def request_model_change(
     authenticated_user_id: str,
     config=None,
     force_reindex: bool = False,
+    db=None,
+    global_settings_change: bool = False,
 ) -> tuple[ModelChangeResult | ModelChangeNoOp, str]:
     """Execute the model-change transaction atomically.
 
-    Authorization precondition: authenticated_user_id must equal admin_id.
-    Caller must perform HTTP authentication before invoking this function.
+    The caller must authenticate the actor. Normally the actor must own the
+    index. A global settings update may rebuild another admin's existing model,
+    but may not select a different model on that admin's behalf.
 
     The admin's ``RAG_EMBEDDING_MODEL_USER`` compatibility config is written
     inside the same transaction so a validation or inventory failure rolls
@@ -123,6 +127,8 @@ def request_model_change(
         target_model_id: Registry model ID or exact approved model name.
         authenticated_user_id: Authenticated requester's user ID (must == admin_id).
         config: Optional config for resolving admin/model if not in DB yet.
+        db: Caller-owned session; when provided, only flush and never commit.
+        global_settings_change: Internal authorization for a global recipe edit.
 
     Returns:
         ``(ModelChangeResult, admin_email)`` on success, or
@@ -133,14 +139,15 @@ def request_model_change(
                        or inventory error.
     """
     # Step 1: Verify requester authorization
-    if authenticated_user_id != admin_id:
+    if authenticated_user_id != admin_id and not global_settings_change:
         raise EmbeddingError(
             EMBEDDING_ADMIN_UNRESOLVED,
             detail=f"Requester {authenticated_user_id} is not authorized to change admin {admin_id}.",
         )
 
     # Step 2-14: Atomic transaction
-    with get_db() as db:
+    owns_transaction = db is None
+    with (get_db() if owns_transaction else nullcontext(db)) as db:
         # Step 2: Ensure admin state exists and lock (creates if missing)
         state_view = AdminEmbeddingModelStateRepository.ensure_state(
             admin_id, config, db=db
@@ -157,6 +164,14 @@ def request_model_change(
 
         # Step 3-4: Resolve and validate target model (within transaction)
         target_spec = _resolve_target_model(target_model_id)
+        if authenticated_user_id != admin_id:
+            actor = Users.get_user_by_id(authenticated_user_id)
+            selected = config.RAG_EMBEDDING_MODEL_USER.get(admin_email) if config else None
+            if (
+                actor is None or actor.role != "admin" or not force_reindex
+                or selected != target_spec.model_name
+            ):
+                raise EmbeddingError(EMBEDDING_ADMIN_UNRESOLVED)
         preparation_recipe = build_preparation_recipe(config, admin_email)
 
         # Step 5: Pending-target guard with failed-operation replacement.
@@ -173,7 +188,10 @@ def request_model_change(
                         config.RAG_EMBEDDING_MODEL_USER.set(
                             admin_email, target_spec.model_name, db=db
                         )
-                    db.commit()
+                    if owns_transaction:
+                        db.commit()
+                    else:
+                        db.flush()
                     return ModelChangeNoOp(
                         active_model_id=state_view.active_embedding_model_id,
                         target_model_id=target_spec.id,
@@ -220,7 +238,10 @@ def request_model_change(
                     config.RAG_EMBEDDING_MODEL_USER.set(
                         admin_email, target_spec.model_name, db=db
                     )
-                db.commit()
+                if owns_transaction:
+                    db.commit()
+                else:
+                    db.flush()
                 return ModelChangeNoOp(
                     active_model_id=state_view.active_embedding_model_id,
                     target_model_id=target_spec.id,
@@ -241,7 +262,10 @@ def request_model_change(
                         config.RAG_EMBEDDING_MODEL_USER.set(
                             admin_email, target_spec.model_name, db=db
                         )
-                    db.commit()
+                    if owns_transaction:
+                        db.commit()
+                    else:
+                        db.flush()
                     return (
                         ModelChangeNoOp(
                             active_model_id=state_view.active_embedding_model_id,
@@ -271,7 +295,10 @@ def request_model_change(
                     config.RAG_EMBEDDING_MODEL_USER.set(
                         admin_email, target_spec.model_name, db=db
                     )
-            db.commit()
+            if owns_transaction:
+                db.commit()
+            else:
+                db.flush()
             return ModelChangeNoOp(
                 active_model_id=state_view.active_embedding_model_id,
                 target_model_id=target_spec.id,
@@ -347,8 +374,11 @@ def request_model_change(
                 db=db,
             )
 
-        # Step 12: Commit (happens automatically when exiting with block)
-        db.commit()
+        # Step 12: Commit only when this function owns the transaction.
+        if owns_transaction:
+            db.commit()
+        else:
+            db.flush()
 
         log.info(
             "[MODEL_CHANGE] created job %s for admin %s: target=%s, files=%d",
@@ -358,7 +388,8 @@ def request_model_change(
             len(inventory),
         )
 
-        # Step 13: Reload job from DB to get authoritative state after commit
+        # Step 13: Read the flushed job; an outer settings transaction may still
+        # need to prepare other admins' jobs before committing all of them.
         committed_job = EmbeddingJobRepository.get_job(job_result.job.id, db=db)
         state_view = AdminEmbeddingModelStateRepository.get_state(admin_id, db=db)
         if committed_job is None:
