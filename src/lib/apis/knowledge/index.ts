@@ -67,6 +67,7 @@ export type KnowledgeIndexingKnowledgeReference = {
 
 export type KnowledgeIndexingStatus = {
 	knowledge_id: string;
+	in_reindex_scope?: boolean;
 	governing_admin_id?: string | null;
 	display_state: KnowledgeIndexingDisplayState;
 	job_status: KnowledgeIndexingJobStatus | null;

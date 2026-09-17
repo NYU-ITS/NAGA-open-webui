@@ -39,8 +39,10 @@
 	};
 
 	const hasActiveJob = () =>
-		status?.job_status === 'queued' || status?.job_status === 'processing' ||
-		(status !== null && (!status.retrieval_available || status.availability === 'partial'));
+		status?.in_reindex_scope !== false &&
+		(status?.job_status === 'queued' ||
+			status?.job_status === 'processing' ||
+			(status !== null && (!status.retrieval_available || status.availability === 'partial')));
 
 	const schedulePolling = () => {
 		stopPolling();
@@ -106,6 +108,9 @@
 		progress.total > 0 ? Math.min(100, (progressValue(progress) / progress.total) * 100) : 0;
 
 	const impactMessage = (indexingStatus: KnowledgeIndexingStatus) => {
+		if (indexingStatus.in_reindex_scope === false) {
+			return $i18n.t('Only knowledge bases directly owned by an administrator can be indexed.');
+		}
 		if (indexingStatus.retrieval_available) {
 			return indexingStatus.availability === 'partial'
 				? $i18n.t('Ready files are searchable. Pending, failed, or incompatible files are excluded.')

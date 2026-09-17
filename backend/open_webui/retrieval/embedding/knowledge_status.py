@@ -95,6 +95,7 @@ class KnowledgeIndexingFailure(KnowledgeIndexingFileIssue):
 
 class KnowledgeIndexingStatusSummary(BaseModel):
     knowledge_id: str
+    in_reindex_scope: bool = True
     governing_admin_id: str | None = None
     display_state: KnowledgeIndexingDisplayState
     job_status: str | None = None
@@ -380,14 +381,14 @@ def _generation_snapshot(db, state, resolver):
     memberships: dict[str, set[str]] = {}
     for knowledge in db.query(Knowledge).all():
         try:
-            if resolver.resolve_knowledge(knowledge) == state.admin_id:
+            if resolver.knowledge_owned_by_admin(knowledge, state.admin_id):
                 for file_id in _iter_knowledge_refs(knowledge):
                     memberships.setdefault(file_id, set()).add(knowledge.id)
         except EmbeddingError:
             continue
     for chat in db.query(Chat).all():
         try:
-            if resolver.resolve_chat(chat) == state.admin_id:
+            if resolver.chat_owned_by_admin(chat, state.admin_id):
                 for file_id in _iter_chat_refs(chat):
                     memberships.setdefault(file_id, set()).add(f"file-{file_id}")
         except EmbeddingError:
@@ -517,10 +518,12 @@ def build_knowledge_indexing_statuses(
             responses.append(
                 KnowledgeIndexingStatusResponse(
                     knowledge_id=knowledge.id,
+                    in_reindex_scope=False,
                     display_state="unavailable",
+                    job_display_state="unavailable",
                     retrieval_available=False,
                     error_code=error.code,
-                    error_message="Indexing status is unavailable for this knowledge base.",
+                    error_message="Only knowledge bases directly owned by an administrator can be indexed.",
                 )
             )
             continue

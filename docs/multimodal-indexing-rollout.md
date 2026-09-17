@@ -38,6 +38,33 @@ budget. Extraction, provider timeouts, and backoff use remaining time; cancellat
 retains a worker slot until the underlying work exits. Filesystem and database
 operations use cooperative cancellation and their underlying transport limits.
 
+## Ownership and reindex queues
+
+Knowledge embedding spaces belong only to the KB's direct administrator owner.
+Read/write sharing grants access without transferring embedding governance.
+Non-admin-owned KBs remain outside reindex scope and display an unavailable
+indexing status with an ownership explanation. Grouped chats belong to their
+group's administrator; ungrouped chats enter an administrator's reindex inventory
+only when directly owned by that administrator. Standalone upload inheritance
+is unchanged.
+
+Inventory validation ignores unrelated sources and retains targeted retry and
+missing-original handling. The same physical file referenced by multiple
+administrators remains rejected: file publication, lease, and audio metadata
+are not stored separately per administrator. KB projections include only current
+memberships owned by the indexing administrator; explicitly requested excluded
+KBs fail rather than receiving another administrator's projection. Ordinary
+uploads, audio repair, and recovery also retain the cross-admin KB conflict guard.
+
+The supplied RQ worker consumes both `file_processing` and `embedding_reindex`.
+Complete modality rejection updates the job outcome and file-card error together,
+under the current generation and required-indexing lease. PDF visual warnings
+continue to allow publication of usable text. Existing model-update error
+rendering and model-aware KB retrieval metadata remain in place.
+
+These integration changes received static code review and whitespace checks.
+No application or tests were run for this integration.
+
 ## Verification before rollout
 
 The Docker production build and Python syntax/static analysis have been checked.

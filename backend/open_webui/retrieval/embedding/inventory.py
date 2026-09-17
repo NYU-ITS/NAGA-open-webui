@@ -5,30 +5,19 @@ a reindex operation must rebuild for one admin: knowledge-base files plus
 applicable chat uploads, deduplicated, with every collection membership the
 worker needs to reconstruct each required vector projection.
 
-Ownership is resolved through the repository's RBAC-group-first admin rules
-(never the uploader email):
+Inventory scope is based on source ownership, not access-control membership:
 
-- A knowledge base resolves to the admins of the groups named in its
-  ``access_control.read/write.group_ids`` when any groups are assigned; with no
-  assigned groups it resolves through the knowledge owner's stable-ID admin
-  inheritance (the owner if admin, else the owner's single group-owner admin).
-- A chat resolves through ``chat.group_id`` (the owning group's admin) when a
-  group is set, else through ``chat.user_id`` the same way.
+- A knowledge base belongs to its direct admin owner, regardless of sharing.
+- A grouped chat belongs to the group's admin owner. An ungrouped chat is
+  included only when it is directly owned by the requested admin.
 
-Sources whose governing admin cannot be resolved to exactly one admin are
-fatal: the inventory is refused and no partial job may be created (Spec 02
-"Error Semantics", user-confirmed stricter reading). A source that references
-no files is never resolved for governance and contributes nothing (rule 7). A
-file referenced by sources governed by more than one distinct admin is
-rejected as ambiguous, and a governed reference to a missing ``file`` row is
-fatal because ``embedding_job_files.file_id`` requires a valid file. Missing-
-file and ambiguity checks apply only to files governed by the requested admin;
-another admin's broken data never blocks this admin's model change.
+Only eligible sources and references sharing their files are parsed, so unrelated
+malformed references do not block this admin's model change. Non-admin-owned
+knowledge bases and ungrouped non-admin chats have no admin reindex scope. Files
+referenced by multiple admins remain ambiguous because publication state is per file.
 
-Malformed structures -- a ``data.file_ids`` that is not a list, a chat payload
-whose messages/files containers are not dict/list, or wrong-typed
-``access_control`` permission rules -- raise a structured malformed-reference
-error; silently ignoring them would change ownership or drop files.
+Malformed eligible knowledge/chat references fail the inventory. Missing
+originals also fail unless retry discovery explicitly collects and skips them.
 
 Exact chat reference path (mirrors the Phase 1 backfill migration and the
 frontend payload): ``chat.chat["history"]["messages"][*]["files"][*]`` where
@@ -203,7 +192,7 @@ class ReindexFile:
 
 @dataclass(frozen=True)
 class ReindexAdminResolver:
-    """Shared group-first governance resolver for reindex-related reads.
+    """Shared ownership snapshot for reindex-related reads.
 
     Build this once per database session so callers that inspect several
     knowledge bases reuse the same user and group snapshot as the inventory
@@ -217,11 +206,25 @@ class ReindexAdminResolver:
     user_group_ids: dict[str, set[str]]
 
     def resolve_knowledge(self, knowledge: Knowledge) -> str:
-        return _resolve_knowledge_admin(
-            knowledge,
-            self.roles,
-            self.group_admins,
-            self.user_group_ids,
+        if not self.knowledge_owned_by_admin(knowledge, knowledge.user_id):
+            raise EmbeddingError(
+                EMBEDDING_ADMIN_UNRESOLVED,
+                detail=f"Knowledge {knowledge.id} is not directly owned by an admin.",
+            )
+        return knowledge.user_id
+
+    def knowledge_owned_by_admin(self, knowledge: Knowledge, admin_id: str) -> bool:
+        return bool(
+            admin_id
+            and knowledge.user_id == admin_id
+            and self.roles.get(admin_id) == "admin"
+        )
+
+    def chat_owned_by_admin(self, chat: Chat, admin_id: str) -> bool:
+        if chat.group_id:
+            return self.group_admins.get(chat.group_id) == admin_id
+        return bool(
+            chat.user_id == admin_id and self.roles.get(admin_id) == "admin"
         )
 
     def resolve_chat(self, chat: Chat) -> str:
@@ -229,7 +232,6 @@ class ReindexAdminResolver:
             chat,
             self.roles,
             self.group_admins,
-            self.user_group_ids,
         )
 
     def resolve_user(self, user_id: str) -> str:
@@ -278,10 +280,9 @@ def build_reindex_inventory(
         Inventory items sorted by ``file_id``.
 
     Raises:
-        EmbeddingError: On unresolvable or ambiguous source governance, on a
-            file governed by more than one distinct admin, on a governed
-            reference to a missing ``file`` row (unless collecting missing
-            files for a retry), or on a malformed knowledge/chat reference.
+        EmbeddingError: If the requested admin is invalid, a relevant source
+            is malformed, a file is governed by multiple admins, or an original
+            is unavailable (unless collecting confirmed missing files for a retry).
     """
     if db is None:
         with get_db() as session:
@@ -429,116 +430,16 @@ def _resolve_user_admin(
     return next(iter(admin_ids))
 
 
-def _knowledge_access_groups(knowledge: Knowledge) -> set[str]:
-    """Group ids from access_control read/write permissions, deduplicated.
-
-    ``None`` access_control or an empty dict means no assigned groups (the
-    owner rule then applies). A present but wrong-typed structure (non-dict
-    ``read``/``write``, non-list ``group_ids``, non-string group id) is a
-    malformed reference: silently ignoring it would change governance to the
-    knowledge owner, so it raises instead.
-    """
-    access_control = knowledge.access_control
-    if access_control is None:
-        return set()
-    if not isinstance(access_control, dict):
-        raise EmbeddingError(
-            EMBEDDING_INVENTORY_MALFORMED_REFERENCE,
-            detail=(
-                f"knowledge {knowledge.id}: access_control is "
-                f"{type(access_control).__name__}, expected a dict or None."
-            ),
-        )
-    group_ids: set[str] = set()
-    for permission in ("read", "write"):
-        rule = access_control.get(permission)
-        if rule is None:
-            continue
-        if not isinstance(rule, dict):
-            raise EmbeddingError(
-                EMBEDDING_INVENTORY_MALFORMED_REFERENCE,
-                detail=(
-                    f"knowledge {knowledge.id}: access_control.{permission} is "
-                    f"{type(rule).__name__}, expected a dict."
-                ),
-            )
-        group_id_list = rule.get("group_ids")
-        if group_id_list is None:
-            continue
-        if not isinstance(group_id_list, list):
-            raise EmbeddingError(
-                EMBEDDING_INVENTORY_MALFORMED_REFERENCE,
-                detail=(
-                    f"knowledge {knowledge.id}: access_control.{permission}.group_ids "
-                    f"is {type(group_id_list).__name__}, expected a list."
-                ),
-            )
-        for group_id in group_id_list:
-            if not isinstance(group_id, str) or not group_id:
-                raise EmbeddingError(
-                    EMBEDDING_INVENTORY_MALFORMED_REFERENCE,
-                    detail=(
-                        f"knowledge {knowledge.id}: access_control.{permission}.group_ids "
-                        f"contains a non-string entry: {group_id!r}."
-                    ),
-                )
-            group_ids.add(group_id)
-    return group_ids
-
-
-def _resolve_knowledge_admin(
-    knowledge: Knowledge,
-    roles: dict[str, str],
-    group_admins: dict[str, Optional[str]],
-    user_group_ids: dict[str, set[str]],
-) -> str:
-    """Resolve the single governing admin of a knowledge base.
-
-    RBAC-group-first: when the knowledge base is assigned to groups via
-    ``access_control``, every assigned group must resolve to the same admin.
-    With no assigned groups, resolve through the knowledge owner.
-    """
-    source_desc = f"knowledge {knowledge.id}"
-    group_ids = _knowledge_access_groups(knowledge)
-    if group_ids:
-        resolved: list[str] = []
-        for group_id in sorted(group_ids):
-            admin_id = group_admins.get(group_id)
-            if admin_id is None:
-                raise EmbeddingError(
-                    EMBEDDING_INVENTORY_UNRESOLVED_SOURCE,
-                    detail=(
-                        f"{source_desc}: assigned group {group_id!r} does not "
-                        f"resolve to an admin owner."
-                    ),
-                )
-            resolved.append(admin_id)
-        distinct = set(resolved)
-        if len(distinct) != 1:
-            raise EmbeddingError(
-                EMBEDDING_INVENTORY_AMBIGUOUS_SOURCE,
-                detail=(
-                    f"{source_desc}: assigned groups resolve to multiple admins: "
-                    f"{sorted(distinct)}."
-                ),
-            )
-        return next(iter(distinct))
-    return _resolve_user_admin(
-        knowledge.user_id, roles, group_admins, user_group_ids, source_desc
-    )
-
-
 def _resolve_chat_admin(
     chat: Chat,
     roles: dict[str, str],
     group_admins: dict[str, Optional[str]],
-    user_group_ids: dict[str, set[str]],
 ) -> str:
     """Resolve the single governing admin of a chat.
 
     ``chat.group_id`` (the owning group's admin) wins when set; otherwise the
-    chat owner resolves through the stable-ID rule. An unresolvable group
-    reference is fatal, never silently downgraded to the owner.
+    chat must be directly admin-owned. An unresolvable group reference is
+    never downgraded to the owner.
     """
     source_desc = f"chat {chat.id}"
     if chat.group_id:
@@ -552,8 +453,11 @@ def _resolve_chat_admin(
                 ),
             )
         return admin_id
-    return _resolve_user_admin(
-        chat.user_id, roles, group_admins, user_group_ids, source_desc
+    if chat.user_id and roles.get(chat.user_id) == "admin":
+        return chat.user_id
+    raise EmbeddingError(
+        EMBEDDING_INVENTORY_UNRESOLVED_SOURCE,
+        detail=f"{source_desc}: ungrouped chat is not directly owned by an admin.",
     )
 
 
@@ -716,9 +620,9 @@ def _build_inventory(
 ) -> list[ReindexFile]:
     admin_resolver = build_reindex_admin_resolver(db)
     files_by_id = _load_files(db)
+    knowledge_rows = _load_knowledge(db)
+    chat_rows = _load_chats(db)
 
-    # file_id -> set of governing admin ids discovered via governed sources
-    file_admins: dict[str, set[str]] = {}
     # file_id -> set of knowledge base ids whose collections contain the file
     file_knowledge: dict[str, set[str]] = {}
     # file_id -> set of source contexts (knowledge / chat_upload)
@@ -726,12 +630,13 @@ def _build_inventory(
     # file_id -> sorted source descriptions for structured error messages
     file_sources: dict[str, set[str]] = {}
 
-    def record(file_id: str, admin: str, source_desc: str, context: str) -> None:
-        file_admins.setdefault(file_id, set()).add(admin)
+    def record(file_id: str, source_desc: str, context: str) -> None:
         file_sources.setdefault(file_id, set()).add(source_desc)
         file_contexts.setdefault(file_id, set()).add(context)
 
-    for knowledge in _load_knowledge(db):
+    for knowledge in knowledge_rows:
+        if not admin_resolver.knowledge_owned_by_admin(knowledge, admin_id):
+            continue
         if file_ids is not None and not _knowledge_references_requested_file(
             knowledge, file_ids
         ):
@@ -741,13 +646,14 @@ def _build_inventory(
             refs = [file_id for file_id in refs if file_id in file_ids]
         if not refs:
             continue  # references no files; governs nothing in this inventory
-        admin = admin_resolver.resolve_knowledge(knowledge)
         source_desc = f"knowledge {knowledge.id}"
         for file_id in refs:
-            record(file_id, admin, source_desc, SOURCE_KNOWLEDGE)
+            record(file_id, source_desc, SOURCE_KNOWLEDGE)
             file_knowledge.setdefault(file_id, set()).add(knowledge.id)
 
-    for chat in _load_chats(db):
+    for chat in chat_rows:
+        if not admin_resolver.chat_owned_by_admin(chat, admin_id):
+            continue
         if file_ids is not None and not _chat_references_requested_file(chat, file_ids):
             continue
         refs = list(_iter_chat_refs(chat))  # may raise MALFORMED
@@ -755,20 +661,39 @@ def _build_inventory(
             refs = [file_id for file_id in refs if file_id in file_ids]
         if not refs:
             continue  # no uploads; chat governance is irrelevant to this inventory
-        admin = admin_resolver.resolve_chat(chat)
         source_desc = f"chat {chat.id}"
         for file_id in refs:
-            record(file_id, admin, source_desc, SOURCE_CHAT_UPLOAD)
+            record(file_id, source_desc, SOURCE_CHAT_UPLOAD)
 
-    # Restrict to this admin's job before validating: only files governed by
-    # ``admin_id`` ever enter the job ledger, so another admin's broken or
-    # ambiguous files must not block this model change.
+    # Keep the existing cross-admin guard: File publication/lease metadata is
+    # not admin-scoped. Inspect other sources only if they reference our files.
+    scoped_ids = set(file_contexts)
+    file_admins = {file_id: {admin_id} for file_id in scoped_ids}
+    for knowledge in knowledge_rows:
+        if (
+            knowledge.user_id == admin_id
+            or not admin_resolver.knowledge_owned_by_admin(knowledge, knowledge.user_id)
+            or not _knowledge_references_requested_file(knowledge, scoped_ids)
+        ):
+            continue
+        for file_id in _iter_knowledge_refs(knowledge):
+            if file_id in scoped_ids:
+                file_admins[file_id].add(knowledge.user_id)
+    for chat in chat_rows:
+        if not _chat_references_requested_file(chat, scoped_ids):
+            continue
+        try:
+            chat_admin_id = admin_resolver.resolve_chat(chat)
+        except EmbeddingError:
+            continue  # Ungoverned chats are outside every admin inventory.
+        if chat_admin_id == admin_id:
+            continue
+        for file_id in _iter_chat_refs(chat):
+            if file_id in scoped_ids:
+                file_admins[file_id].add(chat_admin_id)
+
     items: list[ReindexFile] = []
-    for file_id in sorted(file_admins):
-        governing = file_admins[file_id]
-        if admin_id not in governing:
-            continue  # governed by another admin; never part of this job
-
+    for file_id in sorted(file_contexts):
         # Missing live sources block a new inventory. Retry discovery may
         # explicitly collect confirmed deletions instead.
         if file_id not in files_by_id:
@@ -779,13 +704,12 @@ def _build_inventory(
                         admin_id, file_id, sorted(file_sources[file_id]))
             raise InventorySourceUnavailableError(admin_id, file_id, None, "missing_record")
 
-        # Rule 8: a file governed by more than one distinct admin is ambiguous.
-        if len(governing) != 1:
+        if len(file_admins[file_id]) != 1:
             raise EmbeddingError(
                 EMBEDDING_INVENTORY_AMBIGUOUS_ADMIN,
                 detail=(
                     f"File {file_id!r} is governed by multiple admins: "
-                    f"{sorted(governing)}."
+                    f"{sorted(file_admins[file_id])}."
                 ),
             )
 

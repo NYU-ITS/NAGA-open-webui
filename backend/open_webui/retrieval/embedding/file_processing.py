@@ -631,25 +631,24 @@ def _resolve_knowledge_projection_ids(
                 if candidate_ids
                 else []
             )
-        for row in knowledge_rows:
-            data = row.data if isinstance(row.data, dict) else {}
-            file_ids = data.get("file_ids", [])
-            if isinstance(file_ids, list) and file_id in file_ids:
-                knowledge_ids.add(str(row.id))
-
-        if not knowledge_ids:
-            return
         from open_webui.retrieval.embedding.inventory import (
             build_reindex_admin_resolver,
         )
 
         resolver = build_reindex_admin_resolver(session)
         for row in knowledge_rows:
-            if (
-                str(row.id) in knowledge_ids
-                and resolver.resolve_knowledge(row) != admin_id
-            ):
+            data = row.data if isinstance(row.data, dict) else {}
+            file_ids = data.get("file_ids", [])
+            if not isinstance(file_ids, list) or file_id not in file_ids:
+                continue
+            if resolver.knowledge_owned_by_admin(row, admin_id):
+                knowledge_ids.add(str(row.id))
+            elif resolver.knowledge_owned_by_admin(row, row.user_id):
+                # File publication metadata is shared across projections. Keep
+                # the current cross-admin guard for uploads, audio, and recovery
+                # as well as reindex jobs; another admin's state cannot be replaced.
                 raise EmbeddingError(FILE_PROCESSING_FAILED)
+            # Non-admin-owned KBs have no embedding space and are excluded.
 
     if db is None:
         with get_db() as session:

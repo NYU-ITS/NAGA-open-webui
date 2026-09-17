@@ -274,7 +274,7 @@ def _recover_file(admin_id, file_id):
         knowledge_ids = _resolve_knowledge_projection_ids(
             file_id=file_id, admin_id=admin_id, requested_knowledge_id=None, db=db
         )
-        if not knowledge_ids:
+        if job_file is None and not knowledge_ids:
             from open_webui.retrieval.embedding.inventory import (
                 build_reindex_admin_resolver,
             )
