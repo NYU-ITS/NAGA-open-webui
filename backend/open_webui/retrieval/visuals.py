@@ -380,12 +380,14 @@ def reconstruct_and_sanitize_sources(
     selected_image_candidates = sorted(
         image_candidates_by_id.values(), key=_candidate_rank_key
     )[:selection_limit]
-    selected_video_candidates = sorted(
-        video_candidates_by_id.values(), key=_candidate_rank_key
-    )[: min(selection_limit, MAX_RECONSTRUCTED_VIDEO_SEGMENTS)]
-    selected_audio_candidates = sorted(
-        audio_candidates_by_id.values(), key=_candidate_rank_key
-    )[: min(selection_limit, max(0, int(audio_limit)))]
+    selected_video_candidates = _select_source_balanced_candidates(
+        list(video_candidates_by_id.values()),
+        min(selection_limit, MAX_RECONSTRUCTED_VIDEO_SEGMENTS),
+    )
+    selected_audio_candidates = _select_source_balanced_candidates(
+        list(audio_candidates_by_id.values()),
+        min(selection_limit, max(0, int(audio_limit))),
+    )
 
     reconstructed_images = []
     reconstructed_video_segments = []
@@ -722,6 +724,38 @@ def _candidate_rank_key(candidate: _VisualCandidate) -> tuple:
     if candidate.distance is None:
         return (1, 0.0, *stable_order)
     return (0, candidate.distance, *stable_order)
+
+
+def _select_source_balanced_candidates(
+    candidates: list[_VisualCandidate], limit: int
+) -> list[_VisualCandidate]:
+    """Select relevant media in rounds so one file cannot crowd out another."""
+    if limit <= 0 or not candidates:
+        return []
+
+    candidates_by_source: dict[tuple[str, str | int], list[_VisualCandidate]] = {}
+    for candidate in sorted(candidates, key=_candidate_rank_key):
+        file_id = str(candidate.metadata.get("file_id") or "").strip()
+        source_key: tuple[str, str | int] = (
+            ("file", file_id) if file_id else ("source", candidate.source_index)
+        )
+        candidates_by_source.setdefault(source_key, []).append(candidate)
+
+    selected: list[_VisualCandidate] = []
+    while len(selected) < limit:
+        active_queues = [queue for queue in candidates_by_source.values() if queue]
+        if not active_queues:
+            break
+
+        # Re-rank each round by the next candidate from every source. This keeps
+        # source coverage even while preserving relevance within each round.
+        active_queues.sort(key=lambda queue: _candidate_rank_key(queue[0]))
+        for queue in active_queues:
+            selected.append(queue.pop(0))
+            if len(selected) == limit:
+                break
+
+    return selected
 
 
 def _sortable_int(value) -> tuple[int, int | str]:
