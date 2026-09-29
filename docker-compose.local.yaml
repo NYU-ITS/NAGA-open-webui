@@ -7,7 +7,6 @@ services:
     container_name: open-webui
     volumes:
       - open-webui:/app/backend/data
-      - ./backend:/app/backend
     ports:
       - ${OPEN_WEBUI_PORT-3000}:8080
     environment:
@@ -24,7 +23,7 @@ services:
       - 'RAG_PDF_MAX_VISUALS_PER_PAGE=10'
       - 'RAG_PDF_MAX_VISUALS_PER_DOCUMENT=100'
       # Backend logging (open_webui/env.py). GLOBAL_LOG_LEVEL is the default; MAIN_ / RAG_ override per subsystem.
-      - 'GLOBAL_LOG_LEVEL=WARNING'
+      - 'GLOBAL_LOG_LEVEL=DEBUG'
       - 'MAIN_LOG_LEVEL=DEBUG'
       - 'OPENAI_LOG_LEVEL=DEBUG'
       - 'RAG_LOG_LEVEL=DEBUG'
