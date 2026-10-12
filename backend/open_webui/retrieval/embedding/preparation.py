@@ -23,7 +23,6 @@ from open_webui.retrieval.embedding.errors import (
     EMBEDDING_MODALITY_UNSUPPORTED,
     PDF_VISUAL_EXTRACTION_FAILED,
     PDF_VISUAL_LIMIT_EXCEEDED,
-    PDF_VISUALS_REQUIRE_MULTIMODAL_MODEL,
     VIDEO_DURATION_EXCEEDED,
     VIDEO_VALIDATION_FAILED,
     EmbeddingError,
@@ -47,7 +46,6 @@ from open_webui.retrieval.video_audio import (
 from open_webui.retrieval.loaders.main import Loader
 from open_webui.retrieval.loaders.pdf_complex import (
     COMPLEX_PDF_EXTRACTION_VERSION,
-    ComplexPDFExtractionError,
     ComplexPDFExtractor,
     PDF_FIGURE_MIN_AREA,
     PDF_FIGURE_MIN_HEIGHT,
@@ -1329,6 +1327,24 @@ def _prepare_complex_pdf(
         document.page_content.strip() for document in legacy_documents
         if document.page_content and document.page_content.strip()
     )
+    # Text-only models never need the visual sidecar or its resource limits.
+    if "image" not in model.modalities:
+        if not legacy_chunks:
+            raise EmbeddingError(EMBEDDING_MODALITY_UNSUPPORTED)
+        return PreparedFile(
+            chunks=tuple(legacy_chunks),
+            text_content=legacy_text,
+            source_sha256=hashlib.sha256(source_bytes).hexdigest(),
+            extraction_version=None,
+            warnings=(),
+            visual_summary=_visual_summary(
+                figure_count=0,
+                table_image_count=0,
+                image_chunk_count=0,
+                text_chunk_count=len(legacy_chunks),
+            ),
+        )
+
     try:
         extraction = ComplexPDFExtractor(
             max_visuals_per_page=preparation_recipe.max_visuals_per_page,
@@ -1338,31 +1354,10 @@ def _prepare_complex_pdf(
         ).extract(source_bytes)
     except PDFVisualLimitExceededError:
         raise EmbeddingError(PDF_VISUAL_LIMIT_EXCEEDED) from None
-    except ComplexPDFExtractionError:
-        if "image" in model.modalities:
-            raise EmbeddingError(PDF_VISUAL_EXTRACTION_FAILED) from None
-        if not legacy_chunks:
-            raise EmbeddingError(EMBEDDING_MODALITY_UNSUPPORTED) from None
-        return PreparedFile(
-            chunks=tuple(legacy_chunks), text_content=legacy_text,
-            source_sha256=hashlib.sha256(source_bytes).hexdigest(),
-            extraction_version=COMPLEX_PDF_EXTRACTION_VERSION,
-            warnings=(
-                PDF_VISUAL_EXTRACTION_FAILED,
-                PDF_VISUALS_REQUIRE_MULTIMODAL_MODEL,
-            ),
-            visual_summary=_visual_summary(
-                figure_count=0,
-                table_image_count=0,
-                image_chunk_count=0,
-                text_chunk_count=len(legacy_chunks),
-            ),
-        )
     except Exception:
         raise EmbeddingError(PDF_VISUAL_EXTRACTION_FAILED) from None
 
     visual_chunks: list[PreparedChunk] = []
-    visual_supported = "image" in model.modalities
     warning_codes = [warning.code for warning in extraction.warnings]
 
     for block in extraction.blocks:
@@ -1381,7 +1376,7 @@ def _prepare_complex_pdf(
                 continue
             continue
 
-        if not isinstance(block, VisualBlock) or not visual_supported:
+        if not isinstance(block, VisualBlock):
             continue
         visual_asset_id = _pdf_visual_asset_id(
             source_sha256=extraction.source_sha256,
@@ -1419,13 +1414,7 @@ def _prepare_complex_pdf(
             )
         )
 
-    visual_count = extraction.summary.visual_block_count
-    if visual_count and not visual_supported:
-        warning_codes.append(PDF_VISUALS_REQUIRE_MULTIMODAL_MODEL)
     warning_codes = list(dict.fromkeys(warning_codes))
-
-    if not legacy_chunks and visual_count and not visual_supported:
-        raise EmbeddingError(EMBEDDING_MODALITY_UNSUPPORTED)
 
     def page_index(chunk: PreparedChunk) -> int:
         value = chunk.chunk_metadata.get("page", chunk.chunk_metadata.get("page_index", 0))
