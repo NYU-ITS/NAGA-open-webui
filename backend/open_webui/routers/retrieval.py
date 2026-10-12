@@ -495,6 +495,8 @@ async def get_rag_config(request: Request, user=Depends(get_verified_user)):
         "status": True,
         "audio_max_clips": request.app.state.config.RAG_AUDIO_MAX_CLIPS.get(user.email),
         "pdf_extract_images": request.app.state.config.PDF_EXTRACT_IMAGES,
+        "pdf_max_visuals_per_page": request.app.state.config.RAG_PDF_MAX_VISUALS_PER_PAGE,
+        "pdf_max_visuals_per_document": request.app.state.config.RAG_PDF_MAX_VISUALS_PER_DOCUMENT,
         "RAG_FULL_CONTEXT": request.app.state.config.RAG_FULL_CONTEXT.get(user.email),
         "BYPASS_EMBEDDING_AND_RETRIEVAL": request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL,
         "enable_google_drive_integration": request.app.state.config.ENABLE_GOOGLE_DRIVE_INTEGRATION,
@@ -650,6 +652,8 @@ class ConfigUpdateForm(BaseModel):
     RAG_FULL_CONTEXT: Optional[bool] = None
     BYPASS_EMBEDDING_AND_RETRIEVAL: Optional[bool] = None
     pdf_extract_images: Optional[bool] = None
+    pdf_max_visuals_per_page: Optional[int] = Field(default=None, ge=1, strict=True)
+    pdf_max_visuals_per_document: Optional[int] = Field(default=None, ge=1, strict=True)
     enable_google_drive_integration: Optional[bool] = None
     enable_onedrive_integration: Optional[bool] = None
     file: Optional[FileConfig] = None
@@ -734,6 +738,10 @@ def _update_video_settings(config, video_config, user):
 
 
 def _stage_rag_settings(config, form_data, user):
+    if form_data.pdf_max_visuals_per_page is not None:
+        config.RAG_PDF_MAX_VISUALS_PER_PAGE = form_data.pdf_max_visuals_per_page
+    if form_data.pdf_max_visuals_per_document is not None:
+        config.RAG_PDF_MAX_VISUALS_PER_DOCUMENT = form_data.pdf_max_visuals_per_document
     if form_data.audio_max_clips is not None:
         config.RAG_AUDIO_MAX_CLIPS.set(user.email, form_data.audio_max_clips)
     if form_data.video is not None:
@@ -1079,6 +1087,8 @@ async def update_rag_config(
         "embedding_recipe_changed": recipe_changed,
         **({"reindex_job": reindex_job} if reindex_job else {}),
         "pdf_extract_images": request.app.state.config.PDF_EXTRACT_IMAGES,
+        "pdf_max_visuals_per_page": request.app.state.config.RAG_PDF_MAX_VISUALS_PER_PAGE,
+        "pdf_max_visuals_per_document": request.app.state.config.RAG_PDF_MAX_VISUALS_PER_DOCUMENT,
         "RAG_FULL_CONTEXT": request.app.state.config.RAG_FULL_CONTEXT.get(user.email),
         "BYPASS_EMBEDDING_AND_RETRIEVAL": request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL,
         "file": {

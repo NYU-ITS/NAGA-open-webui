@@ -141,6 +141,8 @@
 	let chunkSize = 1000;
 	let chunkOverlap = 200;
 	let pdfExtractImages = false;  // CRITICAL: Default to false - image extraction causes 2+ minute slowdowns/hangs
+	let pdfMaxVisualsPerPage = 6;
+	let pdfMaxVisualsPerDocument = 80;
 
 	let RAG_FULL_CONTEXT = false;
 	let BYPASS_EMBEDDING_AND_RETRIEVAL = false;
@@ -342,6 +344,13 @@
 	};
 
 	const saveSettings = async (reindexConfirmed = false) => {
+		if (
+			!Number.isInteger(pdfMaxVisualsPerPage) || pdfMaxVisualsPerPage < 1 ||
+			!Number.isInteger(pdfMaxVisualsPerDocument) || pdfMaxVisualsPerDocument < 1
+		) {
+			toast.error($i18n.t('PDF visual limits must be whole numbers of at least 1.'));
+			return;
+		}
 		if (!Number.isInteger(audioMaxClips) || audioMaxClips < 1) {
 			toast.error($i18n.t('Maximum audio clips per answer must be a whole number of at least 1.'));
 			return;
@@ -366,6 +375,8 @@
 			audio_max_clips: audioMaxClips,
 			...(!BYPASS_EMBEDDING_AND_RETRIEVAL ? { embedding: embeddingPayload() } : {}),
 			pdf_extract_images: pdfExtractImages,
+			pdf_max_visuals_per_page: pdfMaxVisualsPerPage,
+			pdf_max_visuals_per_document: pdfMaxVisualsPerDocument,
 			enable_google_drive_integration: enableGoogleDriveIntegration,
 			enable_onedrive_integration: enableOneDriveIntegration,
 			file: {
@@ -404,6 +415,8 @@
 		}
 		documentSettingsSaved = true;
 		audioMaxClips = res.audio_max_clips ?? audioMaxClips;
+		pdfMaxVisualsPerPage = res.pdf_max_visuals_per_page ?? pdfMaxVisualsPerPage;
+		pdfMaxVisualsPerDocument = res.pdf_max_visuals_per_document ?? pdfMaxVisualsPerDocument;
 		trackIndexing(res.indexing);
 
 		console.log('AFTER SAVE - Response:', res);
@@ -529,6 +542,8 @@
 
 		if (res) {
 			pdfExtractImages = res.pdf_extract_images;
+			pdfMaxVisualsPerPage = res.pdf_max_visuals_per_page ?? 6;
+			pdfMaxVisualsPerDocument = res.pdf_max_visuals_per_document ?? 80;
 
 			textSplitter = res.chunk.text_splitter;
 			// Use defaults if backend returns 0, null, undefined, or invalid (means not configured)
@@ -743,6 +758,42 @@
 						</div>
 					</div>
 				{/if}
+
+				<div class="mb-2.5">
+					<div class="flex flex-col gap-2 sm:flex-row">
+						<div class="w-full">
+							<label for="pdf-max-visuals-per-page" class="mb-1 block text-xs font-medium">
+								{$i18n.t('Maximum PDF visuals per page')}
+							</label>
+							<input
+								id="pdf-max-visuals-per-page"
+								class="w-full rounded-lg py-1.5 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+								type="number"
+								min="1"
+								step="1"
+								required
+								bind:value={pdfMaxVisualsPerPage}
+							/>
+						</div>
+						<div class="w-full">
+							<label for="pdf-max-visuals-per-document" class="mb-1 block text-xs font-medium">
+								{$i18n.t('Maximum PDF visuals per document')}
+							</label>
+							<input
+								id="pdf-max-visuals-per-document"
+								class="w-full rounded-lg py-1.5 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+								type="number"
+								min="1"
+								step="1"
+								required
+								bind:value={pdfMaxVisualsPerDocument}
+							/>
+						</div>
+					</div>
+					<p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+						{$i18n.t('These limits apply to all administrators when the embedding model supports images. Text-only models skip PDF visuals and ignore these limits.')}
+					</p>
+				</div>
 
 				<div class="  mb-2.5 flex w-full justify-between">
 					<div class=" self-center text-xs font-medium">

@@ -68,6 +68,8 @@ type RAGConfigForm = {
 	RAG_FULL_CONTEXT?: boolean;
 	BYPASS_EMBEDDING_AND_RETRIEVAL?: boolean;
 	pdf_extract_images?: boolean;
+	pdf_max_visuals_per_page?: number;
+	pdf_max_visuals_per_document?: number;
 	enable_google_drive_integration?: boolean;
 	enable_onedrive_integration?: boolean;
 	chunk?: ChunkConfigForm;
