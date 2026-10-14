@@ -970,7 +970,7 @@ async def update_rag_config(
             if form_data.embedding is not None:
                 stage_embedding_settings(proposed, form_data.embedding, user.email)
             new_recipe = build_preparation_recipe(proposed, user.email)
-            recipe_changed = old_recipe.sha256 != new_recipe.sha256
+            chunking_changed = old_recipe.reindex_settings != new_recipe.reindex_settings
             jobs = prepare_settings_jobs(
                 db, previous, proposed, user,
                 embedding=form_data.embedding,
@@ -1084,7 +1084,7 @@ async def update_rag_config(
         "audio_max_clips": request.app.state.config.RAG_AUDIO_MAX_CLIPS.get(user.email),
         "indexing": indexing,
         "status": True,
-        "embedding_recipe_changed": recipe_changed,
+        "embedding_recipe_changed": chunking_changed,
         **({"reindex_job": reindex_job} if reindex_job else {}),
         "pdf_extract_images": request.app.state.config.PDF_EXTRACT_IMAGES,
         "pdf_max_visuals_per_page": request.app.state.config.RAG_PDF_MAX_VISUALS_PER_PAGE,

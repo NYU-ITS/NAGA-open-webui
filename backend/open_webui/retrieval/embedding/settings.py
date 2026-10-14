@@ -28,19 +28,20 @@ def stage_embedding_settings(config, form, email):
 
 
 def prepare_settings_jobs(db, previous, proposed, user, *, embedding=None, force_reindex=False):
-    """Reindex each configured admin whose recipe changes, or the caller's model.
+    """Reindex for chunking changes or a change to the caller's model.
 
-    Global video/extraction settings affect every admin; scoped chunk settings
-    affect only their owner. All inventories must succeed before any settings
-    or jobs commit. Stable admin ordering avoids competing multi-admin locks.
+    Video chunk duration settings affect every admin; scoped text chunk settings
+    affect only their owner. Other extraction settings apply to future processing.
+    All inventories must succeed before any settings or jobs commit. Stable admin
+    ordering avoids competing multi-admin locks.
     """
     jobs = []
     for admin in db.query(User).filter_by(role="admin").order_by(User.id).all():
         old_recipe = build_preparation_recipe(previous, admin.email)
         new_recipe = build_preparation_recipe(proposed, admin.email)
-        recipe_changed = old_recipe.sha256 != new_recipe.sha256
+        chunking_changed = old_recipe.reindex_settings != new_recipe.reindex_settings
         own_update = admin.id == user.id and embedding is not None
-        force = recipe_changed or (admin.id == user.id and force_reindex)
+        force = chunking_changed or (admin.id == user.id and force_reindex)
         if not force and not own_update:
             continue
         model = embedding.embedding_model if own_update else proposed.RAG_EMBEDDING_MODEL_USER.get(admin.email)
@@ -55,11 +56,11 @@ def prepare_settings_jobs(db, previous, proposed, user, *, embedding=None, force
             config=proposed,
             force_reindex=force,
             db=db,
-            global_settings_change=recipe_changed,
+            global_settings_change=chunking_changed,
         )
         if isinstance(result, ModelChangeResult):
             # Keep the supported reindex_model_change type assigned by the
-            # model-change workflow, including same-model recipe rebuilds.
+            # model-change workflow, including same-model chunking rebuilds.
             jobs.append(result)
     if jobs:
         proposed.set_value(user.email, "rag.settings_indexing_jobs", [job.job_id for job in jobs])

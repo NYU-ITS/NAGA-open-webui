@@ -309,10 +309,9 @@ def read_upload_bytes(
 class PreparationRecipe:
     """Frozen, canonical inputs that determine file extraction and chunking.
 
-    Reindex jobs persist both this record and its digest. Workers use these
-    values instead of mutable live settings, while retry creation compares a
-    newly resolved recipe with the snapshot and requires a fresh model change
-    when behavior has drifted.
+    Reindex jobs persist both this record and its digest. Workers and retries
+    use these values instead of mutable live settings. Only reindex_settings
+    determines whether a settings edit automatically rebuilds existing files.
     """
 
     complex_pdf_parser_enabled: bool
@@ -447,6 +446,19 @@ class PreparationRecipe:
             self.chunk_overlap,
             self.text_splitter,
             self.tiktoken_encoding_name,
+        )
+
+    @property
+    def reindex_settings(self) -> tuple[int, int, str, str, int, int]:
+        """Only text and video chunking changes rebuild existing indexes.
+
+        Extraction options remain in the full recipe and its digest so new
+        processing uses them and queued work retains its frozen inputs.
+        """
+        return (
+            *self.chunk_settings,
+            self.video_chunk_duration,
+            self.video_min_chunk_duration,
         )
 
     def to_dict(self) -> dict[str, Any]:
