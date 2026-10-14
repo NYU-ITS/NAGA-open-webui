@@ -16,8 +16,9 @@ malformed references do not block this admin's model change. Non-admin-owned
 knowledge bases and ungrouped non-admin chats have no admin reindex scope. Files
 referenced by multiple admins remain ambiguous because publication state is per file.
 
-Malformed eligible knowledge/chat references fail the inventory. Missing
-originals also fail unless retry discovery explicitly collects and skips them.
+Malformed eligible knowledge/chat references fail the inventory. New reindex
+and retry discovery collect and skip confirmed missing originals; callers
+validating an individual publication require its source to remain available.
 
 Exact chat reference path (mirrors the Phase 1 backfill migration and the
 frontend payload): ``chat.chat["history"]["messages"][*]["files"][*]`` where
@@ -273,7 +274,7 @@ def build_reindex_inventory(
             is opened and closed here.
         preparation_recipe: Canonical admin-scoped extraction and chunking
             settings to persist identically on every file snapshot.
-        missing_file_ids: When supplied by retry creation, collect and skip
+        missing_file_ids: When supplied by reindex or retry creation, collect and skip
             confirmed missing originals. Other storage failures still abort.
 
     Returns:
@@ -282,7 +283,7 @@ def build_reindex_inventory(
     Raises:
         EmbeddingError: If the requested admin is invalid, a relevant source
             is malformed, a file is governed by multiple admins, or an original
-            is unavailable (unless collecting confirmed missing files for a retry).
+            is unavailable (unless collecting confirmed missing files).
     """
     if db is None:
         with get_db() as session:
@@ -694,8 +695,8 @@ def _build_inventory(
 
     items: list[ReindexFile] = []
     for file_id in sorted(file_contexts):
-        # Missing live sources block a new inventory. Retry discovery may
-        # explicitly collect confirmed deletions instead.
+        # Job creation collects confirmed deletions; publication validation
+        # still requires the source to exist.
         if file_id not in files_by_id:
             if missing_file_ids is not None:
                 missing_file_ids.add(file_id)

@@ -359,6 +359,13 @@ def _snapshot_knowledge_ids(rows: list[EmbeddingJobFile]) -> list[str]:
     return sorted(knowledge_ids)
 
 
+def _source_missing_in_generation(file, state):
+    return bool(state.index_generation_id) and (
+        (file.meta or {}).get("reindex_source_missing_generation_id")
+        == state.index_generation_id
+    )
+
+
 def _generation_snapshot(db, state, resolver):
     """Latest attempt outcomes plus current published uploads, without re-preparing sources."""
     from open_webui.retrieval.embedding.inventory import (
@@ -440,7 +447,7 @@ def _generation_snapshot(db, state, resolver):
                 if row_status == FILE_STATUS_COMPLETED
                 else row_status
             )
-        else:
+        elif not _source_missing_in_generation(file, state):
             statuses[file_id] = FILE_STATUS_PENDING
     return outcomes, all_files, statuses
 
@@ -641,9 +648,14 @@ def build_knowledge_indexing_statuses(
                 for file_id in current_ids
                 if file_id in files
                 and (
-                    file_id not in outcomes
-                    or not is_missing_source_skipped(outcomes[file_id])
-                    or file_id in statuses
+                    file_id in statuses
+                    or (
+                        not _source_missing_in_generation(files[file_id], state)
+                        and (
+                            file_id not in outcomes
+                            or not is_missing_source_skipped(outcomes[file_id])
+                        )
+                    )
                 )
             }
         active_model = models.get(state.active_embedding_model_id) if state else None

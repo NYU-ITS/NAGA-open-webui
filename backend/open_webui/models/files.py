@@ -62,6 +62,7 @@ _PRIVATE_FILE_METADATA_KEYS = frozenset(
         "audio_embedding_repair_state",
         "audio_fragment_manifest_ids",
         "required_indexing",
+        "reindex_source_missing_generation_id",
         "published_content_origin",
         "published_content_override_sha256",
         "bbox",

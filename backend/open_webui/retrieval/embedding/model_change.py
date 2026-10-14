@@ -39,6 +39,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 
 from open_webui.internal.db import get_db
+from open_webui.models.files import File
 from open_webui.models.users import Users
 from open_webui.retrieval.embedding.errors import (
     EmbeddingError,
@@ -305,13 +306,22 @@ def request_model_change(
                 reason="Target equals active model; no reindex is required.",
             ), admin_email
 
-        # Step 8: Build inventory before mutation (failures abort transaction)
+        # Step 8: Build inventory before mutation. As with retries, stale
+        # references to confirmed missing sources do not block the operation.
+        missing_file_ids: set[str] = set()
         inventory = build_reindex_inventory(
             admin_id,
             db=db,
             preparation_recipe=preparation_recipe,
             reliability_policy=snapshot_reliability_policy(config),
+            missing_file_ids=missing_file_ids,
         )
+        for file_id in sorted(missing_file_ids):
+            log.info(
+                "embedding_reindex_source_missing admin_id=%s file_id=%s",
+                admin_id,
+                file_id,
+            )
 
         # Step 9: Create job atomically
         job_result = EmbeddingJobRepository.create_job(
@@ -323,6 +333,23 @@ def request_model_change(
             created_by_user_id=authenticated_user_id,
             db=db,
         )
+
+        # An original can be gone while its File row still exists. Remember
+        # that skip for this generation so status polling does not count it
+        # as pending work that was never queued.
+        if missing_file_ids:
+            for file in (
+                db.query(File)
+                .filter(File.id.in_(sorted(missing_file_ids)))
+                .order_by(File.id)
+                .populate_existing()
+                .with_for_update()
+                .all()
+            ):
+                file.meta = {
+                    **(file.meta or {}),
+                    "reindex_source_missing_generation_id": job_result.job.index_generation_id,
+                }
 
         # Step 10: Set target model and latest job ID
         state_view = AdminEmbeddingModelStateRepository.request_target(
