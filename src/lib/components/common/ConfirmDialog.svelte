@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount, getContext, createEventDispatcher } from 'svelte';
+	import { onMount, onDestroy, getContext, createEventDispatcher } from 'svelte';
 	const i18n = getContext('i18n');
 	const dispatch = createEventDispatcher();
 
@@ -19,11 +19,27 @@
 	export let inputValue = '';
 
 	export let show = false;
+	export let requireExplicitChoice = false;
 
 	let modalElement = null;
 	let mounted = false;
 
 	const handleKeyDown = (event: KeyboardEvent) => {
+		if (requireExplicitChoice) {
+			if (event.key === 'Escape') event.preventDefault();
+			if (event.key === 'Tab') {
+				const buttons = Array.from(modalElement.querySelectorAll('button')) as HTMLButtonElement[];
+				const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+				const next = (index + (event.shiftKey ? -1 : 1) + buttons.length) % buttons.length;
+				event.preventDefault();
+				buttons[next]?.focus();
+			}
+			// Only native button activation can select Cancel or Proceed.
+			if (event.key === 'Enter' && !modalElement.contains(document.activeElement)) {
+				event.preventDefault();
+			}
+			return;
+		}
 		if (event.key === 'Escape') {
 			console.log('Escape');
 			show = false;
@@ -45,12 +61,22 @@
 		mounted = true;
 	});
 
+	onDestroy(() => {
+		if (!mounted) return;
+		window.removeEventListener('keydown', handleKeyDown);
+		if (modalElement?.parentNode) {
+			modalElement.parentNode.removeChild(modalElement);
+			document.body.style.overflow = 'unset';
+		}
+	});
+
 	$: if (mounted) {
 		if (show && modalElement) {
 			document.body.appendChild(modalElement);
 
 			window.addEventListener('keydown', handleKeyDown);
 			document.body.style.overflow = 'hidden';
+			if (requireExplicitChoice) modalElement.querySelector('button')?.focus();
 		} else if (modalElement) {
 			window.removeEventListener('keydown', handleKeyDown);
 			document.body.removeChild(modalElement);
@@ -68,10 +94,14 @@
 		class=" fixed top-0 right-0 left-0 bottom-0 bg-black/60 w-full h-screen max-h-[100dvh] flex justify-center z-99999999 overflow-hidden overscroll-contain"
 		in:fade={{ duration: 10 }}
 		on:mousedown={() => {
-			show = false;
+			if (!requireExplicitChoice) show = false;
 		}}
 	>
 		<div
+			role="dialog"
+			aria-modal="true"
+			aria-label={title || $i18n.t('Confirm your action')}
+			tabindex="-1"
 			class=" m-auto rounded-2xl max-w-full w-[32rem] mx-2 bg-gray-50 dark:bg-gray-950 max-h-[100dvh] shadow-3xl"
 			in:flyAndScale
 			on:mousedown={(e) => {

@@ -210,7 +210,10 @@ async def generate_direct_chat_completion(
                     }
                 )
 
-                log.info(f"res: {res}")
+                log.info(
+                    "Direct chat completion dispatch returned | accepted=%s",
+                    bool(res.get("status", False)) if isinstance(res, dict) else False,
+                )
 
                 if res.get("status", False):
                     # Define a generator to stream responses
@@ -226,8 +229,11 @@ async def generate_direct_chat_completion(
                                     yield f"data: {json.dumps(data)}\n\n"
                                 elif isinstance(data, str):
                                     yield data
-                        except Exception as e:
-                            log.debug(f"Error in event generator: {e}")
+                        except Exception as error:
+                            log.debug(
+                                "Direct chat event stream failed | error_type=%s",
+                                type(error).__name__,
+                            )
                             pass
 
                     # Define a background task to run the event generator
@@ -275,11 +281,10 @@ async def generate_direct_chat_completion(
                 
                 return res
             
-        except Exception as e:
+        except Exception as error:
             # Add event: Direct LLM error
             safe_add_span_event("llm.direct.error", {
-                "error.type": type(e).__name__,
-                "error.message": str(e)[:200],
+                "error.type": type(error).__name__,
             })
             
             # Re-raise exception (span status will be set by trace_span_async)
@@ -293,10 +298,13 @@ async def generate_chat_completion(
     bypass_filter: bool = False,
 ):
     model_id = form_data.get("model", "unknown")
+    messages = form_data.get("messages")
+    message_count = len(messages) if isinstance(messages, list) else 0
     log.debug(
-        f"[DEBUG] [inside generate_chat_completion() from chat.py] entry. model_id={model_id}, user={getattr(user, 'email', None)} (id={getattr(user, 'id', None)}), stream={form_data.get('stream')}."
+        "Generating chat completion | model=%s | message_count=%s",
+        model_id,
+        message_count,
     )
-    log.debug(f"generate_chat_completion: {form_data}")
     
     # Extract model and user info for instrumentation
     user_id = getattr(user, "id", None)
@@ -341,7 +349,7 @@ async def generate_chat_completion(
                 models = {
                     request.state.model["id"]: request.state.model,
                 }
-                log.debug(f"direct connection to model: {models}")
+                log.debug("Direct model route selected | model=%s", model_id)
             else:
                 models = await get_models_for_user(request, user)
 
@@ -478,11 +486,10 @@ async def generate_chat_completion(
             
             return response
             
-        except Exception as e:
+        except Exception as error:
             # Add event: LLM error
             safe_add_span_event("llm.error", {
-                "error.type": type(e).__name__,
-                "error.message": str(e)[:200],  # Truncate long error messages
+                "error.type": type(error).__name__,
             })
             
             # Re-raise exception (span status will be set by trace_span_async)

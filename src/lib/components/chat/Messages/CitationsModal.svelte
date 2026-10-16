@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { getContext, onMount, tick } from 'svelte';
+	import { getContext } from 'svelte';
 	import Modal from '$lib/components/common/Modal.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import { WEBUI_API_BASE_URL } from '$lib/constants';
@@ -11,7 +11,97 @@
 	export let showPercentage = false;
 	export let showRelevance = true;
 
-	let mergedDocuments = [];
+	type CitationMetadata = {
+		file_id?: unknown;
+		name?: unknown;
+		source?: unknown;
+		modality?: unknown;
+		content_kind?: unknown;
+		page?: unknown;
+		page_number?: unknown;
+		element_number?: unknown;
+		html?: unknown;
+	};
+
+	type MergedDocument = {
+		source: any;
+		document: any;
+		metadata?: CitationMetadata;
+		distance?: number;
+	};
+
+	let mergedDocuments: MergedDocument[] = [];
+
+	const visualContentKinds = new Set(['standalone_image', 'pdf_figure', 'pdf_table']);
+
+	const displayText = (value: unknown) =>
+		typeof value === 'string' || typeof value === 'number' ? String(value).trim() : '';
+
+	const positiveInteger = (value: unknown) => {
+		const number = typeof value === 'number' ? value : Number(value);
+		return Number.isInteger(number) && number > 0 ? number : null;
+	};
+
+	const isVisualMetadata = (metadata?: CitationMetadata) =>
+		metadata?.modality === 'image' ||
+		visualContentKinds.has(displayText(metadata?.content_kind));
+
+	const getPageNumber = (metadata?: CitationMetadata) => {
+		const pageNumber = positiveInteger(metadata?.page_number);
+		if (pageNumber) {
+			return pageNumber;
+		}
+
+		const legacyPage = typeof metadata?.page === 'number' ? metadata.page : Number(metadata?.page);
+		return Number.isInteger(legacyPage) && legacyPage >= 0 ? legacyPage + 1 : null;
+	};
+
+	const getVisualKindLabel = (metadata?: CitationMetadata) => {
+		const elementNumber = positiveInteger(metadata?.element_number);
+		switch (metadata?.content_kind) {
+			case 'pdf_figure':
+				return elementNumber ? `Figure ${elementNumber}` : 'Figure';
+			case 'pdf_table':
+				return elementNumber ? `Table ${elementNumber}` : 'Table';
+			case 'standalone_image':
+				return 'Standalone image';
+			default:
+				return 'Image';
+		}
+	};
+
+	const getSourceLabel = (document: MergedDocument) => {
+		const metadata = document.metadata;
+		const sourceName =
+			displayText(metadata?.name) ||
+			displayText(metadata?.source) ||
+			displayText(document.source?.name) ||
+			displayText(document.source?.filename) ||
+			displayText(document.source?.id) ||
+			displayText(document.source?.url);
+
+		if (!isVisualMetadata(metadata)) {
+			return sourceName;
+		}
+
+		const pageNumber = getPageNumber(metadata);
+		return [sourceName || 'Image', pageNumber ? `page ${pageNumber}` : '', getVisualKindLabel(metadata)]
+			.filter(Boolean)
+			.join(' · ');
+	};
+
+	const getSourceUrl = (document: MergedDocument) => {
+		const fileId = displayText(document.metadata?.file_id);
+		if (fileId) {
+			const pageNumber = getPageNumber(document.metadata);
+			return `${WEBUI_API_BASE_URL}/files/${encodeURIComponent(fileId)}/content${pageNumber ? `#page=${pageNumber}` : ''}`;
+		}
+
+		const sourceUrl = displayText(document.source?.url);
+		return sourceUrl.startsWith('http://') || sourceUrl.startsWith('https://')
+			? sourceUrl
+			: '#';
+	};
 
 	function calculatePercentage(distance: number) {
 		if (distance < 0) return 0;
@@ -30,15 +120,30 @@
 	}
 
 	$: if (citation) {
-		mergedDocuments = citation.document?.map((c, i) => {
+		const documents = Array.isArray(citation.document) ? citation.document : [];
+		const metadatas = Array.isArray(citation.metadata) ? citation.metadata : [];
+		const distances = Array.isArray(citation.distances) ? citation.distances : [];
+		const itemCount = Math.max(documents.length, metadatas.length);
+
+		mergedDocuments = Array.from({ length: itemCount }, (_, i) => {
+			const rawDistance = distances[i];
+			const distance =
+				rawDistance === null || rawDistance === undefined || rawDistance === ''
+					? Number.NaN
+					: typeof rawDistance === 'number'
+						? rawDistance
+						: Number(rawDistance);
 			return {
 				source: citation.source,
-				document: c,
-				metadata: citation.metadata?.[i],
-				distance: citation.distances?.[i]
+				document: documents[i] ?? '',
+				metadata: metadatas[i],
+				distance: Number.isFinite(distance) ? distance : undefined
 			};
 		});
-		if (mergedDocuments.every((doc) => doc.distance !== undefined)) {
+		if (
+			mergedDocuments.length > 0 &&
+			mergedDocuments.every((document) => document.distance !== undefined)
+		) {
 			mergedDocuments = mergedDocuments.sort(
 				(a, b) => (b.distance ?? Infinity) - (a.distance ?? Infinity)
 			);
@@ -81,7 +186,7 @@
 							{$i18n.t('Source')}
 						</div>
 
-						{#if document.source?.name}
+						{#if getSourceLabel(document)}
 							<Tooltip
 								className="w-fit"
 								content={$i18n.t('Open file')}
@@ -91,19 +196,16 @@
 								<div class="text-sm dark:text-gray-400 flex items-center gap-2 w-fit">
 									<a
 										class="hover:text-gray-500 dark:hover:text-gray-100 underline grow"
-										href={document?.metadata?.file_id
-											? `${WEBUI_API_BASE_URL}/files/${document?.metadata?.file_id}/content${document?.metadata?.page !== undefined ? `#page=${document.metadata.page + 1}` : ''}`
-											: document.source?.url?.includes('http')
-												? document.source.url
-												: `#`}
+										href={getSourceUrl(document)}
 										target="_blank"
+										rel="noopener noreferrer"
 									>
-										{document?.metadata?.name ?? document.source.name}
+										{getSourceLabel(document)}
 									</a>
-									{#if document?.metadata?.page}
-										<span class="text-xs text-gray-600 dark:text-gray-500 dark:text-gray-400">
+									{#if getPageNumber(document.metadata) && !isVisualMetadata(document.metadata)}
+										<span class="text-xs text-gray-600 dark:text-gray-400">
 											({$i18n.t('page')}
-											{document.metadata.page + 1})
+											{getPageNumber(document.metadata)})
 										</span>
 									{/if}
 								</div>
@@ -153,7 +255,11 @@
 						<div class=" text-sm font-medium dark:text-gray-300 mt-2">
 							{$i18n.t('Content')}
 						</div>
-						{#if document.metadata?.html}
+						{#if isVisualMetadata(document.metadata)}
+							<div class="text-sm dark:text-gray-400 whitespace-pre-line">
+								{getSourceLabel(document)}
+							</div>
+						{:else if document.metadata?.html}
 							<iframe
 								class="w-full border-0 h-auto rounded-none"
 								sandbox="allow-scripts allow-forms allow-same-origin"

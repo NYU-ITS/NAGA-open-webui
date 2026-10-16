@@ -1,0 +1,604 @@
+"""Embedding job status and retry API (Spec 11).
+
+Endpoints::
+
+    GET  /embedding/jobs/latest      — latest job status for the authenticated admin
+    GET  /embedding/jobs/{job_id}    — detailed status for one job
+    POST /embedding/jobs/{job_id}/retry — retry failed files from a terminal job
+
+Only the owning admin may access these endpoints.  Regular users and unrelated
+admins receive 403/404 consistent with repository conventions.
+"""
+
+import logging
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
+from pydantic import BaseModel
+
+from open_webui.internal.db import get_db
+from open_webui.models.users import Users
+from open_webui.retrieval.embedding.errors import (
+    EmbeddingError,
+    EMBEDDING_ADMIN_UNRESOLVED,
+    EMBEDDING_INVENTORY_AMBIGUOUS_ADMIN,
+    EMBEDDING_INVENTORY_AMBIGUOUS_SOURCE,
+    EMBEDDING_INVENTORY_MALFORMED_REFERENCE,
+    EMBEDDING_INVENTORY_MISSING_FILE,
+    EMBEDDING_INVENTORY_UNRESOLVED_SOURCE,
+    EMBEDDING_JOB_ACTIVE_EXISTS,
+    EMBEDDING_JOB_LEDGER_MISMATCH,
+    EMBEDDING_JOB_NOT_FOUND,
+    EMBEDDING_JOB_STALE_OPERATION,
+    EMBEDDING_JOB_WRONG_STATUS,
+    EMBEDDING_MODEL_STATE_CONFLICT,
+    EMBEDDING_REINDEX_SOURCE_CHANGED,
+    EMBEDDING_RETRY_ACTIVE_EXISTS,
+)
+from open_webui.retrieval.embedding.jobs import (
+    EmbeddingJobRepository,
+    EmbeddingJobView,
+    EmbeddingJobFileView,
+    EmbeddingJobStatusView,
+    FILE_STATUS_PENDING,
+    is_job_retry_eligible,
+)
+from open_webui.retrieval.embedding.knowledge_status import (
+    KnowledgeIndexingProgress,
+    get_generation_coverage,
+    get_generation_retry_files,
+)
+from open_webui.retrieval.embedding.reliability import snapshot_reliability_policy
+from open_webui.retrieval.embedding.enqueue import dispatch_embedding_job
+from open_webui.retrieval.embedding.state import AdminEmbeddingModelStateRepository
+from open_webui.retrieval.embedding.registry import get_model_spec_by_id
+from open_webui.utils.auth import get_verified_user
+
+log = logging.getLogger(__name__)
+
+router = APIRouter()
+
+# ─── Status response models ─────────────────────────────────────────────────
+
+
+class FailedFileInfo(BaseModel):
+    """Per-file failure detail."""
+
+    file_id: str
+    error_code: str | None = None
+    error_message: str | None = None
+    attempt_count: int = 0
+    created_at: int | None = None
+    updated_at: int | None = None
+    started_at: int | None = None
+    completed_at: int | None = None
+
+
+class IncompatibleFileInfo(FailedFileInfo):
+    """Per-file modality incompatibility detail."""
+
+
+class EmbeddingJobStatusResponse(BaseModel):
+    """Full status response for an embedding job."""
+
+    job_id: str
+    job_type: str
+    status: str
+    admin_id: str
+
+    # Model context
+    embedding_model_id: str
+    previous_embedding_model_id: str | None = None
+
+    # Admin state
+    active_model_id: str | None = None
+    target_model_id: str | None = None
+    selected_model_id: str | None = None
+    effective_model_id: str | None = None
+    index_generation_id: str | None = None
+    job_index_generation_id: str | None = None
+    availability: str = "unavailable"
+    model_scope: str = "unavailable"
+
+    # Aggregate counters
+    total_files: int = 0
+    processed_files: int = 0
+    failed_files: int = 0
+    incompatible_files: int = 0
+    pending_or_processing: int = 0
+    generation_progress: KnowledgeIndexingProgress | None = None
+    retry_file_count: int = 0
+
+    # Source-context breakdown
+    source_contexts: dict[str, dict] | None = None
+
+    # Failed file details
+    failed_files_detail: list[FailedFileInfo] = []
+    incompatible_files_detail: list[IncompatibleFileInfo] = []
+
+    # Operation-level error
+    error_code: str | None = None
+    error_message: str | None = None
+
+    # Retry eligibility (considers active jobs, target state, source changes)
+    retry_eligible: bool = False
+
+    # Timestamps
+    created_at: int | None = None
+    updated_at: int | None = None
+    started_at: int | None = None
+    completed_at: int | None = None
+
+
+class RetryResponse(BaseModel):
+    """Response for a successful retry request."""
+
+    job_id: str
+    source_job_id: str
+    job_type: str
+    status: str
+    total_files: int
+    dispatch_mode: str
+    index_generation_id: str | None = None
+    nothing_to_retry: bool = False
+    message: str | None = None
+
+
+# ─── Helpers ─────────────────────────────────────────────────────────────────
+
+
+def _require_admin(user) -> str:
+    """Verify the requesting user is an admin and return their ID.
+
+    Regular users and group members receive 403 Forbidden.  Only direct admins
+    may access embedding job status and retry endpoints (Spec 11).
+    """
+    subject = Users.get_user_by_id(user.id)
+    if subject is None or subject.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only admins may access embedding job endpoints.",
+        )
+    return subject.id
+
+
+def _compute_retry_eligible(
+    job_view: EmbeddingJobView,
+    admin_id: str,
+) -> bool:
+    """Compute accurate retry eligibility for a job.
+
+    Returns True when the stable retry prerequisites are met. The retry
+    endpoint still revalidates source freshness transactionally.
+    """
+    active = EmbeddingJobRepository.get_active_job(admin_id)
+    state = AdminEmbeddingModelStateRepository.get_state(admin_id)
+    files = EmbeddingJobRepository.list_files(job_view.id)
+    if state is None or job_view.index_generation_id != state.index_generation_id:
+        return False
+    return is_job_retry_eligible(
+        job_view,
+        target_model_id=state.target_embedding_model_id
+        or state.active_embedding_model_id,
+        has_active_job=active is not None,
+        has_failed_files=bool(get_generation_retry_files(admin_id)),
+        all_files_pending=bool(files)
+        and all(file.status == FILE_STATUS_PENDING for file in files),
+    )
+
+
+def _build_status_response(
+    job_view: EmbeddingJobView,
+    failed_files: list[EmbeddingJobFileView],
+    incompatible_files: list[EmbeddingJobFileView],
+    admin_id: str,
+    state_view=None,
+    status_view: EmbeddingJobStatusView | None = None,
+) -> EmbeddingJobStatusResponse:
+    """Build a rich status response from repository data."""
+
+    # Source-context breakdown
+    source_contexts = None
+    pending_or_processing = (
+        job_view.total_files
+        - job_view.processed_files
+        - job_view.failed_files
+        - job_view.incompatible_files
+    )
+    if status_view is not None:
+        source_contexts = {
+            bucket: {
+                "total": counts.total,
+                "processed": counts.processed,
+                "failed": counts.failed,
+                "incompatible": counts.incompatible,
+                "pending_or_processing": counts.pending_or_processing,
+            }
+            for bucket, counts in status_view.source_contexts.items()
+        }
+        pending_or_processing = status_view.pending_or_processing
+
+    retry_eligible = _compute_retry_eligible(job_view, admin_id)
+    coverage = KnowledgeIndexingProgress(**get_generation_coverage(admin_id))
+    effective_model_id = None
+    if state_view is not None and state_view.target_embedding_model_id is None:
+        try:
+            effective_model_id = get_model_spec_by_id(
+                state_view.active_embedding_model_id
+            ).id
+        except EmbeddingError:
+            pass
+    model_scope = "active" if effective_model_id else "unavailable"
+
+    return EmbeddingJobStatusResponse(
+        job_id=job_view.id,
+        job_type=job_view.job_type,
+        status=job_view.status,
+        admin_id=job_view.admin_id,
+        embedding_model_id=job_view.embedding_model_id,
+        previous_embedding_model_id=job_view.previous_embedding_model_id,
+        active_model_id=state_view.active_embedding_model_id if state_view else None,
+        target_model_id=state_view.target_embedding_model_id if state_view else None,
+        selected_model_id=(
+            (
+                state_view.target_embedding_model_id
+                or state_view.active_embedding_model_id
+            )
+            if state_view
+            else None
+        ),
+        effective_model_id=effective_model_id,
+        index_generation_id=(
+            state_view.index_generation_id
+            if state_view
+            else job_view.index_generation_id
+        ),
+        job_index_generation_id=job_view.index_generation_id,
+        availability=(
+            "ready"
+            if coverage.processed == coverage.total and effective_model_id
+            else (
+                "partial"
+                if coverage.processed and effective_model_id
+                else "unavailable"
+            )
+        ),
+        generation_progress=coverage,
+        retry_file_count=len(get_generation_retry_files(admin_id)),
+        model_scope=model_scope,
+        total_files=job_view.total_files,
+        processed_files=job_view.processed_files,
+        failed_files=job_view.failed_files,
+        incompatible_files=job_view.incompatible_files,
+        pending_or_processing=pending_or_processing,
+        source_contexts=source_contexts,
+        failed_files_detail=[
+            FailedFileInfo(
+                file_id=f.file_id,
+                error_code=f.error_code,
+                error_message=_safe_job_error_message(f.error_code),
+                attempt_count=f.attempt_count,
+                created_at=f.created_at,
+                updated_at=f.updated_at,
+                started_at=f.started_at,
+                completed_at=f.completed_at,
+            )
+            for f in failed_files
+        ],
+        incompatible_files_detail=[
+            IncompatibleFileInfo(
+                file_id=f.file_id,
+                error_code=f.error_code,
+                error_message=_safe_job_error_message(f.error_code),
+                attempt_count=f.attempt_count,
+                created_at=f.created_at,
+                updated_at=f.updated_at,
+                started_at=f.started_at,
+                completed_at=f.completed_at,
+            )
+            for f in incompatible_files
+        ],
+        error_code=job_view.error_code,
+        error_message=_safe_job_error_message(job_view.error_code),
+        retry_eligible=retry_eligible,
+        created_at=job_view.created_at,
+        updated_at=job_view.updated_at,
+        started_at=job_view.started_at,
+        completed_at=job_view.completed_at,
+    )
+
+
+def _safe_job_error_message(error_code: str | None) -> str | None:
+    if error_code is None:
+        return None
+    if error_code == "enqueue_failed":
+        return "The indexing job could not be queued. Try again later."
+    if error_code == "embedding_reindex_source_changed":
+        return "Source content changed during indexing. Retry the failed file to index its current contents."
+    if error_code == "embedding_job_stale_operation":
+        return "This indexing job was superseded by a newer operation."
+    if error_code in {
+        "embedding_modality_unsupported",
+        "pdf_visuals_require_multimodal_model",
+    }:
+        return "This file is incompatible with the current embedding model."
+    return "The embedding indexing operation could not be completed."
+
+
+def _get_job_for_admin(job_id: str, admin_id: str) -> EmbeddingJobView:
+    """Load a job and verify it belongs to the requesting admin."""
+    job = EmbeddingJobRepository.get_job(job_id)
+    if job is None or job.admin_id != admin_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Embedding job not found.",
+        )
+    return job
+
+
+def _active_retry_for_source(
+    admin_id: str, source_job_id: str
+) -> EmbeddingJobView | None:
+    """Return an already-running retry descended from the requested job."""
+    active_job = EmbeddingJobRepository.get_active_job(admin_id)
+    if active_job is None or active_job.job_type != "retry_failed":
+        return None
+
+    cursor = active_job
+    visited = set()
+    for _ in range(16):
+        if cursor.id in visited:
+            return None
+        visited.add(cursor.id)
+        if cursor.source_job_id == source_job_id:
+            return active_job
+        if not cursor.source_job_id:
+            return None
+        parent = EmbeddingJobRepository.get_job(cursor.source_job_id)
+        if parent is None:
+            return None
+        cursor = parent
+    return None
+
+
+def _retry_http_error(error: EmbeddingError) -> HTTPException:
+    """Map retry/model-change errors to the stable public API envelope."""
+    if error.code in (EMBEDDING_JOB_ACTIVE_EXISTS, EMBEDDING_RETRY_ACTIVE_EXISTS):
+        return HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error_code": error.code,
+                "message": "Another embedding indexing operation is already active.",
+            },
+        )
+    if error.code in (EMBEDDING_REINDEX_SOURCE_CHANGED, EMBEDDING_JOB_STALE_OPERATION):
+        return HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error_code": error.code,
+                "message": "The indexing operation changed. Refresh the status before retrying.",
+                "retryable": True,
+            },
+        )
+    if error.code == EMBEDDING_JOB_NOT_FOUND:
+        return HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error_code": error.code,
+                "message": "Embedding job not found.",
+            },
+        )
+    if error.code in (EMBEDDING_JOB_WRONG_STATUS, EMBEDDING_MODEL_STATE_CONFLICT):
+        return HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error_code": error.code,
+                "message": "The embedding indexing operation cannot be retried in its current state.",
+            },
+        )
+    # Use fixed public messages: domain details can contain source data.
+    messages = {
+        EMBEDDING_ADMIN_UNRESOLVED: (
+            "The administrator for this indexing operation could not be resolved."
+        ),
+        EMBEDDING_INVENTORY_UNRESOLVED_SOURCE: (
+            "A failed document's knowledge base or chat has no valid governing "
+            "administrator. Review its owner and group assignments before retrying."
+        ),
+        EMBEDDING_INVENTORY_AMBIGUOUS_SOURCE: (
+            "A failed document's knowledge base or chat resolves to multiple "
+            "administrators. Review its owner and group assignments before retrying."
+        ),
+        EMBEDDING_INVENTORY_AMBIGUOUS_ADMIN: (
+            "A failed document is shared across sources governed by different "
+            "administrators. Resolve its ownership before retrying."
+        ),
+        EMBEDDING_INVENTORY_MISSING_FILE: (
+            "An original document is missing or cannot be read from storage. "
+            "Restore the source file or re-upload the document before retrying."
+        ),
+        EMBEDDING_INVENTORY_MALFORMED_REFERENCE: (
+            "A failed document has invalid references or content metadata. "
+            "Repair the affected document or source metadata before retrying."
+        ),
+        EMBEDDING_JOB_LEDGER_MISMATCH: (
+            "The indexing job history is inconsistent. Contact support to repair "
+            "the job history before retrying."
+        ),
+    }
+    return HTTPException(
+        status_code=(
+            status.HTTP_500_INTERNAL_SERVER_ERROR
+            if error.code == EMBEDDING_JOB_LEDGER_MISMATCH
+            else status.HTTP_400_BAD_REQUEST
+        ),
+        detail={
+            "error_code": error.code,
+            "message": messages.get(
+                error.code, "The embedding indexing operation could not be retried."
+            ),
+        },
+    )
+
+
+# ─── Endpoints ───────────────────────────────────────────────────────────────
+
+
+@router.get("/embedding/jobs/latest")
+def get_latest_job_status(
+    request: Request,
+    user=Depends(get_verified_user),
+):
+    """Return the latest embedding job status for the authenticated admin."""
+    admin_id = _require_admin(user)
+
+    job_view = EmbeddingJobRepository.get_latest_job(admin_id)
+    if job_view is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No embedding job found for this admin.",
+        )
+
+    failed_files = EmbeddingJobRepository.list_failed_files(job_view.id)
+    incompatible_files = EmbeddingJobRepository.list_incompatible_files(job_view.id)
+    state_data = AdminEmbeddingModelStateRepository.get_state(admin_id)
+    status_view = EmbeddingJobRepository.get_job_status(job_view.id)
+
+    return _build_status_response(
+        job_view=job_view,
+        failed_files=failed_files,
+        incompatible_files=incompatible_files,
+        admin_id=admin_id,
+        state_view=state_data,
+        status_view=status_view,
+    )
+
+
+@router.get("/embedding/jobs/{job_id}")
+def get_job_status(
+    job_id: str,
+    request: Request,
+    user=Depends(get_verified_user),
+):
+    """Return detailed status for a specific embedding job."""
+    admin_id = _require_admin(user)
+    job_view = _get_job_for_admin(job_id, admin_id)
+
+    failed_files = EmbeddingJobRepository.list_failed_files(job_id)
+    incompatible_files = EmbeddingJobRepository.list_incompatible_files(job_id)
+    state_data = AdminEmbeddingModelStateRepository.get_state(admin_id)
+    status_view = EmbeddingJobRepository.get_job_status(job_id)
+
+    return _build_status_response(
+        job_view=job_view,
+        failed_files=failed_files,
+        incompatible_files=incompatible_files,
+        admin_id=admin_id,
+        state_view=state_data,
+        status_view=status_view,
+    )
+
+
+@router.post("/embedding/jobs/{job_id}/retry")
+def retry_failed_job(
+    job_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    user=Depends(get_verified_user),
+):
+    """Retry only eligible failures, preserving the generation and frozen recipe."""
+    admin_id = _require_admin(user)
+    source_job = _get_job_for_admin(job_id, admin_id)
+    retry_already_active = False
+    try:
+        with get_db() as db:
+            result = EmbeddingJobRepository.create_retry_job(
+                source_job_id=job_id,
+                admin_id=admin_id,
+                reliability_policy=snapshot_reliability_policy(
+                    request.app.state.config
+                ),
+                db=db,
+            )
+            db.commit()
+            result_job = result.job
+            retry_already_active = result.already_active
+    except EmbeddingError as error:
+        if error.code in (EMBEDDING_JOB_ACTIVE_EXISTS, EMBEDDING_RETRY_ACTIVE_EXISTS):
+            result_job = _active_retry_for_source(admin_id, job_id)
+            if result_job is None:
+                raise _retry_http_error(error)
+            retry_already_active = True
+        elif (
+            error.code == EMBEDDING_JOB_WRONG_STATUS
+            and isinstance(error.detail, str)
+            and error.detail.startswith("Nothing to retry")
+        ):
+            return RetryResponse(
+                job_id=job_id,
+                source_job_id=job_id,
+                job_type=source_job.job_type,
+                status=source_job.status,
+                total_files=0,
+                dispatch_mode="none",
+                index_generation_id=source_job.index_generation_id,
+                nothing_to_retry=True,
+                message="Nothing to retry. No eligible failed files remain; successful files stay available.",
+            )
+        else:
+            log.warning(
+                "[RETRY] Retry validation failed | source_job_id=%s | error_code=%s",
+                job_id,
+                error.code,
+            )
+            raise _retry_http_error(error)
+
+    # Enqueue the job.  On failure, mark the job as failed so it does not
+    # remain stuck as queued.
+    try:
+        dispatch_mode = (
+            "already_queued"
+            if retry_already_active
+            else (
+                dispatch_embedding_job(result_job.id, background_tasks)
+                if result_job.status in ("queued", "processing")
+                else "none"
+            )
+        )
+    except Exception as e:
+        log.error(
+            "[RETRY] Failed to enqueue job %s | type=%s",
+            result_job.id,
+            type(e).__name__,
+        )
+        try:
+            EmbeddingJobRepository.mark_job_failed(
+                job_id=result_job.id,
+                error_code="enqueue_failed",
+                error_message=f"Failed to enqueue retry job: {type(e).__name__}",
+            )
+        except Exception as persist_err:
+            log.error(
+                "[RETRY] Failed to mark job %s after enqueue error | type=%s",
+                result_job.id,
+                type(persist_err).__name__,
+            )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Retry job created but enqueue failed. Try again later.",
+        )
+
+    return RetryResponse(
+        job_id=result_job.id,
+        source_job_id=job_id,
+        job_type=result_job.job_type,
+        status=result_job.status,
+        total_files=result_job.total_files,
+        dispatch_mode=dispatch_mode,
+        index_generation_id=result_job.index_generation_id,
+        nothing_to_retry=result_job.total_files == 0,
+        message=(
+            "Nothing to retry. Missing source files were skipped; successful files remain available."
+            if result_job.total_files == 0
+            else f"Retrying {result_job.total_files} eligible files. Successful files remain available."
+        ),
+    )

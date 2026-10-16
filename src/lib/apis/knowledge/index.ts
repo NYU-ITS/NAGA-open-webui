@@ -1,5 +1,168 @@
 import { WEBUI_API_BASE_URL } from '$lib/constants';
 
+export type KnowledgeIndexingDisplayState =
+	| 'ready'
+	| 'queued'
+	| 'indexing'
+	| 'partial'
+	| 'failed'
+	| 'unavailable';
+
+export type KnowledgeIndexingJobStatus =
+	| 'queued'
+	| 'processing'
+	| 'completed'
+	| 'failed'
+	| 'partially_failed';
+
+export type KnowledgeIndexingProgress = {
+	total: number;
+	processed: number;
+	failed: number;
+	incompatible: number;
+	pending_or_processing: number;
+};
+
+export type EmbeddingModelSummary = {
+	id: string;
+	provider: string;
+	display_name: string;
+	model_name?: string | null;
+	modalities: string[];
+	status: string;
+};
+
+export type KnowledgeIndexingIncompatible = {
+	file_id: string;
+	filename: string | null;
+	source_contexts: string[];
+	knowledge_bases: KnowledgeIndexingKnowledgeReference[];
+	error_code: string | null;
+	error_message: string | null;
+	attempt_count: number;
+	created_at: number | null;
+	updated_at: number | null;
+	started_at: number | null;
+	completed_at: number | null;
+};
+
+export type KnowledgeIndexingFailure = {
+	file_id: string;
+	filename: string | null;
+	source_contexts: string[];
+	knowledge_bases: KnowledgeIndexingKnowledgeReference[];
+	error_code: string | null;
+	error_message: string | null;
+	attempt_count: number;
+	created_at: number | null;
+	updated_at: number | null;
+	started_at: number | null;
+	completed_at: number | null;
+};
+
+export type KnowledgeIndexingKnowledgeReference = {
+	id: string;
+	name: string;
+};
+
+export type KnowledgeIndexingStatus = {
+	knowledge_id: string;
+	in_reindex_scope?: boolean;
+	governing_admin_id?: string | null;
+	display_state: KnowledgeIndexingDisplayState;
+	job_status: KnowledgeIndexingJobStatus | null;
+	retrieval_available: boolean;
+	current_file_count: number;
+	job_display_state: KnowledgeIndexingDisplayState;
+	retry_kind: 'indexing_operation' | 'failed_documents' | null;
+	retry_file_count?: number;
+	index_generation_id?: string | null;
+	availability?: 'ready' | 'partial' | 'unavailable';
+	selected_model?: EmbeddingModelSummary | null;
+	job_id: string | null;
+	job_type: string | null;
+	active_model: EmbeddingModelSummary | null;
+	target_model: EmbeddingModelSummary | null;
+	effective_model: EmbeddingModelSummary | null;
+	model_scope: 'active' | 'staged' | 'legacy' | 'unavailable';
+	collection_progress: KnowledgeIndexingProgress;
+	job_progress: KnowledgeIndexingProgress;
+	generation_progress?: KnowledgeIndexingProgress;
+	failed_document_count: number;
+	job_failed_document_count: number;
+	job_failed_documents: KnowledgeIndexingFailure[];
+	incompatible_document_count: number;
+	job_incompatible_document_count: number;
+	job_incompatible_documents: KnowledgeIndexingIncompatible[];
+	error_code: string | null;
+	error_message: string | null;
+	retry_eligible: boolean;
+	can_retry: boolean;
+	created_at: number | null;
+	updated_at: number | null;
+	started_at: number | null;
+	completed_at: number | null;
+	last_successful_indexed_at: number | null;
+	failed_documents?: KnowledgeIndexingFailure[];
+	incompatible_documents?: KnowledgeIndexingIncompatible[];
+};
+
+export class KnowledgeIndexingApiError extends Error {
+	status: number;
+	detail: unknown;
+	errorCode: string | null;
+
+	constructor(status: number, payload: any) {
+		const detail = payload?.detail ?? payload;
+		const message =
+			typeof detail === 'string'
+				? detail
+				: typeof detail?.message === 'string'
+					? detail.message
+					: `Knowledge indexing request failed (${status}).`;
+		super(message);
+		this.name = 'KnowledgeIndexingApiError';
+		this.status = status;
+		this.detail = detail;
+		this.errorCode =
+			typeof detail === 'object' && typeof detail?.error_code === 'string'
+				? detail.error_code
+				: null;
+	}
+}
+
+const getKnowledgeIndexingResponse = async <T>(url: string, token: string): Promise<T> => {
+	const response = await fetch(url, {
+		method: 'GET',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		}
+	});
+
+	if (!response.ok) {
+		const payload = await response.json().catch(() => null);
+		throw new KnowledgeIndexingApiError(response.status, payload);
+	}
+
+	return response.json();
+};
+
+export const getKnowledgeIndexingStatuses = async (
+	token: string
+): Promise<KnowledgeIndexingStatus[]> =>
+	getKnowledgeIndexingResponse(`${WEBUI_API_BASE_URL}/knowledge/indexing/status`, token);
+
+export const getKnowledgeIndexingStatus = async (
+	token: string,
+	id: string
+): Promise<KnowledgeIndexingStatus> =>
+	getKnowledgeIndexingResponse(
+		`${WEBUI_API_BASE_URL}/knowledge/${encodeURIComponent(id)}/indexing/status`,
+		token
+	);
+
 export const createNewKnowledge = async (
 	token: string,
 	name: string,
@@ -199,11 +362,17 @@ export const addFileToKnowledgeById = async (token: string, knowledgeId: string,
 			if (!res.ok) throw await res.json();
 			return res.json();
 		})
-		.catch((err) => {
-			error = err.detail;
-			console.log(err);
-			return null;
-		});
+	.catch((err) => {
+		const detail = err.detail;
+		// Preserve structured {code, message} errors; normalize for display
+		if (detail && typeof detail === 'object' && detail.message) {
+			error = detail;
+		} else {
+			error = detail;
+		}
+		console.log(err);
+		return null;
+	});
 
 	if (error) {
 		throw error;
@@ -245,6 +414,28 @@ export const updateFileFromKnowledgeById = async (token: string, id: string, fil
 	}
 
 	return res;
+};
+
+export const repairKnowledgeFileAudio = async (
+	token: string,
+	knowledgeId: string,
+	fileId: string
+) => {
+	const response = await fetch(
+		`${WEBUI_API_BASE_URL}/knowledge/${encodeURIComponent(knowledgeId)}/file/${encodeURIComponent(fileId)}/audio/repair`,
+		{
+			method: 'POST',
+			headers: {
+				Accept: 'application/json',
+				authorization: `Bearer ${token}`
+			}
+		}
+	);
+	if (!response.ok) {
+		const payload = await response.json().catch(() => null);
+		throw new KnowledgeIndexingApiError(response.status, payload);
+	}
+	return response.json();
 };
 
 export const removeFileFromKnowledgeById = async (token: string, id: string, fileId: string) => {

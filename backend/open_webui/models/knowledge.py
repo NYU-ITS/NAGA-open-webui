@@ -86,11 +86,11 @@ class KnowledgeUserModel(KnowledgeModel):
 
 
 class KnowledgeResponse(KnowledgeModel):
-    files: Optional[list[FileMetadataResponse | dict]] = None
+    files: Optional[list[FileMetadataResponse]] = None
 
 
 class KnowledgeUserResponse(KnowledgeUserModel):
-    files: Optional[list[FileMetadataResponse | dict]] = None
+    files: Optional[list[FileMetadataResponse]] = None
 
 
 class KnowledgeForm(BaseModel):
@@ -107,14 +107,13 @@ class KnowledgeTable:
         self, user_id: str, form_data: KnowledgeForm
     ) -> Optional[KnowledgeModel]:
         with get_db() as db:
-            # Ensure data is initialized with file_ids list if not provided
+            # ``file_ids`` is server-owned. Attachments must flow through the
+            # add-file routes so membership and vector projections stay aligned.
             form_data_dict = form_data.model_dump(exclude={"assign_to_email"})
-            if form_data_dict.get("data") is None:
-                form_data_dict["data"] = {"file_ids": []}
-            elif not isinstance(form_data_dict.get("data"), dict):
-                form_data_dict["data"] = {"file_ids": []}
-            elif "file_ids" not in form_data_dict["data"]:
-                form_data_dict["data"]["file_ids"] = []
+            data = form_data_dict.get("data")
+            data = dict(data) if isinstance(data, dict) else {}
+            data["file_ids"] = []
+            form_data_dict["data"] = data
             
             knowledge = KnowledgeModel(
                 **{
@@ -255,17 +254,124 @@ class KnowledgeTable:
     ) -> Optional[KnowledgeModel]:
         try:
             with get_db() as db:
-                knowledge = self.get_knowledge_by_id(id=id)
-                db.query(Knowledge).filter_by(id=id).update(
-                    {
-                        **form_data.model_dump(exclude={"assign_to_email"}),
-                        "updated_at": int(time.time()),
-                    }
+                knowledge = (
+                    db.query(Knowledge)
+                    .filter_by(id=id)
+                    .with_for_update()
+                    .first()
                 )
+                if knowledge is None:
+                    return None
+                values = form_data.model_dump(exclude={"assign_to_email"})
+                current_data = (
+                    dict(knowledge.data) if isinstance(knowledge.data, dict) else {}
+                )
+                incoming_data = values.get("data")
+                next_data = (
+                    dict(incoming_data)
+                    if isinstance(incoming_data, dict)
+                    else current_data
+                )
+                current_file_ids = current_data.get("file_ids", [])
+                next_data["file_ids"] = (
+                    list(current_file_ids)
+                    if isinstance(current_file_ids, list)
+                    else []
+                )
+                values["data"] = next_data
+                for key, value in values.items():
+                    setattr(knowledge, key, value)
+                knowledge.updated_at = int(time.time())
                 db.commit()
-                return self.get_knowledge_by_id(id=id)
-        except Exception as e:
-            log.exception(e)
+                return KnowledgeModel.model_validate(knowledge)
+        except Exception as error:
+            log.error(
+                "Failed to update knowledge %s | type=%s",
+                id,
+                type(error).__name__,
+            )
+            return None
+
+    def add_files_to_knowledge_by_id(
+        self,
+        id: str,
+        file_ids: list[str],
+    ) -> Optional[KnowledgeModel]:
+        """Append existing files under the shared File-then-Knowledge lock order."""
+
+        from open_webui.models.files import File
+
+        requested_ids = sorted({str(file_id) for file_id in file_ids if file_id})
+        if not requested_ids:
+            return self.get_knowledge_by_id(id=id)
+        try:
+            with get_db() as db:
+                locked_files = (
+                    db.query(File)
+                    .filter(File.id.in_(requested_ids))
+                    .order_by(File.id)
+                    .with_for_update()
+                    .all()
+                )
+                if {row.id for row in locked_files} != set(requested_ids):
+                    return None
+                knowledge = (
+                    db.query(Knowledge)
+                    .filter(Knowledge.id == id)
+                    .with_for_update()
+                    .first()
+                )
+                if knowledge is None:
+                    return None
+                data = dict(knowledge.data or {})
+                current_ids = data.get("file_ids", [])
+                current_ids = (
+                    list(current_ids) if isinstance(current_ids, list) else []
+                )
+                for file_id in requested_ids:
+                    if file_id not in current_ids:
+                        current_ids.append(file_id)
+                data["file_ids"] = current_ids
+                knowledge.data = data
+                knowledge.updated_at = int(time.time())
+                db.commit()
+                return KnowledgeModel.model_validate(knowledge)
+        except Exception:
+            log.exception("Failed to add files to knowledge %s", id)
+            return None
+
+    def remove_files_from_knowledge_by_id(
+        self,
+        id: str,
+        file_ids: list[str],
+    ) -> Optional[KnowledgeModel]:
+        """Remove specified IDs from the current locked membership list."""
+
+        removed_ids = {str(file_id) for file_id in file_ids if file_id}
+        try:
+            with get_db() as db:
+                knowledge = (
+                    db.query(Knowledge)
+                    .filter(Knowledge.id == id)
+                    .with_for_update()
+                    .first()
+                )
+                if knowledge is None:
+                    return None
+                data = dict(knowledge.data or {})
+                current_ids = data.get("file_ids", [])
+                current_ids = (
+                    list(current_ids) if isinstance(current_ids, list) else []
+                )
+                data["file_ids"] = [
+                    file_id for file_id in current_ids if file_id not in removed_ids
+                ]
+                knowledge.data = data
+                knowledge.updated_at = int(time.time())
+                db.commit()
+                return KnowledgeModel.model_validate(knowledge)
+        except Exception:
+            log.exception("Failed to remove files from knowledge %s", id)
             return None
 
     def update_knowledge_data_by_id(
@@ -285,7 +391,12 @@ class KnowledgeTable:
                         return None
                     
                     # Log current state for debugging
-                    log.info(f"Updating knowledge {id} (attempt {attempt + 1}/{max_retries}): user_id={knowledge_exists.user_id}, current_data={knowledge_exists.data}, new_data={data}")
+                    log.info(
+                        "Updating knowledge %s (attempt %s/%s)",
+                        id,
+                        attempt + 1,
+                        max_retries,
+                    )
                     
                     # Ensure data is a dict with file_ids key
                     if not isinstance(data, dict):
@@ -322,7 +433,7 @@ class KnowledgeTable:
                         log.error(f"Failed to retrieve updated knowledge {id} from same session")
                         return None
                     
-                    log.info(f"Retrieved updated knowledge {id}: data={updated_knowledge.data}")
+                    log.info("Retrieved updated knowledge %s", id)
                     
                     # Convert to model and normalize data
                     knowledge_model = KnowledgeModel.model_validate(updated_knowledge)
@@ -334,13 +445,25 @@ class KnowledgeTable:
                         knowledge_model.data["file_ids"] = []
                     
                     return knowledge_model
-            except Exception as e:
+            except Exception as error:
                 if attempt < max_retries - 1:
-                    log.warning(f"Error updating knowledge {id} on attempt {attempt + 1}, retrying: {e}")
+                    log.warning(
+                        "Knowledge data update failed; retrying | knowledge=%s | "
+                        "attempt=%s | type=%s",
+                        id,
+                        attempt + 1,
+                        type(error).__name__,
+                    )
                     time_module.sleep(retry_delay * (attempt + 1))
                     continue
                 else:
-                    log.exception(f"Error updating knowledge data for {id} after {max_retries} attempts: {e}")
+                    log.error(
+                        "Knowledge data update failed | knowledge=%s | "
+                        "attempts=%s | type=%s",
+                        id,
+                        max_retries,
+                        type(error).__name__,
+                    )
                     return None
         
         return None
@@ -401,6 +524,24 @@ class KnowledgeTable:
         except Exception as e:
             log.exception(f"Error finding knowledge bases for file_id {file_id}: {e}")
         return knowledge_bases
+
+    def user_has_read_access_to_file(self, user_id: str, file_id: str) -> bool:
+        """Return whether any containing knowledge base is readable by a user.
+
+        File ownership and administrator access remain the responsibility of
+        the file route. This helper extends read access only through current
+        knowledge ownership, explicit read grants, or assigned groups.
+        """
+        for knowledge in self.get_knowledge_bases_by_file_id(file_id):
+            if knowledge.user_id == user_id:
+                return True
+            if has_access(user_id, "read", knowledge.access_control):
+                return True
+            if self._item_assigned_to_user_groups(
+                user_id, knowledge, permission="read"
+            ):
+                return True
+        return False
 
     def remove_file_from_all_knowledge_bases(self, file_id: str) -> bool:
         """

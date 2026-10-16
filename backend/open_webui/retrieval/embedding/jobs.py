@@ -1,0 +1,1878 @@
+"""Embedding job repository: transactional API for durable job and file lifecycle (Spec 03).
+
+The repository encapsulates all CRUD for ``embedding_jobs`` and ``embedding_job_files``,
+enforcing atomic claims, terminal transitions, and consistent aggregate counters. It
+follows the same transactional pattern as ``AdminEmbeddingModelStateRepository``: mutating
+methods accept an optional caller-owned ``db`` session and only flush when provided; the
+caller commits. When ``db`` is ``None``, the method owns and commits its own session.
+
+Concurrency is handled via row locks (``with_for_update()``) and conditional updates.
+Duplicate worker delivery receives a no-op result when another worker owns or completed
+the same transition. Counters are recomputed in the same transaction as finalization,
+never incremented optimistically.
+
+Invariants enforced:
+1. One active (queued/processing) job per admin.
+2. One file row per (job_id, file_id) — enforced by composite PK.
+3. total_files is the immutable inventory size and equals persisted file-row count.
+4. processed_files equals completed file-row count.
+5. failed_files equals failed file-row count.
+6. Aggregate counters never exceed total.
+7. Terminal job state cannot return to processing.
+8. Completed file rows are never claimed again within the same job.
+9. Every transition updates updated_at; start and completion timestamps are set once.
+"""
+
+import logging
+import time
+import uuid
+from dataclasses import dataclass, replace
+from typing import Mapping, Optional, Protocol, Sequence
+
+from sqlalchemy.exc import IntegrityError
+
+from open_webui.internal.db import get_db
+from open_webui.models.embeddings import (
+    AdminEmbeddingModelState,
+    EmbeddingJob,
+    EmbeddingJobFile,
+)
+from open_webui.retrieval.embedding.errors import (
+    EmbeddingError,
+    PDF_VISUALS_REQUIRE_MULTIMODAL_MODEL,
+    EMBEDDING_MODALITY_UNSUPPORTED,
+    EMBEDDING_JOB_ACTIVE_EXISTS,
+    EMBEDDING_JOB_LEDGER_MISMATCH,
+    EMBEDDING_JOB_NOT_FOUND,
+    EMBEDDING_JOB_STALE_OPERATION,
+    EMBEDDING_JOB_TERMINAL,
+    EMBEDDING_JOB_WRONG_STATUS,
+    EMBEDDING_FILE_WRONG_STATUS,
+    EMBEDDING_MODEL_STATE_CONFLICT,
+    EMBEDDING_REINDEX_SOURCE_CHANGED,
+    EMBEDDING_RETRY_ACTIVE_EXISTS,
+)
+from open_webui.retrieval.embedding.file_processing import (
+    read_stored_content_provenance,
+)
+from open_webui.retrieval.embedding.inventory import (
+    ReindexFile,
+    SOURCE_KNOWLEDGE,
+    SOURCE_CHAT_UPLOAD,
+    source_sha256_for_file,
+)
+from open_webui.retrieval.embedding.preparation import (
+    PreparationRecipe,
+)
+from open_webui.retrieval.embedding.reliability import EmbeddingReliabilityPolicy
+
+log = logging.getLogger(__name__)
+
+# Job status constants
+JOB_STATUS_QUEUED = "queued"
+JOB_STATUS_PROCESSING = "processing"
+JOB_STATUS_COMPLETED = "completed"
+JOB_STATUS_FAILED = "failed"
+JOB_STATUS_PARTIALLY_FAILED = "partially_failed"
+
+# File status constants
+FILE_STATUS_PENDING = "pending"
+FILE_STATUS_PROCESSING = "processing"
+FILE_STATUS_COMPLETED = "completed"
+FILE_STATUS_FAILED = "failed"
+FILE_STATUS_INCOMPATIBLE = "incompatible"
+
+_INCOMPATIBLE_FILE_CODES = frozenset(
+    {EMBEDDING_MODALITY_UNSUPPORTED, PDF_VISUALS_REQUIRE_MULTIMODAL_MODEL}
+)
+_INCOMPATIBLE_FILE_MESSAGES = {
+    EMBEDDING_MODALITY_UNSUPPORTED: (
+        "This file is incompatible with the current embedding model."
+    ),
+    PDF_VISUALS_REQUIRE_MULTIMODAL_MODEL: (
+        "This file contains visual content incompatible with the current embedding model."
+    ),
+}
+
+_TERMINAL_JOB_STATUSES = frozenset({JOB_STATUS_COMPLETED, JOB_STATUS_FAILED, JOB_STATUS_PARTIALLY_FAILED})
+_ACTIVE_JOB_STATUSES = frozenset({JOB_STATUS_QUEUED, JOB_STATUS_PROCESSING})
+
+
+def is_missing_source_skipped(row) -> bool:
+    """Keep a historical failure out of current coverage after retry skips it."""
+    snapshot = row.file_snapshot if isinstance(row.file_snapshot, dict) else {}
+    return snapshot.get("retry_skip_reason") == "source_missing"
+
+
+class _RetryableJob(Protocol):
+    status: str
+    embedding_model_id: str
+
+
+def is_job_retry_eligible(
+    job: _RetryableJob,
+    *,
+    target_model_id: Optional[str],
+    has_active_job: bool,
+    has_failed_files: bool,
+    all_files_pending: bool,
+) -> bool:
+    """Return whether a terminal job may offer the retry action.
+
+    The retry endpoint remains authoritative and revalidates source freshness
+    transactionally. This read-only predicate mirrors its stable prerequisites,
+    including the enqueue-only failure path where every file is still pending.
+    """
+    if job.status not in _TERMINAL_JOB_STATUSES:
+        return False
+    if has_active_job or target_model_id != job.embedding_model_id:
+        return False
+
+    is_enqueue_only_failure = job.status == JOB_STATUS_FAILED and all_files_pending
+    return has_failed_files or is_enqueue_only_failure
+
+
+@dataclass(frozen=True)
+class EmbeddingJobFileView:
+    """Detached view of one embedding job file row.
+
+    Contains only stable IDs and status data; no credentials or model details.
+    file_snapshot is the persisted ReindexFile inventory data.
+    """
+
+    job_id: str
+    file_id: str
+    status: str
+    attempt_count: int
+    error_code: Optional[str]
+    error_message: Optional[str]
+    file_snapshot: dict
+    created_at: int
+    updated_at: int
+    started_at: Optional[int]
+    completed_at: Optional[int]
+
+
+@dataclass(frozen=True)
+class EmbeddingJobView:
+    """Detached view of one embedding job row.
+
+    Contains only stable IDs, status, and counters; no credentials or model details.
+    """
+
+    id: str
+    admin_id: str
+    embedding_model_id: str
+    previous_embedding_model_id: Optional[str]
+    job_type: str
+    status: str
+    total_files: int
+    processed_files: int
+    failed_files: int
+    incompatible_files: int
+    rq_job_id: Optional[str]
+    created_by_user_id: Optional[str]
+    source_job_id: Optional[str]
+    error_code: Optional[str]
+    error_message: Optional[str]
+    created_at: int
+    updated_at: int
+    started_at: Optional[int]
+    completed_at: Optional[int]
+    index_generation_id: str = ""
+
+
+@dataclass(frozen=True)
+class CreateJobResult:
+    """Result of creating a new job with its file snapshot."""
+
+    job: EmbeddingJobView
+    files: tuple[EmbeddingJobFileView, ...]
+    already_active: bool = False
+
+
+# Source-context buckets for status data (Spec 08). A physical file is classified
+# from its persisted snapshot's ``source_contexts`` into exactly one mutually
+# exclusive bucket so aggregate counts never double-count a file referenced by
+# both a knowledge base and a chat upload.
+SOURCE_CONTEXT_KNOWLEDGE = SOURCE_KNOWLEDGE
+SOURCE_CONTEXT_CHAT_UPLOAD = SOURCE_CHAT_UPLOAD
+SOURCE_CONTEXT_BOTH = "both"
+
+
+@dataclass(frozen=True)
+class SourceContextCounts:
+    """Ledger-derived counts for one source-context bucket.
+
+    ``total`` counts every file row in the bucket; ``processed`` counts
+    completed rows; ``failed`` counts failed rows. A processing or pending row
+    is in neither terminal count, so ``pending_or_processing`` is derived.
+    """
+
+    total: int = 0
+    processed: int = 0
+    failed: int = 0
+    incompatible: int = 0
+
+    @property
+    def pending_or_processing(self) -> int:
+        return self.total - self.processed - self.failed - self.incompatible
+
+
+@dataclass(frozen=True)
+class EmbeddingJobStatusView:
+    """Read-only status for one embedding job (Spec 08).
+
+    ``job`` carries the stored aggregate counters (recomputed from the file
+    ledger after every terminal transition and at finalization).
+    ``pending_or_processing`` and ``source_contexts`` are derived: the three
+    buckets (``knowledge``, ``chat_upload``, ``both``) are mutually exclusive
+    and their totals sum to the aggregate file count without double-counting a
+    file referenced by both knowledge and chat.
+    """
+
+    job: EmbeddingJobView
+    pending_or_processing: int
+    source_contexts: dict[str, SourceContextCounts]
+
+
+def _source_bucket(source_contexts) -> Optional[str]:
+    """Classify a file snapshot's ``source_contexts`` into one status bucket.
+
+    Returns one of :data:`SOURCE_CONTEXT_KNOWLEDGE`,
+    :data:`SOURCE_CONTEXT_CHAT_UPLOAD`, :data:`SOURCE_CONTEXT_BOTH`, or ``None``
+    when no recognized source context is present.
+    """
+    contexts = set(source_contexts or [])
+    has_knowledge = SOURCE_KNOWLEDGE in contexts
+    has_chat_upload = SOURCE_CHAT_UPLOAD in contexts
+    if has_knowledge and has_chat_upload:
+        return SOURCE_CONTEXT_BOTH
+    if has_knowledge:
+        return SOURCE_CONTEXT_KNOWLEDGE
+    if has_chat_upload:
+        return SOURCE_CONTEXT_CHAT_UPLOAD
+    return None
+
+
+def _now() -> int:
+    return int(time.time())
+
+
+def _job_to_view(row: EmbeddingJob) -> EmbeddingJobView:
+    return EmbeddingJobView(
+        id=row.id,
+        index_generation_id=row.index_generation_id,
+        admin_id=row.admin_id,
+        embedding_model_id=row.embedding_model_id,
+        previous_embedding_model_id=row.previous_embedding_model_id,
+        job_type=row.job_type,
+        status=row.status,
+        total_files=row.total_files,
+        processed_files=row.processed_files,
+        failed_files=row.failed_files,
+        incompatible_files=row.incompatible_files,
+        rq_job_id=row.rq_job_id,
+        created_by_user_id=row.created_by_user_id,
+        source_job_id=getattr(row, "source_job_id", None),
+        error_code=row.error_code,
+        error_message=row.error_message,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        started_at=row.started_at,
+        completed_at=row.completed_at,
+    )
+
+
+def _file_to_view(row: EmbeddingJobFile) -> EmbeddingJobFileView:
+    return EmbeddingJobFileView(
+        job_id=row.job_id,
+        file_id=row.file_id,
+        status=row.status,
+        attempt_count=row.attempt_count,
+        error_code=row.error_code,
+        error_message=row.error_message,
+        file_snapshot=row.file_snapshot or {},
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        started_at=row.started_at,
+        completed_at=row.completed_at,
+    )
+
+
+def _get_job_row(db, job_id: str) -> Optional[EmbeddingJob]:
+    return db.query(EmbeddingJob).filter(EmbeddingJob.id == job_id).first()
+
+
+def _lock_job_for_mutation(db, job_id: str) -> Optional[EmbeddingJob]:
+    """Acquire administrator then job before any ledger or file-row locks."""
+    admin_id = (
+        db.query(EmbeddingJob.admin_id).filter(EmbeddingJob.id == job_id).scalar()
+    )
+    if admin_id is None:
+        return None
+    db.query(AdminEmbeddingModelState).filter_by(
+        admin_id=admin_id
+    ).with_for_update().first()
+    return db.query(EmbeddingJob).filter_by(id=job_id).with_for_update().first()
+
+
+def _create_job(
+    db,
+    admin_id: str,
+    embedding_model_id: str,
+    previous_embedding_model_id: Optional[str],
+    job_type: str,
+    files: Sequence[ReindexFile],
+    created_by_user_id: Optional[str],
+    error_message: Optional[str],
+) -> CreateJobResult:
+    """Internal: create job and file rows (flush only; caller commits).
+
+    Enforces one active job per admin via row lock. Files are sorted by file_id
+    for deterministic row order. The ReindexFile snapshot is persisted in
+    file_snapshot so workers can rebuild collection projections and perform
+    staleness checks without re-deriving mutable state.
+    """
+    now = _now()
+
+    db.query(AdminEmbeddingModelState).filter_by(
+        admin_id=admin_id
+    ).with_for_update().first()
+    # Lock check: no active job for this admin
+    active = (
+        db.query(EmbeddingJob)
+        .filter(
+            EmbeddingJob.admin_id == admin_id,
+            EmbeddingJob.status.in_(_ACTIVE_JOB_STATUSES),
+        )
+        .with_for_update()
+        .first()
+    )
+    if active is not None:
+        raise EmbeddingError(
+            EMBEDDING_JOB_ACTIVE_EXISTS,
+            detail=f"Admin {admin_id} already has an active job {active.id}.",
+        )
+
+    # Generate job ID and insert job row
+    job_id = str(uuid.uuid4())
+    # Dedupe by file_id and sort for determinism
+    seen = set()
+    sorted_files = []
+    for f in files:
+        if f.file_id not in seen:
+            seen.add(f.file_id)
+            sorted_files.append(f)
+    sorted_files.sort(key=lambda f: f.file_id)
+    total_files = len(sorted_files)
+
+    job_row = EmbeddingJob(
+        id=job_id,
+        index_generation_id=job_id,
+        admin_id=admin_id,
+        embedding_model_id=embedding_model_id,
+        previous_embedding_model_id=previous_embedding_model_id,
+        job_type=job_type,
+        status=JOB_STATUS_QUEUED,
+        total_files=total_files,
+        processed_files=0,
+        failed_files=0,
+        created_by_user_id=created_by_user_id,
+        error_message=error_message,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(job_row)
+
+    # Insert file rows with inventory snapshots
+    file_rows = []
+    for reindex_file in sorted_files:
+        file_row = EmbeddingJobFile(
+            job_id=job_id,
+            file_id=reindex_file.file_id,
+            status=FILE_STATUS_PENDING,
+            attempt_count=0,
+            file_snapshot=replace(reindex_file, index_generation_id=job_id).to_dict(),
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(file_row)
+        file_rows.append(file_row)
+
+    try:
+        db.flush()
+    except IntegrityError:
+        # Unique constraint violation: another transaction created an active job
+        # Rollback and query for the active job to raise proper error
+        db.rollback()
+        active = (
+            db.query(EmbeddingJob)
+            .filter(
+                EmbeddingJob.admin_id == admin_id,
+                EmbeddingJob.status.in_(_ACTIVE_JOB_STATUSES),
+            )
+            .first()
+        )
+        raise EmbeddingError(
+            EMBEDDING_JOB_ACTIVE_EXISTS,
+            detail=f"Admin {admin_id} already has an active job {active.id if active else 'unknown'}.",
+        )
+
+    log.info(
+        "[JOB] created job %s for admin %s: %d files, model %s",
+        job_id,
+        admin_id,
+        total_files,
+        embedding_model_id,
+    )
+    return CreateJobResult(
+        job=_job_to_view(job_row),
+        files=tuple(_file_to_view(fr) for fr in file_rows),
+    )
+
+
+def _generation_lineage(db, latest_job_id: str) -> list[str]:
+    """Newest first, using parent links rather than ambiguous timestamps."""
+    lineage = []
+    cursor = latest_job_id
+    while cursor is not None:
+        if cursor in lineage:
+            raise EmbeddingError(EMBEDDING_JOB_LEDGER_MISMATCH)
+        lineage.append(cursor)
+        cursor = (
+            db.query(EmbeddingJob.source_job_id)
+            .filter(EmbeddingJob.id == cursor)
+            .scalar()
+        )
+    return lineage
+
+
+def _create_retry_job(
+    db,
+    source_job_id: str,
+    admin_id: str,
+    preparation_recipe: PreparationRecipe | None = None,
+    reliability_policy: EmbeddingReliabilityPolicy | None = None,
+) -> CreateJobResult:
+    """Retry only latest failed outcomes, using current bytes and frozen recipes."""
+    from open_webui.models.files import File
+    from open_webui.retrieval.embedding.inventory import build_reindex_inventory
+
+    now = _now()
+    state = (
+        db.query(AdminEmbeddingModelState)
+        .filter_by(admin_id=admin_id)
+        .with_for_update()
+        .first()
+    )
+    source = (
+        db.query(EmbeddingJob)
+        .filter_by(id=source_job_id, admin_id=admin_id)
+        .with_for_update()
+        .first()
+    )
+    if source is None:
+        raise EmbeddingError(EMBEDDING_JOB_NOT_FOUND)
+    if state is None or (
+        state.index_generation_id != source.index_generation_id
+        or (state.target_embedding_model_id or state.active_embedding_model_id)
+        != source.embedding_model_id
+    ):
+        raise EmbeddingError(EMBEDDING_MODEL_STATE_CONFLICT)
+    lineage = _generation_lineage(db, state.latest_embedding_job_id)
+    if source_job_id not in lineage:
+        raise EmbeddingError(EMBEDDING_JOB_STALE_OPERATION)
+    active = (
+        db.query(EmbeddingJob)
+        .filter(
+            EmbeddingJob.admin_id == admin_id,
+            EmbeddingJob.status.in_(_ACTIVE_JOB_STATUSES),
+        )
+        .first()
+    )
+    if active is not None:
+        if active.index_generation_id == state.index_generation_id:
+            return CreateJobResult(
+                job=_job_to_view(active),
+                files=tuple(
+                    _file_to_view(row)
+                    for row in db.query(EmbeddingJobFile)
+                    .filter_by(job_id=active.id)
+                    .all()
+                ),
+                already_active=True,
+            )
+        raise EmbeddingError(EMBEDDING_RETRY_ACTIVE_EXISTS)
+    latest = (
+        db.query(EmbeddingJob)
+        .filter_by(id=state.latest_embedding_job_id)
+        .with_for_update()
+        .one()
+    )
+    rows_by_job: dict[str, list] = {}
+    for row in (
+        db.query(EmbeddingJobFile).filter(EmbeddingJobFile.job_id.in_(lineage)).all()
+    ):
+        rows_by_job.setdefault(row.job_id, []).append(row)
+    latest_rows = {}
+    for job_id in lineage:
+        for row in rows_by_job.get(job_id, []):
+            latest_rows.setdefault(row.file_id, row)
+
+    # Dispatch recovery resumes the exact original pending inventory. It never
+    # discovers files or reinterprets the operation's preparation recipe.
+    own_rows = rows_by_job.get(latest.id, [])
+    policy = reliability_policy or EmbeddingReliabilityPolicy()
+    if own_rows and all(row.status == FILE_STATUS_PENDING for row in own_rows):
+        latest.status = JOB_STATUS_QUEUED
+        latest.error_code = None
+        latest.error_message = None
+        latest.completed_at = None
+        latest.updated_at = now
+        for row in own_rows:
+            row.file_snapshot = {
+                **row.file_snapshot,
+                "reliability_policy": policy.to_dict(),
+            }
+        db.flush()
+        return CreateJobResult(
+            _job_to_view(latest), tuple(_file_to_view(row) for row in own_rows)
+        )
+
+    failed = {
+        file_id: row
+        for file_id, row in latest_rows.items()
+        if row.status == FILE_STATUS_FAILED and not is_missing_source_skipped(row)
+    }
+    # Successful ordinary uploads/current-generation replacements supersede a
+    # failed historical ledger row without changing the attempt's counters.
+    for file in db.query(File).filter(File.id.in_(list(failed))).all():
+        meta = file.meta or {}
+        try:
+            provenance = read_stored_content_provenance(file)
+        except ValueError:
+            continue
+        if (
+            meta.get("index_generation_id") == state.index_generation_id
+            and meta.get("embedding_model_id") == source.embedding_model_id
+            and meta.get("processing_status") == "completed"
+            and meta.get("source_sha256") == source_sha256_for_file(file)
+            and meta.get("published_content_origin", "stored_source")
+            == provenance.origin
+            and meta.get("published_content_override_sha256")
+            == provenance.content_override_sha256
+        ):
+            failed.pop(file.id, None)
+    if not failed:
+        raise EmbeddingError(
+            EMBEDDING_JOB_WRONG_STATUS,
+            detail="Nothing to retry: no eligible failed files remain.",
+        )
+    try:
+        frozen = {
+            file_id: ReindexFile.from_dict(row.file_snapshot)
+            for file_id, row in failed.items()
+        }
+        existing_ids = {
+            row[0] for row in db.query(File.id).filter(File.id.in_(list(failed))).all()
+        }
+        missing_file_ids = set(failed) - existing_ids
+        refreshed = build_reindex_inventory(
+            admin_id,
+            db=db,
+            preparation_recipe=next(iter(frozen.values())).preparation_recipe,
+            reliability_policy=policy,
+            file_ids=existing_ids,
+            missing_file_ids=missing_file_ids,
+        )
+        retry_files = [
+            replace(
+                item,
+                preparation_recipe=frozen[item.file_id].preparation_recipe,
+                index_generation_id=state.index_generation_id,
+            )
+            for item in refreshed
+        ]
+    except (KeyError, TypeError, ValueError):
+        raise EmbeddingError(
+            EMBEDDING_REINDEX_SOURCE_CHANGED,
+            detail="A failed file has an invalid frozen preparation recipe.",
+        ) from None
+    if not retry_files and not missing_file_ids:
+        raise EmbeddingError(
+            EMBEDDING_JOB_WRONG_STATUS,
+            detail="Nothing to retry: failed files were deleted or are no longer in scope.",
+        )
+
+    # Preserve attempt counters/history, but retire these failures from the
+    # generation's current coverage. Persist with the new retry so an aborted
+    # transaction cannot hide files that were never successfully skipped.
+    for file_id in missing_file_ids:
+        row = failed[file_id]
+        row.file_snapshot = {
+            **row.file_snapshot,
+            "retry_skip_reason": "source_missing",
+        }
+        row.updated_at = now
+        log.info(
+            "embedding_retry_source_missing source_job_id=%s file_id=%s",
+            row.job_id,
+            file_id,
+        )
+
+    new_job_id = str(uuid.uuid4())
+    job = EmbeddingJob(
+        id=new_job_id,
+        index_generation_id=state.index_generation_id,
+        admin_id=admin_id,
+        embedding_model_id=source.embedding_model_id,
+        previous_embedding_model_id=source.previous_embedding_model_id,
+        job_type="retry_failed",
+        status=JOB_STATUS_QUEUED,
+        total_files=len(retry_files),
+        processed_files=0,
+        failed_files=0,
+        incompatible_files=0,
+        source_job_id=latest.id,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(job)
+    file_rows = []
+    for item in retry_files:
+        row = EmbeddingJobFile(
+            job_id=new_job_id,
+            file_id=item.file_id,
+            status=FILE_STATUS_PENDING,
+            attempt_count=0,
+            file_snapshot=item.to_dict(),
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(row)
+        file_rows.append(row)
+    db.flush()
+    state.latest_embedding_job_id = new_job_id
+    state.updated_at = now
+    db.flush()
+    if not file_rows:
+        _finalize_job_success(
+            db,
+            job_id=new_job_id,
+            admin_id=admin_id,
+            target_model_id=source.embedding_model_id,
+            previous_model_id=source.previous_embedding_model_id,
+            vector_repo=None,
+            target_model_spec=None,
+        )
+    log.info(
+        "embedding_retry_created admin_id=%s job_id=%s generation=%s files=%d",
+        admin_id,
+        new_job_id,
+        state.index_generation_id,
+        len(file_rows),
+    )
+    from open_webui.retrieval.embedding.metrics import record_index_event
+
+    record_index_event("retry_files", len(file_rows))
+    return CreateJobResult(
+        _job_to_view(job), tuple(_file_to_view(row) for row in file_rows)
+    )
+
+
+def _transition_to_processing(
+    db, job_id: str
+) -> tuple[Optional[EmbeddingJobView], bool]:
+    """Internal: atomically transition queued -> processing (flush only).
+
+    Returns ``(view, changed)`` where *changed* is True when the job was
+    actually transitioned (queued → processing) and False when the job was
+    already processing (no-op).
+
+    Returns ``(None, False)`` if job not found.
+    Raises EMBEDDING_JOB_TERMINAL if job is in a terminal state.
+    """
+    now = _now()
+    _lock_job_for_mutation(db, job_id)
+    row = (
+        db.query(EmbeddingJob)
+        .filter(EmbeddingJob.id == job_id)
+        .with_for_update()
+        .first()
+    )
+    if row is None:
+        return None, False
+    if row.status == JOB_STATUS_PROCESSING:
+        return _job_to_view(row), False  # no-op: already processing
+    if row.status in _TERMINAL_JOB_STATUSES:
+        raise EmbeddingError(
+            EMBEDDING_JOB_TERMINAL,
+            detail=f"Job {job_id} is {row.status}; cannot transition to processing.",
+        )
+    if row.status != JOB_STATUS_QUEUED:
+        # Should not happen, but defensive
+        raise EmbeddingError(
+            EMBEDDING_JOB_WRONG_STATUS,
+            detail=f"Job {job_id} is {row.status}; expected queued.",
+        )
+
+    row.status = JOB_STATUS_PROCESSING
+    if row.started_at is None:
+        row.started_at = now
+    row.updated_at = now
+    db.flush()
+    return _job_to_view(row), True
+
+
+def _claim_file(db, job_id: str, file_id: str) -> Optional[EmbeddingJobFileView]:
+    """Internal: atomically claim a file and increment attempt_count (flush only).
+
+    Returns None if file not found or not pending (no-op for duplicate/already-done).
+    """
+    now = _now()
+    _lock_job_for_mutation(db, job_id)
+    row = (
+        db.query(EmbeddingJobFile)
+        .filter(EmbeddingJobFile.job_id == job_id, EmbeddingJobFile.file_id == file_id)
+        .with_for_update()
+        .first()
+    )
+    if row is None:
+        return None
+    if row.status != FILE_STATUS_PENDING:
+        return None  # no-op: already claimed, completed, or failed
+
+    row.status = FILE_STATUS_PROCESSING
+    row.attempt_count += 1
+    if row.started_at is None:
+        row.started_at = now
+    row.updated_at = now
+    db.flush()
+    return _file_to_view(row)
+
+
+def _mark_file_completed(db, job_id: str, file_id: str) -> Optional[EmbeddingJobFileView]:
+    """Internal: mark file completed (flush only).
+
+    Returns None if file not found. Returns current view if already completed (no-op).
+    Raises EMBEDDING_FILE_WRONG_STATUS if file is not in processing state.
+    """
+    now = _now()
+    _lock_job_for_mutation(db, job_id)
+    row = (
+        db.query(EmbeddingJobFile)
+        .filter(EmbeddingJobFile.job_id == job_id, EmbeddingJobFile.file_id == file_id)
+        .with_for_update()
+        .first()
+    )
+    if row is None:
+        return None
+    if row.status == FILE_STATUS_COMPLETED:
+        return _file_to_view(row)  # no-op: already completed
+    if row.status != FILE_STATUS_PROCESSING:
+        raise EmbeddingError(
+            EMBEDDING_FILE_WRONG_STATUS,
+            detail=f"File {file_id} in job {job_id} is {row.status}; expected processing.",
+        )
+
+    row.status = FILE_STATUS_COMPLETED
+    if row.completed_at is None:
+        row.completed_at = now
+    row.updated_at = now
+    # Recompute job counters in same transaction per Spec 03 invariant 3-5
+    _recompute_counters(db, job_id)
+    db.flush()
+    return _file_to_view(row)
+
+
+def _mark_file_failed(
+    db,
+    job_id: str,
+    file_id: str,
+    error_code: str,
+    error_message: Optional[str],
+) -> Optional[EmbeddingJobFileView]:
+    """Internal: mark file failed with code and message (flush only).
+
+    Returns None if file not found. Returns current view if already failed (no-op).
+    Raises EMBEDDING_FILE_WRONG_STATUS if file is not in processing state.
+    """
+    now = _now()
+    _lock_job_for_mutation(db, job_id)
+    row = (
+        db.query(EmbeddingJobFile)
+        .filter(EmbeddingJobFile.job_id == job_id, EmbeddingJobFile.file_id == file_id)
+        .with_for_update()
+        .first()
+    )
+    if row is None:
+        return None
+    if row.status == FILE_STATUS_FAILED:
+        return _file_to_view(row)  # no-op: already failed
+    if row.status != FILE_STATUS_PROCESSING:
+        raise EmbeddingError(
+            EMBEDDING_FILE_WRONG_STATUS,
+            detail=f"File {file_id} in job {job_id} is {row.status}; expected processing.",
+        )
+
+    row.status = FILE_STATUS_FAILED
+    row.error_code = error_code
+    row.error_message = error_message
+    if row.completed_at is None:
+        row.completed_at = now
+    row.updated_at = now
+    # Recompute job counters in same transaction per Spec 03 invariant 3-5
+    _recompute_counters(db, job_id)
+    db.flush()
+    return _file_to_view(row)
+
+
+def _mark_file_incompatible(
+    db,
+    job_id: str,
+    file_id: str,
+    error_code: str,
+    error_message: Optional[str] = None,
+) -> Optional[EmbeddingJobFileView]:
+    """Mark a processing file as an intentional, terminal compatibility skip."""
+    if error_code not in _INCOMPATIBLE_FILE_CODES:
+        raise ValueError("incompatible file error code is not allowlisted")
+    safe_message = _INCOMPATIBLE_FILE_MESSAGES[error_code]
+    if error_message is not None and error_message != safe_message:
+        raise ValueError("incompatible file error message is not allowlisted")
+
+    now = _now()
+    _lock_job_for_mutation(db, job_id)
+    row = (
+        db.query(EmbeddingJobFile)
+        .filter(
+            EmbeddingJobFile.job_id == job_id,
+            EmbeddingJobFile.file_id == file_id,
+        )
+        .with_for_update()
+        .first()
+    )
+    if row is None:
+        return None
+    if row.status == FILE_STATUS_INCOMPATIBLE:
+        return _file_to_view(row)
+    if row.status != FILE_STATUS_PROCESSING:
+        raise EmbeddingError(
+            EMBEDDING_FILE_WRONG_STATUS,
+            detail=f"File {file_id} in job {job_id} is {row.status}; expected processing.",
+        )
+
+    row.status = FILE_STATUS_INCOMPATIBLE
+    row.error_code = error_code
+    row.error_message = safe_message
+    if row.completed_at is None:
+        row.completed_at = now
+    row.updated_at = now
+    _recompute_counters(db, job_id)
+    db.flush()
+    return _file_to_view(row)
+
+
+def _fail_nonterminal_files(
+    db,
+    job_id: str,
+    error_code: str,
+    error_messages: Mapping[str, str],
+) -> list[EmbeddingJobFileView]:
+    """Atomically fail every pending or processing file in a job.
+
+    Pending rows first enter processing and increment ``attempt_count`` so the
+    persisted lifecycle remains ``pending -> processing -> failed``. Existing
+    processing rows retain their current attempt. Completed and already-failed
+    rows remain unchanged. Counters are recomputed once after all transitions.
+    """
+    now = _now()
+    _lock_job_for_mutation(db, job_id)
+    rows = (
+        db.query(EmbeddingJobFile)
+        .filter(EmbeddingJobFile.job_id == job_id)
+        .with_for_update()
+        .all()
+    )
+
+    failed_rows: list[EmbeddingJobFileView] = []
+    for row in rows:
+        if row.status not in (FILE_STATUS_PENDING, FILE_STATUS_PROCESSING):
+            continue
+        if row.status == FILE_STATUS_PENDING:
+            row.status = FILE_STATUS_PROCESSING
+            row.attempt_count += 1
+            if row.started_at is None:
+                row.started_at = now
+
+        row.status = FILE_STATUS_FAILED
+        row.error_code = error_code
+        row.error_message = error_messages.get(row.file_id)
+        row.completed_at = now
+        row.updated_at = now
+        failed_rows.append(_file_to_view(row))
+
+    _recompute_counters(db, job_id)
+    db.flush()
+    return failed_rows
+
+
+def _reclaim_file(
+    db, job_id: str, file_id: str, stale_threshold_seconds: int = 300
+) -> Optional[EmbeddingJobFileView]:
+    """Internal: reclaim a stale processing file or retry a failed file (flush only).
+
+    Returns None if file not found or already completed. Returns current view if
+    file is processing but not stale (another worker owns it).
+
+    Reclaim policy:
+    - Processing files: reclaim if updated_at is older than stale_threshold_seconds
+    - Failed files: always allow reclaim for retry
+    - Pending files: treat as fresh claim
+    - Completed files: no-op, return None
+
+    The reclaim clears error fields and transitions to processing, incrementing
+    attempt_count. This allows workers to recover from crashes or retry failures.
+    """
+    now = _now()
+    _lock_job_for_mutation(db, job_id)
+    row = (
+        db.query(EmbeddingJobFile)
+        .filter(EmbeddingJobFile.job_id == job_id, EmbeddingJobFile.file_id == file_id)
+        .with_for_update()
+        .first()
+    )
+    if row is None:
+        return None
+
+    # Already terminal: no-op. Incompatible rows are successful skips and only
+    # real failures can be retried through a new retry job.
+    if row.status in (FILE_STATUS_COMPLETED, FILE_STATUS_INCOMPATIBLE):
+        return None
+
+    # Processing: only reclaim if stale
+    if row.status == FILE_STATUS_PROCESSING:
+        age_seconds = now - (row.updated_at or 0)
+        if age_seconds < stale_threshold_seconds:
+            # Still being worked on by another worker
+            return None
+        # Stale processing file: reclaim it
+
+    # Pending or stale processing or failed: transition to processing
+    row.status = FILE_STATUS_PROCESSING
+    row.attempt_count += 1
+    row.error_code = None
+    row.error_message = None
+    row.completed_at = None  # Clear completion timestamp for retry
+    row.updated_at = now
+    # Note: started_at is not reset; it captures when work first began
+    # Recompute job counters in same transaction per Spec 03 invariant 3-5
+    _recompute_counters(db, job_id)
+    db.flush()
+    return _file_to_view(row)
+
+
+def _get_file_counts(db, job_id: str) -> tuple[int, int, int, int]:
+    """Return persisted ledger totals for a job."""
+    # Sessions disable autoflush globally; persist any in-transaction ledger
+    # transition before deriving counters from SQL.
+    db.flush()
+    total = (
+        db.query(EmbeddingJobFile)
+        .filter(EmbeddingJobFile.job_id == job_id)
+        .count()
+    )
+    processed = (
+        db.query(EmbeddingJobFile)
+        .filter(
+            EmbeddingJobFile.job_id == job_id,
+            EmbeddingJobFile.status == FILE_STATUS_COMPLETED,
+        )
+        .count()
+    )
+    failed = (
+        db.query(EmbeddingJobFile)
+        .filter(
+            EmbeddingJobFile.job_id == job_id,
+            EmbeddingJobFile.status == FILE_STATUS_FAILED,
+        )
+        .count()
+    )
+    incompatible = (
+        db.query(EmbeddingJobFile)
+        .filter(
+            EmbeddingJobFile.job_id == job_id,
+            EmbeddingJobFile.status == FILE_STATUS_INCOMPATIBLE,
+        )
+        .count()
+    )
+    return total, processed, failed, incompatible
+
+
+def _fail_ledger_mismatch(
+    job_row: EmbeddingJob,
+    ledger_total: int,
+    processed: int,
+    failed: int,
+    incompatible: int,
+    now: int,
+) -> EmbeddingJobView:
+    """Fail closed when the durable inventory has lost or gained rows."""
+    expected_total = job_row.total_files
+    bounded_processed = min(max(processed, 0), expected_total)
+    bounded_failed = min(max(failed, 0), expected_total - bounded_processed)
+    bounded_incompatible = min(
+        max(incompatible, 0), expected_total - bounded_processed - bounded_failed
+    )
+    job_row.processed_files = bounded_processed
+    job_row.failed_files = bounded_failed
+    job_row.incompatible_files = bounded_incompatible
+    job_row.status = JOB_STATUS_FAILED
+    job_row.error_code = EMBEDDING_JOB_LEDGER_MISMATCH
+    job_row.error_message = (
+        "Embedding job inventory is inconsistent: "
+        f"expected {expected_total} file rows, found {ledger_total}."
+    )
+    if job_row.completed_at is None:
+        job_row.completed_at = now
+    job_row.updated_at = now
+    log.error(
+        "[JOB] failing job %s because ledger cardinality changed: expected=%d, actual=%d",
+        job_row.id,
+        expected_total,
+        ledger_total,
+    )
+    return _job_to_view(job_row)
+
+
+def _recompute_counters(db, job_id: str) -> Optional[EmbeddingJobView]:
+    """Internal: recompute job counters from file rows (flush only).
+
+    ``total_files`` is the immutable inventory cardinality captured when the
+    job is created. A row-count mismatch is corruption, so the job is failed
+    rather than shrinking the expected total and concealing missing outcomes.
+
+    Returns None if job not found.
+    """
+    now = _now()
+    _lock_job_for_mutation(db, job_id)
+    job_row = (
+        db.query(EmbeddingJob)
+        .filter(EmbeddingJob.id == job_id)
+        .with_for_update()
+        .first()
+    )
+    if job_row is None:
+        return None
+
+    total, processed, failed, incompatible = _get_file_counts(db, job_id)
+    if total != job_row.total_files:
+        view = _fail_ledger_mismatch(
+            job_row, total, processed, failed, incompatible, now
+        )
+        db.flush()
+        return view
+
+    job_row.processed_files = processed
+    job_row.failed_files = failed
+    job_row.incompatible_files = incompatible
+    job_row.updated_at = now
+    db.flush()
+    return _job_to_view(job_row)
+
+
+def _collect_job_lineage(db, job_id: str) -> list[str]:
+    """Walk the source_job_id chain and return all IDs in the lineage.
+
+    The returned list always contains *job_id* itself plus every ancestor
+    reachable via ``source_job_id``.  The walk is bounded by the depth of
+    the retry chain (typically 1–2 hops).
+    """
+    lineage: list[str] = []
+    current: str | None = job_id
+    while current is not None:
+        if current in lineage:
+            break  # defensive: cycle guard
+        lineage.append(current)
+        current = (
+            db.query(EmbeddingJob.source_job_id)
+            .filter(EmbeddingJob.id == current)
+            .scalar()
+        )
+    return lineage
+
+
+def _finalize_job(db, job_id: str) -> Optional[EmbeddingJobView]:
+    """Internal: recompute counters and set terminal status (flush only).
+
+    Returns None if job not found. Terminal status is deterministic:
+    - completed: all files completed (including zero-file jobs)
+    - failed: no file completed and at least one failed, or operation-level error
+    - partially_failed: at least one completed and at least one failed
+
+    Counters are always recomputed in the same transaction as finalization,
+    even for already-terminal jobs, to satisfy Spec 03 invariant 3-5.
+    """
+    now = _now()
+    _lock_job_for_mutation(db, job_id)
+    job_row = (
+        db.query(EmbeddingJob)
+        .filter(EmbeddingJob.id == job_id)
+        .with_for_update()
+        .first()
+    )
+    if job_row is None:
+        return None
+
+    is_terminal = job_row.status in _TERMINAL_JOB_STATUSES
+
+    # Recompute counters first (same transaction) — always, even for terminal jobs
+    # per Spec 03 "counters must be recomputed in the same transaction as finalization"
+    total, processed, failed, incompatible = _get_file_counts(db, job_id)
+    if total != job_row.total_files:
+        view = _fail_ledger_mismatch(
+            job_row, total, processed, failed, incompatible, now
+        )
+        db.flush()
+        return view
+
+    job_row.processed_files = processed
+    job_row.failed_files = failed
+    job_row.incompatible_files = incompatible
+
+    # Reject finalization if any files are still unfinished (pending/processing)
+    # per Spec 09: finalization requires no pending/processing rows
+    unfinished = total - processed - failed - incompatible
+    if unfinished > 0:
+        log.warning(
+            "[JOB] finalize rejected for job %s: %d files still unfinished",
+            job_id,
+            unfinished,
+        )
+        db.flush()
+        return _job_to_view(job_row)
+
+    # Already terminal: preserve state/timestamps, just reconcile counters
+    if is_terminal:
+        job_row.updated_at = now
+        db.flush()
+        return _job_to_view(job_row)
+
+    # Determine terminal status
+    # Check operation-level fatal error first per Spec 03 terminal rules
+    if job_row.error_message:
+        # Operation-level fatal error takes precedence
+        job_row.status = JOB_STATUS_FAILED
+    elif failed == 0 and total == processed + incompatible:
+        # Every file completed or was safely skipped as incompatible.
+        job_row.status = JOB_STATUS_COMPLETED
+    elif failed > 0 and (processed + incompatible) > 0:
+        # At least one successful/skipped file and at least one failed file.
+        job_row.status = JOB_STATUS_PARTIALLY_FAILED
+    elif failed > 0:
+        # No file completed or was safely skipped.
+        job_row.status = JOB_STATUS_FAILED
+    else:
+        # Defensive: should not happen if finalize is called after all files done
+        log.warning(
+            "[JOB] finalize called on job %s with total=%d processed=%d failed=%d; "
+            "defaulting to failed status",
+            job_id,
+            total,
+            processed,
+            failed,
+        )
+        job_row.status = JOB_STATUS_FAILED
+
+    if job_row.completed_at is None:
+        job_row.completed_at = now
+    job_row.updated_at = now
+
+    db.flush()
+    log.info(
+        "[JOB] finalized job %s: status=%s, total=%d, processed=%d, failed=%d, incompatible=%d",
+        job_id,
+        job_row.status,
+        total,
+        processed,
+        failed,
+        incompatible,
+    )
+    return _job_to_view(job_row)
+
+
+def _finalize_job_success(
+    db,
+    job_id: str,
+    admin_id: str,
+    target_model_id: str,
+    previous_model_id: Optional[str],
+    vector_repo,
+    target_model_spec,
+) -> Optional[EmbeddingJobView]:
+    """Finish attempt counters only; files publish independently.
+
+    The sole activation exception is an empty inventory, which has no file
+    publication to trigger first success.
+    """
+    state = (
+        db.query(AdminEmbeddingModelState)
+        .filter_by(admin_id=admin_id)
+        .with_for_update()
+        .first()
+    )
+    job = (
+        db.query(EmbeddingJob)
+        .filter_by(id=job_id, admin_id=admin_id)
+        .with_for_update()
+        .first()
+    )
+    if job is None:
+        return None
+    if state is None or state.index_generation_id != job.index_generation_id:
+        raise EmbeddingError(EMBEDDING_JOB_STALE_OPERATION)
+    if job.total_files == 0 and job.status not in _TERMINAL_JOB_STATUSES:
+        if (
+            state.target_embedding_model_id or state.active_embedding_model_id
+        ) != target_model_id:
+            raise EmbeddingError(EMBEDDING_MODEL_STATE_CONFLICT)
+        state.active_embedding_model_id = target_model_id
+        state.target_embedding_model_id = None
+        state.updated_at = _now()
+    return _finalize_job(db, job_id)
+
+
+def _list_failed_files(db, job_id: str) -> list[EmbeddingJobFileView]:
+    """Internal: list all failed file rows for a job."""
+    rows = (
+        db.query(EmbeddingJobFile)
+        .filter(EmbeddingJobFile.job_id == job_id, EmbeddingJobFile.status == FILE_STATUS_FAILED)
+        .order_by(EmbeddingJobFile.file_id)
+        .all()
+    )
+    return [_file_to_view(row) for row in rows]
+
+
+def _list_incompatible_files(db, job_id: str) -> list[EmbeddingJobFileView]:
+    """Internal: list terminal incompatible file rows for a job."""
+    rows = (
+        db.query(EmbeddingJobFile)
+        .filter(
+            EmbeddingJobFile.job_id == job_id,
+            EmbeddingJobFile.status == FILE_STATUS_INCOMPATIBLE,
+        )
+        .order_by(EmbeddingJobFile.file_id)
+        .all()
+    )
+    return [_file_to_view(row) for row in rows]
+
+
+def _list_files(db, job_id: str) -> list[EmbeddingJobFileView]:
+    """Internal: list every file row for one job in stable order."""
+    rows = (
+        db.query(EmbeddingJobFile)
+        .filter(EmbeddingJobFile.job_id == job_id)
+        .order_by(EmbeddingJobFile.file_id)
+        .all()
+    )
+    return [_file_to_view(row) for row in rows]
+
+
+def _get_job_status(db, job_id: str) -> Optional[EmbeddingJobStatusView]:
+    """Internal: build a read-only status view for a job (no mutation).
+
+    Aggregate counters come from the job row (maintained to match the ledger);
+    ``pending_or_processing`` and the source-context breakdown are derived from
+    the persisted file rows and their inventory snapshots (Spec 08). A physical
+    file belongs to exactly one bucket (knowledge / chat_upload / both) so the
+    bucket totals never double-count a multi-context file.
+    """
+    job_row = _get_job_row(db, job_id)
+    if job_row is None:
+        return None
+    job_view = _job_to_view(job_row)
+
+    file_rows = (
+        db.query(EmbeddingJobFile)
+        .filter(EmbeddingJobFile.job_id == job_id)
+        .all()
+    )
+
+    bucket_totals = {
+        SOURCE_CONTEXT_KNOWLEDGE: 0,
+        SOURCE_CONTEXT_CHAT_UPLOAD: 0,
+        SOURCE_CONTEXT_BOTH: 0,
+    }
+    bucket_processed = dict(bucket_totals)
+    bucket_failed = dict(bucket_totals)
+    bucket_incompatible = dict(bucket_totals)
+    for row in file_rows:
+        snapshot = row.file_snapshot if isinstance(row.file_snapshot, dict) else {}
+        bucket = _source_bucket(snapshot.get("source_contexts"))
+        if bucket is None:
+            continue
+        bucket_totals[bucket] += 1
+        if row.status == FILE_STATUS_COMPLETED:
+            bucket_processed[bucket] += 1
+        elif row.status == FILE_STATUS_FAILED:
+            bucket_failed[bucket] += 1
+        elif row.status == FILE_STATUS_INCOMPATIBLE:
+            bucket_incompatible[bucket] += 1
+
+    source_contexts = {
+        bucket: SourceContextCounts(
+            total=bucket_totals[bucket],
+            processed=bucket_processed[bucket],
+            failed=bucket_failed[bucket],
+            incompatible=bucket_incompatible[bucket],
+        )
+        for bucket in (
+            SOURCE_CONTEXT_KNOWLEDGE,
+            SOURCE_CONTEXT_CHAT_UPLOAD,
+            SOURCE_CONTEXT_BOTH,
+        )
+    }
+
+    pending_or_processing = (
+        job_view.total_files
+        - job_view.processed_files
+        - job_view.failed_files
+        - job_view.incompatible_files
+    )
+    return EmbeddingJobStatusView(
+        job=job_view,
+        pending_or_processing=pending_or_processing,
+        source_contexts=source_contexts,
+    )
+
+
+def _mark_job_failed(
+    db,
+    job_id: str,
+    error_code: str,
+    error_message: str,
+) -> Optional[EmbeddingJobView]:
+    """Internal: mark job as failed with error details (flush only).
+
+    Used for operation-level failures (e.g., enqueue failures) that prevent
+    the job from proceeding. Sets terminal status to 'failed' and records
+    the error code and message.
+
+    Returns None if job not found. No-op if already terminal.
+    """
+    now = _now()
+    _lock_job_for_mutation(db, job_id)
+    job_row = (
+        db.query(EmbeddingJob)
+        .filter(EmbeddingJob.id == job_id)
+        .with_for_update()
+        .first()
+    )
+    if job_row is None:
+        return None
+
+    # Already terminal: no-op
+    if job_row.status in _TERMINAL_JOB_STATUSES:
+        return _job_to_view(job_row)
+
+    # Set failed status with error details
+    job_row.status = JOB_STATUS_FAILED
+    job_row.error_code = error_code
+    job_row.error_message = error_message
+    if job_row.completed_at is None:
+        job_row.completed_at = now
+    job_row.updated_at = now
+
+    # Failed operations never restore the previous compatibility model. The
+    # requested model remains authoritative while retrieval stays fail-closed.
+    db.flush()
+    log.info(
+        "[JOB] marked job %s as failed: error_code=%s, message=%s",
+        job_id,
+        error_code,
+        error_message,
+    )
+    return _job_to_view(job_row)
+
+
+class EmbeddingJobRepository:
+    """Transactional API for durable embedding-job and per-file lifecycle state."""
+
+    @staticmethod
+    def create_job(
+        admin_id: str,
+        embedding_model_id: str,
+        files: Sequence[ReindexFile],
+        job_type: str = "reindex",
+        previous_embedding_model_id: Optional[str] = None,
+        created_by_user_id: Optional[str] = None,
+        error_message: Optional[str] = None,
+        db=None,
+    ) -> CreateJobResult:
+        """Create a new job with its complete file snapshot in one transaction.
+
+        Enforces one active job per admin. Files are deduplicated by file_id and sorted.
+        The ReindexFile inventory snapshot is persisted so workers can rebuild
+        collection projections and perform staleness checks without re-deriving
+        mutable state.
+
+        When ``db`` is provided the caller owns the transaction (only flush);
+        otherwise a session is opened and committed here.
+
+        Raises:
+            EmbeddingError: EMBEDDING_JOB_ACTIVE_EXISTS if an active job already exists.
+        """
+        if db is None:
+            with get_db() as session:
+                result = _create_job(
+                    session,
+                    admin_id,
+                    embedding_model_id,
+                    previous_embedding_model_id,
+                    job_type,
+                    files,
+                    created_by_user_id,
+                    error_message,
+                )
+                session.commit()
+                return result
+        return _create_job(
+            db,
+            admin_id,
+            embedding_model_id,
+            previous_embedding_model_id,
+            job_type,
+            files,
+            created_by_user_id,
+            error_message,
+        )
+
+    @staticmethod
+    def get_job(job_id: str, db=None) -> Optional[EmbeddingJobView]:
+        """Return the job view for a job ID, or None if not found."""
+        if db is None:
+            with get_db() as session:
+                row = _get_job_row(session, job_id)
+        else:
+            row = _get_job_row(db, job_id)
+        return _job_to_view(row) if row else None
+
+    @staticmethod
+    def get_latest_job(admin_id: str, db=None) -> Optional[EmbeddingJobView]:
+        """Return the admin state's authoritative latest job.
+
+        State rows created before their first model-change job legitimately
+        have a null pointer, which means there is no latest job. Timestamp
+        ordering is used only when no state row exists, for compatibility with
+        jobs created before admin state was introduced. An invalid or
+        cross-admin pointer fails closed and is logged as inconsistent state.
+        """
+
+        def load(session):
+            state_row = (
+                session.query(AdminEmbeddingModelState.latest_embedding_job_id)
+                .filter(AdminEmbeddingModelState.admin_id == admin_id)
+                .first()
+            )
+            if state_row is not None:
+                latest_job_id = state_row[0]
+                if latest_job_id is None:
+                    return None
+                pointed_job = (
+                    session.query(EmbeddingJob)
+                    .filter(
+                        EmbeddingJob.id == latest_job_id,
+                        EmbeddingJob.admin_id == admin_id,
+                    )
+                    .first()
+                )
+                if pointed_job is None:
+                    log.error(
+                        "[JOB] admin %s has invalid latest job pointer %s",
+                        admin_id,
+                        latest_job_id,
+                    )
+                return pointed_job
+
+            return (
+                session.query(EmbeddingJob)
+                .filter(EmbeddingJob.admin_id == admin_id)
+                .order_by(
+                    EmbeddingJob.created_at.desc(),
+                    EmbeddingJob.updated_at.desc(),
+                    EmbeddingJob.id.desc(),
+                )
+                .first()
+            )
+
+        if db is None:
+            with get_db() as session:
+                row = load(session)
+        else:
+            row = load(db)
+        return _job_to_view(row) if row else None
+
+    @staticmethod
+    def get_active_job(admin_id: str, db=None) -> Optional[EmbeddingJobView]:
+        """Return the active (queued/processing) job for an admin, or None."""
+        if db is None:
+            with get_db() as session:
+                row = (
+                    session.query(EmbeddingJob)
+                    .filter(
+                        EmbeddingJob.admin_id == admin_id,
+                        EmbeddingJob.status.in_(_ACTIVE_JOB_STATUSES),
+                    )
+                    .order_by(EmbeddingJob.created_at.desc())
+                    .first()
+                )
+        else:
+            row = (
+                db.query(EmbeddingJob)
+                .filter(
+                    EmbeddingJob.admin_id == admin_id,
+                    EmbeddingJob.status.in_(_ACTIVE_JOB_STATUSES),
+                )
+                .order_by(EmbeddingJob.created_at.desc())
+                .first()
+            )
+        return _job_to_view(row) if row else None
+
+    @staticmethod
+    def attach_rq_job_id(job_id: str, rq_job_id: str, db=None) -> bool:
+        """Attach an RQ job ID to a job (conditional: only when rq_job_id is NULL).
+
+        Returns True if attached, False if already set or job not found.
+        """
+        if db is None:
+            with get_db() as session:
+                updated = (
+                    session.query(EmbeddingJob)
+                    .filter(EmbeddingJob.id == job_id, EmbeddingJob.rq_job_id.is_(None))
+                    .update({EmbeddingJob.rq_job_id: rq_job_id, EmbeddingJob.updated_at: _now()})
+                )
+                session.commit()
+                return updated > 0
+        updated = (
+            db.query(EmbeddingJob)
+            .filter(EmbeddingJob.id == job_id, EmbeddingJob.rq_job_id.is_(None))
+            .update({EmbeddingJob.rq_job_id: rq_job_id, EmbeddingJob.updated_at: _now()})
+        )
+        db.flush()
+        return updated > 0
+
+    @staticmethod
+    def transition_to_processing(job_id: str, db=None) -> Optional[EmbeddingJobView]:
+        """Atomically transition queued -> processing.
+
+        Returns None if job not found. Returns current view if already processing (no-op).
+        Raises EMBEDDING_JOB_TERMINAL if job is in a terminal state.
+
+        Note: the internal ``_transition_to_processing`` returns ``(view, changed)``;
+        this public wrapper discards the flag for backward compatibility.  Use the
+        internal function directly when you need to distinguish a fresh claim from an
+        already-processing no-op.
+        """
+        if db is None:
+            with get_db() as session:
+                view, _changed = _transition_to_processing(session, job_id)
+                session.commit()
+                return view
+        view, _changed = _transition_to_processing(db, job_id)
+        return view
+
+    @staticmethod
+    def claim_file(job_id: str, file_id: str, db=None) -> Optional[EmbeddingJobFileView]:
+        """Atomically claim a file and increment attempt_count.
+
+        Returns None if file not found or not pending (no-op for duplicate/already-done).
+        """
+        if db is None:
+            with get_db() as session:
+                view = _claim_file(session, job_id, file_id)
+                session.commit()
+                return view
+        return _claim_file(db, job_id, file_id)
+
+    @staticmethod
+    def reclaim_file(
+        job_id: str,
+        file_id: str,
+        stale_threshold_seconds: int = 300,
+        db=None,
+    ) -> Optional[EmbeddingJobFileView]:
+        """Reclaim a stale processing file or retry a failed file.
+
+        Returns None if file not found, already completed, or processing but not stale.
+
+        Reclaim policy:
+        - Processing files: reclaim if updated_at is older than stale_threshold_seconds
+        - Failed files: always allow reclaim for retry
+        - Pending files: treat as fresh claim
+        - Completed files: no-op, return None
+
+        When ``db`` is provided the caller owns the transaction (only flush);
+        otherwise a session is opened and committed here.
+        """
+        if db is None:
+            with get_db() as session:
+                view = _reclaim_file(session, job_id, file_id, stale_threshold_seconds)
+                session.commit()
+                return view
+        return _reclaim_file(db, job_id, file_id, stale_threshold_seconds)
+
+    @staticmethod
+    def mark_file_completed(job_id: str, file_id: str, db=None) -> Optional[EmbeddingJobFileView]:
+        """Mark a file completed.
+
+        Returns None if file not found. Returns current view if already completed (no-op).
+        Raises EMBEDDING_FILE_WRONG_STATUS if file is not in processing state.
+        """
+        if db is None:
+            with get_db() as session:
+                view = _mark_file_completed(session, job_id, file_id)
+                session.commit()
+                return view
+        return _mark_file_completed(db, job_id, file_id)
+
+    @staticmethod
+    def mark_file_incompatible(
+        job_id: str,
+        file_id: str,
+        error_code: str,
+        error_message: Optional[str] = None,
+        db=None,
+    ) -> Optional[EmbeddingJobFileView]:
+        """Mark one processing file as an allowlisted compatibility skip."""
+        if db is None:
+            with get_db() as session:
+                view = _mark_file_incompatible(
+                    session, job_id, file_id, error_code, error_message
+                )
+                session.commit()
+                return view
+        return _mark_file_incompatible(
+            db, job_id, file_id, error_code, error_message
+        )
+
+    @staticmethod
+    def mark_file_failed(
+        job_id: str,
+        file_id: str,
+        error_code: str,
+        error_message: Optional[str] = None,
+        db=None,
+    ) -> Optional[EmbeddingJobFileView]:
+        """Mark a file failed with code and message.
+
+        Returns None if file not found. Returns current view if already failed (no-op).
+        Raises EMBEDDING_FILE_WRONG_STATUS if file is not in processing state.
+        """
+        if db is None:
+            with get_db() as session:
+                view = _mark_file_failed(session, job_id, file_id, error_code, error_message)
+                session.commit()
+                return view
+        return _mark_file_failed(db, job_id, file_id, error_code, error_message)
+
+    @staticmethod
+    def fail_nonterminal_files(
+        job_id: str,
+        error_code: str,
+        error_messages: Mapping[str, str],
+        db=None,
+    ) -> list[EmbeddingJobFileView]:
+        """Fail all pending or processing files and recompute counters atomically."""
+        if db is None:
+            with get_db() as session:
+                views = _fail_nonterminal_files(
+                    session, job_id, error_code, error_messages
+                )
+                session.commit()
+                return views
+        return _fail_nonterminal_files(db, job_id, error_code, error_messages)
+
+    @staticmethod
+    def recompute_counters(job_id: str, db=None) -> Optional[EmbeddingJobView]:
+        """Recompute job counters from file rows.
+
+        Returns None if job not found.
+        """
+        if db is None:
+            with get_db() as session:
+                view = _recompute_counters(session, job_id)
+                session.commit()
+                return view
+        return _recompute_counters(db, job_id)
+
+    @staticmethod
+    def finalize_job(job_id: str, db=None) -> Optional[EmbeddingJobView]:
+        """Recompute counters and set terminal status.
+
+        Returns None if job not found. Returns current view if already terminal (no-op).
+        Terminal status is deterministic based on file completion counts.
+        """
+        if db is None:
+            with get_db() as session:
+                view = _finalize_job(session, job_id)
+                session.commit()
+                return view
+        return _finalize_job(db, job_id)
+
+    @staticmethod
+    def finalize_job_success(
+        job_id: str,
+        admin_id: str,
+        target_model_id: str,
+        previous_model_id: Optional[str],
+        vector_repo,
+        target_model_spec,
+        db=None,
+    ) -> Optional[EmbeddingJobView]:
+        """Finalize attempt counters; activate only the empty-inventory exception.
+
+        Successful files already published their vectors and readiness. This
+        compatibility entry point never promotes or deletes whole vector spaces.
+        Idempotent: returns the current view if already terminal.
+
+        Raises:
+            EmbeddingError (EMBEDDING_JOB_STALE_OPERATION): if the job is no
+                longer in the administrator's current generation.
+            EmbeddingError (EMBEDDING_MODEL_STATE_CONFLICT): if admin state
+                is missing or inconsistent.
+        """
+        if db is None:
+            with get_db() as session:
+                view = _finalize_job_success(
+                    session,
+                    job_id,
+                    admin_id,
+                    target_model_id,
+                    previous_model_id,
+                    vector_repo,
+                    target_model_spec,
+                )
+                session.commit()
+                return view
+        return _finalize_job_success(
+            db,
+            job_id,
+            admin_id,
+            target_model_id,
+            previous_model_id,
+            vector_repo,
+            target_model_spec,
+        )
+
+    @staticmethod
+    def create_retry_job(
+        source_job_id: str,
+        admin_id: str,
+        preparation_recipe: PreparationRecipe | None = None,
+        reliability_policy: EmbeddingReliabilityPolicy | None = None,
+        db=None,
+    ) -> CreateJobResult:
+        """Retry the generation's latest eligible failures using current sources.
+
+        Preparation recipes, model, and generation remain frozen. Active retry
+        requests converge on one attempt; dispatch-only recovery resumes the
+        existing pending inventory. Successful file publications remain intact.
+
+        Raises:
+            EmbeddingError: on validation failure (wrong status, active job,
+                target mismatch, source content changed).
+        """
+        if db is None:
+            with get_db() as session:
+                result = _create_retry_job(
+                    session,
+                    source_job_id,
+                    admin_id,
+                    preparation_recipe,
+                    reliability_policy,
+                )
+                session.commit()
+                return result
+        return _create_retry_job(
+            db,
+            source_job_id,
+            admin_id,
+            preparation_recipe,
+            reliability_policy,
+        )
+
+    @staticmethod
+    def list_failed_files(job_id: str, db=None) -> list[EmbeddingJobFileView]:
+        """List all failed file rows for a job, sorted by file_id."""
+        if db is None:
+            with get_db() as session:
+                return _list_failed_files(session, job_id)
+        return _list_failed_files(db, job_id)
+
+    @staticmethod
+    def list_incompatible_files(job_id: str, db=None) -> list[EmbeddingJobFileView]:
+        """List incompatible terminal file rows for a job."""
+        if db is None:
+            with get_db() as session:
+                return _list_incompatible_files(session, job_id)
+        return _list_incompatible_files(db, job_id)
+
+    @staticmethod
+    def list_files(job_id: str, db=None) -> list[EmbeddingJobFileView]:
+        """List every file row for a job, sorted by file ID."""
+        if db is None:
+            with get_db() as session:
+                return _list_files(session, job_id)
+        return _list_files(db, job_id)
+
+    @staticmethod
+    def get_job_status(job_id: str, db=None) -> Optional[EmbeddingJobStatusView]:
+        """Return a read-only status view for a job (Spec 08).
+
+        Includes the job row, ``pending_or_processing``, and derived counts by
+        source context (``knowledge`` / ``chat_upload`` / ``both``). The bucket
+        totals are mutually exclusive and never double-count a physical file
+        referenced by both knowledge and chat.
+
+        Returns None if the job is not found.
+        """
+        if db is None:
+            with get_db() as session:
+                return _get_job_status(session, job_id)
+        return _get_job_status(db, job_id)
+
+    @staticmethod
+    def mark_job_failed(
+        job_id: str,
+        error_code: str,
+        error_message: str,
+        db=None,
+    ) -> Optional[EmbeddingJobView]:
+        """Mark job as failed with error details.
+
+        Used for operation-level failures (e.g., enqueue failures) that prevent
+        the job from proceeding. Sets terminal status to 'failed' and records
+        the error code and message.
+
+        Returns None if job not found. No-op if already terminal.
+
+        When ``db`` is provided the caller owns the transaction (only flush);
+        otherwise a session is opened and committed here.
+        """
+        if db is None:
+            with get_db() as session:
+                view = _mark_job_failed(
+                    session,
+                    job_id,
+                    error_code,
+                    error_message,
+                )
+                session.commit()
+                return view
+        return _mark_job_failed(
+            db,
+            job_id,
+            error_code,
+            error_message,
+        )

@@ -622,6 +622,10 @@ async def periodic_task_cleanup():
     from open_webui.env import REDIS_URL
     from open_webui.socket.utils import RedisLock
 
+    if not _redis_task_store._check_redis_connection():
+        log.debug("Skipping periodic task cleanup: Redis task tracking is unavailable.")
+        return
+
     cleanup_lock = RedisLock(
         redis_url=REDIS_URL,
         lock_name="task_cleanup_lock",

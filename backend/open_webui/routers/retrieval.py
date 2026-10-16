@@ -6,7 +6,7 @@ import time
 
 import uuid
 from datetime import datetime
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, List, Literal, Optional
 from uuid import UUID
 
 from fastapi import (
@@ -26,14 +26,18 @@ from open_webui.utils.job_queue import (
     is_job_queue_available,
 )
 from fastapi.concurrency import run_in_threadpool
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import tiktoken
+from sqlalchemy import cast, func
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.exc import IntegrityError
 
 
 from langchain.text_splitter import RecursiveCharacterTextSplitter, TokenTextSplitter
 from langchain_core.documents import Document
 
-from open_webui.models.files import FileModel, Files
+from open_webui.internal.db import get_db
+from open_webui.models.files import File as FileRecord, FileModel, Files
 from open_webui.models.knowledge import Knowledges
 from open_webui.models.users import Users
 from open_webui.storage.provider import Storage
@@ -42,6 +46,28 @@ from open_webui.socket.utils import RedisLock
 
 
 from open_webui.retrieval.vector.connector import VECTOR_DB_CLIENT
+from open_webui.retrieval.embedding.errors import (
+    EmbeddingError,
+    EMBEDDING_ADMIN_UNRESOLVED,
+    EMBEDDING_CREDENTIALS_MISSING,
+    EMBEDDING_FILE_NOT_FOUND,
+    EMBEDDING_JOB_ACTIVE_EXISTS,
+    EMBEDDING_MODEL_DISABLED,
+    EMBEDDING_MODEL_NOT_CONFIGURED,
+    EMBEDDING_MODEL_STATE_CONFLICT,
+    EMBEDDING_PROVIDER_UNSUPPORTED,
+    EMBEDDING_REINDEX_NOT_READY,
+    EMBEDDING_STORAGE_DIMENSION_UNSUPPORTED,
+    FILE_PROCESSING_FAILED,
+    safe_file_processing_error_code,
+    safe_file_processing_error_message,
+)
+from open_webui.retrieval.embedding.model_change import (
+    ModelChangeResult,
+    ModelChangeNoOp,
+    request_model_change,
+)
+from open_webui.retrieval.embedding.enqueue import dispatch_embedding_job
 
 # Document loaders
 from open_webui.retrieval.loaders.main import Loader
@@ -81,6 +107,7 @@ from open_webui.utils.misc import (
     calculate_sha256_string,
 )
 from open_webui.utils.auth import get_admin_user, get_verified_user
+from open_webui.utils.access_control import has_access
 
 
 from open_webui.config import (
@@ -244,7 +271,7 @@ async def get_worker_status(request: Request, user=Depends(get_verified_user)):
         is_job_queue_available,
     )
     from rq import Worker
-    
+
     status = {
         "job_queue_enabled": ENABLE_JOB_QUEUE,
         "job_queue_available": False,
@@ -253,7 +280,7 @@ async def get_worker_status(request: Request, user=Depends(get_verified_user)):
         "workers": [],
         "redis_connected": False,
     }
-    
+
     try:
         if is_job_queue_available():
             status["job_queue_available"] = True
@@ -261,7 +288,7 @@ async def get_worker_status(request: Request, user=Depends(get_verified_user)):
             if queue:
                 status["queue_length"] = len(queue)
                 status["redis_connected"] = True
-                
+
                 # Get active workers
                 try:
                     workers = Worker.all(queue=queue)
@@ -279,7 +306,7 @@ async def get_worker_status(request: Request, user=Depends(get_verified_user)):
     except Exception as e:
         log.error(f"Error checking worker status: {e}", exc_info=True)
         status["error"] = str(e)
-    
+
     return status
 
 
@@ -296,7 +323,7 @@ async def get_status(request: Request, user=Depends(get_verified_user)):
 
     return {
         "status": True,
-        
+
         "chunk_size": chunk_size if chunk_size and chunk_size > 0 else 1000,
         "chunk_overlap": chunk_overlap if chunk_overlap is not None and chunk_overlap > 0 else 200,
         "template": request.app.state.config.RAG_TEMPLATE.get(user.email),
@@ -308,50 +335,27 @@ async def get_status(request: Request, user=Depends(get_verified_user)):
 
 
 @router.get("/embedding")
-async def get_embedding_config(request: Request, user=Depends(get_verified_user)):
+async def get_embedding_config(request: Request, user=Depends(get_admin_user)):
     """
     Get embedding configuration for the requesting user.
-    
-    RBAC: The API key returned is scoped to the requesting user:
-    - If user is an admin: Returns their own configured API key
-    - If user is in a group: Returns the group creator's (admin's) API key
-    - Other admins' API keys are NOT accessible (proper RBAC isolation)
+    Returns embedding configuration, including the stored API key, for the requesting user.
     """
-    # CRITICAL RBAC: Log the requesting user's email to ensure proper isolation
     requesting_email = user.email
-    log.info(
-        f"========== LOADING EMBEDDING CONFIG (Documents Page) ========== "
-        f"User '{requesting_email}' (ID: {user.id}) is opening the Documents page."
-    )
-    
-    # Get model and key for THIS specific user
     embedding_model = request.app.state.config.RAG_EMBEDDING_MODEL_USER.get(requesting_email) or ""
-    embedding_api_key = request.app.state.config.RAG_OPENAI_API_KEY.get(requesting_email)
-    
-    log.info(
-        f"[RETURNING TO FRONTEND] For user '{requesting_email}': "
-        f"Model = '{embedding_model}', API Key = '{embedding_api_key}'. "
-        f"This is what the Documents page will display."
-    )
-    
+
     return {
         "status": True,
-        "embedding_engine": request.app.state.config.RAG_EMBEDDING_ENGINE,  # Always "portkey"
-        # RBAC: Per-admin model name - retrieved using requesting user's email
-        # This ensures the model is only accessible to:
-        # 1. The admin who configured it (when they request it)
-        # 2. Users in groups created by that admin (via group inheritance)
-        # 3. NOT accessible to other admins or their groups
+        "embedding_engine": request.app.state.config.RAG_EMBEDDING_ENGINE,
         "embedding_model": embedding_model,
         "embedding_batch_size": request.app.state.config.RAG_EMBEDDING_BATCH_SIZE,
+        "reliability": {
+            "max_attempts": request.app.state.config.RAG_EMBEDDING_MAX_ATTEMPTS,
+            "connection_timeout_seconds": request.app.state.config.RAG_EMBEDDING_CONNECTION_TIMEOUT,
+            "read_timeout_seconds": request.app.state.config.RAG_EMBEDDING_READ_TIMEOUT,
+        },
         "openai_config": {
             "url": request.app.state.config.RAG_OPENAI_API_BASE_URL,
-            # RBAC: Per-admin API key - retrieved using requesting user's email
-            # This ensures the key is only accessible to:
-            # 1. The admin who configured it (when they request it)
-            # 2. Users in groups created by that admin (via group inheritance)
-            # 3. NOT accessible to other admins or their groups
-            "key": embedding_api_key,
+            "key": request.app.state.config.RAG_OPENAI_API_KEY.get(requesting_email) or "",
         },
     }
 
@@ -374,232 +378,59 @@ class OllamaConfigForm(BaseModel):
     key: str
 
 
+class EmbeddingReliabilityForm(BaseModel):
+    max_attempts: int = Field(default=3, ge=1, le=5)
+    connection_timeout_seconds: int = Field(default=10, ge=1, le=60)
+    read_timeout_seconds: int = Field(default=120, ge=30, le=600)
+
+
 class EmbeddingModelUpdateForm(BaseModel):
+    save_id: Optional[UUID] = None
     openai_config: Optional[OpenAIConfigForm] = None
     ollama_config: Optional[OllamaConfigForm] = None
     embedding_engine: str
     embedding_model: str
     embedding_batch_size: Optional[int] = 1
+    reliability: Optional[EmbeddingReliabilityForm] = None
+    force_reindex: bool = False
 
 
 @router.post("/embedding/update")
 async def update_embedding_config(
-    request: Request, form_data: EmbeddingModelUpdateForm, user=Depends(get_verified_user)
+    request: Request, form_data: EmbeddingModelUpdateForm,
+    background_tasks: BackgroundTasks, user=Depends(get_admin_user)
 ):
-    log.info(
-        f"========== EMBEDDING CONFIG UPDATE REQUEST ========== "
-        f"Admin '{user.email}' clicked SAVE on the Documents Embedding page. "
-        f"They want to set: Engine='{form_data.embedding_engine}', Model='{form_data.embedding_model}', "
-        f"BatchSize={form_data.embedding_batch_size}, "
-        f"OpenAI URL='{form_data.openai_config.url if form_data.openai_config else '(none)'}', "
-        f"OpenAI API Key='{form_data.openai_config.key if form_data.openai_config else '(none)'}', "
-        f"Ollama URL='{form_data.ollama_config.url if form_data.ollama_config else '(none)'}', "
-        f"Ollama Key='{form_data.ollama_config.key if form_data.ollama_config else '(none)'}'"
+    # Use the same transaction as document settings, including standalone model
+    # updates. Validation failures must not persist credentials or reliability edits.
+    result = await update_rag_config(
+        request,
+        ConfigUpdateForm(
+            embedding=form_data, force_reindex=form_data.force_reindex,
+            save_id=form_data.save_id,
+        ),
+        background_tasks,
+        user,
     )
-
-    # Basic validation: model and API key are mandatory for OpenAI/Portkey engines
-    if form_data.embedding_engine in ["openai", "portkey"]:
-        if not form_data.embedding_model or not form_data.embedding_model.strip():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Embedding model is required for OpenAI/Portkey engines.",
-            )
-        if form_data.openai_config is None or not form_data.openai_config.key.strip():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Embedding API key is required for OpenAI/Portkey engines.",
-            )
-
-    # CRITICAL RBAC: Log the admin's email to ensure proper isolation
-    admin_email = user.email
-    try:
-        # Get current model safely inside try block to catch any potential errors
-        current_model = "(empty)"
-        try:
-            current_model = request.app.state.config.RAG_EMBEDDING_MODEL_USER.get(admin_email) or "(empty)"
-        except Exception as e:
-            log.warning(f"Could not get current model for logging: {e}")
-        
-        log.info(
-            f"[RBAC_SET_EMBEDDING] Admin {admin_email} (ID: {user.id}) updating embedding config: "
-            f"{current_model} -> {form_data.embedding_model}, "
-            f"engine={form_data.embedding_engine}"
-        )
-        # Fetch CURRENT model BEFORE update
-        current_engine = getattr(request.app.state.config, 'RAG_EMBEDDING_ENGINE', '(unset)')
-        
-        log.info(
-            f"[ENGINE CHANGE] Admin '{admin_email}' is changing embedding engine from '{current_engine}' to '{form_data.embedding_engine}'"
-        )
-        request.app.state.config.RAG_EMBEDDING_ENGINE = form_data.embedding_engine
-        # RBAC: Per-admin model name - stored under admin's email
-        # The model will be accessible to:
-        # 1. The admin themselves
-        # 2. Users in groups created by this admin (via group inheritance)
-        # 3. NOT accessible to other admins or their groups
-        log.info(f"[RBAC_SET_EMBEDDING] Setting model for admin {admin_email}: {form_data.embedding_model}")
-        request.app.state.config.RAG_EMBEDDING_MODEL_USER.set(
-            admin_email, form_data.embedding_model
-        )
-
-        if request.app.state.config.RAG_EMBEDDING_ENGINE in [
-            "ollama",
-            "openai",
-            "portkey",
-        ]:
-            if form_data.openai_config is not None:
-                # Fetch CURRENT value BEFORE update to trace changes
-                current_api_key = request.app.state.config.RAG_OPENAI_API_KEY.get(admin_email) or "(empty)"
-                current_base_url = getattr(request.app.state.config.RAG_OPENAI_API_BASE_URL, 'value', str(request.app.state.config.RAG_OPENAI_API_BASE_URL)) or "(empty)"
-                
-                log.info(
-                    f"***** API KEY COMPARISON ***** "
-                    f"Admin '{admin_email}' is about to change the API key. "
-                    f"CURRENT API Key in system = '{current_api_key}'. "
-                    f"NEW API Key being set = '{form_data.openai_config.key}'. "
-                    f"CURRENT Base URL = '{current_base_url}'. "
-                    f"NEW Base URL = '{form_data.openai_config.url}'."
-                )
-                
-                request.app.state.config.RAG_OPENAI_API_BASE_URL = (
-                    form_data.openai_config.url
-                )
-                # Per-admin API key - set for this admin and their group (RBAC-protected)
-                # The key is stored under the admin's email and will be accessible to:
-                # 1. The admin themselves
-                # 2. Users in groups created by this admin
-                # 3. NOT accessible to other admins or their groups
-                log.info(
-                    f"[NOW SAVING API KEY] Calling config.RAG_OPENAI_API_KEY.set() for admin '{admin_email}' with key='{form_data.openai_config.key}'"
-                )
-                request.app.state.config.RAG_OPENAI_API_KEY.set(
-                    admin_email, form_data.openai_config.key
-                )
-                log.info(
-                    f"Admin {user.email} configured embedding OpenAI/Portkey API settings: "
-                    f"base_url={form_data.openai_config.url}, "
-                    f"api_key={form_data.openai_config.key} "
-                    f"(RBAC: accessible to admin and their group members only)"
-                )
-
-            if form_data.ollama_config is not None:
-                request.app.state.config.RAG_OLLAMA_BASE_URL = (
-                    form_data.ollama_config.url
-                )
-                request.app.state.config.RAG_OLLAMA_API_KEY = (
-                    form_data.ollama_config.key
-                )
-
-            request.app.state.config.RAG_EMBEDDING_BATCH_SIZE = (
-                form_data.embedding_batch_size
-            )
-
-        request.app.state.ef = get_ef(
-            request.app.state.config.RAG_EMBEDDING_ENGINE,
-            request.app.state.config.RAG_EMBEDDING_MODEL,
-        )
-
-        # Get user's API key for embedding function
-        user_api_key = request.app.state.config.RAG_OPENAI_API_KEY.get(user.email)
-        
-        # Get base URL value - handle PersistentConfig objects properly
-        if request.app.state.config.RAG_EMBEDDING_ENGINE == "openai" or request.app.state.config.RAG_EMBEDDING_ENGINE == "portkey":
-            base_url_config = request.app.state.config.RAG_OPENAI_API_BASE_URL
-            base_url = (
-                base_url_config.value
-                if hasattr(base_url_config, 'value')
-                else str(base_url_config)
-            )
-            # Fallback to default if empty (from config.py default)
-            if not base_url or base_url.strip() == "":
-                base_url = "https://ai-gateway.apps.cloud.rt.nyu.edu/v1"
-                log.warning(f"RAG_OPENAI_API_BASE_URL is empty, using default: {base_url}")
-        else:
-            base_url_config = request.app.state.config.RAG_OLLAMA_BASE_URL
-            base_url = (
-                base_url_config.value
-                if hasattr(base_url_config, 'value')
-                else str(base_url_config)
-            )
-        
-        request.app.state.EMBEDDING_FUNCTION = get_embedding_function(
-            request.app.state.config.RAG_EMBEDDING_ENGINE,
-            request.app.state.config.RAG_EMBEDDING_MODEL,
-            request.app.state.ef,
-            base_url,
-            (
-                user_api_key
-                if request.app.state.config.RAG_EMBEDDING_ENGINE == "openai"
-                or request.app.state.config.RAG_EMBEDDING_ENGINE == "portkey"
-                else request.app.state.config.RAG_OLLAMA_API_KEY
-            ),
-            request.app.state.config.RAG_EMBEDDING_BATCH_SIZE,
-        )
-
-        # Fetch the saved values from database to verify the save worked
-        # (cache should be invalidated by set(), so get() will fetch from DB)
-        saved_model = request.app.state.config.RAG_EMBEDDING_MODEL_USER.get(user.email) or ""
-        saved_api_key = request.app.state.config.RAG_OPENAI_API_KEY.get(user.email) or ""
-        
-        # Verify the save worked by comparing with what we tried to save
-        log.info(f"[VERIFICATION] Now checking if the save worked by reading back from database...")
-        
-        if saved_model != form_data.embedding_model:
-            log.error(
-                f"!!!!! MODEL SAVE FAILED !!!!! "
-                f"Admin '{admin_email}' tried to save model='{form_data.embedding_model}', "
-                f"but database actually has model='{saved_model}'. Something went wrong!"
-            )
-        else:
-            log.info(
-                f"[MODEL VERIFIED] Model saved correctly for admin '{admin_email}': '{saved_model}'"
-            )
-
-        if form_data.openai_config is not None:
-            if saved_api_key != form_data.openai_config.key:
-                log.error(
-                    f"!!!!! API KEY SAVE FAILED !!!!! "
-                    f"Admin '{admin_email}' tried to save API key='{form_data.openai_config.key}', "
-                    f"but database actually has API key='{saved_api_key}'. "
-                    f"THE KEY WAS OVERWRITTEN OR NOT SAVED CORRECTLY!"
-                )
-            else:
-                log.info(
-                    f"[API KEY VERIFIED] API key saved correctly for admin '{admin_email}': '{saved_api_key}'"
-                )
-        else:
-            log.info(f"[NO API KEY] No OpenAI/Portkey API key was provided (engine='{form_data.embedding_engine}')")
-        
-        # Final summary
-        log.info(
-            f"========== EMBEDDING CONFIG UPDATE COMPLETE ========== "
-            f"Admin: '{admin_email}' | Engine: '{form_data.embedding_engine}' | Model: '{saved_model}' | "
-            f"API Key User Wanted: '{form_data.openai_config.key if form_data.openai_config else '(none)'}' | "
-            f"API Key Actually Saved: '{saved_api_key}'"
-        )
-
-        return {
-            "status": True,
-            "embedding_engine": request.app.state.config.RAG_EMBEDDING_ENGINE,
-            # Return the verified value from database
-            "embedding_model": saved_model,
-            "embedding_batch_size": request.app.state.config.RAG_EMBEDDING_BATCH_SIZE,
-            "openai_config": {
-                "url": request.app.state.config.RAG_OPENAI_API_BASE_URL,
-                # Return the verified API key from database
-                "key": saved_api_key,
-            },
-            "ollama_config": {
-                "url": request.app.state.config.RAG_OLLAMA_BASE_URL,
-                "key": request.app.state.config.RAG_OLLAMA_API_KEY,
-            },
-        }
-    except Exception as e:
-        log.exception(f"Problem updating embedding model: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=ERROR_MESSAGES.DEFAULT(e),
-        )
+    config = request.app.state.config
+    return {
+        **result,
+        "embedding_engine": config.RAG_EMBEDDING_ENGINE,
+        "embedding_model": config.RAG_EMBEDDING_MODEL_USER.get(user.email),
+        "embedding_batch_size": config.RAG_EMBEDDING_BATCH_SIZE,
+        "reliability": {
+            "max_attempts": config.RAG_EMBEDDING_MAX_ATTEMPTS,
+            "connection_timeout_seconds": config.RAG_EMBEDDING_CONNECTION_TIMEOUT,
+            "read_timeout_seconds": config.RAG_EMBEDDING_READ_TIMEOUT,
+        },
+        "openai_config": {
+            "url": config.RAG_OPENAI_API_BASE_URL,
+            "key": config.RAG_OPENAI_API_KEY.get(user.email),
+        },
+        "ollama_config": {
+            "url": config.RAG_OLLAMA_BASE_URL,
+            "key": config.RAG_OLLAMA_API_KEY,
+        },
+    }
 
 
 class RerankingModelUpdateForm(BaseModel):
@@ -637,11 +468,35 @@ async def update_reranking_config(
         )
 
 
+def _effective_video_max_size_mb(request: Request) -> int:
+    """Return the effective video file size limit in MB.
+
+    The effective limit is min(RAG_VIDEO_MAX_FILE_SIZE_MB, RAG_FILE_MAX_SIZE)
+    when the global file limit is configured. If no global file limit exists,
+    the video-specific limit applies.
+    """
+    video_limit = getattr(request.app.state.config, "RAG_VIDEO_MAX_FILE_SIZE_MB", 20)
+    if hasattr(video_limit, "value"):
+        video_limit = video_limit.value
+    video_limit = int(video_limit) if video_limit else 20
+
+    global_limit = getattr(request.app.state.config, "FILE_MAX_SIZE", None)
+    if hasattr(global_limit, "value"):
+        global_limit = global_limit.value
+
+    if global_limit is not None and global_limit > 0:
+        return min(video_limit, int(global_limit))
+    return video_limit
+
+
 @router.get("/config")
 async def get_rag_config(request: Request, user=Depends(get_verified_user)):
     return {
         "status": True,
+        "audio_max_clips": request.app.state.config.RAG_AUDIO_MAX_CLIPS.get(user.email),
         "pdf_extract_images": request.app.state.config.PDF_EXTRACT_IMAGES,
+        "pdf_max_visuals_per_page": request.app.state.config.RAG_PDF_MAX_VISUALS_PER_PAGE,
+        "pdf_max_visuals_per_document": request.app.state.config.RAG_PDF_MAX_VISUALS_PER_DOCUMENT,
         "RAG_FULL_CONTEXT": request.app.state.config.RAG_FULL_CONTEXT.get(user.email),
         "BYPASS_EMBEDDING_AND_RETRIEVAL": request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL,
         "enable_google_drive_integration": request.app.state.config.ENABLE_GOOGLE_DRIVE_INTEGRATION,
@@ -655,13 +510,20 @@ async def get_rag_config(request: Request, user=Depends(get_verified_user)):
             },
         },
         "chunk": {
-            "text_splitter": request.app.state.config.TEXT_SPLITTER,
+            "text_splitter": request.app.state.config.TEXT_SPLITTER or "character",
             "chunk_size": (lambda v: v if v and v > 0 else 1000)(request.app.state.config.CHUNK_SIZE.get(user.email)),
             "chunk_overlap": (lambda v: v if v is not None and v > 0 else 200)(request.app.state.config.CHUNK_OVERLAP.get(user.email)),
         },
         "file": {
             "max_size": request.app.state.config.FILE_MAX_SIZE,
             "max_count": request.app.state.config.FILE_MAX_COUNT,
+        },
+        "video": {
+            "max_file_size_mb": getattr(request.app.state.config, "RAG_VIDEO_MAX_FILE_SIZE_MB", 20),
+            "effective_max_file_size_mb": _effective_video_max_size_mb(request),
+            "chunk_duration_seconds": getattr(request.app.state.config, "RAG_VIDEO_CHUNK_DURATION", 16),
+            "min_chunk_duration_seconds": getattr(request.app.state.config, "RAG_VIDEO_MIN_CHUNK_DURATION", 4),
+            "max_duration_seconds": getattr(request.app.state.config, "RAG_VIDEO_MAX_DURATION", 120),
         },
         "youtube": {
             "language": request.app.state.config.YOUTUBE_LOADER_LANGUAGE,
@@ -772,185 +634,473 @@ class WebConfig(BaseModel):
     BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL: Optional[bool] = None
 
 
+class VideoConfig(BaseModel):
+    max_file_size_mb: Optional[int] = None
+    chunk_duration_seconds: Optional[int] = None
+    min_chunk_duration_seconds: Optional[int] = None
+    max_duration_seconds: Optional[int] = None
+
+
 class ConfigUpdateForm(BaseModel):
+    save_id: Optional[UUID] = None
+    reindex_confirmed: bool = False
+    audio_max_clips: Optional[int] = Field(default=None, ge=1, strict=True)
+    # Accepted for old clients; indexing settings can no longer defer job creation.
+    defer_embedding_reindex: bool = False
+    embedding: Optional[EmbeddingModelUpdateForm] = None
+    force_reindex: bool = False
     RAG_FULL_CONTEXT: Optional[bool] = None
     BYPASS_EMBEDDING_AND_RETRIEVAL: Optional[bool] = None
     pdf_extract_images: Optional[bool] = None
+    pdf_max_visuals_per_page: Optional[int] = Field(default=None, ge=1, strict=True)
+    pdf_max_visuals_per_document: Optional[int] = Field(default=None, ge=1, strict=True)
     enable_google_drive_integration: Optional[bool] = None
     enable_onedrive_integration: Optional[bool] = None
     file: Optional[FileConfig] = None
+    video: Optional[VideoConfig] = None
     content_extraction: Optional[ContentExtractionConfig] = None
     chunk: Optional[ChunkParamUpdateForm] = None
     youtube: Optional[YoutubeLoaderConfig] = None
     web: Optional[WebConfig] = None
 
 
-@router.post("/config/update")
-async def update_rag_config(
-    request: Request, form_data: ConfigUpdateForm, user=Depends(get_admin_user)
-):
-    request.app.state.config.PDF_EXTRACT_IMAGES = (
+def _update_video_settings(config, video_config, user):
+    """Validate and stage video settings on a transaction-local config view."""
+    from open_webui.utils.super_admin import is_super_admin
+
+    if not is_super_admin(user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only super administrators can update video settings.",
+        )
+
+    v = video_config
+
+    # Resolve omitted fields from current persisted values
+    def _current(attr, default):
+        val = getattr(config, attr, default)
+        return val.value if hasattr(val, "value") else val
+
+    resolved_max_size = v.max_file_size_mb if v.max_file_size_mb is not None else int(_current("RAG_VIDEO_MAX_FILE_SIZE_MB", 20))
+    resolved_chunk = v.chunk_duration_seconds if v.chunk_duration_seconds is not None else int(_current("RAG_VIDEO_CHUNK_DURATION", 16))
+    resolved_min = v.min_chunk_duration_seconds if v.min_chunk_duration_seconds is not None else int(_current("RAG_VIDEO_MIN_CHUNK_DURATION", 4))
+    resolved_max_dur = v.max_duration_seconds if v.max_duration_seconds is not None else int(_current("RAG_VIDEO_MAX_DURATION", 120))
+
+    # Strict type validation — reject booleans, decimals, non-integer values
+    errors = {}
+    for name, val in [
+        ("max_file_size_mb", resolved_max_size),
+        ("chunk_duration_seconds", resolved_chunk),
+        ("min_chunk_duration_seconds", resolved_min),
+        ("max_duration_seconds", resolved_max_dur),
+    ]:
+        if isinstance(val, bool):
+            errors[name] = "Must be an integer, not a boolean."
+        elif isinstance(val, float) and not val.is_integer():
+            errors[name] = "Must be an integer, not a decimal."
+
+    if errors:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=errors)
+
+    # Range validation
+    resolved_max_size = int(resolved_max_size)
+    resolved_chunk = int(resolved_chunk)
+    resolved_min = int(resolved_min)
+    resolved_max_dur = int(resolved_max_dur)
+
+    errors = {}
+    if not (1 <= resolved_max_size <= 1024):
+        errors["max_file_size_mb"] = "Must be between 1 and 1024 MB."
+    if not (1 <= resolved_chunk <= 120):
+        errors["chunk_duration_seconds"] = "Must be between 1 and 120 seconds."
+    if resolved_min < 1:
+        errors["min_chunk_duration_seconds"] = "Must be at least 1 second."
+    if not (1 <= resolved_max_dur <= 3600):
+        errors["max_duration_seconds"] = "Must be between 1 and 3600 seconds."
+    if resolved_min >= resolved_chunk:
+        errors["min_chunk_duration_seconds"] = "Must be less than chunk duration."
+
+    if errors:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=errors)
+
+    config.RAG_VIDEO_MAX_FILE_SIZE_MB = resolved_max_size
+    config.RAG_VIDEO_CHUNK_DURATION = resolved_chunk
+    config.RAG_VIDEO_MIN_CHUNK_DURATION = resolved_min
+    config.RAG_VIDEO_MAX_DURATION = resolved_max_dur
+
+    return {
+        "max_file_size_mb": resolved_max_size,
+        "effective_max_file_size_mb": min(resolved_max_size, config.FILE_MAX_SIZE or resolved_max_size),
+        "chunk_duration_seconds": resolved_chunk,
+        "min_chunk_duration_seconds": resolved_min,
+        "max_duration_seconds": resolved_max_dur,
+    }
+
+
+def _stage_rag_settings(config, form_data, user):
+    if form_data.pdf_max_visuals_per_page is not None:
+        config.RAG_PDF_MAX_VISUALS_PER_PAGE = form_data.pdf_max_visuals_per_page
+    if form_data.pdf_max_visuals_per_document is not None:
+        config.RAG_PDF_MAX_VISUALS_PER_DOCUMENT = form_data.pdf_max_visuals_per_document
+    if form_data.audio_max_clips is not None:
+        config.RAG_AUDIO_MAX_CLIPS.set(user.email, form_data.audio_max_clips)
+    if form_data.video is not None:
+        _update_video_settings(config, form_data.video, user)
+
+    config.PDF_EXTRACT_IMAGES = (
         form_data.pdf_extract_images
         if form_data.pdf_extract_images is not None
-        else request.app.state.config.PDF_EXTRACT_IMAGES
+        else config.PDF_EXTRACT_IMAGES
     )
 
-    
     if form_data.RAG_FULL_CONTEXT is not None:
-        request.app.state.config.RAG_FULL_CONTEXT.set(user.email,form_data.RAG_FULL_CONTEXT)
-    
+        config.RAG_FULL_CONTEXT.set(user.email, form_data.RAG_FULL_CONTEXT)
 
-    request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL = (
+    config.BYPASS_EMBEDDING_AND_RETRIEVAL = (
         form_data.BYPASS_EMBEDDING_AND_RETRIEVAL
         if form_data.BYPASS_EMBEDDING_AND_RETRIEVAL is not None
-        else request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL
+        else config.BYPASS_EMBEDDING_AND_RETRIEVAL
     )
 
-    request.app.state.config.ENABLE_GOOGLE_DRIVE_INTEGRATION = (
+    config.ENABLE_GOOGLE_DRIVE_INTEGRATION = (
         form_data.enable_google_drive_integration
         if form_data.enable_google_drive_integration is not None
-        else request.app.state.config.ENABLE_GOOGLE_DRIVE_INTEGRATION
+        else config.ENABLE_GOOGLE_DRIVE_INTEGRATION
     )
 
-    request.app.state.config.ENABLE_ONEDRIVE_INTEGRATION = (
+    config.ENABLE_ONEDRIVE_INTEGRATION = (
         form_data.enable_onedrive_integration
         if form_data.enable_onedrive_integration is not None
-        else request.app.state.config.ENABLE_ONEDRIVE_INTEGRATION
+        else config.ENABLE_ONEDRIVE_INTEGRATION
     )
 
     if form_data.file is not None:
-        request.app.state.config.FILE_MAX_SIZE = form_data.file.max_size
-        request.app.state.config.FILE_MAX_COUNT = form_data.file.max_count
+        config.FILE_MAX_SIZE = form_data.file.max_size
+        config.FILE_MAX_COUNT = form_data.file.max_count
 
     if form_data.content_extraction is not None:
         log.info(
-            f"Updating content extraction: {request.app.state.config.CONTENT_EXTRACTION_ENGINE} to {form_data.content_extraction.engine}"
+            f"Updating content extraction: {config.CONTENT_EXTRACTION_ENGINE} to {form_data.content_extraction.engine}"
         )
-        request.app.state.config.CONTENT_EXTRACTION_ENGINE = (
+        config.CONTENT_EXTRACTION_ENGINE = (
             form_data.content_extraction.engine
         )
-        request.app.state.config.TIKA_SERVER_URL = (
+        config.TIKA_SERVER_URL = (
             form_data.content_extraction.tika_server_url
         )
         if form_data.content_extraction.document_intelligence_config is not None:
-            request.app.state.config.DOCUMENT_INTELLIGENCE_ENDPOINT = (
+            config.DOCUMENT_INTELLIGENCE_ENDPOINT = (
                 form_data.content_extraction.document_intelligence_config.endpoint
             )
-            request.app.state.config.DOCUMENT_INTELLIGENCE_KEY = (
+            config.DOCUMENT_INTELLIGENCE_KEY = (
                 form_data.content_extraction.document_intelligence_config.key
             )
 
     if form_data.chunk is not None:
-        request.app.state.config.TEXT_SPLITTER = form_data.chunk.text_splitter
+        requested_splitter = (form_data.chunk.text_splitter or "character").strip().lower()
+        if requested_splitter in {"", "character", "recursive"}:
+            requested_splitter = "character"
+        elif requested_splitter in {"token", "tiktoken"}:
+            requested_splitter = "token"
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Text splitter must be character or token.",
+            )
+        config.TEXT_SPLITTER = requested_splitter
         # Validate and set chunk_size (must be > 0, default 1000)
         log.info(f"[CHUNK_UPDATE] Received chunk_size={form_data.chunk.chunk_size}, chunk_overlap={form_data.chunk.chunk_overlap} from user={user.email}")
         chunk_size = form_data.chunk.chunk_size if form_data.chunk.chunk_size and form_data.chunk.chunk_size > 0 else 1000
         # Validate and set chunk_overlap (must be > 0, default 200) - treat 0 as invalid
         chunk_overlap = form_data.chunk.chunk_overlap if form_data.chunk.chunk_overlap is not None and form_data.chunk.chunk_overlap > 0 else 200
         log.info(f"[CHUNK_UPDATE] Validated and saving chunk_size={chunk_size}, chunk_overlap={chunk_overlap} for user={user.email}")
-        request.app.state.config.CHUNK_SIZE.set(user.email, chunk_size)
-        request.app.state.config.CHUNK_OVERLAP.set(user.email, chunk_overlap)
+        config.CHUNK_SIZE.set(user.email, chunk_size)
+        config.CHUNK_OVERLAP.set(user.email, chunk_overlap)
 
     if form_data.youtube is not None:
-        request.app.state.config.YOUTUBE_LOADER_LANGUAGE = form_data.youtube.language
-        request.app.state.config.YOUTUBE_LOADER_PROXY_URL = form_data.youtube.proxy_url
-        request.app.state.YOUTUBE_LOADER_TRANSLATION = form_data.youtube.translation
+        config.YOUTUBE_LOADER_LANGUAGE = form_data.youtube.language
+        config.YOUTUBE_LOADER_PROXY_URL = form_data.youtube.proxy_url
 
     if form_data.web is not None:
-        request.app.state.config.ENABLE_RAG_WEB_LOADER_SSL_VERIFICATION = (
+        config.ENABLE_RAG_WEB_LOADER_SSL_VERIFICATION = (
             # Note: When UI "Bypass SSL verification for Websites"=True then ENABLE_RAG_WEB_LOADER_SSL_VERIFICATION=False
             form_data.web.ENABLE_RAG_WEB_LOADER_SSL_VERIFICATION
         )
 
-        # request.app.state.config.ENABLE_RAG_WEB_SEARCH = form_data.web.search.enabled
-        # request.app.state.config.RAG_WEB_SEARCH_ENGINE = form_data.web.search.engine
+        # config.ENABLE_RAG_WEB_SEARCH = form_data.web.search.enabled
+        # config.RAG_WEB_SEARCH_ENGINE = form_data.web.search.engine
 
-        request.app.state.config.ENABLE_RAG_WEB_SEARCH.set(user.email,form_data.web.search.enabled)
-        request.app.state.config.RAG_WEB_SEARCH_ENGINE.set(user.email,form_data.web.search.engine) 
+        config.ENABLE_RAG_WEB_SEARCH.set(user.email,form_data.web.search.enabled)
+        config.RAG_WEB_SEARCH_ENGINE.set(user.email,form_data.web.search.engine)
 
-        # request.app.state.config.BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL = (
+        # config.BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL = (
         #     form_data.web.BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL
         # )
 
-        request.app.state.config.BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL.set(user.email,
+        config.BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL.set(user.email,
             form_data.web.BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL
         )
 
-        request.app.state.config.SEARXNG_QUERY_URL.set(user.email,
+        config.SEARXNG_QUERY_URL.set(user.email,
             form_data.web.search.searxng_query_url
         )
-        request.app.state.config.GOOGLE_PSE_API_KEY.set(user.email,
+        config.GOOGLE_PSE_API_KEY.set(user.email,
             form_data.web.search.google_pse_api_key
         )
-        request.app.state.config.GOOGLE_PSE_ENGINE_ID.set(user.email,
+        config.GOOGLE_PSE_ENGINE_ID.set(user.email,
             form_data.web.search.google_pse_engine_id
         )
-        request.app.state.config.BRAVE_SEARCH_API_KEY.set(user.email,
+        config.BRAVE_SEARCH_API_KEY.set(user.email,
             form_data.web.search.brave_search_api_key
         )
-        request.app.state.config.KAGI_SEARCH_API_KEY.set(user.email,
+        config.KAGI_SEARCH_API_KEY.set(user.email,
             form_data.web.search.kagi_search_api_key
         )
-        request.app.state.config.MOJEEK_SEARCH_API_KEY.set(user.email,
+        config.MOJEEK_SEARCH_API_KEY.set(user.email,
             form_data.web.search.mojeek_search_api_key
         )
-        request.app.state.config.BOCHA_SEARCH_API_KEY.set(user.email,
+        config.BOCHA_SEARCH_API_KEY.set(user.email,
             form_data.web.search.bocha_search_api_key
         )
-        request.app.state.config.SERPSTACK_API_KEY.set(user.email,
+        config.SERPSTACK_API_KEY.set(user.email,
             form_data.web.search.serpstack_api_key
         )
-        request.app.state.config.SERPSTACK_HTTPS.set(user.email,form_data.web.search.serpstack_https)
-        request.app.state.config.SERPER_API_KEY.set(user.email,form_data.web.search.serper_api_key)
-        request.app.state.config.SERPLY_API_KEY.set(user.email, form_data.web.search.serply_api_key)
-        request.app.state.config.TAVILY_API_KEY.set(user.email,form_data.web.search.tavily_api_key)
-        request.app.state.config.SEARCHAPI_API_KEY.set(user.email,
+        config.SERPSTACK_HTTPS.set(user.email,form_data.web.search.serpstack_https)
+        config.SERPER_API_KEY.set(user.email,form_data.web.search.serper_api_key)
+        config.SERPLY_API_KEY.set(user.email, form_data.web.search.serply_api_key)
+        config.TAVILY_API_KEY.set(user.email,form_data.web.search.tavily_api_key)
+        config.SEARCHAPI_API_KEY.set(user.email,
             form_data.web.search.searchapi_api_key
         )
-        request.app.state.config.SEARCHAPI_ENGINE.set(user.email,
+        config.SEARCHAPI_ENGINE.set(user.email,
             form_data.web.search.searchapi_engine
         )
 
-        request.app.state.config.SERPAPI_API_KEY.set(user.email,form_data.web.search.serpapi_api_key)
-        request.app.state.config.SERPAPI_ENGINE.set(user.email,form_data.web.search.serpapi_engine)
+        config.SERPAPI_API_KEY.set(user.email,form_data.web.search.serpapi_api_key)
+        config.SERPAPI_ENGINE.set(user.email,form_data.web.search.serpapi_engine)
 
-        request.app.state.config.JINA_API_KEY.set(user.email,form_data.web.search.jina_api_key)
-        request.app.state.config.BING_SEARCH_V7_ENDPOINT.set(user.email,
+        config.JINA_API_KEY.set(user.email,form_data.web.search.jina_api_key)
+        config.BING_SEARCH_V7_ENDPOINT.set(user.email,
             form_data.web.search.bing_search_v7_endpoint
         )
-        request.app.state.config.BING_SEARCH_V7_SUBSCRIPTION_KEY.set(user.email,
+        config.BING_SEARCH_V7_SUBSCRIPTION_KEY.set(user.email,
             form_data.web.search.bing_search_v7_subscription_key
         )
 
-        request.app.state.config.EXA_API_KEY.set(user.email,form_data.web.search.exa_api_key)
+        config.EXA_API_KEY.set(user.email,form_data.web.search.exa_api_key)
 
-        request.app.state.config.RAG_WEB_SEARCH_RESULT_COUNT.set(user.email,
+        config.RAG_WEB_SEARCH_RESULT_COUNT.set(user.email,
             form_data.web.search.result_count
         )
-        request.app.state.config.RAG_WEB_SEARCH_CONCURRENT_REQUESTS.set(user.email,
+        config.RAG_WEB_SEARCH_CONCURRENT_REQUESTS.set(user.email,
             form_data.web.search.concurrent_requests
         )
-        request.app.state.config.RAG_WEB_SEARCH_TRUST_ENV.set(user.email,
+        config.RAG_WEB_SEARCH_TRUST_ENV.set(user.email,
             form_data.web.search.trust_env
         )
-        request.app.state.config.RAG_WEB_SEARCH_DOMAIN_FILTER_LIST.set(user.email,
+        config.RAG_WEB_SEARCH_DOMAIN_FILTER_LIST.set(user.email,
             form_data.web.search.domain_filter_list
         )
-        request.app.state.config.RAG_WEB_SEARCH_WEBSITE_BLOCKLIST.set(user.email,
+        config.RAG_WEB_SEARCH_WEBSITE_BLOCKLIST.set(user.email,
             form_data.web.search.website_blocklist
         )
-        request.app.state.config.RAG_WEB_SEARCH_INTERNAL_FACILITIES_SITES.set(user.email,
+        config.RAG_WEB_SEARCH_INTERNAL_FACILITIES_SITES.set(user.email,
             form_data.web.search.internal_facilities_sites
         )
 
+
+
+@router.get("/config/indexing")
+async def get_settings_indexing(user=Depends(get_admin_user)):
+    from open_webui.internal.db import get_db
+    from open_webui.retrieval.embedding.settings import settings_indexing_status
+
+    with get_db() as db:
+        return settings_indexing_status(db, user)
+
+
+@router.get("/config/saves/{save_id}")
+async def get_settings_save(save_id: UUID, user=Depends(get_admin_user)):
+    """Confirm a committed save when its HTTP response did not reach the client."""
+    from open_webui.config import Config
+    from open_webui.retrieval.embedding.settings import settings_indexing_status
+
+    with get_db() as db:
+        row = db.query(Config).filter_by(email=user.email, version=0).first()
+        data = row.data if row and isinstance(row.data, dict) else {}
+        if str(save_id) not in data.get("rag", {}).get("settings_save_ids", []):
+            # Absence is not a rejection: the original request may still be running.
+            return {"status": "unconfirmed"}
+        try:
+            indexing = settings_indexing_status(db, user)
+        except Exception:
+            log.warning("Could not read indexing status for confirmed save | admin=%s", user.id)
+            indexing = {"status": "unknown", "jobs": [], "in_progress": True}
+        return {
+            "status": True,
+            "settings_saved": True,
+            "indexing": indexing,
+        }
+
+
+@router.post("/config/update")
+async def update_rag_config(
+    request: Request,
+    form_data: ConfigUpdateForm,
+    background_tasks: BackgroundTasks,
+    user=Depends(get_admin_user),
+):
+    from open_webui.internal.db import get_db
+    from open_webui.utils.config_transaction import ConfigTransaction, ConfigUpdateConflict
+    from open_webui.retrieval.embedding.errors import InventorySourceUnavailableError
+    from open_webui.retrieval.embedding.preparation import build_preparation_recipe
+    from open_webui.retrieval.embedding.settings import (
+        prepare_settings_jobs, stage_embedding_settings, settings_indexing_status,
+    )
+
+    # Nothing touches live config or caches until every inventory and job has
+    # been prepared and the encompassing database transaction has committed.
+    commit_started = False
+    try:
+        with get_db() as db:
+            previous = ConfigTransaction(request.app.state.config, db)
+            proposed = ConfigTransaction(request.app.state.config, db)
+            old_recipe = build_preparation_recipe(previous, user.email)
+            _stage_rag_settings(proposed, form_data, user)
+            if form_data.embedding is not None:
+                stage_embedding_settings(proposed, form_data.embedding, user.email)
+            new_recipe = build_preparation_recipe(proposed, user.email)
+            chunking_changed = old_recipe.reindex_settings != new_recipe.reindex_settings
+            jobs = prepare_settings_jobs(
+                db, previous, proposed, user,
+                embedding=form_data.embedding,
+                force_reindex=form_data.force_reindex or bool(
+                    form_data.embedding and form_data.embedding.force_reindex
+                ),
+            )
+            if jobs and not form_data.reindex_confirmed:
+                # Preparation only flushes into this transaction. Roll back all
+                # settings, jobs and projection changes before asking the user.
+                db.rollback()
+                raise HTTPException(status_code=409, detail={
+                    "error_code": "reindex_confirmation_required",
+                    "message": "Applying these changes will reindex all affected knowledge collections and chat uploads. Proceed?",
+                    "settings_saved": False,
+                })
+            if form_data.save_id is not None:
+                save_ids = proposed.get_value(user.email, "rag.settings_save_ids", [])
+                proposed.set_value(
+                    user.email, "rag.settings_save_ids",
+                    [*save_ids[-19:], str(form_data.save_id)],
+                )
+            proposed.persist()
+            commit_started = True
+            db.commit()
+    except HTTPException as error:
+        if isinstance(error.detail, dict) and error.detail.get("error_code") == "reindex_confirmation_required":
+            raise
+        message = error.detail
+        if isinstance(message, dict):
+            message = "; ".join(f"{key}: {value}" for key, value in message.items())
+        raise HTTPException(status_code=error.status_code, detail={
+            "message": f"Settings were not saved. {message}", "settings_saved": False,
+        }) from None
+    except InventorySourceUnavailableError as error:
+        from open_webui.utils.super_admin import is_super_admin
+
+        detail = {
+            "error_code": error.code,
+            "settings_saved": False,
+            "message": "Settings were not saved because a referenced source file is missing "
+                       "or unreadable. Restore the source or remove its live references, then save again.",
+        }
+        if error.admin_id == user.id or is_super_admin(user):
+            detail["file"] = {
+                "id": error.file_id, "name": error.filename, "reason": error.reason,
+            }
+        else:
+            detail["message"] = "Settings were not saved because another administrator's " \
+                                "index has a missing or unreadable source. Ask its owner to repair it."
+        raise HTTPException(status_code=409, detail=detail) from None
+    except (EmbeddingError, ConfigUpdateConflict, ValueError) as error:
+        code = error.code if isinstance(error, EmbeddingError) else "settings_validation_failed"
+        message = "Settings were not saved. Resolve the indexing error and try again."
+        if isinstance(error, ConfigUpdateConflict):
+            message = "Settings changed during this save. Reload the page and try again."
+        elif isinstance(error, ValueError):
+            message = str(error)
+        elif code in {EMBEDDING_JOB_ACTIVE_EXISTS, EMBEDDING_MODEL_STATE_CONFLICT}:
+            message = "Settings were not saved because indexing is already in progress or awaiting recovery."
+        log.warning("Indexing settings rejected | admin=%s code=%s", user.id, code)
+        raise HTTPException(status_code=409, detail={
+            "error_code": code, "message": message, "settings_saved": False,
+        }) from None
+    except Exception as error:
+        # Do not expose SQL parameters (which may include credentials). A
+        # constraint rejection or failure before commit definitely rolled back;
+        # a lost connection during commit needs the durable receipt check.
+        rolled_back = not commit_started or isinstance(error, IntegrityError)
+        diagnostic = getattr(getattr(error, "orig", None), "diag", None)
+        constraint = getattr(diagnostic, "constraint_name", None)
+        log.error(
+            "Settings transaction failed | admin=%s type=%s constraint=%s rolled_back=%s",
+            user.id, type(error).__name__, constraint, rolled_back,
+        )
+        detail = {
+            "error_code": "settings_save_failed",
+            "message": "Settings were not saved because the server could not prepare or store the update. Please try again."
+            if rolled_back else "The database connection was interrupted while saving settings.",
+        }
+        if rolled_back:
+            detail["settings_saved"] = False
+        raise HTTPException(status_code=500, detail=detail) from None
+
+    proposed.publish()
+    if form_data.youtube is not None:
+        request.app.state.YOUTUBE_LOADER_TRANSLATION = form_data.youtube.translation
+    log.info("Indexing settings committed | actor=%s jobs=%s", user.id, [job.job_id for job in jobs])
+    dispatch_failed = False
+    for job in jobs:
+        if job.status not in {"queued", "processing"}:
+            continue
+        try:
+            dispatch_embedding_job(job.job_id, background_tasks)
+        except Exception:
+            # The committed job is durable and retryable. Never claim rollback
+            # after commit, and do not lose background tasks for other jobs.
+            dispatch_failed = True
+            log.exception("Settings indexing dispatch failed | job=%s", job.job_id)
+    try:
+        with get_db() as db:
+            indexing = settings_indexing_status(db, user)
+    except Exception:
+        log.exception("Could not read committed settings indexing status | actor=%s", user.id)
+        indexing = {"status": "unknown", "jobs": [], "in_progress": True}
+    indexing["dispatch_failed"] = dispatch_failed
+    reindex_job = next((job for job in indexing["jobs"] if job["own_index"]), None)
+
     return {
+        "settings_saved": True,
+        "audio_max_clips": request.app.state.config.RAG_AUDIO_MAX_CLIPS.get(user.email),
+        "indexing": indexing,
         "status": True,
+        "embedding_recipe_changed": chunking_changed,
+        **({"reindex_job": reindex_job} if reindex_job else {}),
         "pdf_extract_images": request.app.state.config.PDF_EXTRACT_IMAGES,
+        "pdf_max_visuals_per_page": request.app.state.config.RAG_PDF_MAX_VISUALS_PER_PAGE,
+        "pdf_max_visuals_per_document": request.app.state.config.RAG_PDF_MAX_VISUALS_PER_DOCUMENT,
         "RAG_FULL_CONTEXT": request.app.state.config.RAG_FULL_CONTEXT.get(user.email),
         "BYPASS_EMBEDDING_AND_RETRIEVAL": request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL,
         "file": {
             "max_size": request.app.state.config.FILE_MAX_SIZE,
             "max_count": request.app.state.config.FILE_MAX_COUNT,
+        },
+        "video": {
+            "max_file_size_mb": getattr(request.app.state.config, "RAG_VIDEO_MAX_FILE_SIZE_MB", 20),
+            "effective_max_file_size_mb": _effective_video_max_size_mb(request),
+            "chunk_duration_seconds": getattr(request.app.state.config, "RAG_VIDEO_CHUNK_DURATION", 16),
+            "min_chunk_duration_seconds": getattr(request.app.state.config, "RAG_VIDEO_MIN_CHUNK_DURATION", 4),
+            "max_duration_seconds": getattr(request.app.state.config, "RAG_VIDEO_MAX_DURATION", 120),
         },
         "content_extraction": {
             "engine": request.app.state.config.CONTENT_EXTRACTION_ENGINE,
@@ -961,7 +1111,7 @@ async def update_rag_config(
             },
         },
         "chunk": {
-            "text_splitter": request.app.state.config.TEXT_SPLITTER,
+            "text_splitter": request.app.state.config.TEXT_SPLITTER or "character",
             "chunk_size": (lambda v: v if v and v > 0 else 1000)(request.app.state.config.CHUNK_SIZE.get(user.email)),
             "chunk_overlap": (lambda v: v if v is not None and v > 0 else 200)(request.app.state.config.CHUNK_OVERLAP.get(user.email)),
         },
@@ -1085,6 +1235,34 @@ def _get_user_chunk_settings(request: Request, user=None):
     return user_email, chunk_size, chunk_overlap
 
 
+def _resolve_model_aware_ingestion(
+    *,
+    admin_id: Optional[str],
+    embedding_model_id: Optional[str],
+    file_id: Optional[str],
+    texts: list[str],
+    metadatas: list[dict],
+):
+    """Phase 3: persist rag_chunks and resolve the model spec for file ingestion.
+
+    Returns (model_spec, rag_chunk_ids) when the caller resolved a model-aware
+    admin/model context and a file_id is present; otherwise (None, None) so the
+    legacy ingestion path runs unchanged.
+    """
+    if not (admin_id and embedding_model_id and file_id):
+        return None, None
+    from open_webui.retrieval.embedding.registry import get_model_spec_by_id
+    from open_webui.models.embeddings import RagChunk
+
+    model_spec = get_model_spec_by_id(embedding_model_id)
+    chunks = [
+        {"content": text, "content_type": "text", "chunk_metadata": metadatas[idx]}
+        for idx, text in enumerate(texts)
+    ]
+    rag_chunk_ids = RagChunk.insert_chunks(admin_id, file_id, chunks)
+    return model_spec, rag_chunk_ids
+
+
 def save_docs_to_vector_db(
     request: Request,
     docs,
@@ -1094,7 +1272,10 @@ def save_docs_to_vector_db(
     split: bool = True,
     add: bool = False,
     user=None,
-    owner_email: Optional[str] = None,
+    embedding_function: Callable = None,
+    admin_id: Optional[str] = None,
+    embedding_model_id: Optional[str] = None,
+    knowledge_id: Optional[str] = None,
 ) -> bool:
     def _get_docs_info(docs: list[Document]) -> str:
         docs_info = set()
@@ -1167,11 +1348,11 @@ def save_docs_to_vector_db(
                     )
                     log.error(error_msg)
                     raise ValueError(error_msg)
-                
+
                 if chunk_overlap < 0:
                     log.warning(f"chunk_overlap={chunk_overlap} is negative, setting to 0")
                     chunk_overlap = 0
-                
+
                 if chunk_overlap >= chunk_size:
                     log.warning(
                         f"chunk_overlap={chunk_overlap} >= chunk_size={chunk_size}, "
@@ -1234,6 +1415,15 @@ def save_docs_to_vector_db(
                 for doc in docs
             ]
 
+            file_id = metadata.get("file_id") if isinstance(metadata, dict) else None
+            model_spec, rag_chunk_ids = _resolve_model_aware_ingestion(
+                admin_id=admin_id,
+                embedding_model_id=embedding_model_id,
+                file_id=file_id,
+                texts=texts,
+                metadatas=metadatas,
+            )
+
             # ChromaDB does not like datetime formats
             # for meta-data so convert them to string.
             for metadata in metadatas:
@@ -1259,192 +1449,37 @@ def save_docs_to_vector_db(
                         return True
 
                 log.info(f"adding to collection {collection_name}")
-                
-                # RBAC: Determine owner_email for per-admin model/key lookup
-                # If owner_email is explicitly provided (from worker/job), use it
-                # Otherwise, fall back to user.email (for direct calls)
-                effective_owner_email = owner_email if owner_email else (user.email if user else None)
-                
-                if not effective_owner_email:
-                    error_msg = (
-                        "No owner_email or user.email available for RBAC model/key lookup. "
-                        "Cannot determine which admin's embedding model to use."
-                    )
-                    log.error(error_msg)
-                    raise ValueError(error_msg)
-                
-                # RBAC: Get per-admin model name and API key for the owner
-                owner_model = request.app.state.config.RAG_EMBEDDING_MODEL_USER.get(effective_owner_email)
-                owner_api_key = request.app.state.config.RAG_OPENAI_API_KEY.get(effective_owner_email)
-                
-                # Validate both model and key are present (no fallback)
-                if not owner_model or not owner_model.strip():
-                    error_msg = (
-                        f"No embedding model configured for owner {effective_owner_email}. "
-                        f"Please ensure the admin configures the embedding model in Settings > Documents."
-                    )
-                    log.error(error_msg)
-                    raise ValueError(error_msg)
-                
-                if not owner_api_key or not owner_api_key.strip():
-                    error_msg = (
-                        f"No embedding API key configured for owner {effective_owner_email}. "
-                        f"Please ensure the admin configures the embedding API key in Settings > Documents."
-                    )
-                    log.error(error_msg)
-                    raise ValueError(error_msg)
-                
-                log.info(
-                    f"RBAC: Using per-admin config for owner={effective_owner_email}: "
-                    f"model={owner_model}, key_length={len(owner_api_key)}"
-                )
-                
-                # Get base URL value - handle PersistentConfig objects properly
-                if request.app.state.config.RAG_EMBEDDING_ENGINE == "openai" or request.app.state.config.RAG_EMBEDDING_ENGINE == "portkey":
-                    base_url_config = request.app.state.config.RAG_OPENAI_API_BASE_URL
-                    base_url = (
-                        base_url_config.value
-                        if hasattr(base_url_config, 'value')
-                        else str(base_url_config)
-                    )
-                    print(f"  [STEP 3.1] Extracted base_url: {base_url}", flush=True)
-                    log.info(f"  [STEP 3.1] Extracted base_url: {base_url}")
-                    
-                    # Fallback to default if empty (from config.py default)
-                    if not base_url or base_url.strip() == "" or base_url == "None":
-                        base_url = "https://ai-gateway.apps.cloud.rt.nyu.edu/v1"
-                        print(f"  [STEP 3.2] ⚠️  Base URL was empty/None, using default: {base_url}", flush=True)
-                        log.warning(f"  [STEP 3.2] Base URL was empty/None, using default: {base_url}")
-                    else:
-                        print(f"  [STEP 3.2] ✅ Using configured base URL: {base_url}", flush=True)
-                        log.info(f"  [STEP 3.2] ✅ Using configured base URL: {base_url}")
-                    
-                    # RBAC: Use owner's API key (per-admin)
-                    api_key_to_use = owner_api_key
-                    print(f"  [STEP 3.3] Using OpenAI/Portkey API key (owner_api_key for {effective_owner_email})", flush=True)
-                    log.info(f"  [STEP 3.3] Using OpenAI/Portkey API key (owner_api_key for {effective_owner_email})")
-                else:
-                    base_url_config = request.app.state.config.RAG_OLLAMA_BASE_URL
-                    base_url = (
-                        base_url_config.value
-                        if hasattr(base_url_config, 'value')
-                        else str(base_url_config)
-                    )
-                    api_key_to_use = request.app.state.config.RAG_OLLAMA_API_KEY
-                    print(f"  [STEP 3.1] Using Ollama config: base_url={base_url}", flush=True)
-                    log.info(f"  [STEP 3.1] Using Ollama config: base_url={base_url}")
-                
-                # CRITICAL BUG FIX: Validate API key before creating embedding function
-                print(f"  [STEP 4] Validating API key before embedding function creation...", flush=True)
-                log.info(f"  [STEP 4] Validating API key before embedding function creation...")
-                print(f"    api_key_to_use is None: {api_key_to_use is None}", flush=True)
-                print(f"    api_key_to_use is empty: {api_key_to_use == '' if api_key_to_use else 'N/A'}", flush=True)
-                print(f"    api_key_to_use length: {len(api_key_to_use) if api_key_to_use else 0}", flush=True)
-                log.info(f"    api_key_to_use is None: {api_key_to_use is None}")
-                log.info(f"    api_key_to_use is empty: {api_key_to_use == '' if api_key_to_use else 'N/A'}")
-                log.info(f"    api_key_to_use length: {len(api_key_to_use) if api_key_to_use else 0}")
-                
-                if not api_key_to_use or not api_key_to_use.strip():
-                    error_msg = (
-                        f"❌ CRITICAL BUG: API key is None or empty before embedding function creation. "
-                        f"Cannot generate embeddings. "
-                        f"user_email={user_email}, engine={request.app.state.config.RAG_EMBEDDING_ENGINE}"
-                    )
-                    print(f"  [STEP 4] ❌ {error_msg}", flush=True)
-                    log.error(f"  [STEP 4] ❌ {error_msg}")
-                    raise ValueError(error_msg)
-                
-                print(f"  [STEP 4] ✅ API key validated", flush=True)
-                log.info(f"  [STEP 4] ✅ API key validated")
-                
-                # Embedding function that sends all texts at once
-                # RBAC: Use per-admin model name (not global)
-                print(f"  [STEP 5] Creating embedding function:", flush=True)
-                print(f"    engine: {request.app.state.config.RAG_EMBEDDING_ENGINE}", flush=True)
-                print(f"    model: {owner_model} (per-admin for {effective_owner_email})", flush=True)
-                print(f"    base_url: {base_url}", flush=True)
-                print(f"    batch_size: {request.app.state.config.RAG_EMBEDDING_BATCH_SIZE}", flush=True)
-                print(f"    api_key provided: {api_key_to_use is not None and len(api_key_to_use) > 0}", flush=True)
-                log.info(f"  [STEP 5] Creating embedding function:")
-                log.info(f"    engine: {request.app.state.config.RAG_EMBEDDING_ENGINE}")
-                log.info(f"    model: {owner_model} (per-admin for {effective_owner_email})")
-                log.info(f"    base_url: {base_url}")
-                log.info(f"    batch_size: {request.app.state.config.RAG_EMBEDDING_BATCH_SIZE}")
-                log.info(f"    api_key provided: {api_key_to_use is not None and len(api_key_to_use) > 0}")
-                
-                embedding_function = get_single_batch_embedding_function(
-                    request.app.state.config.RAG_EMBEDDING_ENGINE,
-                    owner_model,  # RBAC: Use per-admin model (not global)
-                    request.app.state.ef,
-                    base_url,
-                    api_key_to_use,
-                    request.app.state.config.RAG_EMBEDDING_BATCH_SIZE,
-                )
-                
-                print(f"  [STEP 5.1] Embedding function created:", flush=True)
-                print(f"    embedding_function is None: {embedding_function is None}", flush=True)
-                print(f"    embedding_function type: {type(embedding_function)}", flush=True)
-                log.info(f"  [STEP 5.1] Embedding function created:")
-                log.info(f"    embedding_function is None: {embedding_function is None}")
-                log.info(f"    embedding_function type: {type(embedding_function)}")
-                
-                if embedding_function is None:
-                    error_msg = "Failed to create embedding function - get_single_batch_embedding_function returned None"
-                    print(f"  [STEP 5.1] ❌ {error_msg}", flush=True)
-                    log.error(f"  [STEP 5.1] ❌ {error_msg}")
-                    raise ValueError(error_msg)
-                
-                print(f"  [STEP 5.1] ✅ Embedding function created successfully", flush=True)
-                log.info(f"  [STEP 5.1] ✅ Embedding function created successfully")
 
-                # Process all text chunks in a single API call
+                # Credential-safe: Use the provided embedding_function
+                if embedding_function is None:
+                    raise ValueError("No embedding function provided. Cannot generate embeddings.")
+
+                # Generate embeddings using the provided function
                 embed_api_start = time.time()
-                print(f"  [STEP 6] Generating embeddings for {len(texts)} chunks in a single batch | timestamp={embed_api_start:.3f}", flush=True)
-                log.info(f"  [STEP 6] Generating embeddings for {len(texts)} chunks in a single batch | timestamp={embed_api_start:.3f}")
-                
+                log.info(f"Generating embeddings for {len(texts)} chunks")
+
                 safe_add_span_event("embedding.generation.started", {"text.count": len(texts)})
-                
+
                 try:
                     embeddings = embedding_function(
                         list(map(lambda x: x.replace("\n", " "), texts)), user=user
                     )
                     embed_api_end = time.time()
-                    embed_api_duration = embed_api_end - embed_api_start
-                    log.info(f"[EMBED_API] COMPLETE | chunks={len(texts)} | duration={embed_api_duration:.2f}s | timestamp={embed_api_end:.3f}")
-                
-                    print(f"  [STEP 6.1] Embedding generation result:", flush=True)
-                    print(f"    embeddings is None: {embeddings is None}", flush=True)
-                    print(f"    embeddings type: {type(embeddings)}", flush=True)
-                    print(f"    embeddings length: {len(embeddings) if embeddings else 0}", flush=True)
-                    if embeddings and len(embeddings) > 0:
-                        print(f"    first embedding length: {len(embeddings[0]) if embeddings[0] else 0}", flush=True)
-                    log.info(f"  [STEP 6.1] Embedding generation result:")
-                    log.info(f"    embeddings is None: {embeddings is None}")
-                    log.info(f"    embeddings type: {type(embeddings)}")
-                    log.info(f"    embeddings length: {len(embeddings) if embeddings else 0}")
-                    
+                    log.info(f"[EMBED_API] COMPLETE | chunks={len(texts)} | duration={embed_api_end - embed_api_start:.2f}s")
+
                     if not embeddings or len(embeddings) == 0:
-                        error_msg = "Embedding generation returned empty result"
-                        print(f"  [STEP 6.1] ❌ {error_msg}", flush=True)
-                        log.error(f"  [STEP 6.1] ❌ {error_msg}")
-                        raise ValueError(error_msg)
-                    
+                        raise ValueError("Embedding generation returned empty result")
+
                     if len(embeddings) != len(texts):
-                        error_msg = f"Embedding count mismatch: expected {len(texts)}, got {len(embeddings)}"
-                        print(f"  [STEP 6.1] ❌ {error_msg}", flush=True)
-                        log.error(f"  [STEP 6.1] ❌ {error_msg}")
-                        raise ValueError(error_msg)
-                    
-                    print(f"  [STEP 6.1] ✅ Embeddings generated successfully", flush=True)
-                    log.info(f"  [STEP 6.1] ✅ Embeddings generated successfully")
-                    safe_add_span_event("embedding.generation.completed", {"embedding.count": len(embeddings) if embeddings else 0})
+                        raise ValueError(f"Embedding count mismatch: expected {len(texts)}, got {len(embeddings)}")
+
+                    safe_add_span_event("embedding.generation.completed", {"embedding.count": len(embeddings)})
+                except EmbeddingError as e:
+                    safe_add_span_event("embedding.generation.failed", {"error.code": e.code})
+                    raise
                 except Exception as embed_error:
-                    error_msg = f"Failed to generate embeddings: {embed_error}"
-                    print(f"  [STEP 6] ❌ {error_msg}", flush=True)
-                    log.error(f"  [STEP 6] ❌ {error_msg}", exc_info=True)
                     safe_add_span_event("embedding.generation.failed", {
                         "error.type": type(embed_error).__name__,
-                        "error.message": str(embed_error)[:200],
                     })
                     raise
 
@@ -1453,27 +1488,55 @@ def save_docs_to_vector_db(
                 print(f"    items count: {len(texts)}", flush=True)
                 log.info(f"  [STEP 7] Preparing items for vector DB insertion:")
                 log.info(f"    collection_name: {collection_name}, items count: {len(texts)}")
-                
-                items = [
-                    {
-                        "id": str(uuid.uuid4()),
-                        "text": text,
-                        "vector": embeddings[idx],
-                        "metadata": metadatas[idx],
-                    }
-                    for idx, text in enumerate(texts)
-                ]
-                
+
+                if rag_chunk_ids is not None:
+                    from open_webui.retrieval.vector.model_aware import (
+                        ModelAwareVectorRepository,
+                    )
+
+                    vector_repo = ModelAwareVectorRepository()
+                    items = vector_repo.make_items(
+                        texts=texts,
+                        vectors=embeddings,
+                        metadata=metadatas,
+                        rag_chunk_ids=rag_chunk_ids,
+                        admin_id=admin_id,
+                        model=model_spec,
+                        file_id=file_id,
+                        knowledge_id=knowledge_id,
+                    )
+                else:
+                    items = [
+                        {
+                            "id": str(uuid.uuid4()),
+                            "text": text,
+                            "vector": embeddings[idx],
+                            "metadata": metadatas[idx],
+                        }
+                        for idx, text in enumerate(texts)
+                    ]
+
                 print(f"  [STEP 7.1] Items prepared, inserting into vector DB...", flush=True)
                 log.info(f"  [STEP 7.1] Items prepared, inserting into vector DB...")
 
                 safe_add_span_event("vector_db.insert.started", {"item.count": len(items)})
 
                 try:
-                    VECTOR_DB_CLIENT.insert(
-                        collection_name=collection_name,
-                        items=items,
-                    )
+                    if rag_chunk_ids is not None:
+                        # Spec 07: transactional per-projection reconcile keyed by
+                        # (admin_id, embedding_model_id, rag_chunk_id, collection_name).
+                        # Current rows are upserted and stale rows for this
+                        # projection only are deleted in the same transaction.
+                        vector_repo.reconcile_model_aware(
+                            collection_name=collection_name,
+                            items=items,
+                            model=model_spec,
+                        )
+                    else:
+                        VECTOR_DB_CLIENT.insert(
+                            collection_name=collection_name,
+                            items=items,
+                        )
                     print(f"  [STEP 7.1] ✅ Successfully inserted {len(items)} items into collection: {collection_name}", flush=True)
                     log.info(f"  [STEP 7.1] ✅ Successfully inserted {len(items)} items into collection: {collection_name}")
                     safe_add_span_event("vector_db.insert.completed", {"item.count": len(items)})
@@ -1543,7 +1606,7 @@ def get_embeddings_with_fallback(
             # First, try single batch embedding function
             logging.info(f"Generating embeddings for {len(texts)} chunks in a single batch")
             safe_add_span_event("embedding.api.request", {"method": "single_batch"})
-            
+
             single_batch_func = get_single_batch_embedding_function(
                 embedding_engine,
                 embedding_model,
@@ -1567,7 +1630,7 @@ def get_embeddings_with_fallback(
             # Log the specific error from single batch attempt
             logging.warning(f"Single batch embedding failed. Error: {str(e)}")
             logging.warning(f"Falling back to batched embedding function")
-            
+
             # Set fallback attribute
             safe_set_span_attribute(span, "embedding.fallback_used", True)
             safe_add_span_event("embedding.api.fallback", {
@@ -1611,7 +1674,10 @@ def save_docs_to_multiple_collections(
     overwrite: bool = False,
     split: bool = True,
     user=None,
-    owner_email: Optional[str] = None,
+    embedding_function: Callable = None,
+    admin_id: Optional[str] = None,
+    embedding_model_id: Optional[str] = None,
+    knowledge_id: Optional[str] = None,
 ) -> bool:
     """
     Save documents to multiple collections using a single embedding operation
@@ -1702,42 +1768,27 @@ def save_docs_to_multiple_collections(
         )
         raise ValueError(ERROR_MESSAGES.EMPTY_CONTENT)
 
-    # RBAC: Determine owner_email for per-admin model lookup
-    effective_owner_email = owner_email if owner_email else (user.email if user else None)
-    
-    # RBAC: Get per-admin model name (no fallback to global)
-    owner_model = None
-    if effective_owner_email:
-        owner_model = request.app.state.config.RAG_EMBEDDING_MODEL_USER.get(effective_owner_email)
-        if not owner_model or not owner_model.strip():
-            error_msg = (
-                f"No embedding model configured for owner {effective_owner_email}. "
-                f"Please ensure the admin configures the embedding model in Settings > Documents."
-            )
-            log.error(error_msg)
-            raise ValueError(error_msg)
-    else:
-        error_msg = (
-            "No owner_email or user.email available for RBAC model lookup. "
-            "Cannot determine which admin's embedding model to use."
-        )
-        log.error(error_msg)
-        raise ValueError(error_msg)
-    
+    # Credential-safe: Validate embedding_function is provided
+    if embedding_function is None:
+        raise ValueError("No embedding function provided. Cannot generate embeddings.")
+
     texts = [doc.page_content for doc in docs]
     metadatas = [
         {
             **doc.metadata,
             **(metadata if metadata else {}),
-            "embedding_config": json.dumps(
-                {
-                    "engine": request.app.state.config.RAG_EMBEDDING_ENGINE,
-                    "model": owner_model,  # RBAC: Per-admin model (not global)
-                }
-            ),
         }
         for doc in docs
     ]
+
+    file_id = metadata.get("file_id") if isinstance(metadata, dict) else None
+    model_spec, rag_chunk_ids = _resolve_model_aware_ingestion(
+        admin_id=admin_id,
+        embedding_model_id=embedding_model_id,
+        file_id=file_id,
+        texts=texts,
+        metadatas=metadatas,
+    )
 
     # ChromaDB does not like datetime formats
     # for meta-data so convert them to string.
@@ -1761,200 +1812,84 @@ def save_docs_to_multiple_collections(
                     VECTOR_DB_CLIENT.delete_collection(collection_name=collection_name)
                     log.info(f"Deleting existing collection {collection_name}")
 
-        # RBAC: Get per-admin model and API key for the owner
-        print("=" * 80, flush=True)
-        print("[EMBEDDING] Starting embedding generation in save_docs_to_multiple_collections", flush=True)
-        log.info("=" * 80)
-        log.info("[EMBEDDING] Starting embedding generation in save_docs_to_multiple_collections")
-        
-        # RBAC: Use owner_email if provided, otherwise fall back to user.email
-        effective_owner_email_for_key = effective_owner_email  # Already determined above
-        
-        print(f"  [STEP 1] RBAC context:", flush=True)
-        print(f"    owner_email: {effective_owner_email_for_key}", flush=True)
-        print(f"    owner_model: {owner_model}", flush=True)
-        print(f"    collections: {collections}", flush=True)
-        log.info(f"  [STEP 1] RBAC context: owner_email={effective_owner_email_for_key}, owner_model={owner_model}, collections={collections}")
-        
-        print(f"  [STEP 2] Retrieving API key from config for owner {effective_owner_email_for_key}...", flush=True)
-        log.info(f"  [STEP 2] Retrieving API key from config for owner {effective_owner_email_for_key}...")
-        owner_api_key = request.app.state.config.RAG_OPENAI_API_KEY.get(effective_owner_email_for_key)
-        
-        print(f"  [STEP 2.1] API key retrieval result:", flush=True)
-        print(f"    owner_api_key is None: {owner_api_key is None}", flush=True)
-        print(f"    owner_api_key is empty: {owner_api_key == '' if owner_api_key else 'N/A'}", flush=True)
-        print(f"    owner_api_key length: {len(owner_api_key) if owner_api_key else 0}", flush=True)
-        if owner_api_key:
-            api_key_preview = owner_api_key[-4:] if len(owner_api_key) >= 4 else '***'
-            print(f"    owner_api_key ends with: ...{api_key_preview}", flush=True)
-        log.info(f"  [STEP 2.1] API key retrieval result:")
-        log.info(f"    owner_api_key is None: {owner_api_key is None}")
-        log.info(f"    owner_api_key is empty: {owner_api_key == '' if owner_api_key else 'N/A'}")
-        log.info(f"    owner_api_key length: {len(owner_api_key) if owner_api_key else 0}")
-        
-        # RBAC: Validate API key before use (no fallback)
-        if not owner_api_key or not owner_api_key.strip():
-            error_msg = (
-                f"❌ No embedding API key found for owner {effective_owner_email_for_key}. "
-                f"Cannot generate embeddings. "
-                f"Please ensure the admin configures the embedding API key in Settings > Documents."
-            )
-            print(f"  [STEP 2.2] ❌ {error_msg}", flush=True)
-            log.error(f"  [STEP 2.2] ❌ {error_msg}")
-            raise ValueError(error_msg)
-        
-        print(f"  [STEP 2.2] ✅ API key validated", flush=True)
-        log.info(f"  [STEP 2.2] ✅ API key validated")
-        
-        # Get base URL value - handle PersistentConfig objects properly
-        print(f"  [STEP 3] Getting base URL for embedding engine: {request.app.state.config.RAG_EMBEDDING_ENGINE}", flush=True)
-        log.info(f"  [STEP 3] Getting base URL for embedding engine: {request.app.state.config.RAG_EMBEDDING_ENGINE}")
-        
-        if request.app.state.config.RAG_EMBEDDING_ENGINE == "openai" or request.app.state.config.RAG_EMBEDDING_ENGINE == "portkey":
-            base_url_config = request.app.state.config.RAG_OPENAI_API_BASE_URL
-            base_url = (
-                base_url_config.value
-                if hasattr(base_url_config, 'value')
-                else str(base_url_config)
-            )
-            print(f"  [STEP 3.1] Extracted base_url: {base_url}", flush=True)
-            log.info(f"  [STEP 3.1] Extracted base_url: {base_url}")
-            
-            # Fallback to default if empty (from config.py default)
-            if not base_url or base_url.strip() == "" or base_url == "None":
-                base_url = "https://ai-gateway.apps.cloud.rt.nyu.edu/v1"
-                print(f"  [STEP 3.2] ⚠️  Base URL was empty/None, using default: {base_url}", flush=True)
-                log.warning(f"  [STEP 3.2] Base URL was empty/None, using default: {base_url}")
-            else:
-                print(f"  [STEP 3.2] ✅ Using configured base URL: {base_url}", flush=True)
-                log.info(f"  [STEP 3.2] ✅ Using configured base URL: {base_url}")
-            
-            # RBAC: Use owner's API key (per-admin)
-            api_key_to_use = owner_api_key
-            print(f"  [STEP 3.3] Using OpenAI/Portkey API key (owner_api_key for {effective_owner_email_for_key})", flush=True)
-            log.info(f"  [STEP 3.3] Using OpenAI/Portkey API key (owner_api_key for {effective_owner_email_for_key})")
-        else:
-            base_url_config = request.app.state.config.RAG_OLLAMA_BASE_URL
-            base_url = (
-                base_url_config.value
-                if hasattr(base_url_config, 'value')
-                else str(base_url_config)
-            )
-            api_key_to_use = request.app.state.config.RAG_OLLAMA_API_KEY
-            print(f"  [STEP 3.1] Using Ollama config: base_url={base_url}", flush=True)
-            log.info(f"  [STEP 3.1] Using Ollama config: base_url={base_url}")
-        
-        # CRITICAL BUG FIX: Validate API key before calling embedding function
-        print(f"  [STEP 4] Validating API key before embedding generation...", flush=True)
-        log.info(f"  [STEP 4] Validating API key before embedding generation...")
-        print(f"    api_key_to_use is None: {api_key_to_use is None}", flush=True)
-        print(f"    api_key_to_use is empty: {api_key_to_use == '' if api_key_to_use else 'N/A'}", flush=True)
-        print(f"    api_key_to_use length: {len(api_key_to_use) if api_key_to_use else 0}", flush=True)
-        log.info(f"    api_key_to_use is None: {api_key_to_use is None}")
-        log.info(f"    api_key_to_use is empty: {api_key_to_use == '' if api_key_to_use else 'N/A'}")
-        log.info(f"    api_key_to_use length: {len(api_key_to_use) if api_key_to_use else 0}")
-        
-        if not api_key_to_use or not api_key_to_use.strip():
-            error_msg = (
-                f"❌ API key is None or empty before embedding generation. "
-                f"Cannot generate embeddings. "
-                f"owner_email={effective_owner_email_for_key}, engine={request.app.state.config.RAG_EMBEDDING_ENGINE}"
-            )
-            print(f"  [STEP 4] ❌ {error_msg}", flush=True)
-            log.error(f"  [STEP 4] ❌ {error_msg}")
-            raise ValueError(error_msg)
-        
-        print(f"  [STEP 4] ✅ API key validated", flush=True)
-        log.info(f"  [STEP 4] ✅ API key validated")
-        
-        # Usage of get_embeddings_with_fallback
-        # RBAC: Use per-admin model (not global)
-        print(f"  [STEP 5] Calling get_embeddings_with_fallback:", flush=True)
-        print(f"    engine: {request.app.state.config.RAG_EMBEDDING_ENGINE}", flush=True)
-        print(f"    model: {owner_model} (per-admin for {effective_owner_email_for_key})", flush=True)
-        print(f"    base_url: {base_url}", flush=True)
-        print(f"    batch_size: {request.app.state.config.RAG_EMBEDDING_BATCH_SIZE}", flush=True)
-        print(f"    texts count: {len(texts)}", flush=True)
-        print(f"    api_key provided: {api_key_to_use is not None and len(api_key_to_use) > 0}", flush=True)
-        log.info(f"  [STEP 5] Calling get_embeddings_with_fallback:")
-        log.info(f"    engine: {request.app.state.config.RAG_EMBEDDING_ENGINE}")
-        log.info(f"    model: {owner_model} (per-admin for {effective_owner_email_for_key})")
-        log.info(f"    base_url: {base_url}")
-        log.info(f"    batch_size: {request.app.state.config.RAG_EMBEDDING_BATCH_SIZE}")
-        log.info(f"    texts count: {len(texts)}")
-        log.info(f"    api_key provided: {api_key_to_use is not None and len(api_key_to_use) > 0}")
-        
+        # Credential-safe: Use the provided embedding_function
+        log.info(f"Generating embeddings for {len(texts)} chunks")
+
         try:
-            embeddings = get_embeddings_with_fallback(
-                request.app.state.config.RAG_EMBEDDING_ENGINE,
-                owner_model,  # RBAC: Use per-admin model (not global)
-                request.app.state.ef,
-                base_url,
-                api_key_to_use,
-                request.app.state.config.RAG_EMBEDDING_BATCH_SIZE,
-                list(map(lambda x: x.replace("\n", " "), texts)),
-                get_single_batch_embedding_function,  # Pass this function
-                get_embedding_function,  # Pass this function
-                user=user,
+            embeddings = embedding_function(
+                list(map(lambda x: x.replace("\n", " "), texts)), user=user
             )
-            
-            print(f"  [STEP 5.1] Embedding generation result:", flush=True)
-            print(f"    embeddings is None: {embeddings is None}", flush=True)
-            print(f"    embeddings type: {type(embeddings)}", flush=True)
-            print(f"    embeddings length: {len(embeddings) if embeddings else 0}", flush=True)
-            if embeddings and len(embeddings) > 0:
-                print(f"    first embedding length: {len(embeddings[0]) if embeddings[0] else 0}", flush=True)
-            log.info(f"  [STEP 5.1] Embedding generation result:")
-            log.info(f"    embeddings is None: {embeddings is None}")
-            log.info(f"    embeddings type: {type(embeddings)}")
-            log.info(f"    embeddings length: {len(embeddings) if embeddings else 0}")
-            
+
             if not embeddings or len(embeddings) == 0:
-                error_msg = "Embedding generation returned empty result"
-                print(f"  [STEP 5.1] ❌ {error_msg}", flush=True)
-                log.error(f"  [STEP 5.1] ❌ {error_msg}")
-                raise ValueError(error_msg)
-            
+                raise ValueError("Embedding generation returned empty result")
+
             if len(embeddings) != len(texts):
-                error_msg = f"Embedding count mismatch: expected {len(texts)}, got {len(embeddings)}"
-                print(f"  [STEP 5.1] ❌ {error_msg}", flush=True)
-                log.error(f"  [STEP 5.1] ❌ {error_msg}")
-                raise ValueError(error_msg)
-            
-            print(f"  [STEP 5.1] ✅ Embeddings generated successfully", flush=True)
-            log.info(f"  [STEP 5.1] ✅ Embeddings generated successfully")
+                raise ValueError(f"Embedding count mismatch: expected {len(texts)}, got {len(embeddings)}")
+
+            log.info(f"Embeddings generated successfully: {len(embeddings)} vectors")
+        except EmbeddingError as e:
+            log.error(f"Embedding failed: {e.code}")
+            raise
         except Exception as embed_error:
-            error_msg = f"Failed to generate embeddings: {embed_error}"
-            print(f"  [STEP 5] ❌ {error_msg}", flush=True)
-            log.error(f"  [STEP 5] ❌ {error_msg}", exc_info=True)
+            log.error(f"Failed to generate embeddings: {embed_error}")
             raise
 
         # Insert embeddings into all collections
         print(f"  [STEP 7] Inserting embeddings into {len(collections)} collection(s): {collections}", flush=True)
         log.info(f"  [STEP 7] Inserting embeddings into {len(collections)} collection(s): {collections}")
-        
+
         for col_idx, collection_name in enumerate(collections):
             print(f"  [STEP 7.{col_idx+1}] Processing collection: {collection_name}", flush=True)
             log.info(f"  [STEP 7.{col_idx+1}] Processing collection: {collection_name}")
-            
-            items = [
-                {
-                    "id": str(uuid.uuid4()),
-                    "text": text,
-                    "vector": embeddings[text_idx],
-                    "metadata": metadatas[text_idx],
-                }
-                for text_idx, text in enumerate(texts)
-            ]
-            
+
+            if rag_chunk_ids is not None:
+                from open_webui.retrieval.vector.model_aware import (
+                    ModelAwareVectorRepository,
+                )
+
+                vector_repo = ModelAwareVectorRepository()
+                items = vector_repo.make_items(
+                    texts=texts,
+                    vectors=embeddings,
+                    metadata=metadatas,
+                    rag_chunk_ids=rag_chunk_ids,
+                    admin_id=admin_id,
+                    model=model_spec,
+                    file_id=file_id,
+                    knowledge_id=knowledge_id,
+                )
+            else:
+                items = [
+                    {
+                        "id": str(uuid.uuid4()),
+                        "text": text,
+                        "vector": embeddings[text_idx],
+                        "metadata": metadatas[text_idx],
+                    }
+                    for text_idx, text in enumerate(texts)
+                ]
+
             print(f"    Preparing {len(items)} items for insertion", flush=True)
             log.info(f"    Preparing {len(items)} items for insertion")
 
             try:
-                VECTOR_DB_CLIENT.insert(
-                    collection_name=collection_name,
-                    items=items,
-                )
+                if rag_chunk_ids is not None:
+                    # Spec 07: transactional per-projection reconcile keyed by
+                    # (admin_id, embedding_model_id, rag_chunk_id, collection_name).
+                    # Current rows are upserted and stale rows for this
+                    # projection only are deleted in the same transaction, so
+                    # one collection's re-ingestion never touches another
+                    # membership's rows.
+                    vector_repo.reconcile_model_aware(
+                        collection_name=collection_name,
+                        items=items,
+                        model=model_spec,
+                    )
+                else:
+                    VECTOR_DB_CLIENT.insert(
+                        collection_name=collection_name,
+                        items=items,
+                    )
                 print(f"  [STEP 7.{col_idx+1}] ✅ Successfully inserted into collection: {collection_name}", flush=True)
                 log.info(f"  [STEP 7.{col_idx+1}] ✅ Successfully inserted into collection: {collection_name}")
             except Exception as insert_error:
@@ -1968,7 +1903,7 @@ def save_docs_to_multiple_collections(
         log.info(f"[EMBEDDING] ✅ All embeddings saved successfully")
         print("=" * 80, flush=True)
         log.info("=" * 80)
-        
+
         return True
     except Exception as e:
         log.exception(e)
@@ -1981,18 +1916,197 @@ class ProcessFileForm(BaseModel):
     collection_name: Optional[str] = None
 
 
-def _process_file_sync(
+def _claim_file_processing_dispatch(
+    file_id: str,
+    stale_pending_seconds: int,
+) -> tuple[bool, dict[str, Any], Optional[str], bool]:
+    """Atomically claim a file-processing dispatch lease.
+
+    A running worker (``processing``) is never reclaimable. A ``pending``
+    dispatch is reclaimable only after its last durable update has aged past
+    the configured bound. The updated-at compare-and-swap complements the row
+    lock for databases such as SQLite that do not implement ``FOR UPDATE``.
+    """
+
+    now = int(time.time())
+    with get_db() as db:
+        file_row = (
+            db.query(FileRecord)
+            .filter(FileRecord.id == file_id)
+            .with_for_update()
+            .first()
+        )
+        if file_row is None:
+            return False, {}, None, False
+
+        meta = dict(file_row.meta or {})
+        raw_status = meta.get("processing_status")
+        if raw_status is not None and not isinstance(raw_status, str):
+            # Fail closed on malformed state rather than overwrite a status
+            # that cannot be compared portably across supported databases.
+            return False, meta, None, False
+        current_status = raw_status
+
+        if current_status == "processing":
+            return False, meta, current_status, False
+
+        reclaiming_stale_pending = False
+        if current_status == "pending":
+            lease_at = file_row.updated_at
+            if not isinstance(lease_at, int) or isinstance(lease_at, bool):
+                lease_at = file_row.created_at
+            if not isinstance(lease_at, int) or isinstance(lease_at, bool):
+                # A pending row without a trustworthy lease timestamp cannot
+                # be reclaimed without risking duplicate live work.
+                return False, meta, current_status, False
+            if now - lease_at < stale_pending_seconds:
+                return False, meta, current_status, False
+            reclaiming_stale_pending = True
+
+        observed_updated_at = file_row.updated_at
+        claimed_updated_at = now + 1 if observed_updated_at == now else now
+        claimed_meta = {**meta, "processing_status": "pending"}
+
+        claim_query = db.query(FileRecord).filter(FileRecord.id == file_id)
+        if observed_updated_at is None:
+            claim_query = claim_query.filter(FileRecord.updated_at.is_(None))
+        else:
+            claim_query = claim_query.filter(
+                FileRecord.updated_at == observed_updated_at
+            )
+
+        dialect_name = db.get_bind().dialect.name
+        if dialect_name == "postgresql":
+            status_expression = cast(FileRecord.meta, JSONB)[
+                "processing_status"
+            ].astext
+        elif dialect_name == "sqlite":
+            status_expression = func.json_extract(
+                FileRecord.meta,
+                "$.processing_status",
+            )
+        else:
+            # JSONField is text-backed, so exact metadata comparison remains a
+            # safe compare-and-swap fallback for other SQL dialects.
+            status_expression = None
+
+        if status_expression is None:
+            if file_row.meta is None:
+                claim_query = claim_query.filter(FileRecord.meta.is_(None))
+            else:
+                claim_query = claim_query.filter(FileRecord.meta == file_row.meta)
+        elif current_status is None:
+            claim_query = claim_query.filter(status_expression.is_(None))
+        else:
+            claim_query = claim_query.filter(status_expression == current_status)
+
+        claimed = (
+            claim_query.update(
+                {
+                    FileRecord.meta: claimed_meta,
+                    FileRecord.updated_at: claimed_updated_at,
+                },
+                synchronize_session=False,
+            )
+            == 1
+        )
+        if claimed:
+            db.commit()
+            return True, claimed_meta, "pending", reclaiming_stale_pending
+
+        db.rollback()
+        latest_row = db.query(FileRecord).filter(FileRecord.id == file_id).first()
+        if latest_row is None:
+            return False, {}, None, False
+        latest_meta = dict(latest_row.meta or {})
+        latest_status = latest_meta.get("processing_status")
+        if not isinstance(latest_status, str):
+            latest_status = None
+        return False, latest_meta, latest_status, False
+
+
+def _effective_process_knowledge_id(
+    form_data: ProcessFileForm,
+    knowledge_id: Optional[str],
+) -> Optional[str]:
+    collection_knowledge_id = (
+        form_data.collection_name
+        if form_data.collection_name
+        and form_data.collection_name != f"file-{form_data.file_id}"
+        else None
+    )
+    if (
+        knowledge_id
+        and collection_knowledge_id
+        and knowledge_id != collection_knowledge_id
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Conflicting knowledge collection IDs.",
+        )
+    return knowledge_id or collection_knowledge_id
+
+
+def _require_file_processing_access(
+    *,
+    file: FileModel,
+    user,
+    knowledge_id: Optional[str],
+):
+    is_admin = user.role == "admin"
+    is_file_owner = file.user_id == user.id
+
+    if knowledge_id is None:
+        if not is_admin and not is_file_owner:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+            )
+        return None
+
+    knowledge = Knowledges.get_knowledge_by_id(id=knowledge_id)
+    if knowledge is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    can_write_knowledge = (
+        is_admin
+        or knowledge.user_id == user.id
+        or has_access(user.id, "write", knowledge.access_control)
+    )
+    if not can_write_knowledge:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    data = knowledge.data if isinstance(knowledge.data, dict) else {}
+    file_ids = data.get("file_ids", [])
+    if not isinstance(file_ids, list) or file.id not in file_ids:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    return knowledge
+
+
+def _process_file_sync_legacy(
     request: Request,
     file_id: str,
     content: Optional[str] = None,
     collection_name: Optional[str] = None,
     knowledge_id: Optional[str] = None,
     user_id: Optional[str] = None,
+    admin_id: Optional[str] = None,
+    embedding_model_id: Optional[str] = None,
 ) -> None:
     """
     Core file processing logic that runs synchronously.
     This is called from background tasks to process files.
-    
+
     Args:
         request: FastAPI Request object
         file_id: ID of the file to process
@@ -2000,18 +2114,11 @@ def _process_file_sync(
         collection_name: Optional collection name
         knowledge_id: Optional knowledge base ID
         user_id: User ID for logging
+        admin_id: Frozen admin user ID for credential-safe resolution
+        embedding_model_id: Frozen embedding model ID for credential-safe resolution
     """
-    print("=" * 80, flush=True)
-    print("[BACKGROUND TASK] Starting _process_file_sync", flush=True)
-    print(f"  file_id: {file_id}", flush=True)
-    print(f"  user_id: {user_id}", flush=True)
-    print(f"  collection_name: {collection_name}", flush=True)
-    print(f"  knowledge_id: {knowledge_id}", flush=True)
-    print(f"  content provided: {'Yes (' + str(len(content)) + ' chars)' if content else 'No'}", flush=True)
-    log.info("=" * 80)
-    log.info("[BACKGROUND TASK] Starting _process_file_sync")
-    log.info(f"  file_id: {file_id}, user_id: {user_id}, collection_name: {collection_name}, knowledge_id: {knowledge_id}")
-    
+    log.info(f"[BACKGROUND TASK] Starting _process_file_sync file_id={file_id} user_id={user_id} admin_id={admin_id}")
+
     try:
         # Get user object if user_id is provided
         print(f"  [STEP 1] Retrieving user object...", flush=True)
@@ -2040,27 +2147,18 @@ def _process_file_sync(
         else:
             print(f"  [STEP 1] ⚠️  No user_id provided, processing without user context", flush=True)
             log.warning(f"  [STEP 1] No user_id provided, processing without user context")
-        
-        # RBAC: Determine owner_email for per-admin model/key lookup
-        # If uploading to a knowledge base, use the knowledge base OWNER's model/key
-        # Otherwise, use the uploader's (user's) model/key
-        owner_email = user.email if user else None
-        if knowledge_id and user:
-            try:
-                knowledge = Knowledges.get_knowledge_by_id(knowledge_id)
-                if knowledge and knowledge.user_id:
-                    owner = Users.get_user_by_id(knowledge.user_id)
-                    if owner and owner.email:
-                        owner_email = owner.email
-                        if owner_email != user.email:
-                            log.info(
-                                f"  [RBAC] Using knowledge base owner's model/key: "
-                                f"owner={owner_email} (not uploader={user.email})"
-                            )
-            except Exception as e:
-                log.warning(f"Failed to retrieve knowledge base owner, using uploader's email: {e}")
-                owner_email = user.email if user else None
-        
+
+        # Credential-safe: Create embedding function from frozen IDs
+        embedding_function = None
+        if admin_id and embedding_model_id and not request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL:
+            from open_webui.retrieval.embedding.service import EmbeddingService
+            from open_webui.retrieval.embedding.compatibility import make_embedding_function_with_storage_guard
+
+            service = EmbeddingService(request.app.state.config)
+            embedding_function = make_embedding_function_with_storage_guard(
+                service, admin_id=admin_id, embedding_model_id=embedding_model_id
+            )
+
         # Update status to processing
         print(f"  [STEP 2] Updating file status to 'processing'...", flush=True)
         log.info(f"  [STEP 2] Updating file status to 'processing'...")
@@ -2073,7 +2171,7 @@ def _process_file_sync(
         )
         print(f"  [STEP 2] ✅ File status updated", flush=True)
         log.info(f"  [STEP 2] ✅ File status updated")
-        
+
         print(f"  [STEP 3] Retrieving file object...", flush=True)
         log.info(f"  [STEP 3] Retrieving file object...")
         file = Files.get_file_by_id(file_id)
@@ -2121,7 +2219,7 @@ def _process_file_sync(
             # No content provided - need to extract from file or use cached
             docs = None
             text_content = None
-            
+
             # First, check if file has already been processed and exists in vector DB
             if collection_name:
                 print(f"  [CACHE CHECK] collection_name provided: {collection_name}", flush=True)
@@ -2134,7 +2232,7 @@ def _process_file_sync(
                     result = VECTOR_DB_CLIENT.query(
                         collection_name=cache_collection, filter={"file_id": file.id}
                     )
-                    
+
                     if result is not None and result.ids and len(result.ids) > 0 and len(result.ids[0]) > 0:
                         # File already processed - use existing documents
                         docs = [
@@ -2149,7 +2247,7 @@ def _process_file_sync(
                 except Exception as query_error:
                     log.debug(f"Vector DB query failed for file_id={file.id}: {query_error}")
                     # Fall through to extraction
-            
+
             # Also check if file.data already has content
             if docs is None and file.data.get("content", "").strip():
                 existing_content = file.data.get("content", "")
@@ -2167,21 +2265,21 @@ def _process_file_sync(
                 ]
                 text_content = existing_content
                 log.info(f"[Content Cache Hit] file_id={file.id} | Using existing content from file.data ({len(existing_content)} chars)")
-            
+
             # If still no docs, extract from the actual file
             if docs is None:
                 # Process the file and save the content
                 file_path = file.path
                 if file_path:
                     file_path = Storage.get_file(file_path)
-                    
+
                     # Log extraction engine being used
                     extraction_engine = request.app.state.config.CONTENT_EXTRACTION_ENGINE or "default (PyPDF)"
                     log.info(
                         f"[Content Extraction] file_id={file.id} | filename={file.filename} | "
                         f"content_type={file.meta.get('content_type')} | engine={extraction_engine}"
                     )
-                    
+
                     # CRITICAL: Force PDF_EXTRACT_IMAGES=False to prevent hangs (image extraction causes 2+ minute slowdowns)
                     loader = Loader(
                         engine=request.app.state.config.CONTENT_EXTRACTION_ENGINE,
@@ -2193,7 +2291,7 @@ def _process_file_sync(
                     docs = loader.load(
                         file.filename, file.meta.get("content_type"), file_path
                     )
-                    
+
                     # Log extraction results for debugging
                     total_chars = sum(len(doc.page_content) for doc in docs)
                     non_empty_docs = [doc for doc in docs if doc.page_content.strip()]
@@ -2202,7 +2300,7 @@ def _process_file_sync(
                         f"pages_extracted={len(docs)} | non_empty_pages={len(non_empty_docs)} | "
                         f"total_chars={total_chars}"
                     )
-                    
+
                     # Fail early if extraction returned empty content (BUG #15 fix)
                     if total_chars == 0:
                         file_ext = file.filename.split(".")[-1].lower() if "." in file.filename else "unknown"
@@ -2258,7 +2356,7 @@ def _process_file_sync(
 
         hash = calculate_sha256_string(text_content)
         Files.update_file_hash_by_id(file.id, hash)
-        
+
         print(f"  [STEP 4] Checking BYPASS_EMBEDDING_AND_RETRIEVAL flag...", flush=True)
         log.info(f"  [STEP 4] Checking BYPASS_EMBEDDING_AND_RETRIEVAL flag...")
         print(f"    BYPASS_EMBEDDING_AND_RETRIEVAL: {request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL}", flush=True)
@@ -2272,7 +2370,7 @@ def _process_file_sync(
                 if knowledge_id:
                     file_collection = f"file-{file.id}"
                     collections = [file_collection, knowledge_id]
-                    
+
                     print(f"  [STEP 5] Knowledge ID provided, saving to multiple collections:", flush=True)
                     print(f"    collections: {collections}", flush=True)
                     log.info(
@@ -2281,7 +2379,7 @@ def _process_file_sync(
                         f"user_id={user_id}"
                     )
 
-                    # RBAC: Pass owner_email so save_docs_to_multiple_collections uses per-admin model/key
+                    # Credential-safe: Pass embedding_function
                     result = save_docs_to_multiple_collections(
                         request,
                         docs=docs,
@@ -2291,14 +2389,17 @@ def _process_file_sync(
                             "name": file.filename,
                             "hash": hash,
                         },
-                        owner_email=owner_email,  # RBAC: Per-admin model/key lookup
-                        user=user,  # Use user object if available
+                        embedding_function=embedding_function,
+                        admin_id=admin_id,
+                        embedding_model_id=embedding_model_id,
+                        knowledge_id=knowledge_id,
+                        user=user,
                     )
 
                     # Use file collection name for file metadata
                     print(f"  [STEP 6] Embedding save result: {result}", flush=True)
                     log.info(f"  [STEP 6] Embedding save result: {result}")
-                    
+
                     if result:
                         print(f"  [STEP 6] ✅ Embeddings saved successfully, updating file status to 'completed'", flush=True)
                         log.info(f"  [STEP 6] ✅ Embeddings saved successfully, updating file status to 'completed'")
@@ -2329,8 +2430,8 @@ def _process_file_sync(
                     print(f"  [STEP 5] No knowledge ID, saving to single collection:", flush=True)
                     print(f"    collection_name: {collection_name}", flush=True)
                     log.info(f"  [STEP 5] No knowledge ID, saving to single collection: {collection_name}")
-                    
-                    # RBAC: Pass owner_email so save_docs_to_vector_db uses per-admin model/key
+
+                    # Credential-safe: Pass embedding_function
                     result = save_docs_to_vector_db(
                         request,
                         docs=docs,
@@ -2341,10 +2442,13 @@ def _process_file_sync(
                             "hash": hash,
                         },
                         add=(True if collection_name else False),
-                        user=user,  # Use user object if available
-                        owner_email=owner_email,  # RBAC: Per-admin model/key lookup
+                        embedding_function=embedding_function,
+                        admin_id=admin_id,
+                        embedding_model_id=embedding_model_id,
+                        knowledge_id=knowledge_id,
+                        user=user,
                     )
-                    
+
                     print(f"  [STEP 6] Embedding save result: {result}", flush=True)
                     log.info(f"  [STEP 6] Embedding save result: {result}")
 
@@ -2397,7 +2501,7 @@ def _process_file_sync(
             )
             print(f"  [STEP 4.1] ✅ File status updated to 'completed' (bypassed)", flush=True)
             log.info(f"  [STEP 4.1] File status updated to 'completed' (bypassed)")
-        
+
         print(f"[BACKGROUND TASK] ✅ File processing completed successfully", flush=True)
         log.info(f"[BACKGROUND TASK] ✅ File processing completed successfully")
         print("=" * 80, flush=True)
@@ -2411,7 +2515,7 @@ def _process_file_sync(
             f"user_id={user_id}, error={error_msg}"
         )
         log.exception(e)
-        
+
         # Update file status to error
         try:
             Files.update_file_metadata_by_id(
@@ -2428,6 +2532,74 @@ def _process_file_sync(
             )
 
 
+def _process_file_sync(
+    request: Request,
+    file_id: str,
+    content: Optional[str] = None,
+    collection_name: Optional[str] = None,
+    knowledge_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    admin_id: Optional[str] = None,
+    embedding_model_id: Optional[str] = None,
+    reliability_policy: Optional[dict] = None,
+    indexing_snapshot: Optional[dict] = None,
+) -> None:
+    """Process a stored file through the shared mixed-modality pipeline."""
+
+    bypass_value = getattr(
+        request.app.state.config,
+        "BYPASS_EMBEDDING_AND_RETRIEVAL",
+        False,
+    )
+    bypass_embedding = bool(getattr(bypass_value, "value", bypass_value))
+    if bypass_embedding:
+        from open_webui.retrieval.embedding.file_processing import (
+            load_authoritative_content_override,
+        )
+
+        _process_file_sync_legacy(
+            request=request,
+            file_id=file_id,
+            content=load_authoritative_content_override(file_id),
+            collection_name=collection_name,
+            knowledge_id=knowledge_id,
+            user_id=user_id,
+            admin_id=admin_id,
+            embedding_model_id=embedding_model_id,
+        )
+        return
+
+    from open_webui.retrieval.embedding.file_processing import (
+        FILE_PROCESSING_FAILED,
+        process_stored_file_for_embedding,
+    )
+    from open_webui.retrieval.embedding.errors import EmbeddingError
+
+    try:
+        process_stored_file_for_embedding(
+            config=request.app.state.config,
+            file_id=file_id,
+            admin_id=admin_id or "",
+            embedding_model_id=embedding_model_id or "",
+            knowledge_id=knowledge_id,
+            collection_name=collection_name,
+            reliability_policy=reliability_policy,
+            indexing_snapshot=indexing_snapshot,
+        )
+    except Exception as error:
+        error_code = (
+            error.code
+            if isinstance(error, EmbeddingError)
+            else FILE_PROCESSING_FAILED
+        )
+        log.error(
+            "Background file processing failed | file_id=%s | code=%s | type=%s",
+            file_id,
+            error_code,
+            type(error).__name__,
+        )
+
+
 @router.post("/process/file")
 def process_file(
     request: Request,
@@ -2440,7 +2612,7 @@ def process_file(
 ):
     """
     Process a file and generate embeddings.
-    
+
     Processing runs in the background and the endpoint returns immediately
     with status "processing". The file metadata will be updated with processing status.
     """
@@ -2452,7 +2624,7 @@ def process_file(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid file ID format: {form_data.file_id}. File ID must be a valid UUID."
         )
-    
+
     # BUG #7 fix: Cache file object to avoid multiple database fetches
     file = Files.get_file_by_id(form_data.file_id)
     if not file:
@@ -2460,10 +2632,28 @@ def process_file(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
+
+    effective_knowledge_id = _effective_process_knowledge_id(
+        form_data,
+        knowledge_id,
+    )
+    _require_file_processing_access(
+        file=file,
+        user=user,
+        knowledge_id=effective_knowledge_id,
+    )
+    if form_data.content is not None and not (
+        user.role == "admin" or file.user_id == user.id
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
     # Cache file object and metadata for reuse throughout the function
     cached_file = file
     cached_meta = file.meta or {}
-    
+
     # Use Redis distributed lock to prevent race conditions in multi-replica deployments
     # This ensures only one pod can start processing a file at a time
     # Lock timeout is configurable via environment variable (default: 1 hour for large files)
@@ -2486,16 +2676,22 @@ def process_file(
                 f"Invalid value for {key}: {os.environ.get(key)}, using default {default}. Error: {e}"
             )
             return default
-    
+
     lock_timeout = _safe_int_env("FILE_PROCESSING_LOCK_TIMEOUT", 3600, min_value=60, max_value=86400)  # 1 min to 24 hours
+    pending_reclaim_timeout = _safe_int_env(
+        "FILE_PROCESSING_PENDING_RECLAIM_TIMEOUT",
+        300,
+        min_value=60,
+        max_value=86400,
+    )
     lock_name = f"open-webui:file_processing_lock:{form_data.file_id}"
-    
+
     processing_lock = None
     lock_acquired = False
     redis_available = True
     status_update_succeeded = False  # BUG #1 fix: Initialize at function level to avoid scope issues
     lock_released = False  # BUG #1 fix: Initialize at function level to avoid scope issues (used in background task block)
-    
+
     try:
         # Validate REDIS_URL before attempting to create lock (BUG #8 fix)
         if not REDIS_URL:
@@ -2509,7 +2705,7 @@ def process_file(
             )
             # Try to acquire lock - distinguish between "lock held" vs "Redis unavailable" (BUG #2 fix)
             lock_acquired = processing_lock.aquire_lock()
-            
+
             if not lock_acquired:
                 # Check if Redis is actually available by testing connection
                 # If Redis is down, we'll fall through to database check
@@ -2521,6 +2717,26 @@ def process_file(
                         # Reuse the existing connection
                         processing_lock.redis.ping()
                         redis_available = True
+                        # Redis is available but the lock is held, so another
+                        # request still owns the dispatch window.
+                        meta = cached_meta
+                        current_status = meta.get(
+                            "processing_status",
+                            "processing",
+                        )
+
+                        log.info(
+                            f"File {form_data.file_id} is already being processed (lock held by another pod), "
+                            f"skipping duplicate processing request from user {user.id}"
+                        )
+                        return {
+                            "status": current_status,
+                            "file_id": form_data.file_id,
+                            "filename": cached_file.filename,
+                            "message": f"File is already {current_status}. Please wait for completion.",
+                            "collection_name": meta.get("collection_name"),
+                            "content": None,
+                        }
                     else:
                         # If processing_lock doesn't have redis, it means initialization failed
                         # Don't create a new connection (resource leak), just mark as unavailable
@@ -2529,23 +2745,6 @@ def process_file(
                             "Marking Redis as unavailable."
                         )
                         redis_available = False
-                    # Redis is available but lock is held - another pod is processing
-                    # BUG #7 fix: Use cached file object instead of fetching again
-                    meta = cached_meta
-                    current_status = meta.get("processing_status", "processing")
-                    
-                    log.info(
-                        f"File {form_data.file_id} is already being processed (lock held by another pod), "
-                        f"skipping duplicate processing request from user {user.id}"
-                    )
-                    return {
-                        "status": current_status,
-                        "file_id": form_data.file_id,
-                        "filename": cached_file.filename,
-                        "message": f"File is already {current_status}. Please wait for completion.",
-                        "collection_name": meta.get("collection_name"),
-                        "content": None,
-                    }
                 except Exception as redis_test_error:
                     # Redis is unavailable - fall through to database check
                     log.warning(
@@ -2563,247 +2762,79 @@ def process_file(
         )
         redis_available = False
         lock_acquired = False
-    
-    # If Redis lock is not available, fall back to database-level checking
-    # This provides graceful degradation when Redis is unavailable
-    if not redis_available or not lock_acquired:
-        # Fallback: Check database status (double-check pattern)
-        # BUG #7 fix: Use cached file object, but refresh metadata to get latest status
-        # Re-fetch only metadata to get latest processing status
-        refreshed_file = Files.get_file_by_id(form_data.file_id)
-        if not refreshed_file:
+
+    # Redis protects the short dispatch window across replicas. The database
+    # lease is authoritative in both Redis and degraded modes, so a fresh
+    # pending request is deduplicated while a stranded pending request becomes
+    # reclaimable after a bounded interval.
+    try:
+        (
+            dispatch_claimed,
+            cached_meta,
+            current_status,
+            reclaimed_stale_pending,
+        ) = _claim_file_processing_dispatch(
+            form_data.file_id,
+            pending_reclaim_timeout,
+        )
+        if not cached_meta and current_status is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=ERROR_MESSAGES.NOT_FOUND,
             )
-        # Update cached metadata with latest values
-        cached_meta = refreshed_file.meta or {}
-        # BUG #3 fix: Try to keep cached_file.meta in sync, but don't fail if assignment doesn't work
-        # (Pydantic models are mutable by default, but assignment might fail in edge cases)
         try:
             cached_file.meta = cached_meta
         except (AttributeError, TypeError) as assign_error:
-            # Assignment failed - not critical, we'll use cached_meta directly
-            log.debug(f"Could not update cached_file.meta: {assign_error}, using cached_meta directly")
-        meta = cached_meta
-        current_status = meta.get("processing_status")
-        
-        # Check if already processing
-        # CRITICAL FIX: Only skip if status is "processing" (job running), not "pending" (job queued)
-        if current_status == "processing":
-            log.info(
-                f"File {form_data.file_id} is already {current_status} "
-                f"(Redis unavailable, using database check), "
-                f"skipping duplicate processing request from user {user.id}"
+            log.debug(
+                "Could not update cached_file.meta: %s; using cached metadata",
+                assign_error,
             )
+
+        if not dispatch_claimed:
+            effective_status = current_status or "processing"
+            log.info(
+                "File %s already has live processing state %s; skipping "
+                "duplicate request from user %s",
+                form_data.file_id,
+                effective_status,
+                user.id,
+            )
+            if processing_lock and lock_acquired and not lock_released:
+                processing_lock.release_lock()
+                lock_released = True
             return {
-                "status": current_status,
+                "status": effective_status,
                 "file_id": form_data.file_id,
                 "filename": cached_file.filename,
-                "message": f"File is already {current_status}. Please wait for completion.",
-                "collection_name": meta.get("collection_name"),
+                "message": (
+                    f"File is already {effective_status}. "
+                    "Please wait for completion."
+                ),
+                "collection_name": cached_meta.get("collection_name"),
                 "content": None,
             }
-        
-        # Set initial status (database-level check passed)
-        # BUG #2 fix: Use atomic database update to prevent race condition
-        # Only update if status is not already "pending" or "processing"
-        # This provides some protection against race conditions in fallback path
-        try:
-            from open_webui.internal.db import get_db, engine
-            from sqlalchemy import text
-            
-            # Detect database type for appropriate SQL syntax
-            # BUG #6 fix: Use engine.dialect.name for reliable database type detection
-            try:
-                is_postgresql = engine.dialect.name == 'postgresql'
-            except (AttributeError, Exception) as db_detect_error:
-                # Fallback to string matching if dialect.name not available
-                log.warning(f"Could not detect database type via dialect.name: {db_detect_error}, using string matching")
-                is_postgresql = "postgresql" in str(engine.url) if engine and engine.url else False
-            
-            with get_db() as db:
-                if is_postgresql:
-                    # PostgreSQL: Use JSONB functions for atomic update
-                    # Cast meta to jsonb first (meta column is JSON type, but jsonb_set requires jsonb)
-                    result = db.execute(
-                        text("""
-                            UPDATE file 
-                            SET meta = jsonb_set(
-                                COALESCE(meta::jsonb, '{}'::jsonb),
-                                '{processing_status}',
-                                '"pending"',
-                                true
-                            )
-                            WHERE id = :file_id
-                            AND (
-                                meta->>'processing_status' IS NULL 
-                                OR meta->>'processing_status' NOT IN ('pending', 'processing')
-                            )
-                            RETURNING id
-                        """),
-                        {"file_id": form_data.file_id}
-                    )
-                else:
-                    # SQLite: Use JSON functions (json_set, json_extract)
-                    result = db.execute(
-                        text("""
-                            UPDATE file 
-                            SET meta = json_set(
-                                COALESCE(meta, '{}'),
-                                '$.processing_status',
-                                'pending'
-                            )
-                            WHERE id = :file_id
-                            AND (
-                                json_extract(meta, '$.processing_status') IS NULL 
-                                OR json_extract(meta, '$.processing_status') NOT IN ('pending', 'processing')
-                            )
-                        """),
-                        {"file_id": form_data.file_id}
-                    )
-                db.commit()
-                
-                # Check if update actually happened (row was updated)
-                # For SQLite, check rowcount; for PostgreSQL, check RETURNING result
-                if is_postgresql:
-                    updated_row = result.fetchone()
-                    update_succeeded = updated_row is not None
-                else:
-                    update_succeeded = result.rowcount > 0
-                
-                if not update_succeeded:
-                    # Another request already set status to pending/processing
-                    # Re-fetch to get current status
-                    refreshed_file = Files.get_file_by_id(form_data.file_id)
-                    if refreshed_file:
-                        meta = refreshed_file.meta or {}
-                        current_status = meta.get("processing_status", "processing")
-                        log.info(
-                            f"File {form_data.file_id} status changed to {current_status} during atomic update, "
-                            f"skipping duplicate processing request from user {user.id}"
-                        )
-                        return {
-                            "status": current_status,
-                            "file_id": form_data.file_id,
-                            "filename": cached_file.filename,
-                            "message": f"File is already {current_status}. Please wait for completion.",
-                            "collection_name": meta.get("collection_name"),
-                            "content": None,
-                        }
-        except Exception as atomic_update_error:
-            # If atomic update fails (e.g., database doesn't support JSON functions), fall back to regular update
+
+        status_update_succeeded = True
+        if reclaimed_stale_pending:
             log.warning(
-                f"Atomic update failed for file {form_data.file_id}: {atomic_update_error}. "
-                "Falling back to regular update (may have race condition).",
-                exc_info=True
-            )
-            # BUG #4 fix: Check return value in fallback path too
-            result = Files.update_file_metadata_by_id(
+                "Reclaimed stale pending file-processing dispatch | "
+                "file_id=%s | stale_after_seconds=%s | user_id=%s",
                 form_data.file_id,
-                {
-                    "processing_status": "pending",
-                },
+                pending_reclaim_timeout,
+                user.id,
             )
-            if result is None:
-                log.error(
-                    f"Failed to update file status in fallback path for file_id={form_data.file_id}: "
-                    "update_file_metadata_by_id returned None"
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Failed to update file processing status. Please try again."
-                )
-    else:
-        # We have the Redis lock, now check status atomically
-        # BUG #5 fix: Wrap entire section in try-finally to ensure lock is always released
-        # Note: lock_released is initialized at function level to avoid scope issues
-        try:
-            # BUG #7 fix: Re-fetch only metadata to get latest state (file object cached)
-            refreshed_file = Files.get_file_by_id(form_data.file_id)
-            if not refreshed_file:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=ERROR_MESSAGES.NOT_FOUND,
-                )
-            # Update cached metadata with latest values
-            cached_meta = refreshed_file.meta or {}
-            # BUG #3 fix: Try to keep cached_file.meta in sync, but don't fail if assignment doesn't work
-            # (Pydantic models are mutable by default, but assignment might fail in edge cases)
+    except Exception:
+        if processing_lock and lock_acquired and not lock_released:
             try:
-                cached_file.meta = cached_meta
-            except (AttributeError, TypeError) as assign_error:
-                # Assignment failed - not critical, we'll use cached_meta directly
-                log.debug(f"Could not update cached_file.meta: {assign_error}, using cached_meta directly")
-            meta = cached_meta
-            current_status = meta.get("processing_status")
-            
-            # Check if already processing (double-check after acquiring lock)
-            # CRITICAL FIX: Only skip if status is "processing" (job running), not "pending" (job queued)
-            # "pending" means job is queued but not started - we should allow re-enqueueing if needed
-            # "processing" means job is currently running - we should skip to avoid duplicates
-            if current_status == "processing":
-                log.info(
-                    f"File {form_data.file_id} status is {current_status} after acquiring lock, "
-                    f"skipping duplicate processing request from user {user.id}"
-                )
-                # Release lock before returning (BUG #5 fix)
-                if processing_lock and lock_acquired and not lock_released:
-                    processing_lock.release_lock()
-                    lock_released = True
-                    log.debug(f"Released file processing lock for file_id={form_data.file_id} (already processing)")
-                return {
-                    "status": current_status,
-                    "file_id": form_data.file_id,
-                    "filename": cached_file.filename,
-                    "message": f"File is already {current_status}. Please wait for completion.",
-                    "collection_name": meta.get("collection_name"),
-                    "content": None,
-                }
-            # If status is "pending", we can proceed - it means job was queued but may have failed or needs re-enqueueing
-            # If status is None/"not_started"/"completed"/"error", we can also proceed
-            
-            # Set initial status (we have the lock, so this is safe)
-            # Status update must succeed before we can proceed
-            try:
-                # Check return value to detect silent failures
-                result = Files.update_file_metadata_by_id(
-                    form_data.file_id,
-                    {
-                        "processing_status": "pending",
-                    },
-                )
-                # Check if update actually succeeded (returns FileModel on success, None on failure)
-                if result is None:
-                    # Update failed silently - don't release lock
-                    log.error(
-                        f"Failed to update file status for file_id={form_data.file_id}: "
-                        "update_file_metadata_by_id returned None"
-                    )
-                    status_update_succeeded = False
-                    raise Exception("File status update failed: update returned None")
-                # Status update succeeded
-                status_update_succeeded = True
-            except Exception as status_error:
-                # Status update failed - don't release lock to prevent another request from starting
+                processing_lock.release_lock()
+                lock_released = True
+            except Exception as release_error:
                 log.error(
-                    f"Failed to update file status for file_id={form_data.file_id}: {status_error}. "
-                    "Lock will not be released to prevent duplicate processing."
+                    "Failed to release file-processing lock after claim error: %s",
+                    release_error,
                 )
-                status_update_succeeded = False
-                raise  # Re-raise to let caller know it failed
-        except Exception as outer_error:
-            # If any other error occurs (e.g., file not found), ensure lock is released
-            # Only release if not already released
-            if processing_lock and lock_acquired and not lock_released:
-                try:
-                    processing_lock.release_lock()
-                    lock_released = True
-                    log.debug(f"Released file processing lock for file_id={form_data.file_id} after error")
-                except Exception as release_error:
-                    log.error(f"Failed to release lock after error: {release_error}")
-            raise  # Re-raise the original error
-    
+        raise
+
     # Enqueue job to distributed job queue (RQ) if available, otherwise fall back to BackgroundTasks
     # This enables distributed processing across multiple pods in Kubernetes
     # CRITICAL: Keep lock held until we've successfully enqueued job or added BackgroundTask
@@ -2812,195 +2843,171 @@ def process_file(
     use_job_queue = False
     job_enqueued = False
     background_task_added = False
-    
-    # Get the user's embedding API key for the worker (per-admin scoped)
-    print("=" * 80, flush=True)
-    print("[PROCESS FILE] Starting file processing request", flush=True)
-    print(f"  file_id: {form_data.file_id}", flush=True)
-    print(f"  user.email: {user.email}", flush=True)
-    print(f"  user.id: {user.id}", flush=True)
-    print(f"  user.role: {user.role}", flush=True)
-    print(f"  knowledge_id: {knowledge_id}", flush=True)
-    log.info("=" * 80)
-    log.info("[PROCESS FILE] Starting file processing request")
-    log.info(f"  file_id: {form_data.file_id}, user.email: {user.email}, user.id: {user.id}, user.role: {user.role}, knowledge_id: {knowledge_id}")
-    
-    # CRITICAL FIX: Determine the correct email to use for API key retrieval
-    # If uploading to a knowledge base, use the knowledge base OWNER's API key
-    # This ensures that when super admin uploads files to admin's knowledge base,
-    # the admin's API key is used (not super admin's)
-    api_key_owner_email = user.email  # Default to requesting user
-    
-    if knowledge_id:
-        try:
-            knowledge = Knowledges.get_knowledge_by_id(knowledge_id)
-            if knowledge and knowledge.user_id:
-                # Get the knowledge base owner's email
-                owner = Users.get_user_by_id(knowledge.user_id)
-                if owner and owner.email:
-                    api_key_owner_email = owner.email
-                    if api_key_owner_email != user.email:
-                        log.info(
-                            f"  [API KEY RBAC] Using knowledge base owner's API key: "
-                            f"owner={api_key_owner_email} (not uploader={user.email})"
-                        )
-                        print(
-                            f"  [API KEY RBAC] Using knowledge base owner's API key: "
-                            f"owner={api_key_owner_email} (not uploader={user.email})",
-                            flush=True
-                        )
-        except Exception as e:
-            log.warning(f"Failed to retrieve knowledge base owner, using uploader's email: {e}")
-            # Fall back to requesting user's email if anything fails
-            api_key_owner_email = user.email
-    
-    embedding_api_key = None
-    embedding_model = None
-    print(f"  [STEP 1] Checking embedding engine: {request.app.state.config.RAG_EMBEDDING_ENGINE}", flush=True)
-    log.info(f"  [STEP 1] Checking embedding engine: {request.app.state.config.RAG_EMBEDDING_ENGINE}")
-    
-    if request.app.state.config.RAG_EMBEDDING_ENGINE in ["openai", "portkey"]:
-        print(f"  [STEP 1.1] Engine is OpenAI/Portkey, retrieving model and API key for {api_key_owner_email}...", flush=True)
-        log.info(f"  [STEP 1.1] Engine is OpenAI/Portkey, retrieving model and API key for {api_key_owner_email}...")
-        
-        # RBAC: Get per-admin model name and API key for the owner
-        embedding_model = request.app.state.config.RAG_EMBEDDING_MODEL_USER.get(api_key_owner_email)
-        embedding_api_key = request.app.state.config.RAG_OPENAI_API_KEY.get(api_key_owner_email)
-        
-        print(f"  [STEP 1.2] Model and API key retrieval result:", flush=True)
-        print(f"    embedding_model is None: {embedding_model is None}", flush=True)
-        print(f"    embedding_model is empty: {embedding_model == '' if embedding_model else 'N/A'}", flush=True)
-        print(f"    embedding_model value: {embedding_model if embedding_model else '(empty)'}", flush=True)
-        print(f"    embedding_api_key is None: {embedding_api_key is None}", flush=True)
-        print(f"    embedding_api_key is empty: {embedding_api_key == '' if embedding_api_key else 'N/A'}", flush=True)
-        print(f"    embedding_api_key length: {len(embedding_api_key) if embedding_api_key else 0}", flush=True)
-        if embedding_api_key:
-            api_key_preview = embedding_api_key[-4:] if len(embedding_api_key) >= 4 else '***'
-            print(f"    embedding_api_key ends with: ...{api_key_preview}", flush=True)
-        log.info(f"  [STEP 1.2] Model and API key retrieval result:")
-        log.info(f"    embedding_model is None: {embedding_model is None}")
-        log.info(f"    embedding_model is empty: {embedding_model == '' if embedding_model else 'N/A'}")
-        log.info(f"    embedding_model value: {embedding_model if embedding_model else '(empty)'}")
-        log.info(f"    embedding_api_key is None: {embedding_api_key is None}")
-        log.info(f"    embedding_api_key is empty: {embedding_api_key == '' if embedding_api_key else 'N/A'}")
-        log.info(f"    embedding_api_key length: {len(embedding_api_key) if embedding_api_key else 0}")
-        
-        # RBAC: Both model and API key are mandatory - validate both
-        owner_info = f"knowledge base owner {api_key_owner_email}" if knowledge_id and api_key_owner_email != user.email else f"user {api_key_owner_email}"
-        
-        if not embedding_model or not embedding_model.strip():
-            error_msg = (
-                f"❌ No embedding model configured for {owner_info}. "
-                f"File processing will fail without a model. "
-                f"Please ensure the admin ({api_key_owner_email}) configures the embedding model in Settings > Documents. "
-                f"If {api_key_owner_email} is not admin, ensure they are in a group created by an admin who has configured the model."
-            )
-            print(f"  [STEP 1.3] ❌ {error_msg}", flush=True)
-            log.error(f"  [STEP 1.3] ❌ {error_msg}")
-            if processing_lock and lock_acquired and not lock_released:
-                try:
-                    processing_lock.release_lock()
-                    lock_released = True
-                    log.debug(f"Released file processing lock for file_id={form_data.file_id} (model missing)")
-                except Exception as release_error:
-                    log.error(f"Failed to release lock after model check failure: {release_error}")
-            return {
-                "status": False,
-                "file_id": form_data.file_id,
-                "error": "No embedding model configured. Please configure in Settings > Documents.",
-            }
-        
-        if not embedding_api_key or not embedding_api_key.strip():
-            error_msg = (
-                f"❌ No embedding API key configured for {owner_info}. "
-                f"File processing will fail without an API key. "
-                f"Please ensure the admin ({api_key_owner_email}) configures the embedding API key in Settings > Documents. "
-                f"If {api_key_owner_email} is not admin, ensure they are in a group created by an admin who has configured the API key."
-            )
-            print(f"  [STEP 1.3] ❌ {error_msg}", flush=True)
-            log.error(f"  [STEP 1.3] ❌ {error_msg}")
-            if processing_lock and lock_acquired and not lock_released:
-                try:
-                    processing_lock.release_lock()
-                    lock_released = True
-                    log.debug(f"Released file processing lock for file_id={form_data.file_id} (API key missing)")
-                except Exception as release_error:
-                    log.error(f"Failed to release lock after API key check failure: {release_error}")
-            return {
-                "status": False,
-                "file_id": form_data.file_id,
-                "error": "No embedding API key configured. Please configure in Settings > Documents.",
-            }
-        
-        print(f"  [STEP 1.3] ✅ Model and API key retrieved and validated", flush=True)
-        log.info(f"  [STEP 1.3] ✅ Model ({embedding_model}) and API key retrieved and validated for owner {api_key_owner_email}")
-    else:
-        print(f"  [STEP 1.1] Engine is {request.app.state.config.RAG_EMBEDDING_ENGINE}, skipping OpenAI API key check", flush=True)
-        log.info(f"  [STEP 1.1] Engine is {request.app.state.config.RAG_EMBEDDING_ENGINE}, skipping OpenAI API key check")
-    
+
+    # Credential-safe: Resolve frozen IDs (no credentials in payload)
+    from open_webui.retrieval.embedding.resolution import freeze_for_enqueue, freeze_for_knowledge_enqueue
+
     try:
+        admin_id, embedding_model_id = (
+            freeze_for_knowledge_enqueue(
+                effective_knowledge_id,
+                user.id,
+                request.app.state.config,
+            )
+            if effective_knowledge_id
+            else freeze_for_enqueue(user.id, request.app.state.config)
+        )
+    except Exception as error:
+        error_code = (
+            error.code if isinstance(error, EmbeddingError) else FILE_PROCESSING_FAILED
+        )
+        public_error = safe_file_processing_error_message(error_code)
+        log.error(
+            "Embedding resolution failed | file_id=%s | code=%s | type=%s",
+            form_data.file_id,
+            error_code,
+            type(error).__name__,
+        )
+        status_result = Files.update_file_metadata_by_id(
+            form_data.file_id,
+            {
+                "processing_status": "error",
+                "processing_completed_at": int(time.time()),
+                "processing_error_code": error_code,
+                "processing_error": public_error,
+            },
+        )
+        if processing_lock and lock_acquired and not lock_released:
+            try:
+                processing_lock.release_lock()
+                lock_released = True
+            except Exception:
+                pass
+        if status_result is None:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=public_error,
+            )
+        return {
+            "status": "error",
+            "file_id": form_data.file_id,
+            "processing_error_code": error_code,
+            "error": public_error,
+        }
+
+    log.info(f"[PROCESS FILE] file_id={form_data.file_id} admin_id={admin_id} embedding_model_id={embedding_model_id}")
+
+    try:
+        from open_webui.retrieval.embedding.file_processing import (
+            persist_content_provenance_before_dispatch,
+        )
+        from open_webui.retrieval.embedding.reliability import (
+            snapshot_reliability_policy,
+        )
+
+        reliability_policy = snapshot_reliability_policy(
+            request.app.state.config
+        ).to_dict()
+
+        # Background and RQ workers must read one durable, authoritative input;
+        # never rely on an ephemeral request/queue payload for text overrides.
+        persist_content_provenance_before_dispatch(
+            form_data.file_id,
+            form_data.content,
+        )
+        from open_webui.retrieval.embedding.publication import freeze_file_indexing
+
+        indexing_snapshot = freeze_file_indexing(
+            config=request.app.state.config,
+            file_id=form_data.file_id,
+            admin_id=admin_id,
+            embedding_model_id=embedding_model_id,
+        )
+
         # Try to use job queue first if available
         if is_job_queue_available():
             try:
-                # Enqueue job to distributed job queue
-                # RBAC: Include owner_email and embedding_model in payload for worker
                 job_id = enqueue_file_processing_job(
                     file_id=form_data.file_id,
-                    content=form_data.content,
+                    content=None,
                     collection_name=form_data.collection_name,
-                    knowledge_id=knowledge_id,
+                    knowledge_id=effective_knowledge_id,
                     user_id=user.id,
-                    owner_email=api_key_owner_email,  # KB owner or uploader
-                    embedding_model=embedding_model,  # Per-admin model name
-                    embedding_api_key=embedding_api_key,
+                    admin_id=admin_id,
+                    embedding_model_id=embedding_model_id,
+                    reliability_policy=reliability_policy,
+                    indexing_snapshot=indexing_snapshot,
                 )
-                
+
                 if job_id is not None:
-                    # Successfully enqueued job
                     use_job_queue = True
                     job_enqueued = True
                     log.info(f"Successfully enqueued job {job_id} for file_id={form_data.file_id}")
                 else:
-                    # Job queue unavailable, will fall back to BackgroundTasks
                     log.warning(
                         f"Job queue unavailable for file_id={form_data.file_id}, "
                         "falling back to BackgroundTasks"
                     )
             except Exception as job_enqueue_error:
-                # If job enqueue fails, fall back to BackgroundTasks
                 log.warning(
                     f"Failed to enqueue job for file_id={form_data.file_id}: {job_enqueue_error}, "
                     "falling back to BackgroundTasks",
                     exc_info=True
                 )
-        
-        # Fall back to BackgroundTasks if job queue wasn't used
+
         if not job_enqueued:
             try:
-                # Add background task (background_tasks is always provided by FastAPI)
                 background_tasks.add_task(
                     _process_file_sync,
                     request=request,
                     file_id=form_data.file_id,
-                    content=form_data.content,
+                    content=None,
                     collection_name=form_data.collection_name,
-                    knowledge_id=knowledge_id,
+                    knowledge_id=effective_knowledge_id,
                     user_id=user.id,
+                    admin_id=admin_id,
+                    embedding_model_id=embedding_model_id,
+                    reliability_policy=reliability_policy,
+                    indexing_snapshot=indexing_snapshot,
                 )
                 background_task_added = True
                 log.debug(f"Added BackgroundTask for file_id={form_data.file_id}")
             except Exception as bg_task_error:
-                # If background task addition fails, log and re-raise
                 log.error(
                     f"Failed to add BackgroundTask for file_id={form_data.file_id}: {bg_task_error}",
                     exc_info=True
                 )
-                raise  # Re-raise the error - this will trigger lock release in finally block
-        
+                raise
+
         # Only mark as successful if we actually enqueued/added a task
         if not (job_enqueued or background_task_added):
             raise Exception("Failed to enqueue job or add BackgroundTask - no task was created")
-            
+    except Exception as error:
+        public_error = safe_file_processing_error_message(FILE_PROCESSING_FAILED)
+        Files.update_file_metadata_by_id(
+            form_data.file_id,
+            {
+                "processing_status": "error",
+                "processing_completed_at": int(time.time()),
+                "processing_error_code": FILE_PROCESSING_FAILED,
+                "processing_error": public_error,
+            },
+        )
+        log.error(
+            "File processing dispatch failed | file_id=%s | type=%s",
+            form_data.file_id,
+            type(error).__name__,
+        )
+        if processing_lock and lock_acquired and not lock_released:
+            try:
+                processing_lock.release_lock()
+                lock_released = True
+            except Exception:
+                pass
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=public_error,
+        ) from None
     finally:
         # CRITICAL FIX: Release lock AFTER successfully enqueueing job or adding BackgroundTask
         # This ensures no race condition can occur
@@ -3036,7 +3043,7 @@ def process_file(
                     f"Lock NOT released for file_id={form_data.file_id} due to task creation failure. "
                     "Lock will expire after timeout."
                 )
-    
+
     # Return immediately with processing status (backward compatible format)
     # Include both old format fields and new status for compatibility
     result = {
@@ -3048,11 +3055,11 @@ def process_file(
         "collection_name": None,
         "content": None,
     }
-    
+
     # Add job_id if job was successfully enqueued
     if job_enqueued and job_id:
         result["job_id"] = job_id
-    
+
     return result
 
 
@@ -3441,12 +3448,173 @@ async def process_web_search(
         )
 
 
+def _resolve_model_aware_query_context(
+    request,
+    user,
+    *,
+    knowledge_ids: Optional[list[str]] = None,
+    file_ids: Optional[list[str]] = None,
+):
+    """Resolve the model space and any source-scoped staged-vector allowance.
+
+    Admins without durable state use their config-resolved model. All readiness
+    and resolution failures propagate so callers fail closed instead of running
+    a model-unaware vector search.
+    """
+    try:
+        from open_webui.retrieval.embedding.resolution import resolve_for_user
+        from open_webui.retrieval.embedding.gate import (
+            assert_embedding_retrieval_ready,
+            RetrievalModelSpace,
+        )
+
+        result = assert_embedding_retrieval_ready(
+            requesting_user_id=user.id,
+            knowledge_ids=knowledge_ids,
+            file_ids=file_ids,
+        )
+        if isinstance(result, RetrievalModelSpace):
+            return (
+                result.admin_id,
+                result.effective_model_id,
+                list(result.staged_job_ids) or None,
+                list(result.staged_file_ids) or None,
+                list(result.staged_collection_files) or None,
+                result,
+            )
+        # RetrievalReadyNoState: legacy admin, use config-resolved model.
+        ctx = resolve_for_user(user.id, request.app.state.config)
+        return ctx.admin_id, ctx.model.id, None, None, None, None
+    except EmbeddingError:
+        # All embedding errors (MIXED, NOT_READY, resolution failures) propagate.
+        raise
+    except Exception as error:
+        # Non-embedding resolution failure: fail closed.
+        log.warning(
+            "Model-aware query resolution failed | type=%s",
+            type(error).__name__,
+        )
+        raise
+
+
+def _resolve_authorized_query_collections(
+    collection_names: list[str],
+) -> tuple[list[str], list[str]]:
+    """Derive file/knowledge scope from client-requested collection names.
+
+    Direct query endpoints have no server-owned legacy collection allowlist, so
+    every requested name must be a canonical file or Knowledge collection. The
+    readiness gate performs the corresponding read-access and model-space checks.
+    """
+    from open_webui.models.knowledge import Knowledges
+
+    knowledge_ids: list[str] = []
+    file_ids: list[str] = []
+    for raw_name in collection_names:
+        collection_name = str(raw_name or "").strip()
+        if not collection_name:
+            raise EmbeddingError(EMBEDDING_FILE_NOT_FOUND)
+        if collection_name.startswith("file-"):
+            file_id = collection_name.removeprefix("file-")
+            if not file_id or Files.get_file_by_id(file_id) is None:
+                raise EmbeddingError(EMBEDDING_FILE_NOT_FOUND)
+            file_ids.append(file_id)
+            continue
+        if Knowledges.get_knowledge_by_id(collection_name) is None:
+            raise EmbeddingError(EMBEDDING_FILE_NOT_FOUND)
+        knowledge_ids.append(collection_name)
+    return list(dict.fromkeys(knowledge_ids)), list(dict.fromkeys(file_ids))
+
+
 class QueryDocForm(BaseModel):
     collection_name: str
     query: str
     k: Optional[int] = None
     r: Optional[float] = None
     hybrid: Optional[bool] = None
+
+
+def _finish_model_aware_query(result, model_space):
+    from open_webui.retrieval.embedding.gate import assert_retrieval_generation_current
+
+    payload = (
+        result.model_dump() if hasattr(result, "model_dump") else dict(result or {})
+    )
+    warnings = payload.pop("_retrieval_errors", [])
+    if model_space is not None:
+        warnings.extend(
+            {
+                "file_id": file_id,
+                "error_code": "embedding_reindex_not_ready",
+                "message": "This file is not available in the current index.",
+                "retryable": True,
+            }
+            for file_id in model_space.excluded_file_ids
+        )
+        metadata = payload.get("metadatas", [[]])[0]
+        keep = [
+            index
+            for index, item in enumerate(metadata)
+            if str((item or {}).get("file_id") or "") in model_space.ready_file_ids
+        ]
+        for key in ("documents", "metadatas", "ids", "distances"):
+            if payload.get(key):
+                payload[key] = [
+                    [
+                        payload[key][0][index]
+                        for index in keep
+                        if index < len(payload[key][0])
+                    ]
+                ]
+        payload.update(
+            index_generation_id=model_space.index_generation_id,
+            effective_model_id=model_space.effective_model_id,
+            availability="partial" if warnings else "ready",
+        )
+    assert_retrieval_generation_current(model_space)
+    if warnings and not any(payload.get("documents", [])):
+        raise EmbeddingError(
+            "embedding_retrieval_failed",
+            detail={
+                "message": "The requested evidence could not be retrieved. Please retry.",
+                "retryable": True,
+            },
+            retryable=True,
+            http_status=503,
+        )
+    if warnings:
+        payload["warnings"] = warnings
+    return payload
+
+
+def _query_http_error(error: Exception) -> HTTPException:
+    if isinstance(error, HTTPException):
+        return error
+    if isinstance(error, EmbeddingError) and error.code in {
+        EMBEDDING_REINDEX_NOT_READY,
+        EMBEDDING_FILE_NOT_FOUND,
+        "embedding_model_space_mixed",
+    }:
+        detail = error.detail if isinstance(error.detail, dict) else {}
+        return HTTPException(
+            status_code=409,
+            detail={
+                "error_code": error.code,
+                "message": detail.get(
+                    "message",
+                    "The requested index or source is unavailable. Refresh and retry.",
+                ),
+                "retryable": True,
+            },
+        )
+    return HTTPException(
+        status_code=503,
+        detail={
+            "error_code": "embedding_retrieval_failed",
+            "message": "The requested evidence could not be retrieved. Please retry.",
+            "retryable": True,
+        },
+    )
 
 
 @router.post("/query/doc")
@@ -3456,37 +3624,80 @@ def query_doc_handler(
     user=Depends(get_verified_user),
 ):
     try:
+        knowledge_ids, file_ids = _resolve_authorized_query_collections(
+            [form_data.collection_name]
+        )
+        (
+            admin_id,
+            embedding_model_id,
+            staged_job_ids,
+            staged_file_ids,
+            staged_collection_files,
+            model_space,
+        ) = _resolve_model_aware_query_context(
+            request,
+            user,
+            knowledge_ids=knowledge_ids,
+            file_ids=file_ids,
+        )
+
+        # Bind query generation to the exact model approved by the gate.
+        from open_webui.retrieval.embedding.service import EmbeddingService
+        from open_webui.retrieval.embedding.compatibility import make_embedding_function
+
+        service = EmbeddingService(request.app.state.config)
+        embedding_function = make_embedding_function(
+            service,
+            admin_id=admin_id,
+            embedding_model_id=embedding_model_id,
+        )
+
         if request.app.state.config.ENABLE_RAG_HYBRID_SEARCH.get(user.email):
-            return query_doc_with_hybrid_search(
+            result = query_doc_with_hybrid_search(
                 collection_name=form_data.collection_name,
                 query=form_data.query,
-                embedding_function=lambda query: request.app.state.EMBEDDING_FUNCTION(
-                    query, user=user
+                embedding_function=embedding_function,
+                k=(
+                    form_data.k
+                    if form_data.k
+                    else request.app.state.config.TOP_K.get(user.email)
                 ),
-                k=form_data.k if form_data.k else request.app.state.config.TOP_K.get(user.email),
                 reranking_function=request.app.state.rf,
                 r=(
                     form_data.r
                     if form_data.r
                     else request.app.state.config.RELEVANCE_THRESHOLD
                 ),
-                user=user,
+                admin_id=admin_id,
+                embedding_model_id=embedding_model_id,
+                knowledge_ids=knowledge_ids or None,
+                file_ids=file_ids or None,
+                staged_job_ids=staged_job_ids,
+                staged_file_ids=staged_file_ids,
+                staged_collection_files=staged_collection_files,
             )
         else:
-            return query_doc(
+            result = query_doc(
                 collection_name=form_data.collection_name,
-                query_embedding=request.app.state.EMBEDDING_FUNCTION(
-                    form_data.query, user=user
+                query_embedding=embedding_function(form_data.query),
+                k=(
+                    form_data.k
+                    if form_data.k
+                    else request.app.state.config.TOP_K.get(user.email)
                 ),
-                k=form_data.k if form_data.k else request.app.state.config.TOP_K.get(user.email),
                 user=user,
+                admin_id=admin_id,
+                embedding_model_id=embedding_model_id,
+                knowledge_ids=knowledge_ids or None,
+                file_ids=file_ids or None,
+                staged_job_ids=staged_job_ids,
+                staged_file_ids=staged_file_ids,
+                staged_collection_files=staged_collection_files,
             )
-    except Exception as e:
-        log.exception(e)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=ERROR_MESSAGES.DEFAULT(e),
-        )
+        return _finish_model_aware_query(result, model_space)
+    except Exception as error:
+        log.warning("Model-aware retrieval failed | type=%s", type(error).__name__)
+        raise _query_http_error(error) from error
 
 
 class QueryCollectionsForm(BaseModel):
@@ -3504,37 +3715,81 @@ def query_collection_handler(
     user=Depends(get_verified_user),
 ):
     try:
+        knowledge_ids, file_ids = _resolve_authorized_query_collections(
+            form_data.collection_names
+        )
+        (
+            admin_id,
+            embedding_model_id,
+            staged_job_ids,
+            staged_file_ids,
+            staged_collection_files,
+            model_space,
+        ) = _resolve_model_aware_query_context(
+            request,
+            user,
+            knowledge_ids=knowledge_ids,
+            file_ids=file_ids,
+        )
+
+        # Bind query generation to the exact model approved by the gate.
+        from open_webui.retrieval.embedding.service import EmbeddingService
+        from open_webui.retrieval.embedding.compatibility import make_embedding_function
+
+        service = EmbeddingService(request.app.state.config)
+        embedding_function = make_embedding_function(
+            service,
+            admin_id=admin_id,
+            embedding_model_id=embedding_model_id,
+        )
+
         if request.app.state.config.ENABLE_RAG_HYBRID_SEARCH.get(user.email):
-            return query_collection_with_hybrid_search(
+            result = query_collection_with_hybrid_search(
                 collection_names=form_data.collection_names,
                 queries=[form_data.query],
-                embedding_function=lambda query: request.app.state.EMBEDDING_FUNCTION(
-                    query, user=user
+                embedding_function=embedding_function,
+                k=(
+                    form_data.k
+                    if form_data.k
+                    else request.app.state.config.TOP_K.get(user.email)
                 ),
-                k=form_data.k if form_data.k else request.app.state.config.TOP_K.get(user.email),
                 reranking_function=request.app.state.rf,
                 r=(
                     form_data.r
                     if form_data.r
                     else request.app.state.config.RELEVANCE_THRESHOLD
                 ),
+                admin_id=admin_id,
+                embedding_model_id=embedding_model_id,
+                knowledge_ids=knowledge_ids or None,
+                file_ids=file_ids or None,
+                staged_job_ids=staged_job_ids,
+                staged_file_ids=staged_file_ids,
+                staged_collection_files=staged_collection_files,
             )
         else:
-            return query_collection(
+            result = query_collection(
                 collection_names=form_data.collection_names,
                 queries=[form_data.query],
-                embedding_function=lambda query: request.app.state.EMBEDDING_FUNCTION(
-                    query, user=user
+                embedding_function=embedding_function,
+                k=(
+                    form_data.k
+                    if form_data.k
+                    else request.app.state.config.TOP_K.get(user.email)
                 ),
-                k=form_data.k if form_data.k else request.app.state.config.TOP_K.get(user.email),
+                admin_id=admin_id,
+                embedding_model_id=embedding_model_id,
+                knowledge_ids=knowledge_ids or None,
+                file_ids=file_ids or None,
+                staged_job_ids=staged_job_ids,
+                staged_file_ids=staged_file_ids,
+                staged_collection_files=staged_collection_files,
             )
 
-    except Exception as e:
-        log.exception(e)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=ERROR_MESSAGES.DEFAULT(e),
-        )
+        return _finish_model_aware_query(result, model_space)
+    except Exception as error:
+        log.warning("Model-aware retrieval failed | type=%s", type(error).__name__)
+        raise _query_http_error(error) from error
 
 
 ####################################
@@ -3601,8 +3856,9 @@ if ENV == "dev":
 
     @router.get("/ef/{text}")
     async def get_embeddings(request: Request, text: Optional[str] = "Hello World!", user=Depends(get_verified_user)):
-        # Pass user to ensure per-user API key is used for embeddings
-        return {"result": request.app.state.EMBEDDING_FUNCTION(text, user=user)}
+        from open_webui.retrieval.embedding.compatibility import get_user_embedding_function
+        ef = get_user_embedding_function(request.app.state.config, user.id)
+        return {"result": ef(text)}
 
 
 class BatchProcessFilesForm(BaseModel):
@@ -3612,8 +3868,9 @@ class BatchProcessFilesForm(BaseModel):
 
 class BatchProcessFilesResult(BaseModel):
     file_id: str
-    status: str
-    error: Optional[str] = None
+    status: Literal["completed", "failed"]
+    error_code: Optional[str] = None
+    message: Optional[str] = None
 
 
 class BatchProcessFilesResponse(BaseModel):
@@ -3634,64 +3891,125 @@ def process_files_batch(
     errors: List[BatchProcessFilesResult] = []
     collection_name = form_data.collection_name
 
-    # Prepare all documents first
-    all_docs: List[Document] = []
-    for file in form_data.files:
-        try:
-            text_content = file.data.get("content", "")
+    knowledge = Knowledges.get_knowledge_by_id(id=collection_name)
+    if knowledge is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+    if (
+        user.role != "admin"
+        and knowledge.user_id != user.id
+        and not has_access(user.id, "write", knowledge.access_control)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
 
-            docs: List[Document] = [
-                Document(
-                    page_content=text_content.replace("<br/>", "\n"),
-                    metadata={
-                        **file.meta,
-                        "name": file.filename,
-                        "created_by": file.user_id,
-                        "file_id": file.id,
-                        "source": file.filename,
-                    },
-                )
-            ]
-
-            hash = calculate_sha256_string(text_content)
-            Files.update_file_hash_by_id(file.id, hash)
-            Files.update_file_data_by_id(file.id, {"content": text_content})
-
-            all_docs.extend(docs)
-            results.append(BatchProcessFilesResult(file_id=file.id, status="prepared"))
-
-        except Exception as e:
-            log.error(f"process_files_batch: Error processing file {file.id}: {str(e)}")
-            errors.append(
-                BatchProcessFilesResult(file_id=file.id, status="failed", error=str(e))
+    # Never trust caller-supplied FileModel fields. Rehydrate each file from the
+    # database and require ownership (or admin authority) for this add flow.
+    files: List[FileModel] = []
+    for submitted_file in form_data.files:
+        file = Files.get_file_by_id(submitted_file.id)
+        if file is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=ERROR_MESSAGES.NOT_FOUND,
             )
+        if user.role != "admin" and file.user_id != user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+            )
+        files.append(file)
 
-    # Save all documents in one batch
-    if all_docs:
+    from open_webui.retrieval.embedding.file_processing import (
+        process_stored_file_for_embedding,
+    )
+    from open_webui.retrieval.embedding.resolution import (
+        freeze_for_knowledge_enqueue,
+    )
+    from open_webui.retrieval.embedding.reliability import (
+        snapshot_reliability_policy,
+    )
+
+    try:
+        admin_id, embedding_model_id = freeze_for_knowledge_enqueue(
+            collection_name,
+            user.id,
+            request.app.state.config,
+        )
+    except Exception as error:
+        raw_error_code = (
+            error.code if isinstance(error, EmbeddingError) else FILE_PROCESSING_FAILED
+        )
+        error_code = (
+            safe_file_processing_error_code(raw_error_code)
+            or FILE_PROCESSING_FAILED
+        )
+        public_error = safe_file_processing_error_message(error_code)
+        log.error(
+            "Batch embedding resolution failed | knowledge_id=%s | code=%s | type=%s",
+            collection_name,
+            error_code,
+            type(error).__name__,
+        )
+        for file in files:
+            failure = BatchProcessFilesResult(
+                file_id=file.id,
+                status="failed",
+                error_code=error_code,
+                message=public_error,
+            )
+            results.append(failure)
+            errors.append(failure)
+        return BatchProcessFilesResponse(results=results, errors=errors)
+
+    # The shared processor reads the authoritative stored bytes, prepares all
+    # modalities, and reconciles the file plus every current knowledge
+    # membership governed by this frozen admin/model context.
+    reliability_policy = snapshot_reliability_policy(
+        request.app.state.config
+    ).to_dict()
+    for file in files:
         try:
-            save_docs_to_vector_db(
-                request=request,
-                docs=all_docs,
+            process_stored_file_for_embedding(
+                config=request.app.state.config,
+                file_id=file.id,
+                admin_id=admin_id,
+                embedding_model_id=embedding_model_id,
+                knowledge_id=collection_name,
                 collection_name=collection_name,
-                add=True,
-                user=user,
+                reliability_policy=reliability_policy,
             )
-
-            # Update all files with collection name
-            for result in results:
-                Files.update_file_metadata_by_id(
-                    result.file_id, {"collection_name": collection_name}
-                )
-                result.status = "completed"
-
-        except Exception as e:
+            results.append(
+                BatchProcessFilesResult(file_id=file.id, status="completed")
+            )
+        except Exception as error:
+            raw_error_code = (
+                error.code
+                if isinstance(error, EmbeddingError)
+                else FILE_PROCESSING_FAILED
+            )
+            error_code = (
+                safe_file_processing_error_code(raw_error_code)
+                or FILE_PROCESSING_FAILED
+            )
+            public_error = safe_file_processing_error_message(error_code)
             log.error(
-                f"process_files_batch: Error saving documents to vector DB: {str(e)}"
+                "Batch file processing failed | file_id=%s | code=%s | type=%s",
+                file.id,
+                error_code,
+                type(error).__name__,
             )
-            for result in results:
-                result.status = "failed"
-                errors.append(
-                    BatchProcessFilesResult(file_id=result.file_id, error=str(e))
-                )
+            failure = BatchProcessFilesResult(
+                file_id=file.id,
+                status="failed",
+                error_code=error_code,
+                message=public_error,
+            )
+            results.append(failure)
+            errors.append(failure)
 
     return BatchProcessFilesResponse(results=results, errors=errors)

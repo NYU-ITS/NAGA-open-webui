@@ -95,6 +95,27 @@ class UserUpdateForm(BaseModel):
 
 
 class UsersTable:
+    @staticmethod
+    def _ensure_admin_embedding_config(db, email: str):
+        """Snapshot the global default for a new admin without overwriting a choice."""
+        from open_webui.config import Config, GLOBAL_CONFIG_EMAIL
+
+        global_config = db.query(Config).filter_by(email=GLOBAL_CONFIG_EMAIL, version=0).first()
+        default_model = ((global_config.data or {}).get("rag") or {}).get("embedding_model")
+        if not default_model:
+            return
+        entry = db.query(Config).filter_by(email=email, version=0).first()
+        data = dict(entry.data or {}) if entry else {}
+        rag = dict(data.get("rag") or {})
+        if rag.get("embedding_model_user"):
+            return
+        rag["embedding_model_user"] = default_model
+        data["rag"] = rag
+        if entry:
+            entry.data = data
+        else:
+            db.add(Config(email=email, version=0, data=data))
+
     # def insert_new_user(
     #     self,
     #     id: str,
@@ -163,6 +184,8 @@ class UsersTable:
 
             try:
                 db.add(result)
+                if role == "admin":
+                    self._ensure_admin_embedding_config(db, email)
                 db.commit()
                 db.refresh(result)
             except Exception:
@@ -272,9 +295,14 @@ class UsersTable:
         
         try:
             with get_db() as db:
-                db.query(User).filter_by(id=id).update({"role": role})
-                db.commit()
                 user = db.query(User).filter_by(id=id).first()
+                if not user:
+                    return None
+                previous_role = user.role
+                user.role = role
+                if role == "admin" and previous_role != "admin":
+                    self._ensure_admin_embedding_config(db, user.email)
+                db.commit()
                 
                 # Invalidate cache for user role and all related data
                 cache.invalidate_user_role(id)
@@ -350,10 +378,20 @@ class UsersTable:
         
         try:
             with get_db() as db:
-                db.query(User).filter_by(id=id).update(updated)
-                db.commit()
-
                 user = db.query(User).filter_by(id=id).first()
+                if not user:
+                    return None
+                old_email = user.email
+                for key, value in updated.items():
+                    setattr(user, key, value)
+                if user.role == "admin" and "email" in updated and updated["email"] != old_email:
+                    from open_webui.config import Config
+                    entry = db.query(Config).filter_by(email=old_email, version=0).first()
+                    if entry:
+                        entry.email = updated["email"]
+                    else:
+                        self._ensure_admin_embedding_config(db, updated["email"])
+                db.commit()
                 
                 # Invalidate auth cache when user data changes
                 cache.invalidate_auth_user(id)
@@ -402,6 +440,10 @@ class UsersTable:
             result = Chats.delete_chats_by_user_id(id)
             if result:
                 with get_db() as db:
+                    user = db.query(User).filter_by(id=id).first()
+                    if user and user.role == "admin":
+                        from open_webui.config import Config
+                        db.query(Config).filter_by(email=user.email, version=0).delete()
                     # Delete User
                     db.query(User).filter_by(id=id).delete()
                     db.commit()

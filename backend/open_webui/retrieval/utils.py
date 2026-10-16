@@ -7,6 +7,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import asyncio
 import requests
 import hashlib
+import math
+from dataclasses import dataclass, field
 
 from huggingface_hub import snapshot_download
 from langchain.retrievers import ContextualCompressionRetriever, EnsembleRetriever
@@ -43,10 +45,66 @@ from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from langchain_core.retrievers import BaseRetriever
 
 
+@dataclass(frozen=True)
+class AuthorizedAttachmentScope:
+    """Canonical, server-authorized file/knowledge retrieval scope."""
+
+    file_ids: frozenset[str]
+    knowledge_ids: frozenset[str]
+
+
+@dataclass(frozen=True)
+class RetrievalResult:
+    """Retrieved sources plus the canonical scope used to obtain them."""
+
+    sources: list[dict]
+    authorized_scope: AuthorizedAttachmentScope
+    excluded_sources: list[dict] = field(default_factory=list)
+    model_space: Any = None
+
+
+def _retrieval_failure() -> Exception:
+    from open_webui.retrieval.embedding.errors import EmbeddingError
+
+    return EmbeddingError(
+        "embedding_retrieval_failed",
+        detail={
+            "error_code": "embedding_retrieval_failed",
+            "message": "The requested evidence could not be retrieved. Please retry.",
+            "retryable": True,
+        },
+        retryable=True,
+        http_status=503,
+    )
+
+
+def _unavailable_attachment() -> Exception:
+    from open_webui.retrieval.embedding.errors import EmbeddingError
+
+    return EmbeddingError(
+        "embedding_reindex_not_ready",
+        detail={
+            "error_code": "embedding_reindex_not_ready",
+            "message": "A requested source is unavailable. Remove it or retry after indexing finishes.",
+            "retryable": True,
+        },
+        retryable=True,
+        http_status=409,
+    )
+
+
 class VectorSearchRetriever(BaseRetriever):
     collection_name: Any
     embedding_function: Any
     top_k: int
+    admin_id: Any = None
+    embedding_model_id: Any = None
+    knowledge_ids: Optional[list[str]] = None
+    file_ids: Optional[list[str]] = None
+    staged_job_ids: Optional[list[str]] = None
+    staged_file_ids: Optional[list[str]] = None
+    staged_collection_files: Optional[list[tuple[str, str]]] = None
+    allow_unscoped_legacy: bool = False
 
     def _get_relevant_documents(
         self,
@@ -54,11 +112,30 @@ class VectorSearchRetriever(BaseRetriever):
         *,
         run_manager: CallbackManagerForRetrieverRun,
     ) -> list[Document]:
-        result = VECTOR_DB_CLIENT.search(
-            collection_name=self.collection_name,
-            vectors=[self.embedding_function(query)],
-            limit=self.top_k,
-        )
+        if self.admin_id and self.embedding_model_id and hasattr(
+            VECTOR_DB_CLIENT, "search_model_aware"
+        ):
+            result = VECTOR_DB_CLIENT.search_model_aware(
+                collection_name=self.collection_name,
+                vectors=[self.embedding_function(query)],
+                admin_id=self.admin_id,
+                embedding_model_id=self.embedding_model_id,
+                limit=self.top_k,
+                knowledge_ids=self.knowledge_ids,
+                file_ids=self.file_ids,
+                staged_job_ids=self.staged_job_ids,
+                staged_file_ids=self.staged_file_ids,
+                staged_collection_files=self.staged_collection_files,
+            )
+        else:
+            result = VECTOR_DB_CLIENT.search(
+                collection_name=self.collection_name,
+                vectors=[self.embedding_function(query)],
+                limit=self.top_k,
+            )
+
+        if result is None:
+            return []
 
         ids = result.ids[0]
         metadatas = result.metadatas[0]
@@ -66,53 +143,120 @@ class VectorSearchRetriever(BaseRetriever):
 
         results = []
         for idx in range(len(ids)):
+            metadata = metadatas[idx] or {}
+            page_content = documents[idx] or ""
+            has_scope = bool(self.knowledge_ids or self.file_ids)
+            authorized = (
+                _metadata_matches_scope(
+                    metadata,
+                    knowledge_ids=self.knowledge_ids,
+                    file_ids=self.file_ids,
+                )
+                if has_scope
+                else self.allow_unscoped_legacy
+            )
+            modality = metadata.get("modality", "text")
+            if modality != "audio" and (
+                modality != "text" or not page_content.strip()
+            ):
+                continue
+            if not authorized:
+                continue
             results.append(
                 Document(
-                    metadata=metadatas[idx],
-                    page_content=documents[idx],
+                    metadata=metadata,
+                    page_content=page_content,
                 )
             )
         return results
 
 
 def query_doc(
-    collection_name: str, query_embedding: list[float], k: int, user: UserModel = None
+    collection_name: str,
+    query_embedding: list[float],
+    k: int,
+    user: UserModel = None,
+    admin_id: Optional[str] = None,
+    embedding_model_id: Optional[str] = None,
+    knowledge_ids: Optional[list[str]] = None,
+    file_ids: Optional[list[str]] = None,
+    staged_job_ids: Optional[list[str]] = None,
+    staged_file_ids: Optional[list[str]] = None,
+    staged_collection_files: Optional[list[tuple[str, str]]] = None,
+    allow_unscoped_legacy: bool = False,
 ):
-    log.info(f"[VECTOR_SEARCH] query_doc START | collection={collection_name} | k={k} | embedding_len={len(query_embedding) if query_embedding else 0}")
+    log.info(
+        "[VECTOR_SEARCH] query_doc START | k=%s | model_aware=%s | embedding_len=%s",
+        k,
+        bool(admin_id and embedding_model_id),
+        len(query_embedding) if query_embedding else 0,
+    )
     try:
-        result = VECTOR_DB_CLIENT.search(
-            collection_name=collection_name,
-            vectors=[query_embedding],
-            limit=k,
+        if admin_id and embedding_model_id and hasattr(
+            VECTOR_DB_CLIENT, "search_model_aware"
+        ):
+            # Phase 3: restrict the result set to one admin/model provenance space.
+            result = VECTOR_DB_CLIENT.search_model_aware(
+                collection_name=collection_name,
+                vectors=[query_embedding],
+                admin_id=admin_id,
+                embedding_model_id=embedding_model_id,
+                limit=k,
+                knowledge_ids=knowledge_ids,
+                file_ids=file_ids,
+                staged_job_ids=staged_job_ids,
+                staged_file_ids=staged_file_ids,
+                staged_collection_files=staged_collection_files,
+            )
+        else:
+            result = VECTOR_DB_CLIENT.search(
+                collection_name=collection_name,
+                vectors=[query_embedding],
+                limit=k,
+            )
+        result = _filter_search_result_to_scope(
+            result,
+            knowledge_ids=knowledge_ids,
+            file_ids=file_ids,
+            allow_unscoped_legacy=allow_unscoped_legacy,
         )
 
         if result:
             num_results = len(result.ids[0]) if result.ids and result.ids[0] else 0
-            log.info(f"[VECTOR_SEARCH] query_doc SUCCESS | collection={collection_name} | results_count={num_results} | ids={result.ids} | metadatas={result.metadatas}")
+            log.info(
+                "[VECTOR_SEARCH] query_doc SUCCESS | results_count=%s",
+                num_results,
+            )
         else:
-            log.info(f"[VECTOR_SEARCH] query_doc EMPTY | collection={collection_name} | no results")
+            log.info("[VECTOR_SEARCH] query_doc EMPTY | no results")
 
         return result
-    except Exception as e:
-        log.exception(f"[VECTOR_SEARCH] query_doc ERROR | collection={collection_name} | k={k} | error={e}")
-        raise e
+    except Exception as error:
+        log.exception(
+            "[VECTOR_SEARCH] query_doc ERROR | k=%s | error_type=%s",
+            k,
+            type(error).__name__,
+        )
+        raise
 
 
 def get_doc(collection_name: str, user: UserModel = None):
-    log.info(f"[VECTOR_GET] get_doc START | collection={collection_name}")
+    log.info("[VECTOR_GET] get_doc START")
     try:
         result = VECTOR_DB_CLIENT.get(collection_name=collection_name)
 
         if result:
             num_docs = len(result.ids[0]) if result.ids and result.ids[0] else 0
-            log.info(f"[VECTOR_GET] get_doc SUCCESS | collection={collection_name} | docs_count={num_docs} | ids={result.ids} | metadatas={result.metadatas}")
+            log.info("[VECTOR_GET] get_doc SUCCESS | docs_count=%s", num_docs)
         else:
-            log.info(f"[VECTOR_GET] get_doc EMPTY | collection={collection_name} | no documents")
+            log.info("[VECTOR_GET] get_doc EMPTY | no documents")
 
         return result
-    except Exception as e:
-        log.exception(f"[VECTOR_GET] get_doc ERROR | collection={collection_name} | error={e}")
-        raise e
+    except Exception as error:
+        log.exception(
+            "[VECTOR_GET] get_doc ERROR | error_type=%s", type(error).__name__
+        )
+        raise
 
 
 def query_doc_with_hybrid_search(
@@ -122,13 +266,86 @@ def query_doc_with_hybrid_search(
     k: int,
     reranking_function,
     r: float,
+    admin_id: Optional[str] = None,
+    embedding_model_id: Optional[str] = None,
+    knowledge_ids: Optional[list[str]] = None,
+    file_ids: Optional[list[str]] = None,
+    staged_job_ids: Optional[list[str]] = None,
+    staged_file_ids: Optional[list[str]] = None,
+    staged_collection_files: Optional[list[tuple[str, str]]] = None,
+    allow_unscoped_legacy: bool = False,
 ) -> dict:
+    if _is_multimodal_model_space(admin_id, embedding_model_id):
+        result = query_doc(
+            collection_name=collection_name,
+            query_embedding=embedding_function(query),
+            k=k,
+            admin_id=admin_id,
+            embedding_model_id=embedding_model_id,
+            knowledge_ids=knowledge_ids,
+            file_ids=file_ids,
+            staged_job_ids=staged_job_ids,
+            staged_file_ids=staged_file_ids,
+            staged_collection_files=staged_collection_files,
+            allow_unscoped_legacy=allow_unscoped_legacy,
+        )
+        if result is None:
+            return {
+                "distances": [[]],
+                "documents": [[]],
+                "metadatas": [[]],
+            }
+        return result.model_dump()
+
     try:
-        result = VECTOR_DB_CLIENT.get(collection_name=collection_name)
+        # Include only active rows plus any exact staged scope approved by the gate.
+        if admin_id and embedding_model_id and hasattr(
+            VECTOR_DB_CLIENT, "get_model_aware"
+        ):
+            result = VECTOR_DB_CLIENT.get_model_aware(
+                collection_name=collection_name,
+                admin_id=admin_id,
+                embedding_model_id=embedding_model_id,
+                staged_job_ids=staged_job_ids,
+                staged_file_ids=staged_file_ids,
+                staged_collection_files=staged_collection_files,
+            )
+        else:
+            result = VECTOR_DB_CLIENT.get(collection_name=collection_name)
+
+        if result is None or not result.documents or not result.documents[0]:
+            return {
+                "distances": [[]],
+                "documents": [[]],
+                "metadatas": [[]],
+            }
+
+        text_rows = [
+            (document, metadata or {})
+            for document, metadata in zip(
+                result.documents[0], result.metadatas[0]
+            )
+            if isinstance(document, str)
+            and document.strip()
+            and (metadata or {}).get("modality", "text") == "text"
+            and (
+                _metadata_matches_scope(
+                    metadata or {}, knowledge_ids=knowledge_ids, file_ids=file_ids
+                )
+                if (knowledge_ids or file_ids)
+                else allow_unscoped_legacy
+            )
+        ]
+        if not text_rows:
+            return {
+                "distances": [[]],
+                "documents": [[]],
+                "metadatas": [[]],
+            }
 
         bm25_retriever = BM25Retriever.from_texts(
-            texts=result.documents[0],
-            metadatas=result.metadatas[0],
+            texts=[row[0] for row in text_rows],
+            metadatas=[row[1] for row in text_rows],
         )
         bm25_retriever.k = k
 
@@ -136,6 +353,14 @@ def query_doc_with_hybrid_search(
             collection_name=collection_name,
             embedding_function=embedding_function,
             top_k=k,
+            admin_id=admin_id,
+            embedding_model_id=embedding_model_id,
+            knowledge_ids=knowledge_ids,
+            file_ids=file_ids,
+            staged_job_ids=staged_job_ids,
+            staged_file_ids=staged_file_ids,
+            staged_collection_files=staged_collection_files,
+            allow_unscoped_legacy=allow_unscoped_legacy,
         )
 
         ensemble_retriever = EnsembleRetriever(
@@ -159,13 +384,25 @@ def query_doc_with_hybrid_search(
             "metadatas": [[d.metadata for d in result]],
         }
 
+        result_count = len(result["documents"][0]) if result["documents"] else 0
         log.info(
-            "query_doc_with_hybrid_search:result "
-            + f'{result["metadatas"]} {result["distances"]}'
+            "query_doc_with_hybrid_search complete | results_count=%s",
+            result_count,
         )
         return result
-    except Exception as e:
-        raise e
+    except Exception:
+        raise
+
+
+def _is_multimodal_model_space(
+    admin_id: Optional[str], embedding_model_id: Optional[str]
+) -> bool:
+    if not admin_id or not embedding_model_id:
+        return False
+    from open_webui.retrieval.embedding.registry import get_model_spec_by_id
+
+    modalities = get_model_spec_by_id(embedding_model_id).modalities
+    return bool({"audio", "image", "video"}.intersection(modalities))
 
 
 def merge_get_results(get_results: list[dict]) -> dict:
@@ -192,9 +429,7 @@ def merge_get_results(get_results: list[dict]) -> dict:
 def merge_and_sort_query_results(
     query_results: list[dict], k: int, reverse: bool = False
 ) -> dict:
-    # Initialize lists to store combined data
-    combined = []
-    seen_hashes = set()  # To store unique document hashes
+    best_by_identity: dict[tuple[str, str], tuple[object, str, dict]] = {}
 
     for data in query_results:
         distances = data["distances"][0]
@@ -202,21 +437,47 @@ def merge_and_sort_query_results(
         metadatas = data["metadatas"][0]
 
         for distance, document, metadata in zip(distances, documents, metadatas):
-            if isinstance(document, str):
-                doc_hash = hashlib.md5(
-                    document.encode()
-                ).hexdigest()  # Compute a hash for uniqueness
+            metadata = metadata or {}
+            visual_id = metadata.get("visual_asset_id")
+            rag_chunk_id = metadata.get("rag_chunk_id")
+            if visual_id:
+                identity = ("visual", str(visual_id))
+            elif rag_chunk_id:
+                identity = ("chunk", str(rag_chunk_id))
+            elif metadata.get("file_id") is not None and metadata.get(
+                "chunk_index"
+            ) is not None:
+                identity = (
+                    "file_chunk",
+                    f'{metadata.get("file_id")}:{metadata.get("chunk_index")}',
+                )
+            elif isinstance(document, str):
+                identity = (
+                    "text",
+                    hashlib.sha256(document.encode("utf-8")).hexdigest(),
+                )
+            else:
+                continue
 
-                if doc_hash not in seen_hashes:
-                    seen_hashes.add(doc_hash)
-                    combined.append((distance, document, metadata))
+            candidate = (
+                distance,
+                document if isinstance(document, str) else "",
+                metadata,
+            )
+            current = best_by_identity.get(identity)
+            if current is None or _query_result_sort_key(
+                candidate, reverse=reverse
+            ) < _query_result_sort_key(current, reverse=reverse):
+                best_by_identity[identity] = candidate
 
-    # Sort the list based on distances
-    combined.sort(key=lambda x: x[0], reverse=reverse)
+    combined = sorted(
+        best_by_identity.values(),
+        key=lambda row: _query_result_sort_key(row, reverse=reverse),
+    )
 
     # Slice to keep only the top k elements
     sorted_distances, sorted_documents, sorted_metadatas = (
-        zip(*combined[:k]) if combined else ([], [], [])
+        zip(*combined[: max(0, int(k))]) if combined else ([], [], [])
     )
 
     # Create and return the output dictionary
@@ -227,21 +488,275 @@ def merge_and_sort_query_results(
     }
 
 
-def get_all_items_from_collections(collection_names: list[str]) -> dict:
+def _query_result_sort_key(
+    row: tuple[object, str, dict], *, reverse: bool
+) -> tuple:
+    distance, document, metadata = row
+    numeric_distance = _finite_float(distance)
+    distance_key = (
+        math.inf
+        if numeric_distance is None
+        else (-numeric_distance if reverse else numeric_distance)
+    )
+    return (
+        numeric_distance is None,
+        distance_key,
+        str(metadata.get("file_id") or ""),
+        _sortable_number(metadata.get("chunk_index")),
+        _sortable_number(metadata.get("page_index")),
+        _sortable_number(metadata.get("source_sequence")),
+        str(metadata.get("knowledge_id") or ""),
+        str(metadata.get("visual_asset_id") or metadata.get("rag_chunk_id") or ""),
+        hashlib.sha256(document.encode("utf-8")).hexdigest(),
+    )
+
+
+def _finite_float(value) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _sortable_number(value) -> tuple[int, int | str]:
+    if isinstance(value, bool):
+        return (1, "")
+    try:
+        return (0, int(value))
+    except (TypeError, ValueError):
+        return (1, str(value or ""))
+
+
+def _metadata_matches_scope(
+    metadata: dict,
+    *,
+    knowledge_ids: Optional[list[str]],
+    file_ids: Optional[list[str]],
+) -> bool:
+    knowledge_scope = {str(value) for value in knowledge_ids or []}
+    file_scope = {str(value) for value in file_ids or []}
+    if not knowledge_scope and not file_scope:
+        return True
+    return bool(
+        str(metadata.get("file_id") or "") in file_scope
+        or str(metadata.get("knowledge_id") or "") in knowledge_scope
+    )
+
+
+def _filter_search_result_to_scope(
+    result,
+    *,
+    knowledge_ids: Optional[list[str]],
+    file_ids: Optional[list[str]],
+    allow_unscoped_legacy: bool,
+):
+    if result is None:
+        return None
+
+    has_scope = bool(knowledge_ids or file_ids)
+    rows_by_query = []
+    for documents, metadatas, ids, distances in zip(
+        result.documents,
+        result.metadatas,
+        result.ids,
+        result.distances,
+    ):
+        rows = [
+            (document, metadata or {}, vector_id, distance)
+            for document, metadata, vector_id, distance in zip(
+                documents, metadatas, ids, distances
+            )
+            if (
+                _metadata_matches_scope(
+                    metadata or {},
+                    knowledge_ids=knowledge_ids,
+                    file_ids=file_ids,
+                )
+                if has_scope
+                else allow_unscoped_legacy
+            )
+        ]
+        rows_by_query.append(rows)
+
+    from open_webui.retrieval.vector.main import SearchResult
+
+    return SearchResult(
+        documents=[[row[0] for row in rows] for rows in rows_by_query],
+        metadatas=[[row[1] for row in rows] for rows in rows_by_query],
+        ids=[[row[2] for row in rows] for rows in rows_by_query],
+        distances=[[row[3] for row in rows] for rows in rows_by_query],
+    )
+
+
+def _filter_get_result_to_scope(
+    result,
+    *,
+    knowledge_ids: Optional[list[str]],
+    file_ids: Optional[list[str]],
+    allow_unscoped_legacy: bool = False,
+):
+    """Filter a vector get result before it can enter full-context retrieval."""
+    if result is None:
+        return None
+
+    documents = result.documents[0] if result.documents else []
+    metadatas = result.metadatas[0] if result.metadatas else []
+    ids = result.ids[0] if result.ids else []
+    has_scope = bool(knowledge_ids or file_ids)
+    rows = [
+        (document, metadata or {}, vector_id)
+        for document, metadata, vector_id in zip(documents, metadatas, ids)
+        if (
+            _metadata_matches_scope(
+                metadata or {}, knowledge_ids=knowledge_ids, file_ids=file_ids
+            )
+            if has_scope
+            else allow_unscoped_legacy
+        )
+    ]
+    if not rows:
+        return None
+
+    from open_webui.retrieval.vector.main import GetResult
+
+    return GetResult(
+        documents=[[row[0] for row in rows]],
+        metadatas=[[row[1] for row in rows]],
+        ids=[[row[2] for row in rows]],
+    )
+
+
+def get_all_items_from_collections(
+    collection_names: list[str],
+    *,
+    admin_id: Optional[str] = None,
+    embedding_model_id: Optional[str] = None,
+    knowledge_ids: Optional[list[str]] = None,
+    file_ids: Optional[list[str]] = None,
+    staged_job_ids: Optional[list[str]] = None,
+    staged_file_ids: Optional[list[str]] = None,
+    staged_collection_files: Optional[list[tuple[str, str]]] = None,
+    allow_unscoped_legacy: bool = False,
+) -> dict:
     results = []
+    errors = []
 
     for collection_name in collection_names:
         if collection_name:
             try:
-                result = get_doc(collection_name=collection_name)
+                if (
+                    admin_id
+                    and embedding_model_id
+                    and hasattr(VECTOR_DB_CLIENT, "get_model_aware")
+                ):
+                    result = VECTOR_DB_CLIENT.get_model_aware(
+                        collection_name=collection_name,
+                        admin_id=admin_id,
+                        embedding_model_id=embedding_model_id,
+                        knowledge_ids=knowledge_ids,
+                        file_ids=file_ids,
+                        staged_job_ids=staged_job_ids,
+                        staged_file_ids=staged_file_ids,
+                        staged_collection_files=staged_collection_files,
+                    )
+                    result = _filter_get_result_to_scope(
+                        result,
+                        knowledge_ids=knowledge_ids,
+                        file_ids=file_ids,
+                        allow_unscoped_legacy=allow_unscoped_legacy,
+                    )
+                else:
+                    result = get_doc(collection_name=collection_name)
+                    result = _filter_get_result_to_scope(
+                        result,
+                        knowledge_ids=knowledge_ids,
+                        file_ids=file_ids,
+                        allow_unscoped_legacy=allow_unscoped_legacy,
+                    )
                 if result is not None:
                     results.append(result.model_dump())
             except Exception as e:
-                log.exception(f"Error when querying the collection: {e}")
+                log.exception(
+                    "Error when querying a collection | error_type=%s",
+                    type(e).__name__,
+                )
+                errors.append(
+                    {
+                        "collection_id": collection_name,
+                        "error_code": "embedding_retrieval_failed",
+                        "message": "Evidence from this source could not be retrieved.",
+                        "retryable": True,
+                    }
+                )
         else:
             pass
 
-    return merge_get_results(results)
+    merged = merge_get_results(results)
+    merged_rows = list(
+        zip(
+            merged.get("documents", [[]])[0],
+            merged.get("metadatas", [[]])[0],
+            merged.get("ids", [[]])[0],
+        )
+    )
+    rows_by_identity = {}
+    for row in merged_rows:
+        identity = _full_context_identity(row[0], row[1] or {})
+        current = rows_by_identity.get(identity)
+        if current is None or _full_context_sort_key(row) < _full_context_sort_key(
+            current
+        ):
+            rows_by_identity[identity] = row
+    rows = list(rows_by_identity.values())
+    rows.sort(key=_full_context_sort_key)
+    return {
+        "documents": [[row[0] for row in rows]],
+        "metadatas": [[row[1] for row in rows]],
+        "ids": [[row[2] for row in rows]],
+        "_retrieval_errors": errors,
+    }
+
+
+def _full_context_identity(document, metadata: dict) -> tuple:
+    file_id = str(metadata.get("file_id") or "")
+    if file_id and metadata.get("chunk_index") is not None:
+        return ("file_chunk", file_id, str(metadata.get("chunk_index")))
+    visual_id = str(metadata.get("visual_asset_id") or "")
+    if visual_id:
+        return ("visual", visual_id)
+    if isinstance(document, str):
+        return (
+            "content",
+            file_id,
+            hashlib.sha256(document.encode("utf-8")).hexdigest(),
+        )
+    return (
+        "position",
+        file_id,
+        str(metadata.get("page_index") or ""),
+        str(metadata.get("source_sequence") or ""),
+        str(metadata.get("modality") or ""),
+    )
+
+
+def _full_context_sort_key(row: tuple) -> tuple:
+    document, metadata, _vector_id = row
+    metadata = metadata or {}
+    top_norm = _finite_float(metadata.get("top_norm"))
+    return (
+        str(metadata.get("file_id") or ""),
+        _sortable_number(metadata.get("chunk_index")),
+        _sortable_number(metadata.get("page_index")),
+        top_norm if top_norm is not None else math.inf,
+        1 if metadata.get("modality") in {"audio", "image", "video"} else 0,
+        _sortable_number(metadata.get("source_sequence")),
+        hashlib.sha256(
+            (document if isinstance(document, str) else "").encode("utf-8")
+        ).hexdigest(),
+    )
 
 
 def query_collection(
@@ -249,175 +764,87 @@ def query_collection(
     queries: list[str],
     embedding_function,
     k: int,
+    admin_id: Optional[str] = None,
+    embedding_model_id: Optional[str] = None,
+    knowledge_ids: Optional[list[str]] = None,
+    file_ids: Optional[list[str]] = None,
+    staged_job_ids: Optional[list[str]] = None,
+    staged_file_ids: Optional[list[str]] = None,
+    staged_collection_files: Optional[list[tuple[str, str]]] = None,
+    allow_unscoped_legacy: bool = False,
 ) -> dict:
-    log.info(f"[QUERY_COLLECTION] START | collections={list(collection_names)} | queries_count={len(queries) if queries else 0} | k={k} | queries={queries[:3] if queries else []}{'...' if queries and len(queries) > 3 else ''}")
+    """Search each requested source, retaining safe diagnostics for partial failure."""
+    queries = list(dict.fromkeys(query for query in queries if query and query.strip()))
     results = []
-    
-    # Handle edge cases
-    if not queries or len(queries) == 0:
-        log.warning("[QUERY_COLLECTION] EMPTY | called with empty queries list")
-        return merge_and_sort_query_results(results, k=k, reverse=True) if VECTOR_DB != "chroma" else merge_and_sort_query_results(results, k=k, reverse=False)
-    
-    if not collection_names or len(collection_names) == 0:
-        log.warning("query_collection called with empty collection_names list")
-        return merge_and_sort_query_results(results, k=k, reverse=True) if VECTOR_DB != "chroma" else merge_and_sort_query_results(results, k=k, reverse=False)
-    
-    # Filter out empty queries
-    queries = [q for q in queries if q and q.strip()]
-    if not queries:
-        log.warning("All queries were empty after filtering")
-        return merge_and_sort_query_results(results, k=k, reverse=True) if VECTOR_DB != "chroma" else merge_and_sort_query_results(results, k=k, reverse=False)
-    
-    # Batch embedding generation for multiple queries (faster than individual calls)
-    # The embedding_function supports both single strings and lists of strings
-    query_embedding_map = {}
-    try:
-        if len(queries) > 1:
-            # Batch embed all queries at once - significantly faster for multiple queries
-            log.debug(f"Batching {len(queries)} queries for embedding generation")
-            query_embeddings = embedding_function(queries)
-            
-            # Handle different return formats:
-            # - List of embeddings: [[emb1], [emb2], ...] or [emb1, emb2, ...]
-            # - Single embedding: [emb1] or just emb1 (shouldn't happen for batch)
-            if isinstance(query_embeddings, list):
-                if len(query_embeddings) == len(queries):
-                    # Check if embeddings are nested lists or flat lists
-                    if len(query_embeddings) > 0 and isinstance(query_embeddings[0], list):
-                        # Already in correct format: [[emb1], [emb2], ...]
-                        # Validate embeddings are not empty
-                        for i, emb in enumerate(query_embeddings):
-                            if isinstance(emb, list) and len(emb) > 0:
-                                query_embedding_map[queries[i]] = emb
-                            else:
-                                log.warning(f"Empty or invalid embedding for query {i}: {queries[i]}")
-                    else:
-                        # Flat list: might be single embedding or needs wrapping
-                        # If length matches, assume each element is an embedding vector
-                        for i, emb in enumerate(query_embeddings):
-                            if isinstance(emb, list) and len(emb) > 0:
-                                query_embedding_map[queries[i]] = emb
-                            else:
-                                log.warning(f"Empty or invalid embedding for query {i}: {queries[i]}")
-                else:
-                    # Mismatch - fallback to individual calls
-                    log.warning(f"Batch embedding returned {len(query_embeddings)} results for {len(queries)} queries, falling back to individual calls")
-                    raise ValueError("Batch embedding result length mismatch")
-            else:
-                # Unexpected return type - fallback
-                log.warning(f"Batch embedding returned unexpected type: {type(query_embeddings)}, falling back to individual calls")
-                raise ValueError("Unexpected batch embedding return type")
-        elif len(queries) == 1:
-            # Single query - embed normally
-            embedding = embedding_function(queries[0])
-            # Ensure it's a list (embedding functions should return list[float])
-            if isinstance(embedding, list) and len(embedding) > 0:
-                query_embedding_map[queries[0]] = embedding
-            else:
-                # Invalid embedding - log and skip
-                log.warning(f"Empty or invalid embedding for single query: {queries[0]}")
-                if not isinstance(embedding, list):
-                    # Try wrapping as fallback
-                    query_embedding_map[queries[0]] = [embedding] if embedding else None
-    except Exception as e:
-        log.exception(f"Error generating batch embeddings: {e}")
-        # Fallback to individual embedding generation
-        log.debug("Falling back to individual embedding generation")
-        for query in queries:
-            try:
-                embedding = embedding_function(query)
-                if isinstance(embedding, list) and len(embedding) > 0:
-                    query_embedding_map[query] = embedding
-                elif isinstance(embedding, list) and len(embedding) == 0:
-                    log.warning(f"Empty embedding returned for query: {query}")
-                else:
-                    # Wrap non-list embeddings
-                    query_embedding_map[query] = [embedding] if embedding else None
-            except Exception as embed_error:
-                log.exception(f"Error embedding query '{query}': {embed_error}")
-                continue
-    
-    # Validate we have at least some embeddings
-    if not query_embedding_map:
-        log.error("Failed to generate embeddings for any queries")
-        return merge_and_sort_query_results(results, k=k, reverse=True) if VECTOR_DB != "chroma" else merge_and_sort_query_results(results, k=k, reverse=False)
-    
-    # Parallelize query processing for faster RAG retrieval
-    # Note: Thread-safety depends on the vector DB implementation:
-    # - Postgres (pgvector): Uses scoped_session - thread-safe
-    # - SQLite-based DBs: May have issues with concurrent access
-    # - Chroma/Qdrant/Milvus: Generally thread-safe if using separate clients per thread
-    def process_query_collection_pair(query: str, collection_name: str, query_embedding: list[float]):
-        """Process a single query against a single collection using pre-computed embedding"""
-        try:
-            if collection_name:
-                result = query_doc(
-                    collection_name=collection_name,
-                    k=k,
-                    query_embedding=query_embedding,
-                )
-                if result is not None:
-                    return result.model_dump()
-        except Exception as e:
-            log.exception(f"Error when querying collection {collection_name} with query: {e}")
-        return None
-    
-    # Create all query-collection pairs with pre-computed embeddings
-    # Filter out None embeddings and ensure embeddings are valid lists
-    query_collection_pairs = []
-    for query in queries:
-        if query not in query_embedding_map:
-            continue
-        embedding = query_embedding_map[query]
-        if embedding is None or not isinstance(embedding, list) or len(embedding) == 0:
-            continue
-        for collection_name in collection_names:
-            query_collection_pairs.append((query, collection_name, embedding))
-    
-    if not query_collection_pairs:
-        log.warning("No valid query-collection pairs after filtering invalid embeddings")
-        return merge_and_sort_query_results(results, k=k, reverse=True) if VECTOR_DB != "chroma" else merge_and_sort_query_results(results, k=k, reverse=False)
-    
-    # For single query-collection pair, process sequentially to avoid overhead
-    # For multiple queries/collections, use parallel processing
-    if len(query_collection_pairs) == 1:
-        # Sequential processing for single query-collection pair
-        query, collection_name, query_embedding = query_collection_pairs[0]
-        if query_embedding and isinstance(query_embedding, list) and len(query_embedding) > 0:
-            result = process_query_collection_pair(query, collection_name, query_embedding)
-            if result is not None:
-                results.append(result)
-    elif len(query_collection_pairs) > 1:
-        # Process in parallel using ThreadPoolExecutor
-        # Limit workers to prevent resource exhaustion and potential SQLite lock issues
-        max_workers = min(len(query_collection_pairs), 10)
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_pair = {
-                executor.submit(process_query_collection_pair, query, collection_name, query_embedding): (query, collection_name)
-                for query, collection_name, query_embedding in query_collection_pairs
-                if query_embedding is not None and isinstance(query_embedding, list) and len(query_embedding) > 0
-            }
-            
-            if not future_to_pair:
-                log.warning("No valid futures created for parallel query processing")
-            else:
-                for future in as_completed(future_to_pair):
-                    try:
-                        result = future.result()
-                        if result is not None:
-                            results.append(result)
-                    except Exception as e:
-                        log.exception(f"Error in parallel query processing: {e}")
+    errors = []
+    reverse = bool(VECTOR_DB != "chroma" and not (admin_id and embedding_model_id))
+    if not queries or not collection_names:
+        return merge_and_sort_query_results(results, k=k, reverse=reverse)
 
-    if VECTOR_DB == "chroma":
-        # Chroma uses unconventional cosine similarity, so we don't need to reverse the results
-        # https://docs.trychroma.com/docs/collections/configure#configuring-chroma-collections
-        merged = merge_and_sort_query_results(results, k=k, reverse=False)
-    else:
-        merged = merge_and_sort_query_results(results, k=k, reverse=True)
-    
-    merged_count = len(merged.get("documents", [[]])[0]) if merged and merged.get("documents") else 0
-    log.info(f"[QUERY_COLLECTION] DONE | collections={list(collection_names)} | results_merged={merged_count} | k={k}")
+    # A provider error must remain distinguishable from a successful zero-match query.
+    vectors = (
+        embedding_function(queries)
+        if len(queries) > 1
+        else [embedding_function(queries[0])]
+    )
+    if (
+        not isinstance(vectors, list)
+        or len(vectors) != len(queries)
+        or any(not isinstance(vector, list) or not vector for vector in vectors)
+    ):
+        raise _retrieval_failure()
+
+    def search(collection_name, vector):
+        result = query_doc(
+            collection_name=collection_name,
+            k=k,
+            query_embedding=vector,
+            admin_id=admin_id,
+            embedding_model_id=embedding_model_id,
+            knowledge_ids=knowledge_ids,
+            file_ids=file_ids,
+            staged_job_ids=staged_job_ids,
+            staged_file_ids=staged_file_ids,
+            staged_collection_files=staged_collection_files,
+            allow_unscoped_legacy=allow_unscoped_legacy,
+        )
+        return result.model_dump() if result is not None else None
+
+    pairs = [
+        (collection, vector) for collection in collection_names for vector in vectors
+    ]
+    with ThreadPoolExecutor(max_workers=min(10, len(pairs))) as executor:
+        futures = {
+            executor.submit(search, collection, vector): collection
+            for collection, vector in pairs
+        }
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+                if result is not None:
+                    results.append(result)
+            except Exception as error:
+                from open_webui.retrieval.embedding.errors import EmbeddingError
+
+                if isinstance(error, EmbeddingError) and error.code in {
+                    "embedding_reindex_not_ready",
+                    "embedding_model_space_mixed",
+                }:
+                    raise
+                log.warning(
+                    "Collection retrieval failed | type=%s", type(error).__name__
+                )
+                errors.append(
+                    {
+                        "collection_id": futures[future],
+                        "error_code": "embedding_retrieval_failed",
+                        "message": "Evidence from this source could not be retrieved.",
+                        "retryable": True,
+                    }
+                )
+    merged = merge_and_sort_query_results(results, k=k, reverse=reverse)
+    if errors:
+        merged["_retrieval_errors"] = errors
     return merged
 
 
@@ -428,26 +855,57 @@ def query_collection_with_hybrid_search(
     k: int,
     reranking_function,
     r: float,
+    admin_id: Optional[str] = None,
+    embedding_model_id: Optional[str] = None,
+    knowledge_ids: Optional[list[str]] = None,
+    file_ids: Optional[list[str]] = None,
+    staged_job_ids: Optional[list[str]] = None,
+    staged_file_ids: Optional[list[str]] = None,
+    staged_collection_files: Optional[list[tuple[str, str]]] = None,
+    allow_unscoped_legacy: bool = False,
 ) -> dict:
-    log.info(f"[HYBRID_SEARCH] START | collections={list(collection_names)} | queries_count={len(queries) if queries else 0} | k={k} | r={r}")
+    if _is_multimodal_model_space(admin_id, embedding_model_id):
+        log.info("[HYBRID_SEARCH] multimodal model space uses dense retrieval")
+        return query_collection(
+            collection_names=collection_names,
+            queries=queries,
+            embedding_function=embedding_function,
+            k=k,
+            admin_id=admin_id,
+            embedding_model_id=embedding_model_id,
+            knowledge_ids=knowledge_ids,
+            file_ids=file_ids,
+            staged_job_ids=staged_job_ids,
+            staged_file_ids=staged_file_ids,
+            staged_collection_files=staged_collection_files,
+            allow_unscoped_legacy=allow_unscoped_legacy,
+        )
+
+    log.info(
+        "[HYBRID_SEARCH] START | collections_count=%s | queries_count=%s | k=%s | r=%s",
+        len(collection_names) if collection_names else 0,
+        len(queries) if queries else 0,
+        k,
+        r,
+    )
     results = []
     errors = []
-    
+
     # Handle edge cases
     if not queries or len(queries) == 0:
         log.warning("query_collection_with_hybrid_search called with empty queries list")
         return merge_and_sort_query_results(results, k=k, reverse=True) if VECTOR_DB != "chroma" else merge_and_sort_query_results(results, k=k, reverse=False)
-    
+
     if not collection_names or len(collection_names) == 0:
         log.warning("query_collection_with_hybrid_search called with empty collection_names list")
         return merge_and_sort_query_results(results, k=k, reverse=True) if VECTOR_DB != "chroma" else merge_and_sort_query_results(results, k=k, reverse=False)
-    
+
     # Filter out empty queries
     queries = [q for q in queries if q and q.strip()]
     if not queries:
         log.warning("All queries were empty after filtering in hybrid search")
         return merge_and_sort_query_results(results, k=k, reverse=True) if VECTOR_DB != "chroma" else merge_and_sort_query_results(results, k=k, reverse=False)
-    
+
     # Parallelize query processing for faster RAG retrieval with hybrid search
     # Note: Thread-safety depends on the vector DB implementation
     def process_hybrid_search(query: str, collection_name: str):
@@ -460,25 +918,38 @@ def query_collection_with_hybrid_search(
                 k=k,
                 reranking_function=reranking_function,
                 r=r,
+                admin_id=admin_id,
+                embedding_model_id=embedding_model_id,
+                knowledge_ids=knowledge_ids,
+                file_ids=file_ids,
+                staged_job_ids=staged_job_ids,
+                staged_file_ids=staged_file_ids,
+                staged_collection_files=staged_collection_files,
+                allow_unscoped_legacy=allow_unscoped_legacy,
             )
             return {"result": result, "error": None, "collection": collection_name}
-        except Exception as e:
+        except Exception as error:
             log.exception(
-                f"Error when querying collection {collection_name} with hybrid_search: {e}"
+                "Error when querying collection with hybrid search | error_type=%s",
+                type(error).__name__,
             )
-            return {"result": None, "error": str(e), "collection": collection_name}
-    
+            return {
+                "result": None,
+                "error": type(error).__name__,
+                "collection": collection_name,
+            }
+
     # Create all query-collection pairs
     query_collection_pairs = [
         (query, collection_name)
         for collection_name in collection_names
         for query in queries
     ]
-    
+
     if not query_collection_pairs:
         log.warning("No valid query-collection pairs for hybrid search")
         return merge_and_sort_query_results(results, k=k, reverse=True) if VECTOR_DB != "chroma" else merge_and_sort_query_results(results, k=k, reverse=False)
-    
+
     # For single query-collection pair, process sequentially to avoid overhead
     # For multiple queries/collections, use parallel processing
     if len(query_collection_pairs) == 1:
@@ -497,7 +968,7 @@ def query_collection_with_hybrid_search(
                 executor.submit(process_hybrid_search, query, collection_name): (query, collection_name)
                 for query, collection_name in query_collection_pairs
             }
-            
+
             for future in as_completed(future_to_pair):
                 try:
                     pair_result = future.result()
@@ -505,13 +976,26 @@ def query_collection_with_hybrid_search(
                         results.append(pair_result["result"])
                     elif pair_result["error"]:
                         errors.append(pair_result)
-                except Exception as e:
-                    log.exception(f"Error in parallel hybrid search processing: {e}")
-                    errors.append({"result": None, "error": str(e), "collection": "unknown"})
+                except Exception as error:
+                    log.exception(
+                        "Error in parallel hybrid search processing | error_type=%s",
+                        type(error).__name__,
+                    )
+                    errors.append(
+                        {
+                            "result": None,
+                            "error": type(error).__name__,
+                            "collection": "unknown",
+                        }
+                    )
 
-    # Only raise error if ALL searches failed
+    # Propagate failed hybrid searches so the caller can attempt dense retrieval.
     if len(errors) == len(query_collection_pairs):
-        log.error(f"[HYBRID_SEARCH] ALL_FAILED | collections={list(collection_names)} | errors_count={len(errors)}")
+        log.error(
+            "[HYBRID_SEARCH] ALL_FAILED | collections_count=%s | errors_count=%s",
+            len(collection_names),
+            len(errors),
+        )
         raise Exception(
             "Hybrid search failed for all collections. Using Non hybrid search as fallback."
         )
@@ -522,9 +1006,25 @@ def query_collection_with_hybrid_search(
         merged = merge_and_sort_query_results(results, k=k, reverse=False)
     else:
         merged = merge_and_sort_query_results(results, k=k, reverse=True)
-    
+
     merged_count = len(merged.get("documents", [[]])[0]) if merged and merged.get("documents") else 0
-    log.info(f"[HYBRID_SEARCH] DONE | collections={list(collection_names)} | results_merged={merged_count} | errors_count={len(errors)} | k={k}")
+    log.info(
+        "[HYBRID_SEARCH] DONE | collections_count=%s | results_merged=%s | errors_count=%s | k=%s",
+        len(collection_names),
+        merged_count,
+        len(errors),
+        k,
+    )
+    if errors:
+        merged["_retrieval_errors"] = [
+            {
+                "collection_id": error["collection"],
+                "error_code": "embedding_retrieval_failed",
+                "message": "Some evidence could not be retrieved.",
+                "retryable": True,
+            }
+            for error in errors
+        ]
     return merged
 
 
@@ -608,29 +1108,240 @@ def get_sources_from_files(
     r,
     hybrid_search,
     full_context=False,
-):
+    user=None,
+    trusted_legacy_collection_names: Optional[set[str]] = None,
+    trusted_attachment_ids: Optional[set[int]] = None,
+) -> RetrievalResult:
     log.debug(
-        f"files: {files} {queries} {embedding_function} {reranking_function} {full_context}"
+        "Preparing retrieval | files_count=%s | queries_count=%s | full_context=%s",
+        len(files) if files else 0,
+        len(queries) if queries else 0,
+        bool(full_context),
     )
+
+    if user is None:
+        raise ValueError("Authenticated user is required for file retrieval")
+
+    from open_webui.retrieval.embedding.compatibility import make_embedding_function
+    from open_webui.retrieval.embedding.service import EmbeddingService
+
+    embedding_service = EmbeddingService(request.app.state.config)
+
+    trusted_legacy_collection_names = {
+        str(value)
+        for value in (trusted_legacy_collection_names or set())
+        if value
+    }
+    trusted_attachment_ids = set(trusted_attachment_ids or set())
+    canonical_files: list[dict] = []
+    direct_file_ids: list[str] = []
+    knowledge_ids_in_scope: list[str] = []
+    pending_file_attachments: dict[str, tuple[dict, object]] = {}
+    pending_knowledge_attachments: dict[str, tuple[dict, object]] = {}
+
+    from open_webui.models.knowledge import Knowledges
+    from open_webui.retrieval.embedding.gate import assert_embedding_retrieval_ready
+
+    for attached_file in files or []:
+        if not isinstance(attached_file, dict):
+            continue
+
+        attachment_type = attached_file.get("type")
+        is_trusted_server_attachment = id(attached_file) in trusted_attachment_ids
+        if attachment_type == "web_search":
+            if is_trusted_server_attachment:
+                canonical_files.append(attached_file)
+            continue
+        if attachment_type == "text":
+            if is_trusted_server_attachment:
+                canonical_files.append(attached_file)
+            continue
+
+        if attachment_type == "collection":
+            knowledge_id = str(attached_file.get("id") or "").strip()
+            if knowledge_id:
+                knowledge = Knowledges.get_knowledge_by_id(knowledge_id)
+                if knowledge is None:
+                    from open_webui.retrieval.embedding.errors import KnowledgeUnavailableError
+
+                    raise KnowledgeUnavailableError(knowledge_id)
+                knowledge_ids_in_scope.append(knowledge_id)
+                pending_knowledge_attachments.setdefault(
+                    knowledge_id, (attached_file, knowledge)
+                )
+                continue
+
+            requested_legacy_names = attached_file.get("collection_names") or []
+            if not isinstance(requested_legacy_names, list):
+                requested_legacy_names = []
+            # Trust comes from the server-side model allowlist, never from the
+            # descriptor's client-controlled ``legacy`` flag or raw names.
+            legacy_names = [
+                str(value)
+                for value in requested_legacy_names
+                if value and str(value) in trusted_legacy_collection_names
+            ]
+            if legacy_names:
+                canonical_files.append(
+                    {
+                        "name": attached_file.get("name"),
+                        "type": "collection",
+                        "collection_names": list(dict.fromkeys(legacy_names)),
+                        "legacy": True,
+                    }
+                )
+            else:
+                raise _unavailable_attachment()
+            continue
+
+        file_id = str(attached_file.get("id") or "").strip()
+        if not file_id:
+            raise _unavailable_attachment()
+        file_object = Files.get_file_by_id(file_id)
+        if file_object is None:
+            raise _unavailable_attachment()
+        direct_file_ids.append(file_id)
+        pending_file_attachments.setdefault(file_id, (attached_file, file_object))
+
+    knowledge_ids_in_scope = list(dict.fromkeys(knowledge_ids_in_scope))
+    file_ids_in_scope = list(dict.fromkeys(direct_file_ids))
+    authorized_scope = AuthorizedAttachmentScope(
+        file_ids=frozenset(file_ids_in_scope),
+        knowledge_ids=frozenset(knowledge_ids_in_scope),
+    )
+    if not canonical_files and not pending_file_attachments and not pending_knowledge_attachments:
+        return RetrievalResult([], authorized_scope)
+
+    # Resolve the requesting user's admin/model provenance space. All errors
+    # propagate so callers cannot fall back to model-unaware vector search.
+    # This guard covers both the hybrid and non-hybrid paths because invalid
+    # requests are rejected before any vector search runs.
+    admin_id = None
+    embedding_model_id = None
+    staged_job_ids = None
+    staged_file_ids = None
+    staged_collection_files = None
+    model_space = None
+    excluded_sources = []
+    multimodal_model_space = False
+    if canonical_files or pending_file_attachments or pending_knowledge_attachments:
+        try:
+            from open_webui.retrieval.embedding.errors import (
+                EmbeddingError,
+                EMBEDDING_MODEL_SPACE_MIXED,
+                EMBEDDING_REINDEX_NOT_READY,
+            )
+            from open_webui.retrieval.embedding.gate import RetrievalModelSpace
+
+            # Spec 10: single gate call — resolves admin/model space, validates
+            # knowledge/file ownership, and checks readiness.
+            result = assert_embedding_retrieval_ready(
+                requesting_user_id=user.id,
+                knowledge_ids=knowledge_ids_in_scope or None,
+                file_ids=file_ids_in_scope or None,
+            )
+            if isinstance(result, RetrievalModelSpace):
+                model_space = result
+                for file_id in result.excluded_file_ids:
+                    excluded_file = Files.get_file_by_id(file_id)
+                    excluded_sources.append(
+                        {
+                            "file_id": file_id,
+                            "name": (
+                                excluded_file.filename if excluded_file else file_id
+                            ),
+                            "error_code": "embedding_reindex_not_ready",
+                            "message": "This file is pending, failed, or unavailable in the current index.",
+                            "retryable": True,
+                        }
+                    )
+                admin_id = result.admin_id
+                embedding_model_id = result.effective_model_id
+                staged_job_ids = list(result.staged_job_ids) or None
+                staged_file_ids = list(result.staged_file_ids) or None
+                staged_collection_files = list(result.staged_collection_files) or None
+                # Bind the query callable to the exact active model space approved
+                # by this gate result; mutable compatibility config cannot switch it.
+                embedding_function = make_embedding_function(
+                    embedding_service,
+                    admin_id=admin_id,
+                    embedding_model_id=embedding_model_id,
+                )
+                from open_webui.retrieval.embedding.registry import (
+                    get_model_spec_by_id,
+                )
+
+                model_spec = get_model_spec_by_id(embedding_model_id)
+                multimodal_model_space = (
+                    bool(
+                        {"audio", "image", "video"}.intersection(
+                            model_spec.modalities
+                        )
+                    )
+                )
+                if multimodal_model_space:
+                    # Empty media chunks must never enter BM25 or text reranking.
+                    hybrid_search = False
+            else:
+                # RetrievalReadyNoState: legacy admin, no model-aware search.
+                admin_id = None
+                embedding_model_id = None
+                embedding_function = make_embedding_function(
+                    embedding_service,
+                    user_id=user.id,
+                )
+        except EmbeddingError as error:
+            if error.code == EMBEDDING_REINDEX_NOT_READY:
+                # Blocked state: propagate so callers can distinguish
+                # "no matches" from "reindex in progress / failed."
+                log.warning("[RAG Query] retrieval blocked | code=%s", error.code)
+                raise
+            # Ownership, missing-source, and admin-resolution failures must
+            # fail closed rather than silently searching without provenance.
+            log.warning("[RAG Query] retrieval rejected | code=%s", error.code)
+            raise
+        except Exception as error:
+            log.warning(
+                "[RAG Query] retrieval readiness check failed | error_type=%s",
+                type(error).__name__,
+            )
+            raise
+
+    for knowledge_id, (
+        _attached_file,
+        knowledge,
+    ) in pending_knowledge_attachments.items():
+        canonical_files.append(
+            {
+                "id": knowledge_id,
+                "name": knowledge.name,
+                "type": "collection",
+            }
+        )
+    for file_id, (attached_file, file_object) in pending_file_attachments.items():
+        if model_space is not None and file_id not in model_space.ready_file_ids:
+            continue
+        canonical_files.append(
+            {
+                "id": file_id,
+                "name": file_object.filename,
+                "type": "image" if attached_file.get("type") == "image" else "file",
+                "collection_name": f"file-{file_id}",
+            }
+        )
 
     extracted_collections = []
     relevant_contexts = []
 
-    for file in files:
+    for file in canonical_files:
         queried_collections_this_file = []
 
         context = None
-        if file.get("docs"):
+        if file.get("type") == "web_search" and file.get("docs"):
             # BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL
             context = {
                 "documents": [[doc.get("content") for doc in file.get("docs")]],
                 "metadatas": [[doc.get("metadata") for doc in file.get("docs")]],
-            }
-        elif file.get("context") == "full":
-            # Manual Full Mode Toggle
-            context = {
-                "documents": [[file.get("file").get("data", {}).get("content")]],
-                "metadatas": [[{"file_id": file.get("id"), "name": file.get("name")}]],
             }
         elif (
             file.get("type") != "web_search"
@@ -638,11 +1349,21 @@ def get_sources_from_files(
         ):
             # BYPASS_EMBEDDING_AND_RETRIEVAL
             if file.get("type") == "collection":
-                file_ids = file.get("data", {}).get("file_ids", [])
+                knowledge = Knowledges.get_knowledge_by_id(str(file.get("id") or ""))
+                file_ids = (
+                    knowledge.data.get("file_ids", [])
+                    if knowledge is not None and isinstance(knowledge.data, dict)
+                    else []
+                )
 
                 documents = []
                 metadatas = []
                 for file_id in file_ids:
+                    if (
+                        model_space is not None
+                        and file_id not in model_space.ready_file_ids
+                    ):
+                        continue
                     file_object = Files.get_file_by_id(file_id)
 
                     if file_object:
@@ -650,6 +1371,7 @@ def get_sources_from_files(
                         metadatas.append(
                             {
                                 "file_id": file_id,
+                                "knowledge_id": file.get("id"),
                                 "name": file_object.filename,
                                 "source": file_object.filename,
                             }
@@ -677,50 +1399,89 @@ def get_sources_from_files(
                     }
         else:
             collection_names = []
+            item_knowledge_ids = None
+            item_file_ids = None
             if file.get("type") == "collection":
                 if file.get("legacy"):
                     collection_names = file.get("collection_names", [])
                 else:
                     collection_names.append(file["id"])
-            elif file.get("collection_name"):
-                collection_names.append(file["collection_name"])
+                    item_knowledge_ids = [str(file["id"])]
             elif file.get("id"):
-                if file.get("legacy"):
-                    collection_names.append(f"{file['id']}")
-                else:
-                    collection_names.append(f"file-{file['id']}")
+                collection_names.append(f"file-{file['id']}")
+                item_file_ids = [str(file["id"])]
 
-            collection_names = set(collection_names).difference(extracted_collections)
+            collection_names = [
+                collection_name
+                for collection_name in dict.fromkeys(collection_names)
+                if collection_name not in extracted_collections
+            ]
             if not collection_names:
-                log.debug(f"skipping {file} as it has already been extracted")
+                log.debug("Skipping attachment already included in retrieval")
                 continue
 
             queried_collections_this_file = list(collection_names)
 
-            # Log collection names being queried for debugging RAG issues
-            log.info(f"[RAG Query] file_id={file.get('id')} | collection_names={queried_collections_this_file} | queries_count={len(queries)}")
-            
+            log.info(
+                "[RAG Query] collections_count=%s | queries_count=%s",
+                len(queried_collections_this_file),
+                len(queries),
+            )
+
             # Check if collections actually exist and have documents
             for coll_name in collection_names:
                 try:
                     has_coll = VECTOR_DB_CLIENT.has_collection(collection_name=coll_name)
                     if not has_coll:
                         log.warning(
-                            f"[RAG Query WARNING] Collection '{coll_name}' does not exist! "
-                            f"File may not have been processed. Check file processing status."
+                            "[RAG Query WARNING] A requested collection does not exist; "
+                            "the source may not have completed processing"
                         )
-                except Exception as check_err:
-                    log.debug(f"Could not check collection existence: {check_err}")
+                except Exception as check_error:
+                    log.debug(
+                        "Could not check collection existence | error_type=%s",
+                        type(check_error).__name__,
+                    )
 
             if full_context:
                 try:
-                    context = get_all_items_from_collections(collection_names)
-                except Exception as e:
-                    log.exception(e)
+                    context = get_all_items_from_collections(
+                        collection_names,
+                        admin_id=admin_id,
+                        embedding_model_id=embedding_model_id,
+                        knowledge_ids=item_knowledge_ids,
+                        file_ids=item_file_ids,
+                        staged_job_ids=staged_job_ids,
+                        staged_file_ids=staged_file_ids,
+                        staged_collection_files=staged_collection_files,
+                        allow_unscoped_legacy=bool(file.get("legacy")),
+                    )
+                except Exception as error:
+                    if isinstance(error, EmbeddingError) and error.code in {
+                        EMBEDDING_REINDEX_NOT_READY,
+                        EMBEDDING_MODEL_SPACE_MIXED,
+                    }:
+                        raise
+                    log.exception(
+                        "Full-context retrieval failed | error_type=%s",
+                        type(error).__name__,
+                    )
+                    excluded_sources.append(
+                        {
+                            "source_id": file.get("id"),
+                            "name": file.get("name"),
+                            "error_code": "embedding_retrieval_failed",
+                            "message": "Evidence from this source could not be retrieved.",
+                            "retryable": True,
+                        }
+                    )
 
             else:
                 try:
                     context = None
+                    allow_unscoped_legacy = bool(
+                        file.get("legacy") or file.get("type") == "web_search"
+                    )
                     if file.get("type") == "text":
                         context = file["content"]
                     else:
@@ -733,6 +1494,14 @@ def get_sources_from_files(
                                     k=k,
                                     reranking_function=reranking_function,
                                     r=r,
+                                    admin_id=admin_id,
+                                    embedding_model_id=embedding_model_id,
+                                    knowledge_ids=item_knowledge_ids,
+                                    file_ids=item_file_ids,
+                                    staged_job_ids=staged_job_ids,
+                                    staged_file_ids=staged_file_ids,
+                                    staged_collection_files=staged_collection_files,
+                                    allow_unscoped_legacy=allow_unscoped_legacy,
                                 )
                             except Exception as e:
                                 log.debug(
@@ -746,24 +1515,67 @@ def get_sources_from_files(
                                 queries=queries,
                                 embedding_function=embedding_function,
                                 k=k,
+                                admin_id=admin_id,
+                                embedding_model_id=embedding_model_id,
+                                knowledge_ids=item_knowledge_ids,
+                                file_ids=item_file_ids,
+                                staged_job_ids=staged_job_ids,
+                                staged_file_ids=staged_file_ids,
+                                staged_collection_files=staged_collection_files,
+                                allow_unscoped_legacy=allow_unscoped_legacy,
                             )
-                            
+
                             # Log if no results were found for debugging
                             if context is None or not context.get("documents") or not context["documents"][0]:
                                 log.warning(
-                                    f"[RAG Query WARNING] No documents found for file_id={file.get('id')} | "
-                                    f"collections={list(collection_names)} | "
-                                    f"Possible causes: "
-                                    f"1) File not processed yet (check processing_status), "
-                                    f"2) Content extraction failed (empty PDF/scanned image), "
-                                    f"3) Embedding failed during upload"
+                                    "[RAG Query WARNING] No documents found for an attached source; "
+                                    "processing, extraction, or embedding may be incomplete"
                                 )
-                except Exception as e:
-                    log.exception(e)
+                except Exception as error:
+                    if isinstance(error, EmbeddingError) and error.code in {
+                        EMBEDDING_REINDEX_NOT_READY,
+                        EMBEDDING_MODEL_SPACE_MIXED,
+                    }:
+                        raise
+                    log.exception(
+                        "Source retrieval failed | error_type=%s",
+                        type(error).__name__,
+                    )
+                    excluded_sources.append(
+                        {
+                            "source_id": file.get("id"),
+                            "name": file.get("name"),
+                            "error_code": "embedding_retrieval_failed",
+                            "message": "Evidence from this source could not be retrieved.",
+                            "retryable": True,
+                        }
+                    )
 
             extracted_collections.extend(collection_names)
 
         if context:
+            excluded_sources.extend(context.pop("_retrieval_errors", []))
+            if (
+                model_space is not None
+                and not file.get("legacy")
+                and file.get("type") not in {"web_search", "text"}
+            ):
+                metadata = context.get("metadatas", [[]])[0]
+                keep = [
+                    index
+                    for index, item in enumerate(metadata)
+                    if str((item or {}).get("file_id") or "")
+                    in model_space.ready_file_ids
+                ]
+                for key in ("documents", "metadatas", "ids", "distances"):
+                    if context.get(key):
+                        context[key] = [
+                            [
+                                context[key][0][index]
+                                for index in keep
+                                if index < len(context[key][0])
+                            ]
+                        ]
             if "data" in file:
                 del file["data"]
 
@@ -771,19 +1583,10 @@ def get_sources_from_files(
             num_chunks = 0
             if context.get("documents") and context["documents"]:
                 num_chunks = len(context["documents"][0])
-            file_id = file.get("id", "")
-            file_name = file.get("name") or file.get("filename")
-            if not file_name:
-                _file = file.get("file")
-                if isinstance(_file, dict):
-                    _data = _file.get("data")
-                    if isinstance(_data, dict):
-                        file_name = _data.get("name")
-            if not file_name:
-                file_name = f"collection:{file_id}" if file.get("type") == "collection" else str(file_id)
-            file_name = str(file_name) if file_name else str(file_id)
             log.info(
-                f"[RAG Retrieval] file_id={file_id} | file_name={file_name} | chunks_retrieved={num_chunks} | collections_queried={queried_collections_this_file}"
+                "[RAG Retrieval] chunks_retrieved=%s | collections_queried=%s",
+                num_chunks,
+                len(queried_collections_this_file),
             )
             relevant_contexts.append({**context, "file": file})
 
@@ -801,10 +1604,18 @@ def get_sources_from_files(
                         source["distances"] = context["distances"][0]
 
                     sources.append(source)
-        except Exception as e:
-            log.exception(e)
+        except Exception as error:
+            log.exception(
+                "Source assembly failed | error_type=%s", type(error).__name__
+            )
+            raise _retrieval_failure() from error
 
-    return sources
+    from open_webui.retrieval.embedding.gate import assert_retrieval_generation_current
+
+    assert_retrieval_generation_current(model_space)
+    if excluded_sources and not any(source.get("document") for source in sources):
+        raise _retrieval_failure()
+    return RetrievalResult(sources, authorized_scope, excluded_sources, model_space)
 
 
 def get_model_path(model: str, update_model: bool = False):
@@ -923,12 +1734,6 @@ def generate_portkey_embeddings_sdk(
             "Install it with: pip install portkey-ai"
         )
     
-    # Log API key status for debugging (masked for security)
-    key_status = "EMPTY" if not api_key else f"set ({len(api_key)} chars, ends with ...{api_key[-4:] if len(api_key) >= 4 else '***'})"
-    log.info(
-        f"Portkey SDK init: base_url={base_url}, api_key={key_status}"
-    )
-    
     if not api_key:
         log.error(
             "Portkey API key is empty! This will result in 401 Unauthorized. "
@@ -959,16 +1764,13 @@ def generate_portkey_embeddings_sdk(
         
         texts_count = len(texts_list)
         
-        # CRITICAL: Validate input format and log detailed diagnostics
+        # Validate input format without logging request content.
         log.info(
-            f"Portkey embedding input validation: "
-            f"input_type={type(texts)}, "
-            f"texts_count={texts_count}, "
-            f"is_list={isinstance(texts_list, list)}"
+            "Portkey embedding input validation | input_type=%s | texts_count=%s",
+            type(texts).__name__,
+            texts_count,
         )
-        
-        # Sample first few items to diagnose format issues
-        sample_items = []
+
         non_string_count = 0
         empty_count = 0
         very_short_count = 0  # Items with length <= 1
@@ -976,16 +1778,10 @@ def generate_portkey_embeddings_sdk(
         for i, text in enumerate(texts_list[:10]):  # Check first 10 items
             if not isinstance(text, str):
                 non_string_count += 1
-                sample_items.append(f"idx{i}:{type(text).__name__}={text!r}")
             elif len(text.strip()) == 0:
                 empty_count += 1
-                sample_items.append(f"idx{i}:EMPTY")
             elif len(text) <= 1:
                 very_short_count += 1
-                sample_items.append(f"idx{i}:LEN{len(text)}={text!r}")
-            else:
-                preview = text[:50].replace("\n", " ") + ("..." if len(text) > 50 else "")
-                sample_items.append(f"idx{i}:LEN{len(text)}={preview!r}")
         
         # Check beyond first 10 for patterns
         for i in range(10, min(100, texts_count)):
@@ -998,18 +1794,18 @@ def generate_portkey_embeddings_sdk(
                 very_short_count += 1
         
         log.warning(
-            f"Portkey input diagnostics: "
-            f"non_string_items={non_string_count}, "
-            f"empty_items={empty_count}, "
-            f"very_short_items(<=1char)={very_short_count}, "
-            f"sample_items={sample_items[:5]}"
+            "Portkey input diagnostics | non_string_items=%s | empty_items=%s | "
+            "very_short_items=%s",
+            non_string_count,
+            empty_count,
+            very_short_count,
         )
         
         # Validate all items are strings
         for i, text in enumerate(texts_list):
             if not isinstance(text, str):
                 raise ValueError(
-                    f"Item at index {i} is not a string: {type(text)}={text!r}. "
+                    f"Item at index {i} is not a string ({type(text).__name__}). "
                     f"This suggests incorrect chunking or document processing."
                 )
             if not text.strip():
@@ -1025,45 +1821,21 @@ def generate_portkey_embeddings_sdk(
             log.error(error_msg)
             raise ValueError(error_msg)
         
-        # Log a concise view of the request payload
         if texts_list:
-            first_str = texts_list[0][:80].replace("\n", " ") + ("..." if len(texts_list[0]) > 80 else "")
             avg_len = sum(len(t) for t in texts_list[:100]) / min(100, texts_count)
         else:
-            first_str = "<empty>"
             avg_len = 0
         
         log.info(
-            f"Generating Portkey embeddings via SDK: "
-            f"model={model}, "
-            f"texts_count={texts_count}, "
-            f"avg_text_length={avg_len:.1f}, "
-            f"encoding_format={encoding_format}, "
-            f"sample_preview={first_str!r}, "
-            f"will_batch={texts_count > MAX_BATCH_SIZE}"
+            "Generating Portkey embeddings | texts_count=%s | avg_text_length=%.1f | "
+            "will_batch=%s",
+            texts_count,
+            avg_len,
+            texts_count > MAX_BATCH_SIZE,
         )
         
         # Batch processing for large requests
         if texts_count <= MAX_BATCH_SIZE:
-            # Single batch - process all at once
-            # Log complete request payload details
-            sample_texts = [t[:50].replace("\n", " ") + ("..." if len(t) > 50 else "") for t in texts_list[:5]]
-            log.info(
-                f"[Portkey Request Payload]\n"
-                f"  Settings:\n"
-                f"    model: {model}\n"
-                f"    base_url: {base_url}\n"
-                f"    api_key: {api_key[:10]}...{api_key[-4:] if len(api_key) > 14 else '***'} (len={len(api_key)})\n"
-                f"    encoding_format: {encoding_format}\n"
-                f"  Payload:\n"
-                f"    input_type: {type(texts_list).__name__}\n"
-                f"    input_length: {texts_count}\n"
-                f"    input_shape: [{texts_count}]\n"
-                f"    avg_text_len: {sum(len(t) for t in texts_list) / texts_count:.1f}\n"
-                f"    min_text_len: {min(len(t) for t in texts_list)}\n"
-                f"    max_text_len: {max(len(t) for t in texts_list)}\n"
-                f"    sample_texts (first 5): {sample_texts}"
-            )
             response = portkey.embeddings.create(
                 model=model,
                 input=texts_list,
@@ -1081,12 +1853,12 @@ def generate_portkey_embeddings_sdk(
                 batch = texts_list[i:i + MAX_BATCH_SIZE]
                 batch_num = (i // MAX_BATCH_SIZE) + 1
                 total_batches = (texts_count + MAX_BATCH_SIZE - 1) // MAX_BATCH_SIZE
-                sample_batch = [t[:50].replace("\n", " ") + ("..." if len(t) > 50 else "") for t in batch[:3]]
                 log.info(
-                    f"[Portkey Batch {batch_num}/{total_batches}]\n"
-                    f"  Settings: model={model}, base_url={base_url}, api_key={api_key[:10]}...{api_key[-4:] if len(api_key) > 14 else '***'}, encoding={encoding_format}\n"
-                    f"  Payload: input_length={len(batch)}, shape=[{len(batch)}], avg_len={sum(len(t) for t in batch) / len(batch):.1f}\n"
-                    f"  Sample (first 3): {sample_batch}"
+                    "Portkey embedding batch | batch=%s/%s | input_length=%s | avg_length=%.1f",
+                    batch_num,
+                    total_batches,
+                    len(batch),
+                    sum(len(t) for t in batch) / len(batch),
                 )
                 response = portkey.embeddings.create(
                     model=model,
@@ -1116,7 +1888,10 @@ def generate_portkey_embeddings_sdk(
         return embeddings
         
     except Exception as e:
-        log.exception(f"Error generating Portkey embeddings via SDK: {e}")
+        log.exception(
+            "Portkey embedding generation failed | error_type=%s",
+            type(e).__name__,
+        )
         raise
 
 
@@ -1180,9 +1955,12 @@ def generate_embeddings(
     url = kwargs.get("url", "")
     key = kwargs.get("key", "")
     user = kwargs.get("user")
-    user_email = user.email if user and hasattr(user, 'email') else "(no user)"
     text_count = len(text) if isinstance(text, list) else 1
-    log.info(f"[GENERATE_EMBEDDINGS] START | engine={engine} | model={model} | texts_count={text_count} | url={url} | key={key} | user={user_email}")
+    log.info(
+        "[GENERATE_EMBEDDINGS] START | engine=%s | texts_count=%s",
+        engine,
+        text_count,
+    )
     
     # CRITICAL FIX: For portkey/openai engines, dynamically retrieve the user's API key
     # The `key` passed in may be the startup default (empty), but users configure their own keys
@@ -1192,12 +1970,15 @@ def generate_embeddings(
             from open_webui.config import RAG_OPENAI_API_KEY
             user_key = RAG_OPENAI_API_KEY.get(user.email)
             if user_key:
-                log.debug(f"Using per-user API key for {user.email} (key length: {len(user_key)})")
+                log.debug("Using configured per-user embedding credential")
                 key = user_key
             else:
-                log.warning(f"No embedding API key found for user {user.email} - using default (may be empty)")
+                log.warning("No per-user embedding credential found; using configured default")
         except Exception as e:
-            log.warning(f"Failed to retrieve per-user API key: {e}")
+            log.warning(
+                "Failed to retrieve per-user embedding credential | error_type=%s",
+                type(e).__name__,
+            )
 
     if engine == "ollama":
         if isinstance(text, list):
@@ -1215,7 +1996,7 @@ def generate_embeddings(
                 }
             )
         emb_count = len(embeddings) if isinstance(embeddings, list) else 1
-        log.info(f"[GENERATE_EMBEDDINGS] SUCCESS | engine=ollama | model={model} | embeddings_count={emb_count} | user={user_email}")
+        log.info("[GENERATE_EMBEDDINGS] SUCCESS | engine=ollama | embeddings_count=%s", emb_count)
         return embeddings[0] if isinstance(text, str) else embeddings
     elif engine == "openai":
         if isinstance(text, list):
@@ -1224,7 +2005,7 @@ def generate_embeddings(
             embeddings = generate_openai_batch_embeddings(model, [text], url, key, user)
 
         emb_count = len(embeddings) if isinstance(embeddings, list) else 1
-        log.info(f"[GENERATE_EMBEDDINGS] SUCCESS | engine=openai | model={model} | embeddings_count={emb_count} | user={user_email}")
+        log.info("[GENERATE_EMBEDDINGS] SUCCESS | engine=openai | embeddings_count=%s", emb_count)
         return embeddings[0] if isinstance(text, str) else embeddings
     elif engine == "portkey":
         # Use SDK-based implementation
@@ -1236,7 +2017,7 @@ def generate_embeddings(
             encoding_format="float"
         )
         emb_count = len(embeddings) if isinstance(embeddings, list) else 1
-        log.info(f"[GENERATE_EMBEDDINGS] SUCCESS | engine={engine} | model={model} | embeddings_count={emb_count} | user={user_email}")
+        log.info("[GENERATE_EMBEDDINGS] SUCCESS | engine=portkey | embeddings_count=%s", emb_count)
         return embeddings
     else:
         log.error(f"[GENERATE_EMBEDDINGS] ERROR | unknown engine={engine}")
@@ -1266,6 +2047,15 @@ class RerankCompressor(BaseDocumentCompressor):
         query: str,
         callbacks: Optional[Callbacks] = None,
     ) -> Sequence[Document]:
+        documents = [
+            document
+            for document in documents
+            if document.metadata.get("modality", "text") == "text"
+            and document.page_content.strip()
+        ]
+        if not documents:
+            return []
+
         reranking = self.reranking_function is not None
 
         if reranking:

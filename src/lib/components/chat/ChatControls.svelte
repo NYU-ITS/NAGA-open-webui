@@ -31,6 +31,7 @@
 	export let showMessage: Function;
 	export let addMessages: Function;
 	export let saveChatHandler: Function;
+	export let removeChatSource: Function;
 	export let files;
 	export let modelId;
 	export let webSearchEnabled = false;
@@ -171,6 +172,7 @@
 								{modelId}
 								{chatId}
 								{eventTarget}
+								bind:prompt
 								on:close={() => {
 									showControls.set(false);
 								}}
@@ -217,6 +219,7 @@
 							}}
 							{models}
 							bind:chatFiles
+							{removeChatSource}
 							bind:params
 						/>
 					{/if}
@@ -247,6 +250,7 @@
 					{modelId}
 					{chatId}
 					{eventTarget}
+					bind:prompt
 					on:close={() => {
 						showControls.set(false);
 					}}
@@ -294,6 +298,7 @@
 									{modelId}
 									{chatId}
 									{eventTarget}
+									bind:prompt
 									on:close={() => {
 										showControls.set(false);
 									}}
@@ -347,6 +352,7 @@
 								}}
 								{models}
 								bind:chatFiles
+								{removeChatSource}
 								bind:params
 							/>
 						{/if}

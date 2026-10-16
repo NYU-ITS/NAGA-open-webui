@@ -31,6 +31,7 @@
 	export let files;
 	export let chatId;
 	export let modelId;
+	export let prompt = '';
 
 	let wakeLock = null;
 
@@ -144,7 +145,6 @@
 
 		// Convert the canvas to a data base64 URL and console log it
 		const dataURL = canvas.toDataURL('image/png');
-		console.log(dataURL);
 
 		return dataURL;
 	};
@@ -169,19 +169,29 @@
 		});
 
 		if (res) {
-			console.log(res.text);
-
 			if (res.text !== '') {
-				const _responses = await submitPrompt(res.text, { _raw: true });
-				console.log(_responses);
+				const attachmentPending = files.some(
+					(file) =>
+						file?.type === 'image' &&
+						(!file?.id ||
+							['uploading', 'not_started', 'pending', 'processing', 'error'].some(
+								(status) => status === file?.status || status === file?.processing_status
+							))
+				);
+				if (attachmentPending) {
+					prompt = res.text;
+					toast.info(
+						$i18n.t('Transcript saved. Submit it after the image finishes processing.')
+					);
+					return;
+				}
+				await submitPrompt(res.text, { _raw: true });
 			}
 		}
 	};
 
 	const stopRecordingCallback = async (_continue = true) => {
 		if ($showCallOverlay) {
-			console.log('%c%s', 'color: red; font-size: 20px;', '🚨 stopRecordingCallback 🚨');
-
 			// deep copy the audioChunks array
 			const _audioChunks = audioChunks.slice(0);
 

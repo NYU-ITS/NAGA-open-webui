@@ -1,7 +1,7 @@
 """
 RQ Worker Module
 
-This module can be run as a script to start an RQ worker for file processing.
+This module starts an RQ worker for file processing and embedding reindex jobs.
 
 Usage:
     python -m open_webui.workers.start_worker
@@ -39,6 +39,7 @@ from open_webui.env import (
     REDIS_SENTINEL_SERVICE_NAME,
 )
 from open_webui.utils.job_queue import FILE_PROCESSING_QUEUE_NAME
+from open_webui.retrieval.embedding.enqueue import EMBEDDING_REINDEX_QUEUE_NAME
 
 # Set log level from environment
 log.setLevel(SRC_LOG_LEVELS.get("WORKER", SRC_LOG_LEVELS.get("MODELS", logging.INFO)))
@@ -76,7 +77,7 @@ def initialize_database():
 
 
 def start_worker():
-    """Start RQ worker for file processing queue"""
+    """Start an RQ worker for file processing and embedding reindex queues."""
     try:
         log.info("=" * 80)
         log.info("RQ Worker Startup - Initializing file processing worker")
@@ -217,12 +218,22 @@ def start_worker():
                 log.info(f"[REDIS] Ping test | duration={ping_end - ping_start:.3f}s | timestamp={ping_end:.3f}")
                 log.info(f"[REDIS] Direct connection established | total_duration={direct_conn_end - direct_conn_start:.3f}s | timestamp={direct_conn_end:.3f}")
             
-            # Test queue access (RQ handles binary data correctly)
+            # Test both queues (RQ handles binary data correctly).
             queue_test_start = time.time()
-            test_queue = Queue(FILE_PROCESSING_QUEUE_NAME, connection=redis_conn)
-            queue_length = len(test_queue)
+            queue_names = (
+                FILE_PROCESSING_QUEUE_NAME,
+                EMBEDDING_REINDEX_QUEUE_NAME,
+            )
+            queue_lengths = {
+                queue_name: len(Queue(queue_name, connection=redis_conn))
+                for queue_name in queue_names
+            }
             queue_test_end = time.time()
-            log.info(f"[REDIS] Queue access test | queue='{FILE_PROCESSING_QUEUE_NAME}' | length={queue_length} | duration={queue_test_end - queue_test_start:.3f}s | timestamp={queue_test_end:.3f}")
+            log.info(
+                f"[REDIS] Queue access test | queues={queue_lengths} | "
+                f"duration={queue_test_end - queue_test_start:.3f}s | "
+                f"timestamp={queue_test_end:.3f}"
+            )
         except Exception as redis_error:
             log.error(f"Failed to connect to Redis: {redis_error}", exc_info=True)
             log.error("Worker cannot start without Redis connection. Please check:")
@@ -236,7 +247,7 @@ def start_worker():
         worker_name = f"file_processor_{hostname}_{os.getpid()}"
         
         log.info(f"Worker name: {worker_name}")
-        log.info(f"Queue name: {FILE_PROCESSING_QUEUE_NAME}")
+        log.info("Worker queues: %s", ", ".join(queue_names))
         
         # Clean up stale worker registrations before starting
         # This prevents "There exists an active worker named '...' already" errors
@@ -281,22 +292,28 @@ def start_worker():
         worker_init_start = time.time()
         log.info(f"[WORKER] Initializing worker | timestamp={worker_init_start:.3f}")
         with Connection(redis_conn):
-            # Create queue
+            # Create both queues on the shared Redis connection.
             queue_create_start = time.time()
-            queue = Queue(FILE_PROCESSING_QUEUE_NAME)
+            queues = [Queue(queue_name) for queue_name in queue_names]
             queue_create_end = time.time()
-            log.info(f"[WORKER] Queue object created | duration={queue_create_end - queue_create_start:.3f}s | timestamp={queue_create_end:.3f}")
+            log.info(
+                f"[WORKER] Queue objects created | queues={queue_names} | "
+                f"duration={queue_create_end - queue_create_start:.3f}s | "
+                f"timestamp={queue_create_end:.3f}"
+            )
             
             # Create and start worker
             worker_create_start = time.time()
-            worker = Worker([queue], name=worker_name)
+            worker = Worker(queues, name=worker_name)
             worker_create_end = time.time()
             log.info(f"[WORKER] Worker object created | duration={worker_create_end - worker_create_start:.3f}s | timestamp={worker_create_end:.3f}")
             
             worker_init_end = time.time()
             log.info("=" * 80)
             log.info(
-                f"✅ RQ Worker '{worker_name}' starting for queue '{FILE_PROCESSING_QUEUE_NAME}' | init_duration={worker_init_end - worker_init_start:.3f}s"
+                f"✅ RQ Worker '{worker_name}' starting for queues "
+                f"'{', '.join(queue_names)}' | "
+                f"init_duration={worker_init_end - worker_init_start:.3f}s"
             )
             log.info(f"   Redis: {REDIS_URL.split('@')[0]}@...")
             log.info(f"   Hostname: {hostname}")

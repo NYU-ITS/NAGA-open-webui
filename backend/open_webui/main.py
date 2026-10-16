@@ -8,6 +8,7 @@ import shutil
 import sys
 import time
 import random
+import uuid
 
 from contextlib import asynccontextmanager
 from urllib.parse import urlencode, parse_qs, urlparse
@@ -82,6 +83,7 @@ from open_webui.routers import (
     users,
     utils,
     facilities,
+    embedding_jobs,
 )
 
 from open_webui.routers.retrieval import (
@@ -189,9 +191,15 @@ from open_webui.config import (
     RAG_RERANKING_MODEL_TRUST_REMOTE_CODE,
     RAG_EMBEDDING_ENGINE,
     RAG_EMBEDDING_BATCH_SIZE,
+    RAG_EMBEDDING_MAX_ATTEMPTS,
+    RAG_EMBEDDING_CONNECTION_TIMEOUT,
+    RAG_EMBEDDING_READ_TIMEOUT,
+    RAG_EMBEDDING_AUDIO_SPLIT_MAX_DEPTH,
+    RAG_EMBEDDING_AUDIO_SPLIT_MIN_DURATION,
     RAG_RELEVANCE_THRESHOLD,
     RAG_FILE_MAX_COUNT,
     RAG_FILE_MAX_SIZE,
+    RAG_AUDIO_MAX_CLIPS,
     RAG_OPENAI_API_BASE_URL,
     RAG_OPENAI_API_KEY,
     RAG_OLLAMA_BASE_URL,
@@ -206,6 +214,13 @@ from open_webui.config import (
     RAG_TEXT_SPLITTER,
     TIKTOKEN_ENCODING_NAME,
     PDF_EXTRACT_IMAGES,
+    RAG_PDF_COMPLEX_PARSER_ENABLED,
+    RAG_PDF_MAX_VISUALS_PER_PAGE,
+    RAG_PDF_MAX_VISUALS_PER_DOCUMENT,
+    RAG_VIDEO_MAX_FILE_SIZE_MB,
+    RAG_VIDEO_CHUNK_DURATION,
+    RAG_VIDEO_MIN_CHUNK_DURATION,
+    RAG_VIDEO_MAX_DURATION,
     YOUTUBE_LOADER_LANGUAGE,
     YOUTUBE_LOADER_PROXY_URL,
     # Retrieval (Web Search)
@@ -513,7 +528,7 @@ def ensure_chat_group_id_column():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     start_logger()
-    
+
     # Initialize OpenTelemetry SDK (Phase 1)
     otel_initialized = False
     try:
@@ -526,7 +541,7 @@ async def lifespan(app: FastAPI):
         otel_initialized = initialize_otel()
         if otel_initialized:
             log.info("OpenTelemetry SDK initialized successfully")
-            
+
             # Instrument FastAPI (after app is created)
             try:
                 fastapi_instrumented = instrument_fastapi(app)
@@ -534,7 +549,7 @@ async def lifespan(app: FastAPI):
                     log.info("FastAPI auto-instrumentation enabled")
             except Exception as e:
                 log.warning(f"FastAPI instrumentation failed: {e}", exc_info=True)
-            
+
             # Instrument requests library
             try:
                 requests_instrumented = instrument_requests()
@@ -547,7 +562,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         # Don't crash if OTEL fails - log and continue
         log.warning(f"OpenTelemetry initialization failed: {e}", exc_info=True)
-    
+
     if RESET_CONFIG_ON_START:
         reset_config()
 
@@ -580,7 +595,7 @@ async def lifespan(app: FastAPI):
     ensure_chat_group_id_column()
     # Cross-pod models cache invalidation via Redis pub/sub
     start_models_cache_invalidation_listener(app)
-    # Cache KaTeX TTF fonts locally once on startup 
+    # Cache KaTeX TTF fonts locally once on startup
     try:
         compiler = KaTeXCompiler()
         node_katex_dist = compiler.node_modules_path / 'katex' / 'dist'
@@ -605,9 +620,26 @@ async def lifespan(app: FastAPI):
                 log.warning(f"Failed to copy KaTeX fonts from node_modules: {e}")
     except Exception as e:
         log.debug(f"KaTeX font cache init failed: {e}")
-    
-    yield
-    
+
+    from open_webui.retrieval.reconstruction import ReconstructionExecutor
+    from open_webui.retrieval.embedding.audio_repair import (
+        start_audio_repair_reconciliation,
+        stop_audio_repair_reconciliation,
+    )
+
+    app.state.reconstruction_executor = ReconstructionExecutor()
+    start_audio_repair_reconciliation(app.state.config)
+    from open_webui.utils.file_cleanup import periodic_file_cleanup
+
+    file_cleanup_task = asyncio.create_task(periodic_file_cleanup())
+    try:
+        yield
+    finally:
+        file_cleanup_task.cancel()
+        await asyncio.gather(file_cleanup_task, return_exceptions=True)
+        stop_audio_repair_reconciliation()
+        await app.state.reconstruction_executor.shutdown()
+
     # Shutdown OpenTelemetry (flush remaining spans/metrics)
     if otel_initialized:
         try:
@@ -747,7 +779,12 @@ app.state.config.TOP_K = RAG_TOP_K
 app.state.config.RELEVANCE_THRESHOLD = RAG_RELEVANCE_THRESHOLD
 app.state.config.FILE_MAX_SIZE = RAG_FILE_MAX_SIZE
 app.state.config.FILE_MAX_COUNT = RAG_FILE_MAX_COUNT
+app.state.config.RAG_AUDIO_MAX_CLIPS = RAG_AUDIO_MAX_CLIPS
 
+app.state.config.RAG_VIDEO_MAX_FILE_SIZE_MB = RAG_VIDEO_MAX_FILE_SIZE_MB
+app.state.config.RAG_VIDEO_CHUNK_DURATION = RAG_VIDEO_CHUNK_DURATION
+app.state.config.RAG_VIDEO_MIN_CHUNK_DURATION = RAG_VIDEO_MIN_CHUNK_DURATION
+app.state.config.RAG_VIDEO_MAX_DURATION = RAG_VIDEO_MAX_DURATION
 
 app.state.config.RAG_FULL_CONTEXT = RAG_FULL_CONTEXT
 app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL = BYPASS_EMBEDDING_AND_RETRIEVAL
@@ -771,6 +808,17 @@ app.state.config.RAG_EMBEDDING_ENGINE = RAG_EMBEDDING_ENGINE
 app.state.config.RAG_EMBEDDING_MODEL = RAG_EMBEDDING_MODEL
 app.state.config.RAG_EMBEDDING_MODEL_USER = RAG_EMBEDDING_MODEL_USER
 app.state.config.RAG_EMBEDDING_BATCH_SIZE = RAG_EMBEDDING_BATCH_SIZE
+app.state.config.RAG_EMBEDDING_MAX_ATTEMPTS = RAG_EMBEDDING_MAX_ATTEMPTS
+app.state.config.RAG_EMBEDDING_CONNECTION_TIMEOUT = (
+    RAG_EMBEDDING_CONNECTION_TIMEOUT
+)
+app.state.config.RAG_EMBEDDING_READ_TIMEOUT = RAG_EMBEDDING_READ_TIMEOUT
+app.state.config.RAG_EMBEDDING_AUDIO_SPLIT_MAX_DEPTH = (
+    RAG_EMBEDDING_AUDIO_SPLIT_MAX_DEPTH
+)
+app.state.config.RAG_EMBEDDING_AUDIO_SPLIT_MIN_DURATION = (
+    RAG_EMBEDDING_AUDIO_SPLIT_MIN_DURATION
+)
 app.state.config.RAG_RERANKING_MODEL = RAG_RERANKING_MODEL
 app.state.config.RAG_TEMPLATE = RAG_TEMPLATE
 
@@ -784,6 +832,11 @@ app.state.config.RAG_OLLAMA_API_KEY = RAG_OLLAMA_API_KEY
 # Override the PersistentConfig value regardless of what's in the database
 PDF_EXTRACT_IMAGES.value = False
 app.state.config.PDF_EXTRACT_IMAGES = PDF_EXTRACT_IMAGES
+app.state.config.RAG_PDF_COMPLEX_PARSER_ENABLED = RAG_PDF_COMPLEX_PARSER_ENABLED
+app.state.config.RAG_PDF_MAX_VISUALS_PER_PAGE = RAG_PDF_MAX_VISUALS_PER_PAGE
+app.state.config.RAG_PDF_MAX_VISUALS_PER_DOCUMENT = (
+    RAG_PDF_MAX_VISUALS_PER_DOCUMENT
+)
 
 app.state.config.YOUTUBE_LOADER_LANGUAGE = YOUTUBE_LOADER_LANGUAGE
 app.state.config.YOUTUBE_LOADER_PROXY_URL = YOUTUBE_LOADER_PROXY_URL
@@ -853,47 +906,12 @@ except Exception as e:
     pass
 
 
-# At startup, use default API key (no user context yet)
-# Per-user API keys are used during actual document processing
-# Portkey is the default and only supported embedding engine
-# Get base URL value - handle PersistentConfig objects properly
-# If value is empty, fall back to Portkey gateway URL (default from config.py)
-base_url_config = app.state.config.RAG_OPENAI_API_BASE_URL
-base_url = (
-    base_url_config.value
-    if hasattr(base_url_config, 'value')
-    else str(base_url_config)
-)
-# Fallback to Portkey gateway URL if empty (default from config.py)
-if not base_url or base_url.strip() == "":
-    base_url = "https://ai-gateway.apps.cloud.rt.nyu.edu/v1"
-    log.warning(f"RAG_OPENAI_API_BASE_URL is empty, using Portkey default gateway: {base_url}")
+# Credential-safe: Do not construct a global embedding function at startup.
+# Embedding service is created per-request with user-specific credentials.
+# app.state.EMBEDDING_FUNCTION is kept as None for backward compatibility.
+app.state.EMBEDDING_FUNCTION = None
 
-# Ensure engine is set to portkey (default and only supported)
-engine_value = (
-    app.state.config.RAG_EMBEDDING_ENGINE.value
-    if hasattr(app.state.config.RAG_EMBEDDING_ENGINE, 'value')
-    else str(app.state.config.RAG_EMBEDDING_ENGINE)
-)
-if engine_value != "portkey":
-    log.warning(f"Embedding engine was '{engine_value}', forcing to 'portkey' (default and only supported)")
-    # Force engine to portkey by updating the config value
-    app.state.config.RAG_EMBEDDING_ENGINE.update("portkey")
-
-app.state.EMBEDDING_FUNCTION = get_embedding_function(
-    app.state.config.RAG_EMBEDDING_ENGINE,
-    app.state.config.RAG_EMBEDDING_MODEL,
-    app.state.ef,
-    base_url,
-    (
-        # UserScopedConfig - use default at startup (empty or env var)
-        app.state.config.RAG_OPENAI_API_KEY.default
-        if app.state.config.RAG_EMBEDDING_ENGINE == "openai"
-        or app.state.config.RAG_EMBEDDING_ENGINE == "portkey"
-        else app.state.config.RAG_OLLAMA_API_KEY
-    ),
-    app.state.config.RAG_EMBEDDING_BATCH_SIZE,
-)
+log.info("Embedding service initialized (credential-safe mode - no global embedding function)")
 
 ########################################
 #
@@ -1150,6 +1168,7 @@ app.include_router(
 )
 app.include_router(utils.router, prefix="/api/v1/utils", tags=["utils"])
 app.include_router(facilities.router, prefix="/api/v1/facilities", tags=["facilities"])
+app.include_router(embedding_jobs.router, prefix="/api/v1", tags=["embedding_jobs"])
 
 
 try:
@@ -1293,9 +1312,13 @@ async def chat_completion(
                     log.debug("Checking if the user has access to the model...")
                     check_model_access(user, model)
                     log.debug("The user has access to the model! So, we can proceed with the chat completion.")
-                except Exception as e:
-                    log.debug(f"The user does not have access to the model! So, we cannot proceed with the chat completion. The error is: {e}")
-                    raise e
+                except Exception as error:
+                    log.debug(
+                        "Model access check failed | model=%s | error_type=%s",
+                        model_id,
+                        type(error).__name__,
+                    )
+                    raise
         else:
             log.debug("The model_item is direct!")
             model = model_item
@@ -1336,11 +1359,12 @@ async def chat_completion(
 
         request.state.metadata = metadata
         form_data["metadata"] = metadata
+        messages = form_data.get("messages")
+        message_count = len(messages) if isinstance(messages, list) else 0
         log.debug(
-            f"[DEBUG] [inside chat_completion() from main.py] The chat payload is processed! The metadata is: {metadata}."
-            f"The form_data is: {form_data}."
-            f"The user is: {user.email} and user_id is: {user.id}."
-            f"The model is: {model}."
+            "Chat payload prepared | model=%s | message_count=%s",
+            form_data.get("model"),
+            message_count,
         )
 
         log.debug("Processing the chat payload...")
@@ -1348,29 +1372,111 @@ async def chat_completion(
             request, form_data, metadata, user, model
         )
 
-    except Exception as e:
-        log.debug(f"Error processing chat payload: {e}")
-        log.debug(f"[DEBUG] [inside chat_completion() from main.py] The error is: {e}...... This will be returning a 400 bad request.")
+    except HTTPException:
+        raise
+    except Exception as error:
+        log.debug(
+            "Chat payload processing failed | model=%s | error_type=%s",
+            form_data.get("model"),
+            type(error).__name__,
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
-        )
+            detail="Error processing chat payload",
+        ) from None
 
     try:
         log.debug("Calling the chat completion handler...")
-        response = await chat_completion_handler(request, form_data, user)
-        log.debug(f"[DEBUG] [inside chat_completion() from main.py] The chat completion handler returned the response: {response}. The inputs for chat_completion_handler() are: {request}, {form_data}, {user}.")
+        retrieval_model_space = getattr(request.state, "retrieval_model_space", None)
+        if retrieval_model_space is not None:
+            from open_webui.retrieval.embedding.errors import EmbeddingError
+            from open_webui.retrieval.embedding.gate import (
+                assert_retrieval_generation_current,
+            )
+            from open_webui.retrieval.chat_errors import evidence_error, retrieval_error
+
+            try:
+                await asyncio.to_thread(
+                    assert_retrieval_generation_current, retrieval_model_space
+                )
+            except EmbeddingError as error:
+                raise retrieval_error(error) from None
+            except Exception:
+                raise evidence_error(
+                    503,
+                    "retrieval_unavailable",
+                    "The current index could not be verified. Please retry your message.",
+                    retryable=True,
+                ) from None
+        if metadata.get("retrieval_no_match"):
+            response = {
+                "id": f"chatcmpl-{uuid.uuid4()}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": form_data.get("model"),
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "No matching evidence was found in the requested sources. Try a more specific question or select different sources.",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "retrieval": {"status": "no_match"},
+            }
+            if form_data.get("stream"):
+                no_match_response = response
+
+                async def no_match_stream():
+                    chunk = {
+                        **no_match_response,
+                        "object": "chat.completion.chunk",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": no_match_response["choices"][0]["message"],
+                                "finish_reason": None,
+                            }
+                        ],
+                    }
+                    yield f"data: {json.dumps(chunk)}\n\n"
+                    chunk["choices"] = [
+                        {"index": 0, "delta": {}, "finish_reason": "stop"}
+                    ]
+                    yield f"data: {json.dumps(chunk)}\n\n"
+                    yield "data: [DONE]\n\n"
+
+                response = StreamingResponse(
+                    no_match_stream(), media_type="text/event-stream"
+                )
+        else:
+            response = await chat_completion_handler(request, form_data, user)
+        messages = form_data.get("messages")
+        message_count = len(messages) if isinstance(messages, list) else 0
+        log.debug(
+            "Chat completion handler returned | model=%s | message_count=%s",
+            form_data.get("model"),
+            message_count,
+        )
 
         log.debug("Calling the process_chat_response()... this is defined in middleware.py")
         return await process_chat_response(
             request, response, form_data, user, events, metadata, tasks
         )
-    except Exception as e:
-        log.debug(f"[DEBUG] [inside chat_completion() from main.py] The error is: {e}...... This will be returning a 400 bad request.")
+    except HTTPException:
+        raise
+    except Exception as error:
+        log.debug(
+            "Chat completion failed | model=%s | error_type=%s",
+            form_data.get("model"),
+            type(error).__name__,
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
-        )
+            detail="Error generating chat completion",
+        ) from None
 
 
 # Alias for chat_completion (Legacy)
@@ -1435,6 +1541,22 @@ async def list_tasks_endpoint(user=Depends(get_verified_user)):
 # Config Endpoints
 #
 ##################################
+
+
+def _effective_video_max_size_mb(app) -> int:
+    """Return the effective video file size limit in MB."""
+    video_limit = getattr(app.state.config, "RAG_VIDEO_MAX_FILE_SIZE_MB", 20)
+    if hasattr(video_limit, "value"):
+        video_limit = video_limit.value
+    video_limit = int(video_limit) if video_limit else 20
+
+    global_limit = getattr(app.state.config, "FILE_MAX_SIZE", None)
+    if hasattr(global_limit, "value"):
+        global_limit = global_limit.value
+
+    if global_limit is not None and global_limit > 0:
+        return min(video_limit, int(global_limit))
+    return video_limit
 
 
 @app.get("/api/config")
@@ -1518,6 +1640,7 @@ async def get_app_config(request: Request):
                 "file": {
                     "max_size": app.state.config.FILE_MAX_SIZE,
                     "max_count": app.state.config.FILE_MAX_COUNT,
+                    "max_video_size_mb": _effective_video_max_size_mb(app),
                 },
                 "permissions": {**app.state.config.USER_PERMISSIONS},
                 "google_drive": {

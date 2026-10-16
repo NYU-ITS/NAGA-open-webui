@@ -1,4 +1,6 @@
 import { RETRIEVAL_API_BASE_URL } from '$lib/constants';
+import { v4 as uuidv4 } from 'uuid';
+import type { KnowledgeIndexingFailure } from '$lib/apis/knowledge';
 
 export const getRAGConfig = async (token: string,email: string) => {
 	let error = null;
@@ -49,45 +51,111 @@ type YoutubeConfigForm = {
 	proxy_url: string;
 };
 
+type VideoConfigForm = {
+	max_file_size_mb?: number;
+	chunk_duration_seconds?: number;
+	min_chunk_duration_seconds?: number;
+	max_duration_seconds?: number;
+};
+
 type RAGConfigForm = {
 	email: string;
+	reindex_confirmed?: boolean;
+	audio_max_clips?: number;
+	defer_embedding_reindex?: boolean;
+	embedding?: EmbeddingModelUpdateForm;
+	force_reindex?: boolean;
+	RAG_FULL_CONTEXT?: boolean;
+	BYPASS_EMBEDDING_AND_RETRIEVAL?: boolean;
 	pdf_extract_images?: boolean;
+	pdf_max_visuals_per_page?: number;
+	pdf_max_visuals_per_document?: number;
 	enable_google_drive_integration?: boolean;
 	enable_onedrive_integration?: boolean;
 	chunk?: ChunkConfigForm;
+	video?: VideoConfigForm;
 	content_extraction?: ContentExtractConfigForm;
 	web_loader_ssl_verification?: boolean;
 	youtube?: YoutubeConfigForm;
 };
 
-export const updateRAGConfig = async (token: string, payload: RAGConfigForm) => {
-	let error = null;
-
-	const res = await fetch(`${RETRIEVAL_API_BASE_URL}/config/update`, {
-		method: 'POST',
-		headers: {
-			'Content-Type': 'application/json',
-			Authorization: `Bearer ${token}`
-		},
-		body: JSON.stringify({
-			...payload
-		})
-	})
-		.then(async (res) => {
-			if (!res.ok) throw await res.json();
-			return res.json();
-		})
-		.catch((err) => {
-			console.log(err);
-			error = err.detail;
-			return null;
+const saveRetrievalSettings = async (token: string, path: string, payload: object) => {
+	const saveId = uuidv4();
+	let failure;
+	try {
+		const response = await fetch(`${RETRIEVAL_API_BASE_URL}/${path}`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+			body: JSON.stringify({ ...payload, save_id: saveId })
 		});
-
-	if (error) {
-		throw error;
+		const body = await response.json().catch(() => null);
+		if (response.ok && body?.status === true) return body;
+		const detail = body?.detail ?? body;
+		const message = Array.isArray(detail)
+			? detail.map((item) => item.msg).filter(Boolean).join(' ')
+			: typeof detail === 'string' ? detail : detail?.message;
+		const fallback = response.ok
+			? 'The server returned an invalid save response. Your edits are preserved.'
+			: `The server returned an error while saving settings (HTTP ${response.status}). Your edits are preserved.`;
+		failure = {
+			...(detail && typeof detail === 'object' && !Array.isArray(detail) ? detail : {}),
+			message: message || fallback,
+			settings_saved: detail?.settings_saved ??
+				(response.status >= 400 && response.status < 500 && response.status !== 408 ? false : undefined)
+		};
+	} catch {
+		failure = {
+			message: 'The connection was interrupted while saving. Your edits are preserved. Check your connection and try again.'
+		};
 	}
+	if (failure.settings_saved === false) throw failure;
 
-	return res;
+	// A lost response does not imply rollback. Confirm the exact save from its
+	// transactionally stored receipt; never resend the mutation automatically.
+	for (const delay of [0, 500, 1500]) {
+		if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+		try {
+			const response = await fetch(`${RETRIEVAL_API_BASE_URL}/config/saves/${saveId}`, {
+				headers: { Authorization: `Bearer ${token}` },
+				cache: 'no-store',
+				signal: AbortSignal.timeout(5000)
+			});
+			if (!response.ok) continue;
+			const result = await response.json();
+			if (result.settings_saved === true) return result;
+		} catch {
+			// Keep the original error if the server remains unreachable.
+		}
+	}
+	throw failure;
+};
+
+export const updateRAGConfig = async (token: string, payload: RAGConfigForm) =>
+	saveRetrievalSettings(token, 'config/update', payload);
+
+export type SettingsIndexingStatus = {
+	status: 'not_required' | 'pending' | 'failed' | 'ready' | 'unknown';
+	in_progress?: boolean;
+	dispatch_failed?: boolean;
+	jobs: {
+		job_id: string;
+		status: string;
+		total_files: number;
+		processed_files: number;
+		failed_files: number;
+		incompatible_files: number;
+		own_index: boolean;
+		can_retry: boolean;
+		failed_documents?: KnowledgeIndexingFailure[];
+	}[];
+};
+
+export const getSettingsIndexingStatus = async (token: string): Promise<SettingsIndexingStatus> => {
+	const response = await fetch(`${RETRIEVAL_API_BASE_URL}/config/indexing`, {
+		headers: { Authorization: `Bearer ${token}` }
+	});
+	if (!response.ok) throw new Error('Could not load indexing status.');
+	return response.json();
 };
 
 export const getRAGTemplate = async (token: string, email: string) => {
@@ -219,37 +287,16 @@ type EmbeddingModelUpdateForm = {
 	embedding_engine: string;
 	embedding_model: string;
 	embedding_batch_size?: number;
+	reliability?: {
+		max_attempts: number;
+		connection_timeout_seconds: number;
+		read_timeout_seconds: number;
+	};
+	force_reindex?: boolean;
 };
 
-export const updateEmbeddingConfig = async (token: string, payload: EmbeddingModelUpdateForm) => {
-	let error = null;
-
-	const res = await fetch(`${RETRIEVAL_API_BASE_URL}/embedding/update`, {
-		method: 'POST',
-		headers: {
-			'Content-Type': 'application/json',
-			Authorization: `Bearer ${token}`
-		},
-		body: JSON.stringify({
-			...payload
-		})
-	})
-		.then(async (res) => {
-			if (!res.ok) throw await res.json();
-			return res.json();
-		})
-		.catch((err) => {
-			console.log(err);
-			error = err.detail;
-			return null;
-		});
-
-	if (error) {
-		throw error;
-	}
-
-	return res;
-};
+export const updateEmbeddingConfig = async (token: string, payload: EmbeddingModelUpdateForm) =>
+	saveRetrievalSettings(token, 'embedding/update', payload);
 
 export const getRerankingConfig = async (token: string, email: string) => {
 	let error = null;

@@ -1,11 +1,12 @@
 <script lang="ts">
 	import dayjs from 'dayjs';
 	import { toast } from 'svelte-sonner';
-	import { tick, getContext, onMount } from 'svelte';
+	import { tick, getContext } from 'svelte';
 
 	import { models, settings } from '$lib/stores';
 	import { user as _user } from '$lib/stores';
 	import { copyToClipboard as _copyToClipboard, formatDate } from '$lib/utils';
+	import { WEBUI_API_BASE_URL } from '$lib/constants';
 
 	import Name from './Name.svelte';
 	import ProfileImage from './ProfileImage.svelte';
@@ -84,9 +85,11 @@
 		deleteMessage(message.id);
 	};
 
-	onMount(() => {
-		// console.log('UserMessage mounted');
-	});
+	const getImageUrl = (file: { id?: string; url?: string }) =>
+		file?.id
+			? `${WEBUI_API_BASE_URL}/files/${encodeURIComponent(file.id)}/content`
+			: (file?.url ?? '');
+
 </script>
 
 <DeleteConfirmDialog
@@ -141,7 +144,7 @@
 					{#each message.files as file}
 						<div class={($settings?.chatBubble ?? true) ? 'self-end' : ''}>
 							{#if file.type === 'image'}
-								<Image src={file.url} imageClassName=" max-h-96 rounded-lg" />
+								<Image src={getImageUrl(file)} imageClassName=" max-h-96 rounded-lg" />
 							{:else}
 								<FileItem
 									item={file}

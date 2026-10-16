@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { toast } from 'svelte-sonner';
 
-	import { onMount, getContext, createEventDispatcher } from 'svelte';
+	import { onMount, onDestroy, getContext, createEventDispatcher } from 'svelte';
 
 	import { user } from '$lib/stores';
 	import { getSuperAdminEmails } from '$lib/apis/users';
@@ -33,8 +33,11 @@
 		updateRerankingConfig,
 		resetUploadDir,
 		getRAGConfig,
-		updateRAGConfig
+		updateRAGConfig,
+		getSettingsIndexingStatus,
+		type SettingsIndexingStatus
 	} from '$lib/apis/retrieval';
+	import { retryEmbeddingJob } from '$lib/apis/embedding';
 
 	import { knowledge, models } from '$lib/stores';
 	import { getKnowledgeBases } from '$lib/apis/knowledge';
@@ -42,6 +45,8 @@
 
 	import ResetUploadDirConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
 	import ResetVectorDBConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
+	import ReindexConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
+	import IndexingFailureList from '$lib/components/common/IndexingFailureList.svelte';
 	import SensitiveInput from '$lib/components/common/SensitiveInput.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import Switch from '$lib/components/common/Switch.svelte';
@@ -52,6 +57,57 @@
 	let scanDirLoading = false;
 	let updateEmbeddingModelLoading = false;
 	let updateRerankingModelLoading = false;
+	let saving = false;
+	let showReindexConfirm = false;
+	let documentSettingsSaved = false;
+	let saveStep = '';
+	let indexing: SettingsIndexingStatus | null = null;
+	let indexingStatusUnavailable = false;
+	let retryingJob = '';
+	let saveFailure = null;
+	let statusTimer: ReturnType<typeof setTimeout>;
+	let destroyed = false;
+
+	const trackIndexing = (status: SettingsIndexingStatus) => {
+		if (destroyed) return;
+		indexing = status;
+		clearTimeout(statusTimer);
+		if (status.in_progress || status.status === 'pending' || status.status === 'unknown') {
+			statusTimer = setTimeout(refreshIndexingStatus, 5000);
+		}
+	};
+
+	const refreshIndexingStatus = async () => {
+		try {
+			const status = await getSettingsIndexingStatus(localStorage.token);
+			if (destroyed) return;
+			indexingStatusUnavailable = false;
+			trackIndexing(status);
+		} catch {
+			if (destroyed) return;
+			indexingStatusUnavailable = true;
+			clearTimeout(statusTimer);
+			statusTimer = setTimeout(refreshIndexingStatus, 10000);
+		}
+	};
+
+	const retryIndexing = async (jobId: string) => {
+		retryingJob = jobId;
+		try {
+			const result = await retryEmbeddingJob(localStorage.token, jobId);
+			toast.info(result.message ?? $i18n.t('Indexing retry queued.'));
+			await refreshIndexingStatus();
+		} catch (error) {
+			toast.error(errorMessage(error));
+		} finally {
+			retryingJob = '';
+		}
+	};
+
+	onDestroy(() => {
+		destroyed = true;
+		clearTimeout(statusTimer);
+	});
 
 	let showResetConfirm = false;
 	let showResetUploadDirConfirm = false;
@@ -59,10 +115,20 @@
 	let embeddingEngine = 'portkey';
 	let embeddingModel = '';  // CRITICAL RBAC: No default - each admin must set their own model
 	let embeddingBatchSize = 1;
+	let embeddingMaxAttempts = 3;
+	let embeddingConnectionTimeoutSeconds = 10;
+	let embeddingReadTimeoutSeconds = 120;
 	let rerankingModel = '';
 
 	let fileMaxSize = null;
 	let fileMaxCount = null;
+	let audioMaxClips = 4;
+
+	let videoMaxFileSizeMb = 20;
+	let videoEffectiveMaxFileSizeMb = 20;
+	let videoChunkDurationSeconds = 16;
+	let videoMinChunkDurationSeconds = 4;
+	let videoMaxDurationSeconds = 120;
 
 	let contentExtractionEngine = 'default';
 	let tikaServerUrl = '';
@@ -71,10 +137,12 @@
 	let documentIntelligenceKey = '';
 	let showDocumentIntelligenceConfig = false;
 
-	let textSplitter = '';
+	let textSplitter = 'character';
 	let chunkSize = 1000;
 	let chunkOverlap = 200;
 	let pdfExtractImages = false;  // CRITICAL: Default to false - image extraction causes 2+ minute slowdowns/hangs
+	let pdfMaxVisualsPerPage = 6;
+	let pdfMaxVisualsPerDocument = 80;
 
 	let RAG_FULL_CONTEXT = false;
 	let BYPASS_EMBEDDING_AND_RETRIEVAL = false;
@@ -98,51 +166,24 @@
 		hybrid: false
 	};
 
-	const embeddingModelUpdateHandler = async () => {
-		if (embeddingEngine === '' && embeddingModel.split('/').length - 1 > 1) {
-			toast.error(
-				$i18n.t(
-					'Model filesystem path detected. Model shortname is required for update, cannot continue.'
-				)
-			);
-			return;
-		}
-		if (embeddingEngine === 'ollama' && embeddingModel === '') {
-			toast.error(
-				$i18n.t(
-					'Model filesystem path detected. Model shortname is required for update, cannot continue.'
-				)
-			);
-			return;
-		}
+	const errorMessage = (error) => {
+		const detail = error?.detail ?? error;
+		if (Array.isArray(detail)) return detail.map((item) => item.msg).filter(Boolean).join(' ');
+		return typeof detail === 'string'
+			? detail
+			: detail?.message ?? $i18n.t('Please try again.');
+	};
 
-		// Embedding model is mandatory for OpenAI/Portkey engines
-		if (
-			(embeddingEngine === 'openai' || embeddingEngine === 'portkey') &&
-			(embeddingModel === '' || embeddingModel.trim() === '')
-		) {
-			toast.error($i18n.t('Embedding model required.'));
-			return;
-		}
-
-		// API key is mandatory for OpenAI/Portkey engines (URL may fall back on backend)
-		if (embeddingEngine === 'openai' && OpenAIKey === '') {
-			toast.error($i18n.t('OpenAI API key required.'));
-			return;
-		}
-		if (embeddingEngine === 'portkey' && PortkeyKey === '') {
-			toast.error($i18n.t('PORTKEY API key required.'));
-			return;
-		}
-
-		console.log('Update embedding model attempt:', embeddingModel);
-
-		updateEmbeddingModelLoading = true;
-		const res = await updateEmbeddingConfig(localStorage.token, {
+	const embeddingPayload = () => ({
 			email: $user.email,
 			embedding_engine: embeddingEngine,
 			embedding_model: embeddingModel,
 			embedding_batch_size: embeddingBatchSize,
+			reliability: {
+				max_attempts: embeddingMaxAttempts,
+				connection_timeout_seconds: embeddingConnectionTimeoutSeconds,
+				read_timeout_seconds: embeddingReadTimeoutSeconds
+			},
 			ollama_config: {
 				key: OllamaKey,
 				url: OllamaUrl
@@ -151,15 +192,61 @@
 				key: embeddingEngine === 'portkey' ? PortkeyKey : OpenAIKey,
 				url: embeddingEngine === 'portkey' ? PortkeyUrl : OpenAIUrl
 			}
-		}).catch(async (error) => {
-			toast.error(`${error}`);
-			await setEmbeddingConfig();
-			return null;
 		});
-		updateEmbeddingModelLoading = false;
+
+	const embeddingModelUpdateHandler = async (notify = true) => {
+		const fail = (message: string) => {
+			if (!notify) throw new Error(message);
+			toast.error(message);
+			return false;
+		};
+		if (embeddingEngine === '' && embeddingModel.split('/').length - 1 > 1) {
+			return fail(
+				$i18n.t(
+					'Model filesystem path detected. Model shortname is required for update, cannot continue.'
+				)
+			);
+		}
+		if (embeddingEngine === 'ollama' && embeddingModel === '') {
+			return fail(
+				$i18n.t(
+					'Model filesystem path detected. Model shortname is required for update, cannot continue.'
+				)
+			);
+		}
+
+		// Embedding model is mandatory for OpenAI/Portkey engines
+		if (
+			(embeddingEngine === 'openai' || embeddingEngine === 'portkey') &&
+			(embeddingModel === '' || embeddingModel.trim() === '')
+		) {
+			return fail($i18n.t('Embedding model required.'));
+		}
+
+		// API key is mandatory for OpenAI/Portkey engines (URL may fall back on backend)
+		if (embeddingEngine === 'openai' && OpenAIKey === '') {
+			return fail($i18n.t('OpenAI API key required.'));
+		}
+		if (embeddingEngine === 'portkey' && PortkeyKey === '') {
+			return fail($i18n.t('PORTKEY API key required.'));
+		}
+
+		console.log('Update embedding model attempt:', embeddingModel);
+
+		updateEmbeddingModelLoading = true;
+		const res = await updateEmbeddingConfig(localStorage.token, embeddingPayload()).catch((error) => {
+			if (!notify) throw error;
+			const message = errorMessage(error);
+			saveFailure = { ...error, message };
+			toast.error(message);
+			return null;
+		}).finally(() => {
+			updateEmbeddingModelLoading = false;
+		});
 
 		if (res) {
-			console.log('[RBAC_UI] embeddingModelUpdateHandler response:', res);
+			saveFailure = null;
+			if (res.indexing) trackIndexing(res.indexing);
 			if (res.status === true) {
 				// CRITICAL RBAC: Update UI state from backend response to ensure we show the correct per-admin values
 				// This prevents one admin from seeing another admin's values on the same pod
@@ -176,15 +263,21 @@
 					console.log('[RBAC_UI] Updated API key from response (masked)');
 				}
 				// Re-fetch config to ensure we have the latest values
-				await setEmbeddingConfig();
-				toast.success($i18n.t('Embedding model set to "{{embedding_model}}"', res), {
-					duration: 1000 * 10
+				await setEmbeddingConfig().catch(() => {
+					console.warn('Could not refresh embedding configuration.');
 				});
+				if (notify) {
+					dispatch('save', { success: true, indexing: res.indexing });
+				}
 			}
 		}
+		if (!notify && res?.status !== true) {
+			throw new Error($i18n.t('The embedding update did not complete.'));
+		}
+		return res?.status === true;
 	};
 
-	const rerankingModelUpdateHandler = async () => {
+	const rerankingModelUpdateHandler = async (notify = true) => {
 		console.log('Update reranking model attempt:', rerankingModel);
 
 		updateRerankingModelLoading = true;
@@ -192,14 +285,17 @@
 			email: $user.email,
 			reranking_model: rerankingModel
 		}).catch(async (error) => {
-			toast.error(`${error}`);
-			await setRerankingConfig();
+			if (!notify) throw error;
+			toast.error(errorMessage(error));
+			await setRerankingConfig().catch(() => {
+				console.warn('Could not refresh reranking configuration.');
+			});
 			return null;
+		}).finally(() => {
+			updateRerankingModelLoading = false;
 		});
-		updateRerankingModelLoading = false;
 
-		if (res) {
-			console.log('rerankingModelUpdateHandler:', res);
+		if (res && notify) {
 			if (res.status === true) {
 				if (rerankingModel === '') {
 					toast.success($i18n.t('Reranking model disabled', res), {
@@ -212,9 +308,53 @@
 				}
 			}
 		}
+		if (!notify && res?.status !== true) {
+			throw new Error($i18n.t('The reranking update did not complete.'));
+		}
 	};
 
-	const submitHandler = async () => {
+	const submitHandler = async (reindexConfirmed = false) => {
+		if (saving || showReindexConfirm || updateEmbeddingModelLoading || updateRerankingModelLoading) return;
+		saving = true;
+		documentSettingsSaved = false;
+		saveFailure = null;
+		saveStep = $i18n.t('the remaining settings');
+		try {
+			await saveSettings(reindexConfirmed);
+		} catch (error) {
+			if (error?.error_code === 'reindex_confirmation_required') {
+				showReindexConfirm = true;
+				return;
+			}
+			const detail = errorMessage(error);
+			const response = error?.detail ?? error;
+			let message = detail;
+			if (documentSettingsSaved) {
+				message = $i18n.t('Document settings saved, but {{step}} did not complete. {{error}}', {
+					step: saveStep === 'embedding' ? $i18n.t('the embedding update or reindex') : saveStep,
+					error: detail
+				});
+			}
+			saveFailure = { message, file: response?.file, error_code: response?.error_code, settings_saved: response?.settings_saved };
+			dispatch('save', { success: false, partial: documentSettingsSaved, message });
+			await refreshIndexingStatus();
+		} finally {
+			saving = false;
+		}
+	};
+
+	const saveSettings = async (reindexConfirmed = false) => {
+		if (
+			!Number.isInteger(pdfMaxVisualsPerPage) || pdfMaxVisualsPerPage < 1 ||
+			!Number.isInteger(pdfMaxVisualsPerDocument) || pdfMaxVisualsPerDocument < 1
+		) {
+			toast.error($i18n.t('PDF visual limits must be whole numbers of at least 1.'));
+			return;
+		}
+		if (!Number.isInteger(audioMaxClips) || audioMaxClips < 1) {
+			toast.error($i18n.t('Maximum audio clips per answer must be a whole number of at least 1.'));
+			return;
+		}
 		if (contentExtractionEngine === 'tika' && tikaServerUrl === '') {
 			toast.error($i18n.t('Tika Server URL required.'));
 			return;
@@ -227,25 +367,32 @@
 			return;
 		}
 
-		if (!BYPASS_EMBEDDING_AND_RETRIEVAL) {
-			await embeddingModelUpdateHandler();
-
-			if (querySettings.hybrid) {
-				await rerankingModelUpdateHandler();
-			}
-		}
-
 		console.log('BEFORE SAVE - chunkSize:', chunkSize, 'chunkOverlap:', chunkOverlap);
 		
 		const res = await updateRAGConfig(localStorage.token, {
 			email: $user.email,
+			reindex_confirmed: reindexConfirmed,
+			audio_max_clips: audioMaxClips,
+			...(!BYPASS_EMBEDDING_AND_RETRIEVAL ? { embedding: embeddingPayload() } : {}),
 			pdf_extract_images: pdfExtractImages,
+			pdf_max_visuals_per_page: pdfMaxVisualsPerPage,
+			pdf_max_visuals_per_document: pdfMaxVisualsPerDocument,
 			enable_google_drive_integration: enableGoogleDriveIntegration,
 			enable_onedrive_integration: enableOneDriveIntegration,
 			file: {
 				max_size: fileMaxSize === '' || fileMaxSize === null ? 5 : fileMaxSize,
 				max_count: fileMaxCount === '' || fileMaxCount === null ? 2 : fileMaxCount
 			},
+			...(canViewFileSettings
+				? {
+					video: {
+						max_file_size_mb: videoMaxFileSizeMb,
+						chunk_duration_seconds: videoChunkDurationSeconds,
+						min_chunk_duration_seconds: videoMinChunkDurationSeconds,
+						max_duration_seconds: videoMaxDurationSeconds
+					}
+				}
+				: {}),
 			RAG_FULL_CONTEXT: RAG_FULL_CONTEXT,
 			BYPASS_EMBEDDING_AND_RETRIEVAL: BYPASS_EMBEDDING_AND_RETRIEVAL,
 			chunk: {
@@ -262,6 +409,15 @@
 				}
 			}
 		});
+
+		if (res?.status !== true) {
+			throw new Error($i18n.t('The document settings update did not complete.'));
+		}
+		documentSettingsSaved = true;
+		audioMaxClips = res.audio_max_clips ?? audioMaxClips;
+		pdfMaxVisualsPerPage = res.pdf_max_visuals_per_page ?? pdfMaxVisualsPerPage;
+		pdfMaxVisualsPerDocument = res.pdf_max_visuals_per_document ?? pdfMaxVisualsPerDocument;
+		trackIndexing(res.indexing);
 
 		console.log('AFTER SAVE - Response:', res);
 		console.log('AFTER SAVE - res.chunk:', res?.chunk);
@@ -286,7 +442,25 @@
 			}
 		}
 
-		await updateQuerySettings(localStorage.token, {email: $user.email, ...querySettings});
+		// Update video settings from backend response
+		if (res && res.video) {
+			videoMaxFileSizeMb = res.video.max_file_size_mb ?? 20;
+			videoEffectiveMaxFileSizeMb = res.video.effective_max_file_size_mb ?? videoMaxFileSizeMb;
+			videoChunkDurationSeconds = res.video.chunk_duration_seconds ?? 16;
+			videoMinChunkDurationSeconds = res.video.min_chunk_duration_seconds ?? 4;
+			videoMaxDurationSeconds = res.video.max_duration_seconds ?? 120;
+		}
+
+		saveStep = $i18n.t('query settings');
+		const queryResult = await updateQuerySettings(localStorage.token, {email: $user.email, ...querySettings});
+		if (queryResult?.status !== true) throw new Error($i18n.t('The query settings update did not complete.'));
+
+		if (!BYPASS_EMBEDDING_AND_RETRIEVAL) {
+			if (querySettings.hybrid) {
+				saveStep = $i18n.t('reranking');
+				await rerankingModelUpdateHandler(false);
+			}
+		}
 
 		if (fileMaxSize === '' || fileMaxSize === null) {
 			fileMaxSize = 5;
@@ -295,7 +469,7 @@
 			fileMaxCount = 2;
 		}
 
-		dispatch('save');
+		dispatch('save', { success: true, indexing });
 	};
 
 	const setEmbeddingConfig = async () => {
@@ -310,6 +484,11 @@
 
 			// embeddingModel = embeddingConfig.embedding_model;
 			embeddingBatchSize = embeddingConfig.embedding_batch_size ?? 1;
+			embeddingMaxAttempts = embeddingConfig.reliability?.max_attempts ?? 3;
+			embeddingConnectionTimeoutSeconds =
+				embeddingConfig.reliability?.connection_timeout_seconds ?? 10;
+			embeddingReadTimeoutSeconds =
+				embeddingConfig.reliability?.read_timeout_seconds ?? 120;
 
 			if (embeddingConfig.embedding_engine === 'portkey') {
 				PortkeyKey = embeddingConfig.openai_config?.key || PortkeyKey;
@@ -339,11 +518,8 @@
 		}
 	};
 
-	const toggleHybridSearch = async () => {
-		querySettings = await updateQuerySettings(localStorage.token, querySettings);
-	};
-
 	onMount(async () => {
+		void refreshIndexingStatus();
 		// Fetch super admin emails from API
 		try {
 			if (localStorage.token) {
@@ -366,6 +542,8 @@
 
 		if (res) {
 			pdfExtractImages = res.pdf_extract_images;
+			pdfMaxVisualsPerPage = res.pdf_max_visuals_per_page ?? 6;
+			pdfMaxVisualsPerDocument = res.pdf_max_visuals_per_document ?? 80;
 
 			textSplitter = res.chunk.text_splitter;
 			// Use defaults if backend returns 0, null, undefined, or invalid (means not configured)
@@ -389,12 +567,31 @@
 
 			fileMaxSize = res?.file.max_size ?? 5;
 			fileMaxCount = res?.file.max_count ?? 2;
+			audioMaxClips = res.audio_max_clips ?? 4;
+
+			if (res?.video) {
+				videoMaxFileSizeMb = res.video.max_file_size_mb ?? 20;
+				videoEffectiveMaxFileSizeMb = res.video.effective_max_file_size_mb ?? videoMaxFileSizeMb;
+				videoChunkDurationSeconds = res.video.chunk_duration_seconds ?? 16;
+				videoMinChunkDurationSeconds = res.video.min_chunk_duration_seconds ?? 4;
+				videoMaxDurationSeconds = res.video.max_duration_seconds ?? 120;
+			}
 
 			enableGoogleDriveIntegration = res.enable_google_drive_integration;
 			enableOneDriveIntegration = res.enable_onedrive_integration;
 		}
 	});
 </script>
+
+<ReindexConfirmDialog
+	bind:show={showReindexConfirm}
+	requireExplicitChoice
+	title={$i18n.t('Reindex all knowledge collections?')}
+	message={$i18n.t('Applying these changes will reindex all affected knowledge collections and chat uploads. Cancel keeps your current settings. Proceed saves these changes and starts reindexing.')}
+	cancelLabel={$i18n.t('Cancel')}
+	confirmLabel={$i18n.t('Proceed')}
+	on:confirm={() => submitHandler(true)}
+/>
 
 <ResetUploadDirConfirmDialog
 	bind:show={showResetUploadDirConfirm}
@@ -431,6 +628,76 @@
 	}}
 >
 	<div class=" space-y-2.5 overflow-y-scroll scrollbar-hidden h-full pr-1.5">
+		{#if saveFailure}
+			<div role="alert" class="rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm">
+				<p>{saveFailure.message}</p>
+				{#if saveFailure.settings_saved === false}
+					<p class="mt-1">{$i18n.t('Your previous settings remain in effect. The form shows your unsaved changes.')}</p>
+				{/if}
+				{#if saveFailure.file}
+					<p class="mt-2 break-all">{saveFailure.file.name ?? $i18n.t('Missing file record')}</p>
+					<p class="font-mono text-xs break-all">{saveFailure.file.id}</p>
+					<p class="mt-1">
+						{saveFailure.file.reason === 'missing_record'
+							? $i18n.t('A chat or knowledge base references a deleted file record.')
+							: saveFailure.file.reason === 'missing_source'
+								? $i18n.t('The original upload is missing from storage.')
+								: $i18n.t('The original upload could not be read. Check storage access.')}
+					</p>
+				{/if}
+			</div>
+		{/if}
+		{#if indexing && indexing.status !== 'not_required' || indexingStatusUnavailable}
+			<div role="status" class="rounded-lg border border-gray-200 dark:border-gray-700 p-3 text-sm space-y-2">
+				<div class="flex items-center justify-between gap-3">
+					<span class="font-medium">{$i18n.t('Indexing status for saved settings')}</span>
+					<button type="button" class="text-xs underline" on:click={refreshIndexingStatus}>{$i18n.t('Refresh')}</button>
+				</div>
+				{#if indexingStatusUnavailable || indexing?.status === 'unknown'}
+					<p>{$i18n.t('Indexing status is unavailable. Refresh to check progress.')}</p>
+				{:else if indexing?.status === 'pending'}
+					<p>{$i18n.t('Settings are saved. Indexing is in progress; the updated index is not fully ready.')}</p>
+				{:else if indexing?.status === 'failed'}
+					<p>{$i18n.t('Settings are saved, but indexing failed or only partially completed. Failed sources remain unavailable until indexing succeeds.')}</p>
+				{:else if indexing?.status === 'ready'}
+					<p>{$i18n.t('Indexing completed for the saved settings.')}</p>
+				{/if}
+				{#each indexing?.jobs ?? [] as job (job.job_id)}
+					<div class="border-t border-gray-200 dark:border-gray-700 pt-2">
+						<p>{job.own_index ? $i18n.t('Your index') : $i18n.t('Another administrator’s index')}: {$i18n.t(job.status)}</p>
+						<p class="text-xs">{$i18n.t('{{processed}} / {{total}} files processed; {{failed}} failed; {{incompatible}} incompatible.', {
+							processed: job.processed_files, total: job.total_files, failed: job.failed_files, incompatible: job.incompatible_files
+						})}</p>
+						{#if job.own_index && job.failed_documents?.length}
+							<details class="mt-2 rounded-lg bg-gray-50 p-3 dark:bg-gray-850">
+								<summary class="cursor-pointer font-medium">
+									{$i18n.t('View failed files ({{count}})', { count: job.failed_documents.length })}
+								</summary>
+								<p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
+									{$i18n.t('Current failures across knowledge collections and chat uploads. Successfully retried files are removed from this list.')}
+								</p>
+								<IndexingFailureList failures={job.failed_documents} showChatUploads />
+								{#if job.failed_documents.some((file) => file.knowledge_bases.length > 0)}
+									<a class="mt-2 inline-block text-xs underline" href="/workspace/knowledge">
+										{$i18n.t('View knowledge collections')}
+									</a>
+								{/if}
+							</details>
+						{/if}
+						{#if job.can_retry}
+							<p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
+								{$i18n.t('Retry processes eligible failed files. Successful files remain available and are not reprocessed.')}
+							</p>
+							<button type="button" class="mt-1 underline disabled:opacity-50" disabled={saving || !!retryingJob} on:click={() => retryIndexing(job.job_id)}>
+								{$i18n.t(retryingJob === job.job_id ? 'Retrying...' : 'Retry failed indexing')}
+							</button>
+						{:else if !job.own_index && ['failed', 'partially_failed'].includes(job.status)}
+							<p class="text-xs">{$i18n.t('Ask the owning administrator to retry this index.')}</p>
+						{/if}
+					</div>
+				{/each}
+			</div>
+		{/if}
 		<div class="">
 			<div class="mb-3">
 				<div class=" mb-2.5 text-base font-medium">{$i18n.t('General')}</div>
@@ -492,6 +759,42 @@
 					</div>
 				{/if}
 
+				<div class="mb-2.5">
+					<div class="flex flex-col gap-2 sm:flex-row">
+						<div class="w-full">
+							<label for="pdf-max-visuals-per-page" class="mb-1 block text-xs font-medium">
+								{$i18n.t('Maximum PDF visuals per page')}
+							</label>
+							<input
+								id="pdf-max-visuals-per-page"
+								class="w-full rounded-lg py-1.5 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+								type="number"
+								min="1"
+								step="1"
+								required
+								bind:value={pdfMaxVisualsPerPage}
+							/>
+						</div>
+						<div class="w-full">
+							<label for="pdf-max-visuals-per-document" class="mb-1 block text-xs font-medium">
+								{$i18n.t('Maximum PDF visuals per document')}
+							</label>
+							<input
+								id="pdf-max-visuals-per-document"
+								class="w-full rounded-lg py-1.5 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+								type="number"
+								min="1"
+								step="1"
+								required
+								bind:value={pdfMaxVisualsPerDocument}
+							/>
+						</div>
+					</div>
+					<p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+						{$i18n.t('These limits apply to all administrators when the embedding model supports images. Text-only models skip PDF visuals and ignore these limits.')}
+					</p>
+				</div>
+
 				<div class="  mb-2.5 flex w-full justify-between">
 					<div class=" self-center text-xs font-medium">
 						<Tooltip content={$i18n.t('Full Context Mode')} placement="top-start">
@@ -518,7 +821,7 @@
 								class="dark:bg-gray-900 w-fit pr-8 rounded-sm px-2 text-xs bg-transparent outline-hidden text-right"
 								bind:value={textSplitter}
 							>
-								<option value="">{$i18n.t('Default')} ({$i18n.t('Character')})</option>
+								<option value="character">{$i18n.t('Character')}</option>
 								<option value="token">{$i18n.t('Token')} ({$i18n.t('Tiktoken')})</option>
 							</select>
 						</div>
@@ -673,7 +976,7 @@
 											on:click={() => {
 												embeddingModelUpdateHandler();
 											}}
-											disabled={updateEmbeddingModelLoading}
+											disabled={saving || updateEmbeddingModelLoading}
 										>
 											{#if updateEmbeddingModelLoading}
 												<div class="self-center">
@@ -726,11 +1029,6 @@
 							{/if}
 						</div>
 
-						<div class="mt-1 mb-1 text-xs text-gray-600 dark:text-gray-500">
-							{$i18n.t(
-								'Warning: If you update or change your embedding model, you will need to re-import all documents.'
-							)}
-						</div>
 					</div>
 
 					{#if embeddingEngine === 'ollama' || embeddingEngine === 'openai' || embeddingEngine == 'portkey'}
@@ -750,6 +1048,45 @@
 						</div>
 					{/if}
 
+					<div class="mb-2.5 rounded-lg border border-gray-100 p-3 dark:border-gray-850">
+						<div class="mb-2 text-xs font-medium">{$i18n.t('Embedding Provider Reliability')}</div>
+						<div class="grid grid-cols-1 gap-2 sm:grid-cols-3">
+							<label class="text-xs text-gray-600 dark:text-gray-400">
+								{$i18n.t('Maximum attempts')}
+								<input
+									bind:value={embeddingMaxAttempts}
+									type="number"
+									class="mt-1 w-full rounded-lg bg-transparent px-2 py-1 outline-hidden"
+									min="1"
+									max="5"
+								/>
+							</label>
+							<label class="text-xs text-gray-600 dark:text-gray-400">
+								{$i18n.t('Connection timeout (seconds)')}
+								<input
+									bind:value={embeddingConnectionTimeoutSeconds}
+									type="number"
+									class="mt-1 w-full rounded-lg bg-transparent px-2 py-1 outline-hidden"
+									min="1"
+									max="60"
+								/>
+							</label>
+							<label class="text-xs text-gray-600 dark:text-gray-400">
+								{$i18n.t('Read timeout (seconds)')}
+								<input
+									bind:value={embeddingReadTimeoutSeconds}
+									type="number"
+									class="mt-1 w-full rounded-lg bg-transparent px-2 py-1 outline-hidden"
+									min="30"
+									max="600"
+								/>
+							</label>
+						</div>
+						<div class="mt-2 text-xs text-gray-500">
+							{$i18n.t('Changes apply to newly dispatched embedding work and do not reindex files.')}
+						</div>
+					</div>
+
 					<div class="  mb-2.5 flex w-full justify-between">
 						<div class=" self-center text-xs font-medium">{$i18n.t('Full Context Mode')}</div>
 						<div class="flex items-center relative">
@@ -766,12 +1103,7 @@
 					<div class="  mb-2.5 flex w-full justify-between">
 						<div class=" self-center text-xs font-medium">{$i18n.t('Hybrid Search')}</div>
 						<div class="flex items-center relative">
-							<Switch
-								bind:state={querySettings.hybrid}
-								on:change={() => {
-									toggleHybridSearch();
-								}}
-							/>
+							<Switch bind:state={querySettings.hybrid} />
 						</div>
 					</div>
 
@@ -795,7 +1127,7 @@
 										on:click={() => {
 											rerankingModelUpdateHandler();
 										}}
-										disabled={updateRerankingModelLoading}
+										disabled={saving || updateRerankingModelLoading}
 									>
 										{#if updateRerankingModelLoading}
 											<div class="self-center">
@@ -866,6 +1198,26 @@
 								min="0"
 							/>
 						</div>
+					</div>
+
+					<div class="mb-3">
+						<div class="mb-1 flex w-full items-center justify-between gap-3">
+							<label for="audio-max-clips" class="text-xs font-medium">
+								{$i18n.t('Maximum audio clips per answer')}
+							</label>
+							<input
+								id="audio-max-clips"
+								class="w-24 rounded-lg text-sm bg-transparent outline-hidden"
+								type="number"
+								bind:value={audioMaxClips}
+								min="1"
+								step="1"
+								required
+							/>
+						</div>
+						<p class="text-xs text-gray-600 dark:text-gray-400">
+							{$i18n.t('Maximum retrieved audio clips included across all sources in one answer. Also limited by Top K. Default: 4. Applies to new answers without reindexing.')}
+						</p>
 					</div>
 
 					{#if querySettings.hybrid === true}
@@ -963,6 +1315,96 @@
 				</div>
 			{/if}
 
+			{#if canViewFileSettings}
+				<div class="mb-3">
+					<div class=" mb-2.5 text-base font-medium">{$i18n.t('Video Processing')}</div>
+
+					<hr class=" border-gray-100 dark:border-gray-850 my-2" />
+
+					<div class="mb-2.5 flex w-full justify-between">
+						<div class="self-center text-xs font-medium">
+							{$i18n.t('Maximum video file size (MB)')}
+						</div>
+						<div class="flex items-center relative">
+							<Tooltip
+								content={$i18n.t(
+									'The maximum video file size in MB for chat and Knowledge Base uploads. Effective limit may be lower if a global file size limit is set.'
+								)}
+								placement="top-start"
+							>
+								<input
+									class="flex-1 w-full rounded-lg text-sm bg-transparent outline-hidden"
+									type="number"
+									placeholder={$i18n.t('Enter size in MB')}
+									bind:value={videoMaxFileSizeMb}
+									autocomplete="off"
+									min="1"
+									max="1024"
+								/>
+							</Tooltip>
+						</div>
+					</div>
+
+					{#if videoEffectiveMaxFileSizeMb < videoMaxFileSizeMb}
+						<div class="mb-2.5 text-xs text-gray-500 dark:text-gray-400">
+							{$i18n.t('Effective limit: {{limit}} MB (limited by global file size setting)', {
+								limit: videoEffectiveMaxFileSizeMb
+							})}
+						</div>
+					{/if}
+
+					<div class="mb-2.5 flex w-full justify-between">
+						<div class="self-center text-xs font-medium">
+							{$i18n.t('Video chunk duration (seconds)')}
+						</div>
+						<div class="flex items-center relative">
+							<input
+								class="flex-1 w-full rounded-lg text-sm bg-transparent outline-hidden"
+								type="number"
+								placeholder={$i18n.t('Enter seconds')}
+								bind:value={videoChunkDurationSeconds}
+								autocomplete="off"
+								min="1"
+								max="120"
+							/>
+						</div>
+					</div>
+
+					<div class="mb-2.5 flex w-full justify-between">
+						<div class="self-center text-xs font-medium">
+							{$i18n.t('Minimum video chunk duration (seconds)')}
+						</div>
+						<div class="flex items-center relative">
+							<input
+								class="flex-1 w-full rounded-lg text-sm bg-transparent outline-hidden"
+								type="number"
+								placeholder={$i18n.t('Enter seconds')}
+								bind:value={videoMinChunkDurationSeconds}
+								autocomplete="off"
+								min="1"
+							/>
+						</div>
+					</div>
+
+					<div class="mb-2.5 flex w-full justify-between">
+						<div class="self-center text-xs font-medium">
+							{$i18n.t('Maximum video duration (seconds)')}
+						</div>
+						<div class="flex items-center relative">
+							<input
+								class="flex-1 w-full rounded-lg text-sm bg-transparent outline-hidden"
+								type="number"
+								placeholder={$i18n.t('Enter seconds')}
+								bind:value={videoMaxDurationSeconds}
+								autocomplete="off"
+								min="1"
+								max="3600"
+							/>
+						</div>
+					</div>
+				</div>
+			{/if}
+
 			<div class="mb-3">
 				<div class=" mb-2.5 text-base font-medium">{$i18n.t('Integration')}</div>
 
@@ -1020,12 +1462,13 @@
 			</div> -->
 		</div>
 	</div>
-	<div class="flex justify-end pt-3 text-sm font-medium">
+	<div class="flex justify-end gap-3 pt-3 text-sm font-medium">
 		<button
 			class="px-3.5 py-1.5 text-sm font-medium bg-black hover:bg-gray-900 text-white dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-full"
 			type="submit"
+			disabled={saving || showReindexConfirm || updateEmbeddingModelLoading || updateRerankingModelLoading}
 		>
-			{$i18n.t('Save')}
+			{$i18n.t(saving ? 'Saving...' : 'Save')}
 		</button>
 	</div>
 </form>

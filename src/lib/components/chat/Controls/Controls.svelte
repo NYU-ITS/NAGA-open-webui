@@ -12,6 +12,7 @@
 	import { user } from '$lib/stores';
 	export let models = [];
 	export let chatFiles = [];
+	export let removeChatSource: Function;
 	export let params = {};
 
 	let showValves = false;
@@ -35,7 +36,7 @@
 			{#if chatFiles.length > 0}
 				<Collapsible title={$i18n.t('Files')} open={true} buttonClassName="w-full">
 					<div class="flex flex-col gap-1 mt-1.5" slot="content">
-						{#each chatFiles as file, fileIdx}
+						{#each chatFiles as file}
 							<FileItem
 								className="w-full"
 								item={file}
@@ -45,12 +46,7 @@
 								type={file.type}
 								size={file?.size}
 								dismissible={true}
-								on:dismiss={() => {
-									// Remove the file from the chatFiles array
-
-									chatFiles.splice(fileIdx, 1);
-									chatFiles = chatFiles;
-								}}
+								on:dismiss={() => removeChatSource(file)}
 								on:click={() => {
 									console.log(file);
 								}}

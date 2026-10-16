@@ -2,7 +2,7 @@
 	import { DropdownMenu } from 'bits-ui';
 	import { toast } from 'svelte-sonner';
 	import { flyAndScale } from '$lib/utils/transitions';
-	import { getContext, onMount, tick } from 'svelte';
+	import { getContext, tick } from 'svelte';
 
 	import {
 		config,
@@ -14,9 +14,8 @@
 		showFacilitiesOverlay,
 		showRightsideQuestions
 	} from '$lib/stores';
-	import { createPicker } from '$lib/utils/google-drive-picker';
-
 	import { getTools } from '$lib/apis/tools';
+	import { STANDALONE_IMAGE_ACCEPT } from '$lib/utils/file-upload';
 
 	import Dropdown from '$lib/components/common/Dropdown.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
@@ -28,7 +27,6 @@
 	import GlobeAltSolid from '$lib/components/icons/GlobeAltSolid.svelte';
 	import WrenchSolid from '$lib/components/icons/WrenchSolid.svelte';
 	import CameraSolid from '$lib/components/icons/CameraSolid.svelte';
-	import PhotoSolid from '$lib/components/icons/PhotoSolid.svelte';
 	import CommandLineSolid from '$lib/components/icons/CommandLineSolid.svelte';
 	import PencilSquare from '$lib/components/icons/PencilSquare.svelte';
 
@@ -92,9 +90,9 @@
 	function handleFileChange(event) {
 		const inputFiles = Array.from(event.target?.files);
 		if (inputFiles && inputFiles.length > 0) {
-			console.log(inputFiles);
 			inputFilesHandler(inputFiles);
 		}
+		event.target.value = '';
 	}
 </script>
 
@@ -102,7 +100,7 @@
 <input
 	id="camera-input"
 	type="file"
-	accept="image/*"
+	accept={STANDALONE_IMAGE_ACCEPT}
 	capture="environment"
 	on:change={handleFileChange}
 	style="display: none;"

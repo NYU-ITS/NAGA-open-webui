@@ -19,9 +19,13 @@ from concurrent.futures import ThreadPoolExecutor
 import atexit
 
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 
-from open_webui.utils.models import get_models_for_user
+from open_webui.utils.models import (
+    get_models_for_user,
+    model_audio_input_format,
+    model_vision_capability,
+)
 
 from open_webui.env import RAG_THREAD_POOL_SIZE
 
@@ -66,9 +70,21 @@ from open_webui.models.users import UserModel
 from open_webui.models.functions import Functions
 from open_webui.models.models import Models
 
+from open_webui.retrieval.embedding.errors import EmbeddingError
+from open_webui.retrieval.chat_errors import (
+    evidence_error,
+    retrieval_error,
+    safe_stream_error,
+)
+from open_webui.retrieval.reconstruction import ReconstructionTimeout
 from open_webui.retrieval.utils import (
+    AuthorizedAttachmentScope,
     get_sources_from_files,
     get_embedding_function,
+)
+from open_webui.retrieval.visuals import (
+    ReconstructionResult,
+    sanitize_text_sources,
 )
 from open_webui.routers.retrieval import get_ef
 
@@ -85,6 +101,7 @@ from open_webui.utils.misc import (
     add_or_update_system_message,
     add_or_update_user_message,
     get_last_user_message,
+    get_last_user_message_item,
     get_last_assistant_message,
     prepend_to_first_user_message_content,
 )
@@ -176,16 +193,15 @@ async def chat_completion_tools_handler(
     tools_function_calling_prompt = tools_function_calling_generation_template(
         template, tools_specs
     )
-    log.info(f"{tools_function_calling_prompt=}")
+    log.info("Preparing tool selection | tool_count=%s", len(specs))
     payload = get_tools_function_calling_payload(
         body["messages"], task_model_id, tools_function_calling_prompt
     )
 
     try:
         response = await generate_chat_completion(request, form_data=payload, user=user)
-        log.debug(f"{response=}")
         content = await get_content_from_response(response)
-        log.debug(f"{content=}")
+        log.debug("Tool selection response received | has_content=%s", bool(content))
 
         if not content:
             return body, {}
@@ -271,7 +287,7 @@ async def chat_completion_tools_handler(
         log.exception(f"Error: {e}")
         content = None
 
-    log.debug(f"tool_contexts: {sources}")
+    log.debug("Tool contexts prepared | sources_count=%s", len(sources))
 
     if skip_files and "files" in body.get("metadata", {}):
         del body["metadata"]["files"]
@@ -553,28 +569,20 @@ async def chat_image_generation_handler(
 
 
 async def chat_completion_files_handler(
-    request: Request, body: dict, user: UserModel
-) -> tuple[dict, dict[str, list]]:
+    request: Request,
+    body: dict,
+    user: UserModel,
+    *,
+    trusted_legacy_collection_names: set[str] | None = None,
+    trusted_attachment_ids: set[int] | None = None,
+) -> tuple[dict, dict]:
     sources = []
+    excluded_sources = []
+    model_space = None
+    authorized_scope = AuthorizedAttachmentScope(frozenset(), frozenset())
 
     if files := body.get("metadata", {}).get("files", None):
-        # RAG debug: which files/kbs are attached to this chat
-        file_ids = [str(f.get("id", "")) for f in files]
-        def _rag_file_name(f):
-            n = f.get("name") or f.get("filename")
-            if n:
-                return str(n)
-            _file = f.get("file")
-            if isinstance(_file, dict):
-                _data = _file.get("data") or {}
-                n = _data.get("name") if isinstance(_data, dict) else None
-                if n:
-                    return str(n)
-            return str(f.get("id") or "")
-        file_names = [_rag_file_name(f) for f in files]
-        log.info(
-            f"[RAG Chat] files_attached={len(files)} | file_ids={file_ids} | file_names={file_names} | user={user.email if user else None}"
-        )
+        log.info("[RAG Chat] files_attached=%s", len(files))
         queries = []
         try:
             queries_response = await generate_queries(
@@ -601,106 +609,96 @@ async def chat_completion_files_handler(
                 queries_response = {"queries": [queries_response]}
 
             queries = queries_response.get("queries", [])
-            log.info(f"[RAG Chat] query_expansion | queries_count={len(queries)} | queries={queries[:5]}{'...' if len(queries) > 5 else ''}")
-            log.debug(f"RAG query expansion generated {len(queries)} queries: {queries}")
-        except Exception as e:
+            log.info(
+                "[RAG Chat] query_expansion | queries_count=%s", len(queries)
+            )
+        except Exception as error:
             # Query expansion failed - this is OK, we'll use the user's message as fallback
             # This commonly happens when Gemini 2.5 Flash Lite is not available
-            log.debug(f"RAG query expansion failed (using user message as fallback): {e}")
+            log.debug(
+                "RAG query expansion failed; using user message | error_type=%s",
+                type(error).__name__,
+            )
 
         if len(queries) == 0:
             queries = [get_last_user_message(body["messages"])]
             log.info(f"[RAG Chat] using user message as query (expansion failed or empty) | queries_count=1")
-            log.debug(f"Using user message as RAG query fallback: {queries}")
 
         try:
             # RBAC: Create embedding function on-the-fly using user's per-admin model/key
             # This ensures each user uses their own (or their group admin's) model/key
             user_email = user.email if user else None
             if not user_email:
-                log.error("No user email available for RAG query - cannot determine per-admin model/key")
-                sources = []
+                raise evidence_error(
+                    503,
+                    "retrieval_unavailable",
+                    "Source retrieval requires an authenticated account. Please sign in again.",
+                    retryable=False,
+                )
             else:
-                # Get per-admin model and key for the user
-                owner_model = request.app.state.config.RAG_EMBEDDING_MODEL_USER.get(user_email)
-                owner_key = request.app.state.config.RAG_OPENAI_API_KEY.get(user_email)
-                
-                # Validate both are present (no fallback)
-                if not owner_model or not owner_model.strip():
-                    log.error(
-                        f"No embedding model configured for user {user_email}. "
-                        f"RAG query will fail. Please configure in Settings > Documents."
-                    )
-                    sources = []
-                elif not owner_key or not owner_key.strip():
-                    log.error(
-                        f"No embedding API key configured for user {user_email}. "
-                        f"RAG query will fail. Please configure in Settings > Documents."
-                    )
-                    sources = []
-                else:
-                    # Get base URL (global, with fallback)
-                    base_url_config = request.app.state.config.RAG_OPENAI_API_BASE_URL
-                    base_url = (
-                        base_url_config.value
-                        if hasattr(base_url_config, 'value')
-                        else str(base_url_config)
-                    )
-                    if not base_url or base_url.strip() == "":
-                        base_url = "https://ai-gateway.apps.cloud.rt.nyu.edu/v1"
-                    
-                    # Create embedding function using per-admin model/key
-                    ef = get_ef(
-                        request.app.state.config.RAG_EMBEDDING_ENGINE,
-                        owner_model,  # RBAC: Per-admin model (not global)
-                    )
-                    user_embedding_function = get_embedding_function(
-                        request.app.state.config.RAG_EMBEDDING_ENGINE,
-                        owner_model,  # RBAC: Per-admin model (not global)
-                        ef,
-                        base_url,
-                        owner_key,  # RBAC: Per-admin key (not global)
-                        request.app.state.config.RAG_EMBEDDING_BATCH_SIZE,
-                    )
-                    
-                    # Offload get_sources_from_files to module-level thread pool (more efficient)
+                try:
+                    # Offload get_sources_from_files to module-level thread pool
                     loop = asyncio.get_running_loop()
-                    sources = await loop.run_in_executor(
+                    retrieval_result = await loop.run_in_executor(
                         _RAG_EXECUTOR,
                         lambda: get_sources_from_files(
                             request=request,
                             files=files,
                             queries=queries,
-                            embedding_function=lambda query: user_embedding_function(
-                                query, user=user
-                            ),
+                            embedding_function=None,
                             k=request.app.state.config.TOP_K.get(user.email),
                             reranking_function=request.app.state.rf,
                             r=request.app.state.config.RELEVANCE_THRESHOLD,
                             hybrid_search=request.app.state.config.ENABLE_RAG_HYBRID_SEARCH.get(user.email),
                             full_context=request.app.state.config.RAG_FULL_CONTEXT.get(user.email),
+                            user=user,
+                            trusted_legacy_collection_names=trusted_legacy_collection_names,
+                            trusted_attachment_ids=trusted_attachment_ids,
                         ),
                     )
-                # RAG debug: summary of context retrieved (what the model got per file)
+                    sources = retrieval_result.sources
+                    authorized_scope = retrieval_result.authorized_scope
+                    excluded_sources = getattr(retrieval_result, "excluded_sources", [])
+                    model_space = getattr(retrieval_result, "model_space", None)
+                except Exception as error:
+                    log.error(
+                        "Embedding service failed for RAG query | error_type=%s",
+                        type(error).__name__,
+                    )
+                    raise
                 total_chunks = 0
-                summary_parts = []
                 for s in sources:
                     doc_list = s.get("document") if isinstance(s.get("document"), list) else []
-                    chunk_count = len(doc_list)
-                    total_chunks += chunk_count
-                    src = s.get("source") or {}
-                    sid = src.get("id", "")
-                    sname = src.get("name") or src.get("filename") or sid
-                    summary_parts.append(f"file_id={sid} name={sname} chunks={chunk_count}")
+                    total_chunks += len(doc_list)
                 log.info(
-                    f"[RAG Context Summary] total_chunks={total_chunks} | sources_count={len(sources)} | per_source: {' | '.join(summary_parts)}"
+                    "[RAG Context Summary] total_chunks=%s | sources_count=%s",
+                    total_chunks,
+                    len(sources),
                 )
-        except Exception as e:
-            log.exception(e)
+        except EmbeddingError as error:
+            log.warning("[RAG Chat] retrieval blocked | code=%s", error.code)
+            raise retrieval_error(error) from None
+        except HTTPException:
+            raise
+        except Exception as error:
+            log.exception(
+                "RAG retrieval failed | error_type=%s", type(error).__name__
+            )
+            raise evidence_error(
+                503,
+                "retrieval_unavailable",
+                "The source retrieval service failed. Please retry your message.",
+                retryable=True,
+            ) from None
 
-        log.debug(f"rag_contexts:sources: {sources}")
+        log.debug("RAG contexts ready | sources_count=%s", len(sources))
 
-    return body, {"sources": sources}
+    return body, {
+        "sources": sources,
+        "authorized_scope": authorized_scope,
+        "excluded_sources": excluded_sources,
+        "model_space": model_space,
+    }
 
 
 def apply_params_to_form_data(form_data, model):
@@ -744,7 +742,7 @@ async def process_chat_payload(request, form_data, metadata, user, model):
         f"model_id={model.get('id')}, chat_id={metadata.get('chat_id')}, session_id={metadata.get('session_id')}."
     )
     form_data = apply_params_to_form_data(form_data, model)
-    log.debug(f"form_data: {form_data}")
+    log.debug("Chat form parameters applied")
 
     log.debug(
         f"[DEBUG] [WS-CHAT 4] [inside process_chat_payload() from middleware.py] metadata before get_event_emitter: "
@@ -767,6 +765,11 @@ async def process_chat_payload(request, form_data, metadata, user, model):
         "__model__": model,
     }
 
+    # Client-provided media parts are not authorized retrieval results. Remove
+    # them before any inlet/tool/model processing; the retrieval stage below is
+    # the sole path allowed to append server-reconstructed media bytes.
+    _strip_untrusted_media_parts(form_data.get("messages", []))
+
     # Initialize events to store additional event to be sent to the client
     # Initialize contexts and citation
     if getattr(request.state, "direct", False) and hasattr(request.state, "model"):
@@ -785,6 +788,9 @@ async def process_chat_payload(request, form_data, metadata, user, model):
 
     events = []
     sources = []
+    authorized_scope = AuthorizedAttachmentScope(frozenset(), frozenset())
+    trusted_attachment_ids: set[int] = set()
+    trusted_legacy_collection_names: set[str] = set()
 
     user_message = get_last_user_message(form_data["messages"])
     model_knowledge = model.get("info", {}).get("meta", {}).get("knowledge", False)
@@ -804,24 +810,35 @@ async def process_chat_payload(request, form_data, metadata, user, model):
         knowledge_files = []
         for item in model_knowledge:
             if item.get("collection_name"):
-                knowledge_files.append(
-                    {
-                        "id": item.get("collection_name"),
-                        "name": item.get("name"),
-                        "legacy": True,
-                    }
-                )
+                collection_name = str(item.get("collection_name"))
+                trusted_legacy_collection_names.add(collection_name)
+                trusted_item = {
+                    "name": item.get("name"),
+                    "type": "collection",
+                    "collection_names": [collection_name],
+                    "legacy": True,
+                }
+                knowledge_files.append(trusted_item)
+                trusted_attachment_ids.add(id(trusted_item))
             elif item.get("collection_names"):
-                knowledge_files.append(
-                    {
-                        "name": item.get("name"),
-                        "type": "collection",
-                        "collection_names": item.get("collection_names"),
-                        "legacy": True,
-                    }
-                )
+                collection_names = [
+                    str(value)
+                    for value in item.get("collection_names")
+                    if value
+                ]
+                trusted_legacy_collection_names.update(collection_names)
+                trusted_item = {
+                    "name": item.get("name"),
+                    "type": "collection",
+                    "collection_names": collection_names,
+                    "legacy": True,
+                }
+                knowledge_files.append(trusted_item)
+                trusted_attachment_ids.add(id(trusted_item))
             else:
-                knowledge_files.append(item)
+                trusted_item = dict(item)
+                knowledge_files.append(trusted_item)
+                trusted_attachment_ids.add(id(trusted_item))
 
         files = form_data.get("files", [])
         files.extend(knowledge_files)
@@ -853,8 +870,18 @@ async def process_chat_payload(request, form_data, metadata, user, model):
     features = form_data.pop("features", None)
     if features:
         if "web_search" in features and features["web_search"]:
+            existing_attachment_ids = {
+                id(item)
+                for item in (form_data.get("files") or [])
+                if isinstance(item, dict)
+            }
             form_data = await chat_web_search_handler(
                 request, form_data, extra_params, user
+            )
+            trusted_attachment_ids.update(
+                id(item)
+                for item in (form_data.get("files") or [])
+                if isinstance(item, dict) and id(item) not in existing_attachment_ids
             )
 
         if "image_generation" in features and features["image_generation"]:
@@ -902,7 +929,7 @@ async def process_chat_payload(request, form_data, metadata, user, model):
                 "__files__": metadata.get("files", []),
             },
         )
-        log.info(f"{tools=}")
+        log.info("Resolved chat tools | count=%s", len(tools))
 
         if metadata.get("function_calling") == "native":
             # If the function calling is native, then call the tools function calling handler
@@ -922,22 +949,212 @@ async def process_chat_payload(request, form_data, metadata, user, model):
             except Exception as e:
                 log.exception(e)
 
+    retrieval_flags = {}
     if not model["id"].startswith("customrag"):
-        # if True:
-        try:
-            form_data, flags = await chat_completion_files_handler(
-                request, form_data, user
-            )
-            sources.extend(flags.get("sources", []))
-            s1 = f"{model}"
-            log.info(f"Working within inbuilt RAG: {s1}")
-            # Debug log for task model (may be None if user doesn't have access to Gemini Flash Lite)
-            if task_model_id and task_model_id in models:
-                log.debug(f"Task model: {models[task_model_id]}")
-        except Exception as e:
-            log.exception(e)
+        form_data, retrieval_flags = await chat_completion_files_handler(
+            request,
+            form_data,
+            user,
+            trusted_legacy_collection_names=trusted_legacy_collection_names,
+            trusted_attachment_ids=trusted_attachment_ids,
+        )
+        sources.extend(retrieval_flags.get("sources", []))
+        authorized_scope = retrieval_flags.get("authorized_scope", authorized_scope)
+        log.info("Working within inbuilt RAG")
     else:
         log.info("Using Custom RAG")
+
+    retrieved_sources = sources
+    vision_capability = model_vision_capability(model)
+    # Unknown capability is handled optimistically: let the selected model
+    # decide whether it can consume reconstructed visual evidence.
+    vision_enabled = vision_capability is not False
+    audio_input_format = model_audio_input_format(model)
+    has_media_hits = any(
+        isinstance(item, dict) and item.get("modality") in {"image", "video", "audio"}
+        for source in retrieved_sources
+        if isinstance(source, dict)
+        for item in (source.get("metadata") or [])
+    )
+    try:
+        if has_media_hits:
+            reconstruction = (
+                await request.app.state.reconstruction_executor.reconstruct(
+                    retrieved_sources,
+                    request=request,
+                    authorized_scope=authorized_scope,
+                    vision_enabled=vision_enabled,
+                    audio_input_format=audio_input_format,
+                    limit=max(0, int(request.app.state.config.TOP_K.get(user.email))),
+                    audio_limit=request.app.state.config.RAG_AUDIO_MAX_CLIPS.get(user.email),
+                )
+            )
+        else:
+            reconstruction = ReconstructionResult(
+                [],
+                sanitize_text_sources(
+                    retrieved_sources, authorized_scope=authorized_scope
+                ),
+                [],
+            )
+    except Exception as reconstruction_error:
+        log.warning(
+            "Retrieved media reconstruction failed (%s)",
+            type(reconstruction_error).__name__,
+        )
+        timed_out = isinstance(reconstruction_error, ReconstructionTimeout)
+        partial = getattr(reconstruction_error, "partial_result", None)
+        unavailable = (
+            [
+                {
+                    **item,
+                    "reason": (
+                        "reconstruction_timeout"
+                        if timed_out
+                        and item.get("reason") == "media_reconstruction_failed"
+                        else item.get("reason")
+                    ),
+                }
+                for item in partial.unavailable_evidence
+            ]
+            if partial
+            else [
+                {
+                    "reason": (
+                        "reconstruction_timeout"
+                        if timed_out
+                        else "media_reconstruction_failed"
+                    ),
+                    "name": "Retrieved media",
+                }
+            ]
+        )
+        reconstruction = ReconstructionResult(
+            partial.content_parts if partial else [],
+            (
+                partial.sources
+                if partial
+                else sanitize_text_sources(
+                    retrieved_sources, authorized_scope=authorized_scope
+                )
+            ),
+            unavailable,
+            timed_out=timed_out,
+        )
+    reconstructed_parts = reconstruction.content_parts
+    sources = reconstruction.sources
+    omissions = [
+        *retrieval_flags.get("excluded_sources", []),
+        *reconstruction.unavailable_evidence,
+    ]
+    if not reconstruction.has_usable_evidence and omissions:
+        reasons = {item.get("reason") or item.get("error_code") for item in omissions}
+        if reconstruction.timed_out:
+            raise evidence_error(
+                504,
+                "reconstruction_timeout",
+                "Preparing the requested media exceeded the time limit. Retry with fewer sources or shorter video segments.",
+                retryable=True,
+            )
+        if reasons.intersection({"source_changed", "embedding_reindex_not_ready"}):
+            raise evidence_error(
+                409,
+                "embedding_reindex_source_changed",
+                "A requested source changed or is not ready. Wait for indexing or retry the affected files, then send your message again.",
+                retryable=True,
+            )
+        if reasons <= {"answer_model_unsupported", "evidence_limit"}:
+            raise evidence_error(
+                422,
+                "answer_model_evidence_unsupported",
+                "The selected answer model cannot consume the requested evidence. Choose a model supporting the required image, video, or audio input.",
+                retryable=False,
+            )
+        raise evidence_error(
+            503,
+            "requested_evidence_unavailable",
+            "The requested evidence could not be prepared. Retry your message, or reindex the affected files if the problem continues.",
+            retryable=True,
+        )
+    if omissions:
+        reason_labels = {
+            "answer_model_unsupported": "unsupported by the answer model",
+            "reconstruction_timeout": "preparation timed out",
+            "media_reconstruction_failed": "media preparation failed",
+            "source_changed": "source changed",
+            "evidence_limit": "attachment limit",
+            "embedding_reindex_not_ready": "not indexed yet",
+            "embedding_retrieval_failed": "retrieval failed",
+        }
+        names = []
+        for item in omissions:
+            name = str(
+                item.get("name")
+                or item.get("file_id")
+                or item.get("source_id")
+                or "source"
+            )
+            modality = item.get("modality")
+            reason = reason_labels.get(
+                item.get("reason") or item.get("error_code"), "unavailable"
+            )
+            description = f"{name} ({modality + ': ' if modality else ''}{reason})"
+            if description not in names:
+                names.append(description)
+        warning = {
+            "error_code": "partial_evidence",
+            "message": "Some requested evidence was omitted: "
+            + ", ".join(names[:20])
+            + ". The answer uses only the available evidence.",
+            "omitted_sources": omissions,
+        }
+        events.append({"warnings": [warning]})
+        await event_emitter(
+            {
+                "type": "status",
+                "data": {
+                    "description": warning["message"],
+                    "done": True,
+                    "warnings": [warning],
+                },
+            }
+        )
+        form_data["messages"] = add_or_update_system_message(
+            "Some requested sources or media could not be supplied. Base the answer only on the attached media and supplied source text; state the evidence limitations and do not infer missing audio from timestamps.",
+            form_data["messages"],
+        )
+    if (
+        metadata.get("files")
+        and retrieval_flags
+        and not reconstruction.has_usable_evidence
+    ):
+        metadata["retrieval_no_match"] = True
+    # Media reads can take time; fence the result again before invoking the model.
+    request.state.retrieval_model_space = retrieval_flags.get("model_space")
+    if retrieval_flags.get("model_space") is not None:
+        from open_webui.retrieval.embedding.gate import (
+            assert_retrieval_generation_current,
+        )
+
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                _RAG_EXECUTOR,
+                assert_retrieval_generation_current,
+                retrieval_flags["model_space"],
+            )
+        except EmbeddingError as error:
+            raise retrieval_error(error) from None
+        except Exception:
+            raise evidence_error(
+                503,
+                "retrieval_unavailable",
+                "The current index could not be verified. Please retry your message.",
+                retryable=True,
+            ) from None
+    if reconstructed_parts:
+        _append_reconstructed_parts_to_latest_user_message(
+            form_data["messages"], reconstructed_parts
+        )
 
     # If context is not empty, insert it into the messages
     if len(sources) > 0:
@@ -945,7 +1162,8 @@ async def process_chat_payload(request, form_data, metadata, user, model):
         for source_idx, source in enumerate(sources):
             if "document" in source:
                 for doc_idx, doc_context in enumerate(source["document"]):
-                    context_string += f"<source><source_id>{source_idx}</source_id><source_context>{doc_context}</source_context></source>\n"
+                    if isinstance(doc_context, str) and doc_context.strip():
+                        context_string += f"<source><source_id>{source_idx}</source_id><source_context>{doc_context}</source_context></source>\n"
 
         context_string = context_string.strip()
         prompt = get_last_user_message(form_data["messages"])
@@ -962,7 +1180,9 @@ async def process_chat_payload(request, form_data, metadata, user, model):
 
         # Workaround for Ollama 2.0+ system prompt issue
         # TODO: replace with add_or_update_system_message
-        if model.get("owned_by") == "ollama":
+        if not context_string:
+            pass
+        elif model.get("owned_by") == "ollama":
             form_data["messages"] = prepend_to_first_user_message_content(
                 rag_template(
                     request.app.state.config.RAG_TEMPLATE.get(user.email), context_string, prompt
@@ -999,6 +1219,76 @@ async def process_chat_payload(request, form_data, metadata, user, model):
     return form_data, metadata, events
 
 
+def _append_reconstructed_parts_to_latest_user_message(
+    messages: list[dict], reconstructed_parts: list[dict]
+) -> None:
+    """Attach only transient, server-reconstructed evidence to the latest user turn.
+
+    Browser/API callers are not an authority for answer-model media bytes. Drop
+    any pre-existing non-text parts before adding images, timestamped video
+    frames, and audio reconstructed from the server-authorized retrieval scope.
+    """
+    message = get_last_user_message_item(messages)
+    if message is None:
+        return
+    content = message.get("content", "")
+    if isinstance(content, str):
+        parts = [{"type": "text", "text": content}]
+    elif isinstance(content, list):
+        parts = [
+            dict(part)
+            for part in content
+            if isinstance(part, dict)
+            and part.get("type") == "text"
+            and isinstance(part.get("text"), str)
+        ]
+    else:
+        return
+    parts.extend(reconstructed_parts)
+    message["content"] = parts
+
+
+async def _assert_chat_generation_current(request) -> None:
+    space = getattr(request.state, "retrieval_model_space", None)
+    if space is None:
+        return
+    from open_webui.retrieval.embedding.gate import assert_retrieval_generation_current
+
+    try:
+        await asyncio.get_running_loop().run_in_executor(
+            _RAG_EXECUTOR, assert_retrieval_generation_current, space
+        )
+    except EmbeddingError as error:
+        raise retrieval_error(error) from None
+    except Exception:
+        raise evidence_error(
+            503,
+            "retrieval_unavailable",
+            "The current index could not be verified. Please retry your message.",
+            retryable=True,
+        ) from None
+
+
+def _strip_untrusted_media_parts(messages: list[dict]) -> None:
+    """Remove caller-supplied media parts from every chat turn in place."""
+    if not isinstance(messages, list):
+        return
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        text_parts = [
+            dict(part)
+            for part in content
+            if isinstance(part, dict)
+            and part.get("type") == "text"
+            and isinstance(part.get("text"), str)
+        ]
+        message["content"] = text_parts
+
+
 async def process_chat_response(
     request, response, form_data, user, events, metadata, tasks
 ):
@@ -1019,12 +1309,12 @@ async def process_chat_response(
                 # Get available models and find Gemini Flash Lite before running tasks
                 models = await get_models_for_user(request, user)
                 task_model_id = find_gemini_flash_lite_model(models)
-                
+
                 # If Gemini Flash Lite is not available, skip all background tasks
                 if not task_model_id:
                     log.debug(f"Gemini Flash Lite not available for user {user.email}, skipping background tasks")
                     return  # Exit early, don't run any tasks
-                
+
                 if TASKS.TITLE_GENERATION in tasks:
                     if tasks[TASKS.TITLE_GENERATION]:
                         res = await generate_title(
@@ -1146,6 +1436,9 @@ async def process_chat_response(
 
     # Non-streaming response
     if not isinstance(response, StreamingResponse):
+        for event in events:
+            if isinstance(event, dict):
+                response.update(event)
         if event_emitter:
             if "selected_model_id" in response:
                 Chats.upsert_message_to_chat_by_id_and_message_id(
@@ -1794,6 +2087,8 @@ async def process_chat_response(
                                         "data": data,
                                     }
                                 )
+                        except (HTTPException, EmbeddingError):
+                            raise
                         except Exception as e:
                             done = "data: [DONE]" in line
                             if done:
@@ -1916,6 +2211,7 @@ async def process_chat_response(
                     )
 
                     try:
+                        await _assert_chat_generation_current(request)
                         res = await generate_chat_completion(
                             request,
                             {
@@ -1934,6 +2230,8 @@ async def process_chat_response(
                             await stream_body_handler(res)
                         else:
                             break
+                    except (HTTPException, EmbeddingError):
+                        raise
                     except Exception as e:
                         log.debug(e)
                         break
@@ -2098,6 +2396,7 @@ async def process_chat_response(
                         )
 
                         try:
+                            await _assert_chat_generation_current(request)
                             res = await generate_chat_completion(
                                 request,
                                 {
@@ -2120,6 +2419,8 @@ async def process_chat_response(
                                 await stream_body_handler(res)
                             else:
                                 break
+                        except (HTTPException, EmbeddingError):
+                            raise
                         except Exception as e:
                             log.debug(e)
                             break
@@ -2179,8 +2480,26 @@ async def process_chat_response(
                         },
                     )
 
-            if response.background is not None:
-                await response.background()
+            except Exception as error:
+                envelope = safe_stream_error(error)
+                Chats.upsert_message_to_chat_by_id_and_message_id(
+                    metadata["chat_id"],
+                    metadata["message_id"],
+                    {
+                        "error": {"content": envelope["message"], **envelope},
+                        "done": True,
+                    },
+                )
+                await event_emitter(
+                    {
+                        "type": "chat:completion",
+                        "data": {"error": envelope, "done": True},
+                    }
+                )
+                raise RuntimeError(envelope["message"]) from None
+            finally:
+                if response.background is not None:
+                    await response.background()
 
         # background_tasks.add_task(post_response_handler, response, events)
         task_id, _ = create_task(post_response_handler(response, events))
@@ -2204,17 +2523,23 @@ async def process_chat_response(
                 if event:
                     yield wrap_item(json.dumps(event))
 
-            async for data in original_generator:
-                data, _ = await process_filter_functions(
-                    request=request,
-                    filter_ids=filter_ids,
-                    filter_type="stream",
-                    form_data=data,
-                    extra_params=extra_params,
-                )
+            try:
+                async for data in original_generator:
+                    data, _ = await process_filter_functions(
+                        request=request,
+                        filter_ids=filter_ids,
+                        filter_type="stream",
+                        form_data=data,
+                        extra_params=extra_params,
+                    )
 
-                if data:
-                    yield data
+                    if data:
+                        yield data
+            except Exception as error:
+                yield wrap_item(
+                    json.dumps({"error": safe_stream_error(error), "done": True})
+                )
+                yield wrap_item("[DONE]")
 
         return StreamingResponse(
             stream_wrapper(response.body_iterator, events),

@@ -2,6 +2,7 @@ import asyncio
 import json
 import time
 import logging
+import re
 import sys
 import threading
 from contextlib import nullcontext
@@ -21,6 +22,11 @@ from open_webui.models.models import Models
 
 from open_webui.utils.plugin import load_function_module_by_id
 from open_webui.utils.access_control import has_access
+from open_webui.utils.multimodal import (
+    AUDIO_INPUT_FORMAT_GEMINI_DATA_URL,
+    AUDIO_INPUT_FORMAT_OPENAI,
+    SUPPORTED_AUDIO_INPUT_FORMATS,
+)
 
 
 from open_webui.config import (
@@ -136,6 +142,234 @@ def get_affected_user_ids_for_model(model) -> list:
 logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["MAIN"])
+
+
+_OPENAI_GPT_4O_VISION_PATTERN = re.compile(
+    r"(?:^|[./@])gpt-4o(?:-mini)?(?:$|[-./@])",
+    re.IGNORECASE,
+)
+_OPENAI_NON_VISION_VARIANTS = (
+    "-audio",
+    "-realtime",
+    "-transcribe",
+    "-tts",
+)
+_GEMINI_MODEL_PATTERN = re.compile(
+    r"(?:^|[./@])gemini(?:$|[-./@])",
+    re.IGNORECASE,
+)
+_GEMINI_AUDIO_INFERENCE_PATTERN = re.compile(
+    r"(?:^|[./@])gemini[-_.]?(?:1[.-]?5|[2-9])(?:$|[-./@0-9])",
+    re.IGNORECASE,
+)
+_OPENAI_CHAT_AUDIO_MODEL_PATTERN = re.compile(
+    r"(?:^|[./@])(?:"
+    r"gpt-audio(?:-1[._]5|-mini)?|"
+    r"gpt-4o(?:-mini)?-audio-preview"
+    r")(?:-\d{4}-\d{2}-\d{2})?(?:$|[./@])",
+    re.IGNORECASE,
+)
+_OPENAI_PROVIDER_PATTERN = re.compile(
+    r"(?:^|[./])@?openai(?:$|[-./@])",
+    re.IGNORECASE,
+)
+
+
+def model_vision_capability(model: dict) -> bool | None:
+    """Resolve declared answer-model vision support and known model IDs.
+
+    Known OpenAI audio-only model identifiers cannot receive reconstructed
+    frames. Otherwise, explicit metadata is authoritative across API, workspace,
+    and direct model shapes. ``None`` means the capability is unknown.
+    """
+    if not isinstance(model, dict):
+        return None
+
+    info = model.get("info") if isinstance(model.get("info"), dict) else {}
+    identifiers = (
+        model.get("id"),
+        model.get("base_model_id"),
+        info.get("base_model_id"),
+    )
+    normalized_identifiers = tuple(
+        str(identifier or "").strip().lower()
+        for identifier in identifiers
+        if str(identifier or "").strip()
+    )
+    if any(
+        _OPENAI_CHAT_AUDIO_MODEL_PATTERN.search(identifier)
+        for identifier in normalized_identifiers
+    ):
+        return False
+
+    capability_sources = []
+    for container in (info, model):
+        if not isinstance(container, dict):
+            continue
+        meta = container.get("meta")
+        if isinstance(meta, dict):
+            capabilities = meta.get("capabilities")
+            if isinstance(capabilities, dict):
+                capability_sources.append(capabilities)
+        capabilities = container.get("capabilities")
+        if isinstance(capabilities, dict):
+            capability_sources.append(capabilities)
+
+    for capabilities in capability_sources:
+        explicit_vision = capabilities.get("vision")
+        if isinstance(explicit_vision, bool):
+            return explicit_vision
+
+    for normalized in normalized_identifiers:
+        if any(
+            variant in normalized for variant in _OPENAI_NON_VISION_VARIANTS
+        ):
+            continue
+        if _OPENAI_GPT_4O_VISION_PATTERN.search(normalized):
+            return True
+    return None
+
+
+def model_supports_vision(model: dict) -> bool:
+    """Return whether vision support is explicitly known or inferred."""
+    return model_vision_capability(model) is True
+
+
+def _resolve_model_audio_input(model: dict) -> tuple[bool | None, str | None]:
+    if not isinstance(model, dict):
+        return None, None
+
+    info = model.get("info") if isinstance(model.get("info"), dict) else {}
+    explicit_audio = None
+    explicit_input_format = None
+    for container in (info, model):
+        if not isinstance(container, dict):
+            continue
+        capability_sources = []
+        meta = container.get("meta")
+        if isinstance(meta, dict):
+            if isinstance(meta.get("capabilities"), dict):
+                capability_sources.append(meta["capabilities"])
+            declared_format = meta.get("audio_input_format")
+            if (
+                explicit_input_format is None
+                and isinstance(declared_format, str)
+                and declared_format in SUPPORTED_AUDIO_INPUT_FORMATS
+            ):
+                explicit_input_format = declared_format
+        if isinstance(container.get("capabilities"), dict):
+            capability_sources.append(container["capabilities"])
+        declared_format = container.get("audio_input_format")
+        if (
+            explicit_input_format is None
+            and isinstance(declared_format, str)
+            and declared_format in SUPPORTED_AUDIO_INPUT_FORMATS
+        ):
+            explicit_input_format = declared_format
+        for capabilities in capability_sources:
+            declared = capabilities.get("audio")
+            if explicit_audio is None and isinstance(declared, bool):
+                explicit_audio = declared
+
+    identifiers = (
+        model.get("id"),
+        model.get("base_model_id"),
+        info.get("base_model_id"),
+    )
+    normalized_identifiers = tuple(
+        str(identifier or "").strip().lower()
+        for identifier in identifiers
+        if str(identifier or "").strip()
+    )
+    if explicit_audio is False or any(
+        "embedding" in identifier for identifier in normalized_identifiers
+    ):
+        return False, None
+    if explicit_input_format is not None:
+        return True, explicit_input_format
+
+    if any(
+        _OPENAI_CHAT_AUDIO_MODEL_PATTERN.search(identifier)
+        for identifier in normalized_identifiers
+    ):
+        return True, AUDIO_INPUT_FORMAT_OPENAI
+
+    gemini_identifiers = tuple(
+        identifier
+        for identifier in normalized_identifiers
+        if _GEMINI_MODEL_PATTERN.search(identifier) and "embedding" not in identifier
+    )
+    if gemini_identifiers:
+        if explicit_audio is True or any(
+            _GEMINI_AUDIO_INFERENCE_PATTERN.search(identifier)
+            for identifier in gemini_identifiers
+        ):
+            return True, AUDIO_INPUT_FORMAT_GEMINI_DATA_URL
+        return None, None
+
+    if any(
+        _OPENAI_GPT_4O_VISION_PATTERN.search(identifier)
+        for identifier in normalized_identifiers
+    ):
+        return False, None
+
+    if explicit_audio is True and any(
+        _OPENAI_PROVIDER_PATTERN.search(identifier)
+        for identifier in normalized_identifiers
+    ):
+        return True, AUDIO_INPUT_FORMAT_OPENAI
+    return None, None
+
+
+def model_audio_capability(model: dict) -> bool | None:
+    """Resolve safe answer-model support for transient WAV evidence.
+
+    Known Gemini audio models use Portkey's media data-URL contract. Known
+    OpenAI Chat Completions audio models use native ``input_audio`` parts.
+    Plain GPT-4o and GPT-4o Mini are known not to accept audio. ``None`` means
+    either model support or the required request format is unknown.
+    """
+
+    capability, _ = _resolve_model_audio_input(model)
+    return capability
+
+
+def model_audio_input_format(model: dict) -> str | None:
+    """Return the selected model's safe transient WAV request format."""
+
+    _, input_format = _resolve_model_audio_input(model)
+    return input_format
+
+
+def model_supports_audio(model: dict) -> bool:
+    """Return whether audio input support is declared or safely inferred."""
+
+    return model_audio_capability(model) is True
+
+
+def _add_inferred_model_capabilities(model: dict) -> None:
+    """Expose inferred capabilities to both the API response and chat cache."""
+    inferred_capabilities = {}
+    if model_supports_vision(model):
+        inferred_capabilities["vision"] = True
+    if model_supports_audio(model):
+        inferred_capabilities["audio"] = True
+    if not inferred_capabilities:
+        return
+    info = model.get("info")
+    if not isinstance(info, dict):
+        info = {}
+        model["info"] = info
+    meta = info.get("meta")
+    if not isinstance(meta, dict):
+        meta = {}
+        info["meta"] = meta
+    capabilities = meta.get("capabilities")
+    if not isinstance(capabilities, dict):
+        capabilities = {}
+        meta["capabilities"] = capabilities
+    for capability, supported in inferred_capabilities.items():
+        capabilities.setdefault(capability, supported)
 
 
 async def get_all_base_models(request: Request, user: UserModel = None):
@@ -351,6 +585,7 @@ async def get_all_models(request, user: UserModel = None):
     current_user_email = user.email if user else None
 
     for model in models:
+        _add_inferred_model_capabilities(model)
         action_ids = [
             action_id
             for action_id in list(set(model.pop("action_ids", []) + global_action_ids))

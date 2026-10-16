@@ -56,26 +56,34 @@ class CacheManager:
         """
         self.redis_url = redis_url
         self.use_master = use_master
-        self.pool = get_redis_pool(redis_url, use_master=use_master)
-        
-        # Handle Sentinel connection wrapper
-        if hasattr(self.pool, '_conn'):
-            self.redis = self.pool._conn
-        elif hasattr(self.pool, 'get_connection'):
-            # For Sentinel connections, get the appropriate connection
-            from open_webui.socket.utils import get_redis_master_connection, get_redis_replica_connection
-            if use_master:
-                self.redis = get_redis_master_connection()
-            else:
-                self.redis = get_redis_replica_connection()
-            if self.redis is None:
-                # Fallback to direct connection
-                self.redis = redis.Redis(connection_pool=self.pool)
+        self.pool = None
+        self.redis = None
+
+        # Redis is optional. Leave the cache unavailable when no URL is configured;
+        # callers already fall back to their primary data source on cache misses.
+        if redis_url is None or (isinstance(redis_url, str) and not redis_url.strip()):
+            log.debug("REDIS_URL not configured; Redis cache disabled")
         else:
-            # Standard connection pool
-            self.redis = redis.Redis(connection_pool=self.pool)
+            self.pool = get_redis_pool(redis_url, use_master=use_master)
+
+            # Handle Sentinel connection wrapper
+            if hasattr(self.pool, '_conn'):
+                self.redis = self.pool._conn
+            elif hasattr(self.pool, 'get_connection'):
+                # For Sentinel connections, get the appropriate connection
+                from open_webui.socket.utils import get_redis_master_connection, get_redis_replica_connection
+                if use_master:
+                    self.redis = get_redis_master_connection()
+                else:
+                    self.redis = get_redis_replica_connection()
+                if self.redis is None:
+                    # Fallback to direct connection
+                    self.redis = redis.Redis(connection_pool=self.pool)
+            else:
+                # Standard connection pool
+                self.redis = redis.Redis(connection_pool=self.pool)
         
-        self._redis_available = None  # Cache Redis availability check
+        self._redis_available = None if self.redis is not None else False  # Cache Redis availability check
         self._last_connection_error = None  # Track last connection error to reduce log spam
         self._last_availability_check = 0  # Track when we last checked Redis availability
         self._availability_check_interval = 30  # Refresh availability check every 30 seconds
@@ -85,6 +93,9 @@ class CacheManager:
         
         Refreshes availability check every 30 seconds to detect Redis recovery.
         """
+        if self.redis is None:
+            return False
+
         current_time = time.time()
         
         # Refresh check if enough time has passed or if never checked

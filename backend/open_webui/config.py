@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 import requests
 from pydantic import BaseModel
 from sqlalchemy import JSON, Column, DateTime, Integer, func, Any, String
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm.attributes import flag_modified
 from open_webui.models.groups import (
     Groups)
@@ -111,7 +112,7 @@ def save_to_db(data):
         caller = " <- ".join(call_stack)
 
         existing_config = db.query(Config).filter(
-            Config.email == GLOBAL_CONFIG_EMAIL
+            Config.email == GLOBAL_CONFIG_EMAIL, Config.version == 0
         ).first()
         if not existing_config:
             # Legacy DB may have global config in a row with NULL email
@@ -216,7 +217,7 @@ def get_config():
     """Load global config for CONFIG_DATA. Prefers the global row (system@default)."""
     with get_db() as db:
         config_entry = db.query(Config).filter(
-            Config.email == GLOBAL_CONFIG_EMAIL
+            Config.email == GLOBAL_CONFIG_EMAIL, Config.version == 0
         ).first()
         if not config_entry:
             config_entry = (
@@ -315,6 +316,14 @@ class PersistentConfig(Generic[T]):
 
     def save(self):
         log.info(f"Saving '{self.env_name}' to the database")
+        if self.config_path == "rag.embedding_model":
+            with get_db() as db:
+                enabled = db.execute(
+                    text("SELECT 1 FROM embedding_models WHERE model_name = :model AND status = 'enabled'"),
+                    {"model": self.value},
+                ).first()
+                if not enabled:
+                    raise ValueError("Embedding model must be an enabled registry model.")
         path_parts = self.config_path.split(".")
         sub_config = CONFIG_DATA
         for key in path_parts[:-1]:
@@ -324,6 +333,35 @@ class PersistentConfig(Generic[T]):
         sub_config[path_parts[-1]] = self.value
         save_to_db(CONFIG_DATA)
         self.config_value = self.value
+
+def save_persistent_config_values(
+    updates: dict[str, tuple[PersistentConfig, Any]],
+) -> None:
+    """Persist multiple global settings in one database transaction.
+
+    Update in-memory PersistentConfig values only after the global config row
+    commits successfully. Existing callers that update one setting can keep
+    using PersistentConfig.save().
+    """
+    global CONFIG_DATA
+
+    previous_config = copy.deepcopy(CONFIG_DATA)
+    try:
+        for config_path, (_config_item, value) in updates.items():
+            target = CONFIG_DATA
+            path_parts = config_path.split(".")
+            for key in path_parts[:-1]:
+                target = target.setdefault(key, {})
+            target[path_parts[-1]] = value
+        save_to_db(CONFIG_DATA)
+    except Exception:
+        CONFIG_DATA = previous_config
+        raise
+
+    for config_item, value in updates.values():
+        config_item.value = value
+        config_item.config_value = value
+
 
 class UserScopedConfig:
     def __init__(self, config_path: str, default: Any):
@@ -384,7 +422,7 @@ class UserScopedConfig:
                 group_creator_email = group.created_by
                 if not group_creator_email:
                     continue
-                creator_entry = db.query(Config).filter_by(email=group_creator_email).first()
+                creator_entry = db.query(Config).filter_by(email=group_creator_email, version=0).first()
                 if creator_entry and isinstance(creator_entry.data, dict):
                     data = creator_entry.data
                     final_value = self.default
@@ -434,7 +472,7 @@ class UserScopedConfig:
             return cached_value
 
         with get_db() as db:
-            entry = db.query(Config).filter_by(email=email).first()
+            entry = db.query(Config).filter_by(email=email, version=0).first()
             if entry and isinstance(entry.data, dict):
                 data = entry.data
                 final_value = self.default
@@ -461,7 +499,33 @@ class UserScopedConfig:
         cache.set_user_settings(user.id, self.config_path, self.default)
         return self.default
 
-    def set(self, email: str, value: Any):
+    def _set_in_session(self, db, email: str, value: Any):
+        """Update this setting without committing the caller's transaction."""
+        if self.config_path == "rag.embedding_model_user":
+            enabled = db.execute(
+                text("SELECT 1 FROM embedding_models WHERE model_name = :model AND status = 'enabled'"),
+                {"model": value},
+            ).first()
+            if not enabled:
+                raise ValueError("Embedding model must be an enabled registry model.")
+        entry = db.query(Config).filter_by(email=email, version=0).first()
+        if not entry:
+            entry = Config(email=email, data={}, version=0)
+            db.add(entry)
+
+        data = copy.deepcopy(entry.data) if entry.data else {}
+        current = data
+        parts = self.config_path.split(".")
+        for part in parts[:-1]:
+            if part not in current or not isinstance(current[part], dict):
+                current[part] = {}
+            current = current[part]
+        current[parts[-1]] = value
+        entry.data = data
+        entry.updated_at = datetime.now()
+        flag_modified(entry, "data")
+
+    def set(self, email: str, value: Any, db=None):
         """
         Set a user-scoped configuration value.
         
@@ -502,40 +566,18 @@ class UserScopedConfig:
                 f"config_path={self.config_path}, caller={caller}"
             )
         
-        with get_db() as db:
-            entry = db.query(Config).filter_by(email=email).first()
-            if not entry:
-                entry = Config(email=email, data={})
-                db.add(entry)
+        def persist(session):
+            self._set_in_session(session, email, value)
+            if db is None:
+                session.commit()
 
-            # CRITICAL FIX: Create a deep copy of the data dict to ensure SQLAlchemy
-            # detects the change. In-place modification of JSON columns may not be
-            # tracked properly even with flag_modified in some SQLAlchemy/PostgreSQL cases.
-            old_data = entry.data
-            data = copy.deepcopy(entry.data) if entry.data else {}
-            
-            logging.debug(
-                f"[RBAC_CONFIG_SET] Current DB value for '{email}' before change: {old_data}"
-            )
-            
-            current = data
-            parts = self.config_path.split(".")
-            for part in parts[:-1]:
-                if part not in current or not isinstance(current[part], dict):
-                    current[part] = {}
-                current = current[part]
-            current[parts[-1]] = value
-
-            logging.debug(
-                f"[RBAC_CONFIG_SET] New value being saved for '{email}': "
-                f"config_path={self.config_path}, caller={caller}"
-            )
-
-            # Assign the new dict object (not the same reference)
-            entry.data = data
-            entry.updated_at = datetime.now()
-            flag_modified(entry, "data")
-            db.commit()
+        if db is None:
+            with get_db() as session:
+                persist(session)
+        else:
+            persist(db)
+            # The caller owns commit/rollback and must invalidate caches after commit.
+            return
             
             logging.debug(
                 f"[RBAC_CONFIG_SET] Config saved to DB for '{email}': "
@@ -580,8 +622,42 @@ class UserScopedConfig:
 
 
 
+def invalidate_user_scoped_config_cache(email: str, config_path: str) -> None:
+    """Invalidate caches for a ``UserScopedConfig`` value after a transactional write.
+
+    Call this after the owning database transaction has committed.  Mirrors the
+    cache-update logic at the tail of ``UserScopedConfig.set()`` but is safe to
+    call from any post-commit path (e.g. ``request_model_change``).
+    """
+    from open_webui.utils.cache import get_cache_manager
+    from open_webui.models.users import Users
+    from open_webui.models.groups import Groups
+
+    cache = get_cache_manager()
+    user = Users.get_user_by_email(email)
+    if user is None:
+        return
+
+    is_api_key = "api_key" in config_path or "openai_api_key" in config_path
+
+    cache.invalidate_user_settings(user.id, config_path)
+    cache.set_user_settings(user.id, config_path, None)  # force reload on next read
+    logging.debug(
+        f"[CACHE_INVALIDATE] invalidated {config_path} for admin {email} (ID: {user.id})"
+    )
+
+    groups = Groups.get_groups(email)
+    for group in groups:
+        cache.invalidate_group_admin_config(group.id, config_path)
+        member_count = cache.invalidate_group_member_users(group.id)
+        logging.debug(
+            f"[CACHE_INVALIDATE] invalidated {config_path} for {member_count} member(s) "
+            f"of group {group.id} (admin {email})"
+        )
+
+
 class AppConfig:
-    _state: dict[str, PersistentConfig | UserScopedConfig ]
+    _state: dict[str, PersistentConfig | UserScopedConfig]
 
     def __init__(self):
         super().__setattr__("_state", {})
@@ -599,7 +675,12 @@ class AppConfig:
                 raise TypeError("Use .set(email, value) to update UserScopedConfig.")
             
     def __getattr__(self, key):
-        config_obj = self._state[key]
+        try:
+            config_obj = self._state[key]
+        except KeyError:
+            # Follow Python's attribute protocol so callers using
+            # ``getattr(config, name, default)`` receive their fallback.
+            raise AttributeError(key) from None
         if isinstance(config_obj, PersistentConfig):
             return config_obj.value
         return config_obj
@@ -1953,11 +2034,35 @@ OPENSEARCH_USERNAME = os.environ.get("OPENSEARCH_USERNAME", None)
 OPENSEARCH_PASSWORD = os.environ.get("OPENSEARCH_PASSWORD", None)
 
 # Pgvector
-PGVECTOR_DB_URL = os.environ.get("PGVECTOR_DB_URL", DATABASE_URL)
-if VECTOR_DB == "pgvector" and not PGVECTOR_DB_URL.startswith("postgres"):
+PGVECTOR_DB_URL = os.environ.get("PGVECTOR_DB_URL")
+if VECTOR_DB == "pgvector" and not (PGVECTOR_DB_URL or DATABASE_URL).startswith("postgres"):
     raise ValueError(
         "Pgvector requires setting PGVECTOR_DB_URL or using Postgres with vector extension as the primary database."
     )
+if VECTOR_DB == "pgvector" and PGVECTOR_DB_URL:
+    primary_url = make_url(DATABASE_URL)
+    vector_url = make_url(PGVECTOR_DB_URL)
+
+    def _canonical_postgres_target(url):
+        drivername = (
+            "postgresql" if url.drivername.startswith("postgresql") else url.drivername
+        )
+        return (
+            drivername,
+            url.username,
+            url.password,
+            url.host,
+            url.port or (5432 if drivername == "postgresql" else None),
+            url.database,
+            tuple(sorted(url.query.items())),
+        )
+
+    if _canonical_postgres_target(primary_url) != _canonical_postgres_target(
+        vector_url
+    ):
+        raise ValueError(
+            "PGVECTOR_DB_URL must be unset or target the same database as DATABASE_URL."
+        )
 PGVECTOR_INITIALIZE_MAX_VECTOR_LENGTH = int(
     os.environ.get("PGVECTOR_INITIALIZE_MAX_VECTOR_LENGTH", "1536")
 )
@@ -2031,6 +2136,11 @@ BYPASS_EMBEDDING_AND_RETRIEVAL = PersistentConfig(
 )
 RAG_TOP_K = UserScopedConfig( "rag.top_k", int(os.environ.get("RAG_TOP_K", "10")))
 
+# Answer-time audio selection does not change the indexed preparation recipe.
+RAG_AUDIO_MAX_CLIPS = UserScopedConfig(
+    "rag.audio_max_clips", max(1, int(os.environ.get("RAG_AUDIO_MAX_CLIPS", "4")))
+)
+
 # RAG_TOP_K = PersistentConfig(
 #     "RAG_TOP_K", "rag.top_k", int(os.environ.get("RAG_TOP_K", "3"))
 #)
@@ -2088,6 +2198,41 @@ RAG_EMBEDDING_ENGINE = PersistentConfig(
     os.environ.get("RAG_EMBEDDING_ENGINE", "portkey"),
 )
 
+# Operational reliability is deliberately stored outside the preparation recipe.
+# Updating these values affects only newly dispatched work and never requests a
+# reindex of already prepared content.
+RAG_EMBEDDING_MAX_ATTEMPTS = PersistentConfig(
+    "RAG_EMBEDDING_MAX_ATTEMPTS",
+    "rag.embedding_reliability.max_attempts",
+    int(os.environ.get("RAG_EMBEDDING_MAX_ATTEMPTS", "3")),
+)
+
+RAG_EMBEDDING_CONNECTION_TIMEOUT = PersistentConfig(
+    "RAG_EMBEDDING_CONNECTION_TIMEOUT",
+    "rag.embedding_reliability.connection_timeout_seconds",
+    int(os.environ.get("RAG_EMBEDDING_CONNECTION_TIMEOUT", "10")),
+)
+
+RAG_EMBEDDING_READ_TIMEOUT = PersistentConfig(
+    "RAG_EMBEDDING_READ_TIMEOUT",
+    "rag.embedding_reliability.read_timeout_seconds",
+    int(os.environ.get("RAG_EMBEDDING_READ_TIMEOUT", "120")),
+)
+
+# Internal guardrails for adaptive audio splitting. These are intentionally not
+# part of the administrator-facing reliability controls.
+RAG_EMBEDDING_AUDIO_SPLIT_MAX_DEPTH = PersistentConfig(
+    "RAG_EMBEDDING_AUDIO_SPLIT_MAX_DEPTH",
+    "rag.embedding_reliability.audio_split_max_depth",
+    int(os.environ.get("RAG_EMBEDDING_AUDIO_SPLIT_MAX_DEPTH", "2")),
+)
+
+RAG_EMBEDDING_AUDIO_SPLIT_MIN_DURATION = PersistentConfig(
+    "RAG_EMBEDDING_AUDIO_SPLIT_MIN_DURATION",
+    "rag.embedding_reliability.audio_split_min_duration_seconds",
+    int(os.environ.get("RAG_EMBEDDING_AUDIO_SPLIT_MIN_DURATION", "5")),
+)
+
 # PDF_EXTRACT_IMAGES: Extract images from PDFs during processing
 # WARNING: Setting this to True can cause significant slowdowns (2+ minutes) or hangs
 # on PDFs with many images. PyPDFLoader's image extraction is CPU-intensive and can deadlock.
@@ -2096,6 +2241,52 @@ PDF_EXTRACT_IMAGES = PersistentConfig(
     "PDF_EXTRACT_IMAGES",
     "rag.pdf_extract_images",
     os.environ.get("PDF_EXTRACT_IMAGES", "False").lower() == "true",
+)
+
+# Complex PDF parsing owns visual extraction. PyPDFLoader image extraction remains
+# disabled so there is only one deterministic path for PDF images and table crops.
+RAG_PDF_COMPLEX_PARSER_ENABLED = PersistentConfig(
+    "RAG_PDF_COMPLEX_PARSER_ENABLED",
+    "rag.pdf_complex_parser_enabled",
+    os.environ.get("RAG_PDF_COMPLEX_PARSER_ENABLED", "True").lower() == "true",
+)
+
+RAG_PDF_MAX_VISUALS_PER_PAGE = PersistentConfig(
+    "RAG_PDF_MAX_VISUALS_PER_PAGE",
+    "rag.pdf_max_visuals_per_page",
+    int(os.environ.get("RAG_PDF_MAX_VISUALS_PER_PAGE", "6")),
+)
+
+RAG_PDF_MAX_VISUALS_PER_DOCUMENT = PersistentConfig(
+    "RAG_PDF_MAX_VISUALS_PER_DOCUMENT",
+    "rag.pdf_max_visuals_per_document",
+    int(os.environ.get("RAG_PDF_MAX_VISUALS_PER_DOCUMENT", "80")),
+)
+
+# Video upload and processing settings
+RAG_VIDEO_MAX_FILE_SIZE_MB = PersistentConfig(
+    "RAG_VIDEO_MAX_FILE_SIZE_MB",
+    "rag.video.max_file_size_mb",
+    int(os.environ.get("RAG_VIDEO_MAX_FILE_SIZE_MB", "20")),
+)
+
+# Video embedding chunking
+RAG_VIDEO_CHUNK_DURATION = PersistentConfig(
+    "RAG_VIDEO_CHUNK_DURATION",
+    "rag.video_chunk_duration",
+    int(os.environ.get("RAG_VIDEO_CHUNK_DURATION", "16")),
+)
+
+RAG_VIDEO_MIN_CHUNK_DURATION = PersistentConfig(
+    "RAG_VIDEO_MIN_CHUNK_DURATION",
+    "rag.video_min_chunk_duration",
+    int(os.environ.get("RAG_VIDEO_MIN_CHUNK_DURATION", "4")),
+)
+
+RAG_VIDEO_MAX_DURATION = PersistentConfig(
+    "RAG_VIDEO_MAX_DURATION",
+    "rag.video_max_duration",
+    int(os.environ.get("RAG_VIDEO_MAX_DURATION", "120")),
 )
 
 # DEPRECATED: Legacy global embedding model - NOT USED for RAG operations
@@ -2164,7 +2355,7 @@ RAG_RERANKING_MODEL_TRUST_REMOTE_CODE = (
 RAG_TEXT_SPLITTER = PersistentConfig(
     "RAG_TEXT_SPLITTER",
     "rag.text_splitter",
-    os.environ.get("RAG_TEXT_SPLITTER", ""),
+    os.environ.get("RAG_TEXT_SPLITTER", "character"),
 )
 
 

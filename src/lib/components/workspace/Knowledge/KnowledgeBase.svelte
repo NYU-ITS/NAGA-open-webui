@@ -10,7 +10,11 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { mobile, showSidebar, knowledge as _knowledge, user } from '$lib/stores';
-	import { WEBUI_API_BASE_URL } from '$lib/constants';
+	import {
+		SUPPORTED_FILE_EXTENSIONS,
+		SUPPORTED_FILE_TYPE,
+		WEBUI_API_BASE_URL
+	} from '$lib/constants';
 
 	import { updateFileDataContentById, uploadFile, deleteFileById } from '$lib/apis/files';
 	import {
@@ -20,11 +24,16 @@
 		removeFileFromKnowledgeById,
 		resetKnowledgeById,
 		updateFileFromKnowledgeById,
+		repairKnowledgeFileAudio,
 		updateKnowledgeById
 	} from '$lib/apis/knowledge';
 
 	import { transcribeAudio } from '$lib/apis/audio';
 	import { blobToFile } from '$lib/utils';
+	import {
+		normalizeStandaloneImageUpload,
+		STANDALONE_IMAGE_ACCEPT
+	} from '$lib/utils/file-upload';
 	import { processFile } from '$lib/apis/retrieval';
 
 	import Spinner from '$lib/components/common/Spinner.svelte';
@@ -49,6 +58,7 @@
 	import VideoLight from '$lib/components/icons/VideoLight.svelte';
 	import FolderOpen from '$lib/components/icons/FolderOpen.svelte';
 	import AccessControlModal from '../common/AccessControlModal.svelte';
+	import IndexingStatus from './KnowledgeBase/IndexingStatus.svelte';
 
 	let largeScreen = true;
 
@@ -75,13 +85,50 @@
 	let previousFileStates = new Map<string, string>(); // fileId -> status
 
 	// Map backend processing_status to UI status
+	const normalizeCount = (value) => {
+		const count = Number(value);
+		return Number.isFinite(count) && count > 0 ? Math.floor(count) : 0;
+	};
+
+	const normalizeVisualSummary = (summary) => {
+		if (!summary || typeof summary !== 'object') return null;
+
+		return {
+			figure_count: normalizeCount(summary.figure_count),
+			table_image_count: normalizeCount(summary.table_image_count),
+			image_chunk_count: normalizeCount(summary.image_chunk_count),
+			text_chunk_count: normalizeCount(summary.text_chunk_count)
+		};
+	};
+
 	const mapFileStatus = (file) => {
 		if (!file) return file;
 
-		const processingStatus = file?.meta?.processing_status;
+		const processingStatus = file?.processing_status ?? file?.meta?.processing_status;
+		const processingWarnings = Array.isArray(
+			file?.processing_warnings ?? file?.meta?.processing_warnings
+		)
+			? (file?.processing_warnings ?? file.meta.processing_warnings)
+			: [];
+		const storedAudioEmbedding = file?.audio_embedding ?? file?.meta?.audio_embedding;
+		const audioEmbedding =
+			storedAudioEmbedding ??
+			(processingWarnings.includes('audio_embedding_failed')
+				? {
+						status: 'degraded',
+						total_chunks: 0,
+						embedded_chunks: 0,
+						failed_chunks: 0,
+						repairable: true
+					}
+				: null);
 		let status = 'ready';
 
-		if (processingStatus === 'pending' || processingStatus === 'processing') {
+		if (
+			processingStatus === 'not_started' ||
+			processingStatus === 'pending' ||
+			processingStatus === 'processing'
+		) {
 			status = 'processing';
 		} else if (processingStatus === 'error') {
 			status = 'error';
@@ -90,7 +137,15 @@
 		return {
 			...file,
 			status,
-			error: status === 'error' ? (file?.meta?.processing_error ?? '') : ''
+			error:
+				status === 'error'
+					? (file?.processing_error ?? file?.meta?.processing_error ?? '')
+					: '',
+			processing_error_code:
+				file?.processing_error_code ?? file?.meta?.processing_error_code ?? null,
+			processing_warnings: processingWarnings,
+			visual_summary: normalizeVisualSummary(file?.visual_summary ?? file?.meta?.visual_summary),
+			audio_embedding: audioEmbedding
 		};
 	};
 
@@ -106,7 +161,10 @@
 	};
 
 	const hasProcessingFiles = () =>
-		knowledge?.files?.some((file) => file?.status === 'processing') ?? false;
+		knowledge?.files?.some(
+			(file) =>
+				file?.status === 'processing' || ['queued', 'repairing'].includes(file?.audio_embedding?.status)
+		) ?? false;
 
 	const stopProcessingPolling = () => {
 		if (processingPollInterval) {
@@ -189,6 +247,69 @@
 				stopProcessingPolling();
 			}
 		}, 5000);
+	};
+
+	const retryFileProcessing = async (fileId: string) => {
+		if (!knowledge || !id) return;
+
+		knowledge = {
+			...knowledge,
+			files: (knowledge.files ?? []).map((file) =>
+				file.id === fileId
+					? {
+							...file,
+							status: 'processing',
+							error: '',
+							processing_error_code: null
+						}
+					: file
+			)
+		};
+
+		try {
+			const retryResult = await processFile(localStorage.token, fileId, id);
+			if (!retryResult || retryResult.status === 'error') {
+				await refreshKnowledge();
+				toast.error(
+					retryResult?.error || $i18n.t('Failed to retry file processing.')
+				);
+				return;
+			}
+			await refreshKnowledge();
+			if (hasProcessingFiles()) {
+				startProcessingPolling();
+			}
+			toast.success($i18n.t('File processing retry requested'));
+		} catch (_error) {
+			await refreshKnowledge();
+			toast.error($i18n.t('Failed to retry file processing.'));
+		}
+	};
+
+	const retryAudioEmbedding = async (fileId: string) => {
+		if (!knowledge || !id) return;
+		knowledge = {
+			...knowledge,
+			files: (knowledge.files ?? []).map((file) =>
+				file.id === fileId
+					? {
+							...file,
+							audio_embedding: {
+								...(file.audio_embedding ?? {}),
+								status: 'repairing'
+							}
+						}
+					: file
+			)
+		};
+		try {
+			await repairKnowledgeFileAudio(localStorage.token, id, fileId);
+			startProcessingPolling();
+			toast.success($i18n.t('Audio repair requested'));
+		} catch (error) {
+			await refreshKnowledge();
+			toast.error(error instanceof Error ? error.message : $i18n.t('Audio repair failed.'));
+		}
 	};
 
 	let showAddTextContentModal = false;
@@ -365,7 +486,7 @@
 		'ods',
 		'odp'
 	];
-	const IMAGE_EXTENSION_LIST = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'tiff', 'webp', 'heic', 'svg'];
+	const IMAGE_EXTENSION_LIST = ['jpg', 'jpeg', 'jpe', 'jfif', 'png'];
 	const AUDIO_EXTENSION_LIST = ['mp3', 'wav', 'aac', 'flac', 'ogg', 'm4a', 'wma'];
 	const VIDEO_EXTENSION_LIST = ['mp4', 'mov', 'avi', 'mkv', 'webm', 'wmv', 'flv'];
 	const OTHER_EXTENSION_LIST = ['zip', 'rar', '7z', 'tar', 'gz'];
@@ -375,6 +496,20 @@
 	const AUDIO_EXTENSIONS = new Set(AUDIO_EXTENSION_LIST);
 	const VIDEO_EXTENSIONS = new Set(VIDEO_EXTENSION_LIST);
 	const ARCHIVE_EXTENSIONS = new Set(OTHER_EXTENSION_LIST);
+	const FILE_PICKER_ACCEPT = [
+		STANDALONE_IMAGE_ACCEPT,
+		...SUPPORTED_FILE_TYPE.filter((mimeType) => !mimeType.startsWith('image/')),
+		...new Set([
+			...SUPPORTED_FILE_EXTENSIONS,
+			...DOC_EXTENSION_LIST,
+			...IMAGE_EXTENSION_LIST,
+			...AUDIO_EXTENSION_LIST,
+			...VIDEO_EXTENSION_LIST,
+			...OTHER_EXTENSION_LIST
+		])
+	]
+		.map((value) => (value.includes('/') || value.includes(',') ? value : `.${value}`))
+		.join(',');
 
 	const formatExtensionList = (extensions: string[]) =>
 		extensions.map((ext) => `.${ext}`).join(', ');
@@ -465,12 +600,16 @@
 		const blob = new Blob([content], { type: 'text/plain' });
 		const file = blobToFile(blob, `${name}.txt`);
 
-		console.log(file);
 		return file;
 	};
 
-	const uploadFileHandler = async (file) => {
-		console.log(file);
+	const uploadFileHandler = async (sourceFile: File) => {
+		const normalizedUpload = normalizeStandaloneImageUpload(sourceFile);
+		if (normalizedUpload.unsupported) {
+			toast.error($i18n.t('Only PNG and JPEG image uploads are supported.'));
+			return null;
+		}
+		const file = normalizedUpload.file;
 
 		const tempItemId = uuidv4();
 		const fileItem = {
@@ -499,16 +638,17 @@
 				id, // knowledge base ID
 				file
 			).catch((e) => {
-				if (e && typeof e === 'string' && e.includes('Duplicate content')) {
-					toast.warning($i18n.t(e));
+				// Handle structured {code, message} errors from backend
+				const errorMsg = e && typeof e === 'object' && e.message ? e.message : `${e}`;
+				if (typeof errorMsg === 'string' && errorMsg.includes('Duplicate content')) {
+					toast.warning($i18n.t(errorMsg));
 				} else {
-					toast.error(`${e}`);
+					toast.error(errorMsg);
 				}
 				return null;
 			});
 
 			if (uploadedFile) {
-				console.log(uploadedFile);
 				// Replace local optimistic item with normalized backend response
 				knowledge = normalizeKnowledge(uploadedFile);
 
@@ -545,12 +685,14 @@
 				knowledge.files = knowledge.files.filter((item) => item.itemId !== tempItemId);
 			}
 		} catch (e) {
-			toast.error(`${e}`);
+			// Handle structured {code, message} errors from backend
+			const errorMsg = e && typeof e === 'object' && e.message ? e.message : `${e}`;
+			toast.error(errorMsg);
 			// Update status to error
 			knowledge.files = knowledge.files.map((item) => {
 				if (item.itemId === tempItemId) {
 					item.status = 'error';
-					item.error = `${e}`;
+					item.error = errorMsg;
 				}
 				return item;
 			});
@@ -640,8 +782,6 @@
 
 		if (totalFiles > 0) {
 			await processDirectory(dirHandle);
-		} else {
-			console.log('No files to upload.');
 		}
 	};
 
@@ -765,12 +905,8 @@
 
 	const deleteFileHandler = async (fileId) => {
 		try {
-			console.log('Starting file deletion process for:', fileId);
-
 			// Remove from knowledge base only
 			const updatedKnowledge = await removeFileFromKnowledgeById(localStorage.token, id, fileId);
-
-			console.log('Knowledge base updated:', updatedKnowledge);
 
 			if (updatedKnowledge) {
 				knowledge = normalizeKnowledge(updatedKnowledge);
@@ -1003,6 +1139,7 @@
 	id="files-input"
 	bind:files={inputFiles}
 	type="file"
+	accept={FILE_PICKER_ACCEPT}
 	multiple
 	hidden
 	on:change={async () => {
@@ -1099,6 +1236,8 @@
 				</div>
 			</div>
 		</div>
+
+		<IndexingStatus knowledgeId={id} />
 
 		<div class="flex flex-row flex-1 h-full max-h-full pb-2.5 gap-3">
 			{#if largeScreen}
@@ -1292,11 +1431,11 @@
 										selectedFileId = selectedFileId === e.detail ? null : e.detail;
 									}}
 									on:delete={(e) => {
-										console.log(e.detail);
-
 										selectedFileId = null;
 										deleteFileHandler(e.detail);
 									}}
+									on:retry={(e) => retryFileProcessing(e.detail)}
+									on:retryAudio={(e) => retryAudioEmbedding(e.detail)}
 								/>
 							</div>
 						{:else}
@@ -1336,7 +1475,8 @@
 		<div class="flex items-start gap-2 w-110">
 			<div class="space-y-0.5">
 				<p class="font-medium text-gray-700 dark:text-gray-200">
-					<b>Note:</b> Currently, NYU PilotGenAI only supports <b>true</b> PDF files.
+					<b>Note:</b> Standalone images must be <b>PNG</b> or <b>JPEG</b>. Supported
+					document types, including PDF, remain available.
 				</p>
 				<p class="font-medium text-gray-500 dark:text-gray-300">
 					Each file may be up to <b>2 MB</b>, and the total knowledge collection must not exceed <b>30 MB</b>.

@@ -15,6 +15,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
 from open_webui.models.knowledge import Knowledges
 from open_webui.retrieval.vector.connector import VECTOR_DB_CLIENT
+from open_webui.retrieval.embedding.errors import EmbeddingError
 from open_webui.utils.auth import get_verified_user
 from open_webui.retrieval.web.tavily import search_tavily
 from open_webui.retrieval.web.main import SearchResult
@@ -406,8 +407,52 @@ def search_knowledge_base(query: str, user_id: str, request: Request, model, k: 
             return []
         
         try:
-            embedding_function = request.app.state.EMBEDDING_FUNCTION
-            query_embedding = embedding_function(query, user_id)
+            # Spec 10: gate readiness BEFORE embedding generation.
+            from open_webui.retrieval.embedding.gate import (
+                assert_embedding_retrieval_ready,
+                RetrievalModelSpace,
+            )
+
+            admin_id, embedding_model_id = None, None
+            staged_job_ids, staged_file_ids = None, None
+            staged_collection_files = None
+            try:
+                result = assert_embedding_retrieval_ready(
+                    requesting_user_id=user_id,
+                    knowledge_ids=[cid for cid in collection_names] or None,
+                )
+                if isinstance(result, RetrievalModelSpace):
+                    admin_id, embedding_model_id = result.admin_id, result.effective_model_id
+                    staged_job_ids = list(result.staged_job_ids) or None
+                    staged_file_ids = list(result.staged_file_ids) or None
+                    staged_collection_files = (
+                        list(result.staged_collection_files) or None
+                    )
+                else:
+                    # RetrievalReadyNoState: legacy admin.
+                    from open_webui.retrieval.embedding.resolution import resolve_for_user
+                    ctx = resolve_for_user(user_id, request.app.state.config)
+                    admin_id, embedding_model_id = ctx.admin_id, ctx.model.id
+            except EmbeddingError as gate_error:
+                logging.warning(
+                    "facilities retrieval rejected: %s — %s",
+                    gate_error.code,
+                    gate_error.detail,
+                )
+                return []
+            except Exception as gate_error:
+                logging.warning(
+                    "facilities retrieval readiness check failed: %s", gate_error
+                )
+                return []
+
+            # Generate embeddings only after gate passes.
+            from open_webui.retrieval.embedding.service import EmbeddingService
+            from open_webui.retrieval.embedding.compatibility import make_embedding_function
+
+            service = EmbeddingService(request.app.state.config)
+            embedding_function = make_embedding_function(service, user_id=user_id)
+            query_embedding = embedding_function(query)
         except Exception as e:
             logging.error(f"Failed to generate embeddings: {e}")
             return []
@@ -417,11 +462,25 @@ def search_knowledge_base(query: str, user_id: str, request: Request, model, k: 
         for collection_name in collection_names:
             try:
                
-                search_results = VECTOR_DB_CLIENT.search(
-                    collection_name=collection_name,
-                    vectors=[query_embedding],
-                    limit=k * 3  
-                )
+                if admin_id and embedding_model_id and hasattr(
+                    VECTOR_DB_CLIENT, "search_model_aware"
+                ):
+                    search_results = VECTOR_DB_CLIENT.search_model_aware(
+                        collection_name=collection_name,
+                        vectors=[query_embedding],
+                        admin_id=admin_id,
+                        embedding_model_id=embedding_model_id,
+                        limit=k * 3,
+                        staged_job_ids=staged_job_ids,
+                        staged_file_ids=staged_file_ids,
+                        staged_collection_files=staged_collection_files,
+                    )
+                else:
+                    search_results = VECTOR_DB_CLIENT.search(
+                        collection_name=collection_name,
+                        vectors=[query_embedding],
+                        limit=k * 3,
+                    )
                 
                 if search_results and hasattr(search_results, 'documents') and search_results.documents:
                     documents = search_results.documents[0]

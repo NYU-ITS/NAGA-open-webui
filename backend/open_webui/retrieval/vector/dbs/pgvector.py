@@ -1,14 +1,19 @@
 from typing import Optional, List, Dict, Any
 import logging
+import time
+import uuid
 from sqlalchemy import (
+    and_,
+    BigInteger,
     cast,
     column,
     create_engine,
     Column,
     Integer,
     MetaData,
+    or_,
     select,
-    text,
+    String,
     Text,
     Table,
     values,
@@ -35,13 +40,39 @@ log.setLevel(SRC_LOG_LEVELS["RAG"])
 
 
 class DocumentChunk(Base):
-    __tablename__ = "document_chunk"
+    """ORM view of the embeddings_1536 physical vector table.
+
+    The table was renamed from ``document_chunk`` to ``embeddings_1536`` in the
+    Phase 3 migration. The legacy columns (collection_name, vmetadata, text)
+    remain for the collection-name read path during the transition; the
+    provenance columns (admin_id, embedding_model_id, file_id, knowledge_id,
+    rag_chunk_id, modality, embedding_status, provenance_status) back the
+    model-aware write/read path introduced in Phase 3.
+    """
+
+    __tablename__ = "embeddings_1536"
 
     id = Column(Text, primary_key=True)
     vector = Column(Vector(dim=VECTOR_LENGTH), nullable=True)
     collection_name = Column(Text, nullable=False)
     text = Column(Text, nullable=True)
     vmetadata = Column(MutableDict.as_mutable(JSONB), nullable=True)
+
+    # Phase 1/3 model-aware provenance columns.
+    admin_id = Column(Text, nullable=True)
+    embedding_model_id = Column(Text, nullable=True)
+    file_id = Column(Text, nullable=True)
+    knowledge_id = Column(Text, nullable=True)
+    rag_chunk_id = Column(Text, nullable=True)
+    modality = Column(String(16), nullable=True)
+    embedding_status = Column(String(16), nullable=True)
+    provenance_status = Column(String(20), nullable=False, default="unattributed")
+    # Spec 07: the durable embedding job that built this row, when it was built
+    # by a reindex operation. NULL for ordinary ingestion and legacy rows.
+    embedding_job_id = Column(Text, nullable=True)
+    index_generation_id = Column(Text, nullable=True)
+    created_at = Column(BigInteger, nullable=True)
+    updated_at = Column(BigInteger, nullable=True)
 
 
 class PgvectorClient:
@@ -61,38 +92,10 @@ class PgvectorClient:
             )
             self.session = scoped_session(SessionLocal)
 
-        try:
-            # Ensure the pgvector extension is available
-            self.session.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
-
-            # Check vector length consistency
-            self.check_vector_length()
-
-            # Create the tables if they do not exist
-            # Base.metadata.create_all requires a bind (engine or connection)
-            # Get the connection from the session
-            connection = self.session.connection()
-            Base.metadata.create_all(bind=connection)
-
-            # Create an index on the vector column if it doesn't exist
-            self.session.execute(
-                text(
-                    "CREATE INDEX IF NOT EXISTS idx_document_chunk_vector "
-                    "ON document_chunk USING ivfflat (vector vector_cosine_ops) WITH (lists = 100);"
-                )
-            )
-            self.session.execute(
-                text(
-                    "CREATE INDEX IF NOT EXISTS idx_document_chunk_collection_name "
-                    "ON document_chunk (collection_name);"
-                )
-            )
-            self.session.commit()
-            log.info("[PGVECTOR] init SUCCESS")
-        except Exception as e:
-            self.session.rollback()
-            log.exception(f"Error during initialization: {e}")
-            raise
+        # Schema ownership belongs to Alembic.  Runtime initialization is deliberately
+        # read-only so a worker cannot create a differently shaped vector table.
+        self.check_vector_length()
+        log.info("[PGVECTOR] init SUCCESS")
 
     def check_vector_length(self) -> None:
         """
@@ -101,17 +104,17 @@ class PgvectorClient:
         """
         metadata = MetaData()
         try:
-            # Attempt to reflect the 'document_chunk' table
-            document_chunk_table = Table(
-                "document_chunk", metadata, autoload_with=self.session.bind
+            # Reflect the renamed embeddings_1536 table.
+            embeddings_table = Table(
+                "embeddings_1536", metadata, autoload_with=self.session.bind
             )
         except NoSuchTableError:
             # Table does not exist; no action needed
             return
 
         # Proceed to check the vector column
-        if "vector" in document_chunk_table.columns:
-            vector_column = document_chunk_table.columns["vector"]
+        if "vector" in embeddings_table.columns:
+            vector_column = embeddings_table.columns["vector"]
             vector_type = vector_column.type
             if isinstance(vector_type, Vector):
                 db_vector_length = vector_type.dim
@@ -126,7 +129,7 @@ class PgvectorClient:
                 )
         else:
             raise Exception(
-                "The 'vector' column does not exist in the 'document_chunk' table."
+                "The 'vector' column does not exist in the 'embeddings_1536' table."
             )
 
     def adjust_vector_length(self, vector: List[float]) -> List[float]:
@@ -141,20 +144,115 @@ class PgvectorClient:
             )
         return vector
 
+    @staticmethod
+    def _is_model_aware(item: VectorItem) -> bool:
+        """A model-aware write carries registry provenance (embedding_model_id)."""
+        return bool(item.get("embedding_model_id"))
+
+    @staticmethod
+    def _provenance_kwargs(item: VectorItem, now: int) -> dict:
+        """Provenance columns written alongside model-aware vectors."""
+        return {
+            "admin_id": item.get("admin_id"),
+            "embedding_model_id": item.get("embedding_model_id"),
+            "file_id": item.get("file_id"),
+            "knowledge_id": item.get("knowledge_id"),
+            "rag_chunk_id": item.get("rag_chunk_id"),
+            "modality": item.get("modality") or "text",
+            "embedding_status": item.get("embedding_status") or "active",
+            "embedding_job_id": item.get("embedding_job_id"),
+            "index_generation_id": item.get("index_generation_id"),
+            "provenance_status": "attributed",
+            "created_at": now,
+            "updated_at": now,
+        }
+
+    @staticmethod
+    def _result_metadata(row) -> dict:
+        """Merge internal row identity into metadata returned to retrieval.
+
+        These fields are needed for modality-aware ranking and authorized image
+        reconstruction. Public response construction must sanitize them before
+        emitting citations.
+        """
+        metadata = dict(row.vmetadata or {})
+        metadata.update(
+            {
+                "rag_chunk_id": row.rag_chunk_id,
+                "modality": row.modality or "text",
+                "file_id": row.file_id or metadata.get("file_id"),
+                "knowledge_id": row.knowledge_id,
+            }
+        )
+        return metadata
+
+    @staticmethod
+    def _published_visibility(admin_id: str):
+        from open_webui.models.embeddings import AdminEmbeddingModelState
+
+        from open_webui.models.files import File
+
+        file_meta = cast(File.meta, JSONB)
+        published_file = (
+            select(File.id)
+            .where(
+                File.id == DocumentChunk.file_id,
+                file_meta["processing_status"].astext == "completed",
+                or_(
+                    and_(
+                        file_meta["index_generation_id"].astext
+                        == DocumentChunk.index_generation_id,
+                        file_meta["embedding_model_id"].astext
+                        == DocumentChunk.embedding_model_id,
+                        file_meta["published_projection_ids"].op("?")(
+                            DocumentChunk.collection_name
+                        ),
+                    ),
+                    and_(
+                        DocumentChunk.index_generation_id == "baseline:" + admin_id,
+                        file_meta["index_generation_id"].astext.is_(None),
+                    ),
+                ),
+            )
+            .correlate(DocumentChunk)
+            .exists()
+        )
+        return and_(
+            DocumentChunk.embedding_status == "active",
+            or_(DocumentChunk.file_id.is_(None), published_file),
+            DocumentChunk.index_generation_id
+            == select(AdminEmbeddingModelState.index_generation_id)
+            .where(AdminEmbeddingModelState.admin_id == admin_id)
+            .scalar_subquery(),
+            DocumentChunk.embedding_model_id
+            == select(AdminEmbeddingModelState.active_embedding_model_id)
+            .where(AdminEmbeddingModelState.admin_id == admin_id)
+            .scalar_subquery(),
+        )
+
     def insert(self, collection_name: str, items: List[VectorItem]) -> None:
         log.info("[PGVECTOR] insert START | collection=%s | items_count=%s", collection_name, len(items))
         try:
+            now = int(time.time())
             new_items = []
             for item in items:
-                vector = self.adjust_vector_length(item["vector"])
-                new_chunk = DocumentChunk(
-                    id=item["id"],
-                    vector=vector,
-                    collection_name=collection_name,
-                    text=item["text"],
-                    vmetadata=item["metadata"],
+                # Model-aware writes are validated to the exact table dimension
+                # upstream; never pad or truncate them. Legacy writes pad.
+                vector = (
+                    item["vector"]
+                    if self._is_model_aware(item)
+                    else self.adjust_vector_length(item["vector"])
                 )
-                new_items.append(new_chunk)
+                kwargs = {
+                    "id": item["id"],
+                    "vector": vector,
+                    "collection_name": collection_name,
+                    "text": item["text"],
+                    "vmetadata": item["metadata"],
+                }
+                if self._is_model_aware(item):
+                    kwargs.update(self._provenance_kwargs(item, now))
+                new_items.append(DocumentChunk(**kwargs))
             self.session.bulk_save_objects(new_items)
             self.session.commit()
             log.info("[PGVECTOR] insert SUCCESS | collection=%s | inserted=%s", collection_name, len(new_items))
@@ -166,8 +264,13 @@ class PgvectorClient:
     def upsert(self, collection_name: str, items: List[VectorItem]) -> None:
         log.info("[PGVECTOR] upsert START | collection=%s | items_count=%s", collection_name, len(items))
         try:
+            now = int(time.time())
             for item in items:
-                vector = self.adjust_vector_length(item["vector"])
+                vector = (
+                    item["vector"]
+                    if self._is_model_aware(item)
+                    else self.adjust_vector_length(item["vector"])
+                )
                 existing = (
                     self.session.query(DocumentChunk)
                     .filter(DocumentChunk.id == item["id"])
@@ -180,21 +283,330 @@ class PgvectorClient:
                     existing.collection_name = (
                         collection_name  # Update collection_name if necessary
                     )
+                    if self._is_model_aware(item):
+                        for key, value in self._provenance_kwargs(item, now).items():
+                            setattr(existing, key, value)
                 else:
-                    new_chunk = DocumentChunk(
-                        id=item["id"],
-                        vector=vector,
-                        collection_name=collection_name,
-                        text=item["text"],
-                        vmetadata=item["metadata"],
-                    )
-                    self.session.add(new_chunk)
+                    kwargs = {
+                        "id": item["id"],
+                        "vector": vector,
+                        "collection_name": collection_name,
+                        "text": item["text"],
+                        "vmetadata": item["metadata"],
+                    }
+                    if self._is_model_aware(item):
+                        kwargs.update(self._provenance_kwargs(item, now))
+                    self.session.add(DocumentChunk(**kwargs))
             self.session.commit()
             log.info("[PGVECTOR] upsert SUCCESS | collection=%s | upserted=%s", collection_name, len(items))
         except Exception as e:
             self.session.rollback()
             log.exception(f"Error during upsert: {e}")
             raise
+
+    def reconcile_model_aware(
+        self, collection_name: str, items: List[VectorItem]
+    ) -> None:
+        """Atomically upsert current target rows and delete stale target rows.
+
+        This is the Spec 07 write path for one target file/collection
+        projection. The projection is identified by ``(admin_id,
+        embedding_model_id, file_id, collection_name)``.
+
+        In a single database transaction:
+
+        1. Current rows are upserted by the provenance conflict key
+           ``(admin_id, embedding_model_id, rag_chunk_id, collection_name)``
+           (the partial unique index ``ux_embeddings_1536_model_chunk_collection``).
+           On conflict the existing row is updated in place and its generated id
+           is preserved; duplicate delivery, retries, and concurrent workers
+           converge on one row per logical chunk instead of appending.
+        2. Stale rows in the same projection whose ``rag_chunk_id`` is not
+           among the current ids are deleted.
+
+        The stale deletion is deliberately scoped to this projection only:
+        rows for other models, other files, and other collections are never
+        touched, and the shared ``rag_chunks`` rows themselves are never
+        deleted here (so old active-model vectors cannot be cascade-removed
+        while a target build is in progress). Legacy rows without a
+        ``rag_chunk_id`` are excluded and left for later maintenance.
+
+        Every item must be model-aware and carry a ``rag_chunk_id``; otherwise a
+        ``ValueError`` is raised before any write.
+        """
+        log.info(
+            "[PGVECTOR] reconcile_model_aware START | collection=%s | items_count=%s",
+            collection_name,
+            len(items),
+        )
+        if not items:
+            log.info(
+                "[PGVECTOR] reconcile_model_aware EMPTY | collection=%s",
+                collection_name,
+            )
+            return
+
+        try:
+            stale_deleted = self._reconcile_model_aware_projection(
+                collection_name, items
+            )
+            self.session.commit()
+            log.info(
+                "[PGVECTOR] reconcile_model_aware SUCCESS | collection=%s | "
+                "upserted=%s | stale_deleted=%s",
+                collection_name,
+                len(items),
+                stale_deleted,
+            )
+        except Exception as error:
+            try:
+                self.session.rollback()
+            except Exception:
+                pass
+            log.error(
+                "Model-aware reconcile failed | type=%s",
+                type(error).__name__,
+            )
+            raise
+
+    def reconcile_model_aware_many(
+        self,
+        projections: List[tuple[str, List[VectorItem]]],
+        session=None,
+    ) -> None:
+        """Atomically reconcile every collection projection for one file."""
+        non_empty = [projection for projection in projections if projection[1]]
+        if not non_empty:
+            return
+        db = session if session is not None else self.session
+        try:
+            for collection_name, items in non_empty:
+                self._reconcile_model_aware_projection(
+                    collection_name,
+                    items,
+                    session=db,
+                )
+            if session is None:
+                db.commit()
+            else:
+                db.flush()
+        except Exception as error:
+            if session is None:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+            log.error(
+                "Multi-projection model-aware reconcile failed | type=%s",
+                type(error).__name__,
+            )
+            raise
+
+    def upsert_model_aware_many(
+        self,
+        projections: List[tuple[str, List[VectorItem]]],
+        session=None,
+    ) -> None:
+        """Atomically upsert supplied model-aware rows without stale deletion."""
+        non_empty = [projection for projection in projections if projection[1]]
+        if not non_empty:
+            return
+        db = session if session is not None else self.session
+        try:
+            for collection_name, items in non_empty:
+                self._upsert_model_aware_projection(
+                    collection_name,
+                    items,
+                    session=db,
+                )
+            if session is None:
+                db.commit()
+            else:
+                db.flush()
+        except Exception as error:
+            if session is None:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+            log.error(
+                "Additive model-aware upsert failed | type=%s",
+                type(error).__name__,
+            )
+            raise
+
+    def _upsert_model_aware_projection(
+        self,
+        collection_name: str,
+        items: List[VectorItem],
+        session=None,
+    ) -> None:
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        db = session if session is not None else self.session
+        now = int(time.time())
+        rows = []
+        for item in items:
+            if not self._is_model_aware(item) or not item.get("rag_chunk_id"):
+                raise ValueError("model-aware upsert requires complete provenance")
+            rows.append(
+                {
+                    "id": str(uuid.uuid4()),
+                    "vector": item["vector"],
+                    "collection_name": collection_name,
+                    "text": item["text"],
+                    "vmetadata": item["metadata"],
+                    "admin_id": item["admin_id"],
+                    "embedding_model_id": item["embedding_model_id"],
+                    "file_id": item.get("file_id"),
+                    "knowledge_id": item.get("knowledge_id"),
+                    "rag_chunk_id": item["rag_chunk_id"],
+                    "modality": item.get("modality") or "text",
+                    "embedding_status": item.get("embedding_status") or "active",
+                    "embedding_job_id": item.get("embedding_job_id"),
+                    "index_generation_id": item.get("index_generation_id"),
+                    "provenance_status": "attributed",
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            )
+        first = items[0]
+        for item in items[1:]:
+            if any(
+                item.get(key) != first.get(key)
+                for key in (
+                    "admin_id",
+                    "embedding_model_id",
+                    "file_id",
+                    "knowledge_id",
+                    "embedding_status",
+                    "embedding_job_id",
+                )
+            ):
+                raise ValueError("model-aware upsert requires one provenance scope")
+        stmt = pg_insert(DocumentChunk).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[
+                DocumentChunk.admin_id,
+                DocumentChunk.embedding_model_id,
+                DocumentChunk.rag_chunk_id,
+                DocumentChunk.collection_name,
+            ],
+            index_where=DocumentChunk.rag_chunk_id.isnot(None),
+            set_={
+                "vector": stmt.excluded.vector,
+                "text": stmt.excluded.text,
+                "vmetadata": stmt.excluded.vmetadata,
+                "file_id": stmt.excluded.file_id,
+                "knowledge_id": stmt.excluded.knowledge_id,
+                "modality": stmt.excluded.modality,
+                "embedding_status": stmt.excluded.embedding_status,
+                "embedding_job_id": stmt.excluded.embedding_job_id,
+                "index_generation_id": stmt.excluded.index_generation_id,
+                "provenance_status": stmt.excluded.provenance_status,
+                "updated_at": stmt.excluded.updated_at,
+            },
+        )
+        db.execute(stmt)
+
+    def _reconcile_model_aware_projection(
+        self,
+        collection_name: str,
+        items: List[VectorItem],
+        session=None,
+    ) -> int:
+        """Reconcile one projection without committing the current session."""
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        db = session if session is not None else self.session
+        now = int(time.time())
+        current_ids: set[str] = set()
+        rows = []
+        for item in items:
+            if not self._is_model_aware(item) or not item.get("rag_chunk_id"):
+                raise ValueError(
+                    "reconcile_model_aware requires provenance "
+                    "(admin_id, embedding_model_id, rag_chunk_id)"
+                )
+            current_ids.add(item["rag_chunk_id"])
+            rows.append(
+                {
+                    "id": str(uuid.uuid4()),
+                    "vector": item["vector"],
+                    "collection_name": collection_name,
+                    "text": item["text"],
+                    "vmetadata": item["metadata"],
+                    "admin_id": item["admin_id"],
+                    "embedding_model_id": item["embedding_model_id"],
+                    "file_id": item.get("file_id"),
+                    "knowledge_id": item.get("knowledge_id"),
+                    "rag_chunk_id": item["rag_chunk_id"],
+                    "modality": item.get("modality") or "text",
+                    "embedding_status": item.get("embedding_status") or "active",
+                    "embedding_job_id": item.get("embedding_job_id"),
+                    "index_generation_id": item.get("index_generation_id"),
+                    "provenance_status": "attributed",
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            )
+
+        first = items[0]
+        for item in items[1:]:
+            if any(
+                item.get(key) != first.get(key)
+                for key in (
+                    "admin_id",
+                    "embedding_model_id",
+                    "file_id",
+                    "knowledge_id",
+                    "embedding_status",
+                    "embedding_job_id",
+                )
+            ):
+                raise ValueError(
+                    "reconcile_model_aware requires one provenance scope"
+                )
+
+        stmt = pg_insert(DocumentChunk).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[
+                DocumentChunk.admin_id,
+                DocumentChunk.embedding_model_id,
+                DocumentChunk.rag_chunk_id,
+                DocumentChunk.collection_name,
+            ],
+            index_where=DocumentChunk.rag_chunk_id.isnot(None),
+            set_={
+                "vector": stmt.excluded.vector,
+                "text": stmt.excluded.text,
+                "vmetadata": stmt.excluded.vmetadata,
+                "collection_name": stmt.excluded.collection_name,
+                "file_id": stmt.excluded.file_id,
+                "knowledge_id": stmt.excluded.knowledge_id,
+                "modality": stmt.excluded.modality,
+                "embedding_status": stmt.excluded.embedding_status,
+                "embedding_job_id": stmt.excluded.embedding_job_id,
+                "index_generation_id": stmt.excluded.index_generation_id,
+                "provenance_status": stmt.excluded.provenance_status,
+                "updated_at": stmt.excluded.updated_at,
+            },
+        )
+        db.execute(stmt)
+
+        stale_query = (
+            db.query(DocumentChunk)
+            .filter(DocumentChunk.collection_name == collection_name)
+            .filter(DocumentChunk.admin_id == first["admin_id"])
+            .filter(DocumentChunk.embedding_model_id == first["embedding_model_id"])
+        )
+        if first.get("file_id"):
+            stale_query = stale_query.filter(DocumentChunk.file_id == first["file_id"])
+        stale_query = stale_query.filter(DocumentChunk.rag_chunk_id.isnot(None))
+        stale_query = stale_query.filter(
+            DocumentChunk.rag_chunk_id.notin_(list(current_ids))
+        )
+        return stale_query.delete(synchronize_session=False)
 
     def search(
         self,
@@ -296,6 +708,153 @@ class PgvectorClient:
             log.exception(f"Error during search: {e}")
             return None
 
+    def search_model_aware(
+        self,
+        collection_name: str,
+        vectors: List[List[float]],
+        admin_id: str,
+        embedding_model_id: str,
+        limit: Optional[int] = None,
+        knowledge_ids: Optional[List[str]] = None,
+        file_ids: Optional[List[str]] = None,
+        staged_job_ids: Optional[List[str]] = None,
+        staged_file_ids: Optional[List[str]] = None,
+        staged_collection_files: Optional[List[tuple[str, str]]] = None,
+    ) -> Optional[SearchResult]:
+        """Cosine search restricted to one admin/model provenance space.
+
+        Adds admin_id and embedding_model_id filters on top of the collection
+        name so a query can never match vectors from another admin context or
+        another embedding model. Optional knowledge_ids/file_ids further scope
+        the RBAC-authorized result set (OR semantics). Query vectors are never
+        padded because they are validated to the exact dimension upstream.
+        """
+        log.info(
+            "[PGVECTOR] search_model_aware START | collection=%s | admin=%s | model=%s | vectors=%s | limit=%s",
+            collection_name,
+            admin_id,
+            embedding_model_id,
+            len(vectors) if vectors else 0,
+            limit,
+        )
+        try:
+            if not vectors:
+                log.info(
+                    "[PGVECTOR] search_model_aware EMPTY | collection=%s | reason=no_vectors",
+                    collection_name,
+                )
+                return None
+
+            num_queries = len(vectors)
+
+            def vector_expr(vector):
+                return cast(array(vector), Vector(VECTOR_LENGTH))
+
+            qid_col = column("qid", Integer)
+            q_vector_col = column("q_vector", Vector(VECTOR_LENGTH))
+            query_vectors = (
+                values(qid_col, q_vector_col)
+                .data(
+                    [(idx, vector_expr(vector)) for idx, vector in enumerate(vectors)]
+                )
+                .alias("query_vectors")
+            )
+
+            distance = DocumentChunk.vector.cosine_distance(query_vectors.c.q_vector)
+
+            visibility_clause = self._published_visibility(admin_id)
+
+            subq = (
+                select(
+                    DocumentChunk.id,
+                    DocumentChunk.text,
+                    DocumentChunk.vmetadata,
+                    DocumentChunk.rag_chunk_id,
+                    DocumentChunk.modality,
+                    DocumentChunk.file_id,
+                    DocumentChunk.knowledge_id,
+                    distance.label("distance"),
+                )
+                .where(DocumentChunk.collection_name == collection_name)
+                .where(DocumentChunk.admin_id == admin_id)
+                .where(DocumentChunk.embedding_model_id == embedding_model_id)
+                # Every result belongs to an individually published file.
+                .where(visibility_clause)
+            )
+
+            scope_clauses = []
+            if knowledge_ids:
+                scope_clauses.append(DocumentChunk.knowledge_id.in_(knowledge_ids))
+            if file_ids:
+                scope_clauses.append(DocumentChunk.file_id.in_(file_ids))
+            if scope_clauses:
+                subq = subq.where(or_(*scope_clauses))
+
+            subq = subq.order_by(distance)
+            if limit is not None:
+                subq = subq.limit(limit)
+            subq = subq.lateral("result")
+
+            stmt = (
+                select(
+                    query_vectors.c.qid,
+                    subq.c.id,
+                    subq.c.text,
+                    subq.c.vmetadata,
+                    subq.c.rag_chunk_id,
+                    subq.c.modality,
+                    subq.c.file_id,
+                    subq.c.knowledge_id,
+                    subq.c.distance,
+                )
+                .select_from(query_vectors)
+                .join(subq, true())
+                .order_by(query_vectors.c.qid, subq.c.distance)
+            )
+
+            results = self.session.execute(stmt).all()
+
+            ids = [[] for _ in range(num_queries)]
+            distances = [[] for _ in range(num_queries)]
+            documents = [[] for _ in range(num_queries)]
+            metadatas = [[] for _ in range(num_queries)]
+
+            if not results:
+                log.info(
+                    "[PGVECTOR] search_model_aware SUCCESS | collection=%s | results_total=0",
+                    collection_name,
+                )
+                return SearchResult(
+                    ids=ids,
+                    distances=distances,
+                    documents=documents,
+                    metadatas=metadatas,
+                )
+
+            for row in results:
+                qid = int(row.qid)
+                ids[qid].append(row.id)
+                distances[qid].append(row.distance)
+                documents[qid].append(row.text)
+                metadatas[qid].append(self._result_metadata(row))
+
+            total_hits = sum(len(d) for d in documents)
+            log.info(
+                "[PGVECTOR] search_model_aware SUCCESS | collection=%s | results_total=%s",
+                collection_name,
+                total_hits,
+            )
+            return SearchResult(
+                ids=ids, distances=distances, documents=documents, metadatas=metadatas
+            )
+        except Exception as e:
+            try:
+                self.session.rollback()
+            except Exception:
+                pass
+            log.error("Model-aware search failed | type=%s", type(e).__name__)
+            raise
+
     def query(
         self, collection_name: str, filter: Dict[str, Any], limit: Optional[int] = None
     ) -> Optional[GetResult]:
@@ -366,6 +925,70 @@ class PgvectorClient:
             log.exception(f"Error during get: {e}")
             return None
 
+    def get_model_aware(
+        self,
+        collection_name: str,
+        admin_id: str,
+        embedding_model_id: str,
+        limit: Optional[int] = None,
+        knowledge_ids: Optional[List[str]] = None,
+        file_ids: Optional[List[str]] = None,
+        staged_job_ids: Optional[List[str]] = None,
+        staged_file_ids: Optional[List[str]] = None,
+        staged_collection_files: Optional[List[tuple[str, str]]] = None,
+    ) -> Optional[GetResult]:
+        """Return active rows plus explicitly gate-approved staged rows."""
+        log.info(
+            "[PGVECTOR] get_model_aware START | collection=%s | admin=%s | model=%s",
+            collection_name,
+            admin_id,
+            embedding_model_id,
+        )
+        try:
+            visibility_clause = self._published_visibility(admin_id)
+
+            query = self.session.query(DocumentChunk).filter(
+                DocumentChunk.collection_name == collection_name,
+                DocumentChunk.admin_id == admin_id,
+                DocumentChunk.embedding_model_id == embedding_model_id,
+                visibility_clause,
+            )
+            scope_clauses = []
+            if knowledge_ids:
+                scope_clauses.append(DocumentChunk.knowledge_id.in_(knowledge_ids))
+            if file_ids:
+                scope_clauses.append(DocumentChunk.file_id.in_(file_ids))
+            if scope_clauses:
+                query = query.filter(or_(*scope_clauses))
+            if limit is not None:
+                query = query.limit(limit)
+
+            results = query.all()
+
+            if not results:
+                log.info(
+                    "[PGVECTOR] get_model_aware EMPTY | collection=%s", collection_name
+                )
+                return None
+
+            ids = [[result.id for result in results]]
+            documents = [[result.text for result in results]]
+            metadatas = [[self._result_metadata(result) for result in results]]
+
+            log.info(
+                "[PGVECTOR] get_model_aware SUCCESS | collection=%s | results_count=%s",
+                collection_name,
+                len(results),
+            )
+            return GetResult(ids=ids, documents=documents, metadatas=metadatas)
+        except Exception as e:
+            try:
+                self.session.rollback()
+            except Exception:
+                pass
+            log.error("Model-aware retrieval failed | type=%s", type(e).__name__)
+            raise
+
     def delete(
         self,
         collection_name: str,
@@ -392,6 +1015,97 @@ class PgvectorClient:
             log.exception(f"Error during delete: {e}")
             raise
 
+    def delete_file_rows(self, *, file_id: str, session) -> int:
+        """Remove all generations and legacy projections before deleting a file."""
+        return (
+            session.query(DocumentChunk)
+            .filter(
+                or_(
+                    DocumentChunk.file_id == file_id,
+                    DocumentChunk.vmetadata["file_id"].astext == file_id,
+                    DocumentChunk.collection_name == f"file-{file_id}",
+                )
+            )
+            .delete(synchronize_session=False)
+        )
+
+    def delete_file_projection(
+        self,
+        *,
+        collection_name: str,
+        file_id: str,
+        session=None,
+    ) -> int:
+        """Delete every vector row for one file/collection projection.
+
+        A caller-provided session keeps Knowledge membership mutation and vector
+        deletion in the same primary-database transaction. This is the removal
+        side of the row-lock protocol used by multimodal ingestion.
+        """
+
+        db = session if session is not None else self.session
+        try:
+            deleted = (
+                db.query(DocumentChunk)
+                .filter(
+                    DocumentChunk.collection_name == collection_name,
+                    DocumentChunk.file_id == file_id,
+                )
+                .delete(synchronize_session=False)
+            )
+            if session is None:
+                db.commit()
+            else:
+                db.flush()
+            log.info(
+                "[PGVECTOR] delete_file_projection SUCCESS | collection=%s | deleted=%s",
+                collection_name,
+                deleted,
+            )
+            return deleted
+        except Exception:
+            if session is None:
+                db.rollback()
+            log.exception(
+                "[PGVECTOR] delete_file_projection failed | collection=%s",
+                collection_name,
+            )
+            raise
+
+    def delete_collection_rows(
+        self,
+        *,
+        collection_name: str,
+        session=None,
+    ) -> int:
+        """Delete one complete collection, optionally in a caller transaction."""
+
+        db = session if session is not None else self.session
+        try:
+            deleted = (
+                db.query(DocumentChunk)
+                .filter(DocumentChunk.collection_name == collection_name)
+                .delete(synchronize_session=False)
+            )
+            if session is None:
+                db.commit()
+            else:
+                db.flush()
+            log.info(
+                "[PGVECTOR] delete_collection_rows SUCCESS | collection=%s | deleted=%s",
+                collection_name,
+                deleted,
+            )
+            return deleted
+        except Exception:
+            if session is None:
+                db.rollback()
+            log.exception(
+                "[PGVECTOR] delete_collection_rows failed | collection=%s",
+                collection_name,
+            )
+            raise
+
     def reset(self) -> None:
         log.info("[PGVECTOR] reset START")
         try:
@@ -402,6 +1116,152 @@ class PgvectorClient:
             self.session.rollback()
             log.exception(f"Error during reset: {e}")
             raise
+
+    def invalidate_model_projection(
+        self,
+        *,
+        admin_id: str,
+        embedding_model_id: str,
+        session=None,
+    ) -> int:
+        """Make every existing projection for one admin/model non-retrievable."""
+        db = session if session is not None else self.session
+        updated = (
+            db.query(DocumentChunk)
+            .filter(
+                DocumentChunk.admin_id == admin_id,
+                DocumentChunk.embedding_model_id == embedding_model_id,
+                DocumentChunk.embedding_status.in_((
+                    "active",
+                    "building",
+                    "inactive",
+                )),
+            )
+            .update(
+                {
+                    DocumentChunk.embedding_status: "stale",
+                    DocumentChunk.updated_at: int(time.time()),
+                },
+                synchronize_session=False,
+            )
+        )
+        if session is None:
+            db.commit()
+        else:
+            db.flush()
+        return updated
+
+    def delete_obsolete_model_rows(
+        self,
+        *,
+        admin_id: str,
+        embedding_model_id: str,
+        preserve_job_id: str | None,
+        session=None,
+    ) -> int:
+        """Delete stale rows, preserving only active rows from one job."""
+        db = session if session is not None else self.session
+        query = db.query(DocumentChunk).filter(
+            DocumentChunk.admin_id == admin_id,
+            DocumentChunk.embedding_model_id == embedding_model_id,
+        )
+        if preserve_job_id is not None:
+            query = query.filter(
+                or_(
+                    DocumentChunk.embedding_status != "active",
+                    DocumentChunk.embedding_job_id != preserve_job_id,
+                    DocumentChunk.embedding_job_id.is_(None),
+                )
+            )
+        deleted = query.delete(synchronize_session=False)
+        if session is None:
+            db.commit()
+        else:
+            db.flush()
+        log.info(
+            "[PGVECTOR] obsolete model rows deleted | admin=%s | model=%s | count=%d",
+            admin_id,
+            embedding_model_id,
+            deleted,
+        )
+        return deleted
+
+    def bulk_update_embedding_status(
+        self,
+        admin_id: str,
+        embedding_model_id: str,
+        from_status: str,
+        to_status: str,
+        session=None,
+        job_ids: list[str] | None = None,
+    ) -> int:
+        """Bulk-update embedding_status for all matching provenance rows.
+
+        Returns the number of rows updated. Used by Spec 09 finalization to
+        activate target vectors (building→active) or deactivate previous-model
+        vectors (active→inactive).
+
+        When ``session`` is provided the caller owns the transaction (only
+        flush); otherwise the client's own session is used. *job_ids* narrows
+        the update to vectors written by specific embedding jobs (the job
+        lineage) so stale vectors from unrelated abandoned operations are
+        never promoted.
+        """
+        db = session if session is not None else self.session
+        now = int(time.time())
+        q = db.query(DocumentChunk).filter(
+            DocumentChunk.admin_id == admin_id,
+            DocumentChunk.embedding_model_id == embedding_model_id,
+            DocumentChunk.embedding_status == from_status,
+        )
+        if job_ids is not None:
+            q = q.filter(DocumentChunk.embedding_job_id.in_(job_ids))
+        updated = q.update(
+            {
+                DocumentChunk.embedding_status: to_status,
+                DocumentChunk.updated_at: now,
+            },
+            synchronize_session=False,
+        )
+        db.flush()
+        return updated
+
+    def get_job_vector_manifest(
+        self,
+        *,
+        admin_id: str,
+        embedding_model_id: str,
+        job_id: str,
+        session=None,
+    ) -> dict[tuple[str, str], tuple[str, ...]]:
+        """Return exact building chunk identities for promotion validation."""
+        db = session if session is not None else self.session
+        rows = (
+            db.query(
+                DocumentChunk.file_id,
+                DocumentChunk.collection_name,
+                DocumentChunk.rag_chunk_id,
+            )
+            .filter(
+                DocumentChunk.admin_id == admin_id,
+                DocumentChunk.embedding_model_id == embedding_model_id,
+                DocumentChunk.embedding_status == "building",
+                DocumentChunk.embedding_job_id == job_id,
+            )
+            .all()
+        )
+        manifests: dict[tuple[str, str], list[str]] = {}
+        for file_id, collection_name, rag_chunk_id in rows:
+            if not file_id or not collection_name or not rag_chunk_id:
+                raise ValueError("building vector provenance is incomplete")
+            key = (str(file_id), str(collection_name))
+            manifests.setdefault(key, []).append(str(rag_chunk_id))
+        result: dict[tuple[str, str], tuple[str, ...]] = {}
+        for key, chunk_ids in manifests.items():
+            if len(chunk_ids) != len(set(chunk_ids)):
+                raise ValueError("building vector provenance is duplicated")
+            result[key] = tuple(sorted(chunk_ids))
+        return result
 
     def close(self) -> None:
         pass

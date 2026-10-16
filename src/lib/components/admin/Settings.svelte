@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { getContext, tick, onMount } from 'svelte';
 	import { toast } from 'svelte-sonner';
+	import { page } from '$app/stores';
 
 	import { config } from '$lib/stores';
 	import { getBackendConfig } from '$lib/apis';
@@ -39,6 +40,7 @@
 	let selectedTab = 'models';
 
 	onMount(async () => {
+		if ($page.url.searchParams.get('tab') === 'documents') selectedTab = 'documents';
 		const containerElement = document.getElementById('admin-settings-tabs-container');
 
 		if (containerElement) {
@@ -418,11 +420,28 @@
 			<Evaluations />
 		{:else if selectedTab === 'documents'}
 			<Documents
-				on:save={async () => {
-					toast.success($i18n.t('Settings saved successfully!'));
+				on:save={async (event) => {
+					const indexing = event.detail.indexing;
+					if (event.detail.success && (indexing?.status === 'failed' || indexing?.dispatch_failed)) {
+						toast.warning($i18n.t('Settings saved, but indexing needs attention. See indexing status below.'));
+					} else if (event.detail.success && indexing?.status === 'pending') {
+						toast.info($i18n.t('Settings saved. Indexing is in progress.'));
+					} else if (event.detail.success && indexing?.status === 'unknown') {
+						toast.warning($i18n.t('Settings saved. Indexing status is currently unavailable.'));
+					} else if (event.detail.success) {
+						toast.success($i18n.t('Settings saved successfully!'));
+					} else if (event.detail.partial) {
+						toast.warning(event.detail.message);
+					} else {
+						toast.error(event.detail.message);
+					}
 
 					await tick();
-					await config.set(await getBackendConfig());
+					try {
+						await config.set(await getBackendConfig());
+					} catch (error) {
+						console.warn('Could not refresh backend configuration after saving settings.');
+					}
 				}}
 			/>
 		{:else if selectedTab === 'web'}
